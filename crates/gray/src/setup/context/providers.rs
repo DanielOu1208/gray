@@ -1049,7 +1049,14 @@ pub fn save_models_cache_to_disk() {
     {
         return;
     }
-    let tmp = path.with_extension("json.tmp");
+    // Audit #18: a shared models.json.tmp lets two concurrent refreshes
+    // clobber or rename each other's temporary write; the pid+random
+    // suffix makes each rename target distinct.
+    let tmp = path.with_extension(format!(
+        "json.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
     if std::fs::write(&tmp, s).is_err() {
         return;
     }

@@ -621,9 +621,9 @@ fn runit_log_script(home: &Path) -> String {
 
 fn systemd_unit_body(home: &Path, exe: &Path) -> String {
     let exe = exe.display().to_string().replace('"', "\\\"");
+    let home = home.display().to_string().replace('"', "\\\"");
     format!(
-        "[Unit]\nDescription=gray gateway (cron ticker + control socket)\nAfter=default.target\n\n[Service]\nType=exec\nEnvironment=GRAY_HOME={home}\nExecStart=\"{exe}\" gateway run\nRestart=always\nRestartSec=2\nKillSignal=SIGTERM\nTimeoutStopSec=75\n\n[Install]\nWantedBy=default.target\n",
-        home = home.display(),
+        "[Unit]\nDescription=gray gateway (cron ticker + control socket)\nAfter=default.target\n\n[Service]\nType=exec\nEnvironment=GRAY_HOME=\"{home}\"\nExecStart=\"{exe}\" gateway run\nRestart=always\nRestartSec=2\nKillSignal=SIGTERM\nTimeoutStopSec=75\n\n[Install]\nWantedBy=default.target\n",
     )
 }
 

@@ -116,9 +116,16 @@ pub fn tail_gray_log(home: &Path) -> (Vec<String>, usize) {
     if capped && !lines.is_empty() {
         lines.remove(0);
     }
-    let total = lines.len();
+    // Audit #21: the byte cap reads only the tail, so counting its lines
+    // reports the tail length under the field's name. Count the whole file
+    // (a separate scan of the full bytes) and return the last
+    // LOGS_TAIL_LINES of the tail lines as the retained window.
+    let total = std::str::from_utf8(&body)
+        .map(|s| s.lines().count())
+        .unwrap_or(lines.len());
     let kept = if total > LOGS_TAIL_LINES {
-        lines[total - LOGS_TAIL_LINES..].to_vec()
+        let from = lines.len().saturating_sub(LOGS_TAIL_LINES);
+        lines.split_off(from)
     } else {
         lines
     };

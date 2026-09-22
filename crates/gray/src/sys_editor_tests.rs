@@ -83,3 +83,31 @@ fn reset_backup_missing_file_returns_none() {
     let path = dir.path().join("AGENTS.md");
     assert_eq!(backup_before_overwrite(&path).unwrap(), None);
 }
+
+#[test]
+fn editor_words_honour_quotes() {
+    assert_eq!(
+        super::split_editor_words(r#""/c/Program Files/Notepad++/npp" -multiInst"#),
+        vec![
+            "/c/Program Files/Notepad++/npp".to_string(),
+            "-multiInst".to_string()
+        ]
+    );
+    assert_eq!(
+        super::split_editor_words("'my editor' --wait")
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>(),
+        vec!["my editor", "--wait"]
+    );
+    // Unterminated quote runs to the end; empties never become tokens.
+    assert_eq!(
+        super::split_editor_words("'unterminated"),
+        vec!["unterminated".to_string()]
+    );
+    assert!(super::split_editor_words("   ").is_empty());
+    // parse_editor_cmd inherits the quoting: a quoted program stays whole.
+    let (prog, args) = super::parse_editor_cmd(r#""/c/Program Files/ed.exe" -w"#);
+    assert_eq!(prog, "/c/Program Files/ed.exe");
+    assert_eq!(args, vec!["-w".to_string()]);
+}
