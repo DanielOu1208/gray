@@ -318,16 +318,16 @@ fn png_bytes() -> Vec<u8> {
     let img = image::RgbImage::from_pixel(2, 2, image::Rgb([9, 8, 7]));
     let mut buf = Vec::new();
     image::DynamicImage::ImageRgb8(img)
-        .write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)
+        .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
         .unwrap();
     buf
 }
 
 #[tokio::test]
-async fn cat_image_shows_png_as_vision_block() {
+async fn cat_shows_png_as_vision_block() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("plot.png"), png_bytes()).unwrap();
-    let out = cat_image("cat plot.png", dir.path()).expect("cat on a png must show the image");
+    let out = image_command("cat plot.png", dir.path()).expect("cat on a png must show the image");
     assert!(!out.is_error);
     assert!(out.content.contains("Image shown"), "{}", out.content);
     assert_eq!(out.images.len(), 1, "one vision block per call");
@@ -341,8 +341,8 @@ async fn cat_image_only_claims_plain_single_file_cat() {
     std::fs::write(dir.path().join("b.png"), png_bytes()).unwrap();
     std::fs::write(dir.path().join("notes.txt"), "text").unwrap();
     // The claimed shape: exactly cat + one bare path.
-    assert!(cat_image("cat a.png", dir.path()).is_some());
-    assert!(cat_image("  cat   a.png  ", dir.path()).is_some());
+    assert!(image_command("cat a.png", dir.path()).is_some());
+    assert!(image_command("  cat   a.png  ", dir.path()).is_some());
     // Everything else falls through to a normal shell run.
     for cmd in [
         "cat a.png b.png",
@@ -356,7 +356,7 @@ async fn cat_image_only_claims_plain_single_file_cat() {
         "cat *.png",
     ] {
         assert!(
-            cat_image(cmd, dir.path()).is_none(),
+            image_command(cmd, dir.path()).is_none(),
             "must not claim: {cmd}"
         );
     }
@@ -391,7 +391,7 @@ async fn cat_image_keeps_full_resolution() {
         .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
         .unwrap();
     std::fs::write(dir.path().join("wide.png"), &buf).unwrap();
-    let out = cat_image("cat wide.png", dir.path()).unwrap();
+    let out = image_command("cat wide.png", dir.path()).unwrap();
     let raw = base64::engine::general_purpose::STANDARD
         .decode(&out.images[0].data)
         .unwrap();
@@ -406,7 +406,158 @@ async fn cat_image_keeps_full_resolution() {
 }
 
 #[tokio::test]
-async fn a_cd_carries_into_the_next_command_in_the_same_session() {
+async fn gray_view_shows_every_image_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.png"), png_bytes()).unwrap();
+    std::fs::write(dir.path().join("b.png"), png_bytes()).unwrap();
+    let out = image_command("gray view a.png b.png", dir.path())
+        .expect("gray view must show the images it names");
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.images.len(), 2, "one vision block per path");
+    assert_eq!(out.images[0].media_type, "image/png");
+    assert!(
+        out.content.contains("a.png") && out.content.contains("b.png"),
+        "{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("Image shown"),
+        "same note cat uses: {}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn gray_view_downscales_where_cat_keeps_full_resolution() {
+    // Same source image both ways: 2400px is past MAX_IMAGE_SIDE (2000), so
+    // `view` — the everyday path — shrinks it and `cat` does not.
+    use base64::Engine as _;
+    use image::ImageDecoder;
+    use std::io::Cursor;
+    let dir = tempfile::tempdir().unwrap();
+    let img = image::RgbImage::from_pixel(2400, 100, image::Rgb([1, 2, 3]));
+    let mut buf = Vec::new();
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+        .unwrap();
+    std::fs::write(dir.path().join("wide.png"), &buf).unwrap();
+
+    let view = image_command("gray view wide.png", dir.path()).unwrap();
+    let cat = image_command("cat wide.png", dir.path()).unwrap();
+    let dims = |data: &str| -> (u32, u32) {
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap();
+        image::ImageReader::with_format(Cursor::new(&raw), image::ImageFormat::Png)
+            .into_decoder()
+            .unwrap()
+            .dimensions()
+    };
+    let (cw, ch) = dims(&cat.images[0].data);
+    let (vw, vh) = dims(&view.images[0].data);
+    assert_eq!((cw, ch), (2400, 100), "cat stays full resolution");
+    assert!(vw <= 2000 && vh < ch, "view caps at 2000px, got {vw}x{vh}");
+}
+
+#[tokio::test]
+async fn gray_view_refuses_a_text_file_rather_than_pixel_soup() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "text").unwrap();
+    // The claim is dropped, so the shell runs `gray view notes.txt` and its
+    // own error message is what the model reads.
+    assert!(image_command("gray view notes.txt", dir.path()).is_none());
+}
+
+#[tokio::test]
+async fn gray_view_only_claims_gray_view() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.png"), png_bytes()).unwrap();
+    // Other gray subcommands are ordinary shell commands: claiming them would
+    // swallow their output entirely.
+    for cmd in [
+        "gray --version",
+        "gray memory list",
+        "gray view",
+        "gray view -A a.png",
+        "gray view a.png | wc -c",
+        "gray view a.png && echo done",
+        "gray view a.png; ls",
+        "gray view $HOME/a.png",
+        "gray view *.png",
+        "gray view missing.png",
+        "gray /usr/bin/view a.png",
+    ] {
+        assert!(
+            image_command(cmd, dir.path()).is_none(),
+            "must not claim: {cmd}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn gray_view_through_execute_shows_vision() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("shot.png"), png_bytes()).unwrap();
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        ..ToolContext::default()
+    };
+    let out = BashTool::default()
+        .execute(&ctx, json!({"command": "gray view shot.png"}))
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.images.len(), 1, "execute must surface the vision block");
+}
+
+#[tokio::test]
+async fn cat_expands_a_tilde_the_shell_would_have() {
+    // The fast path runs before the shell, so `~` never gets expanded: without
+    // this, `cat ~/shot.png` streams binary garbage.
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let named = dir.path().join("named.png");
+    std::fs::write(&named, png_bytes()).unwrap();
+    assert!(
+        std::path::Path::new(&home).is_dir(),
+        "$HOME must be a directory for the expansion to resolve"
+    );
+    assert_eq!(expand_tilde("~/shot.png"), Some(format!("{home}/shot.png")));
+    assert_eq!(expand_tilde("~"), Some(home.clone()));
+    assert_eq!(expand_tilde("~/a/b.png"), Some(format!("{home}/a/b.png")));
+    // Not ours to expand.
+    assert_eq!(expand_tilde("~other/shot.png"), None);
+    assert_eq!(
+        expand_tilde("~/shot.png ".trim()),
+        Some(format!("{home}/shot.png"))
+    );
+    assert_eq!(expand_tilde("plain.png"), None);
+    assert_eq!(expand_tilde("./x.png"), None);
+}
+
+#[tokio::test]
+async fn cat_resolves_a_tilde_path_only_when_the_file_is_there() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() || !std::path::Path::new(&home).is_dir() {
+        return;
+    }
+    let at_home = std::path::Path::new(&home).join("gray-rs-tilde-probe.png");
+    std::fs::write(&at_home, png_bytes()).unwrap();
+    let out = image_command("cat ~/gray-rs-tilde-probe.png", Path::new("."));
+    let _ = std::fs::remove_file(&at_home);
+    let out = out.expect("cat ~/probe.png must show the image");
+    assert_eq!(out.images.len(), 1);
+    assert!(
+        out.content.contains("gray-rs-tilde-probe.png"),
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn a_cd_carries_carries_into_the_next_command_in_the_same_session() {
     // A subdirectory of the session's own cwd, not an absolute path: Git Bash
     // speaks MSYS paths, so handing it a Windows `C:/...` path is exactly the
     // trap the windows-runtime job exists to catch. The behaviour under test

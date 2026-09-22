@@ -36,6 +36,7 @@ pub mod tool_fmt;
 pub mod tui;
 pub mod turn_caps;
 pub mod update;
+pub mod view;
 
 use clap::Parser;
 use std::path::{Path, PathBuf};
@@ -334,6 +335,17 @@ fn parse_context_window_cli(s: &str) -> Result<usize, String> {
 pub enum Commands {
     /// Curated cross-session memory (local files, no model required)
     Memory(memory::MemoryArgs),
+
+    /// Show an image file as an image (png/jpg/jpeg/gif/webp)
+    ///
+    /// Run `gray view plot.png` and the image is shown, not its bytes: bash
+    /// output is text only, so this is the way to check a rendered chart,
+    /// screenshot or diagram. `cat <path>` is the full-resolution sibling.
+    View {
+        /// One or more image paths (png/jpg/jpeg/gif/webp)
+        #[arg(value_name = "PATH", required = true)]
+        paths: Vec<String>,
+    },
     /// Log this machine in to gray.alignment.id (paste the site's one-time code)
     Login {
         /// One-time enrollment code from gray.alignment.id/account. Omit to be

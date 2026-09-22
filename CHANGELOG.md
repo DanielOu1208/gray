@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `gray view PATH...` shows an image file as an image (downscaled to the 2000px
+  cap, the one shared with the `read` tool and pasted attachments). The `view`
+  *tool* that 9ae15d3b deleted comes back as a command: bash's one vision path
+  now claims `gray view <path>...` before the shell runs, alongside
+  `cat <path>` (full resolution) — so an agent checking a rendered chart,
+  screenshot or diagram gets an image instead of pixel soup, with no new tool
+  in its toolset. Multi-path by design; a leading `~` is expanded, since
+  nothing else would do it before the shell runs.
+
 ## [0.1.3] - 2026-09-22
 
 ### Added
