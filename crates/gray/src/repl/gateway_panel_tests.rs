@@ -34,20 +34,29 @@ fn app_row_shows_plugin_shape_and_toggle_state() {
 fn missing_config_marks_the_app_as_needing_setup() {
     let home = tempfile::tempdir().unwrap();
     let items = app_rows_with(&[row("discord", true)], Some(home.path()));
-    assert!(
-        items[0]
-            .row
-            .contains("needs setup \u{2014} gray discord setup"),
-        "{}",
-        items[0].row
-    );
+    assert!(items[0].row.contains("needs setup"), "{}", items[0].row);
+    // The flag is what routes Enter to the setup flow.
+    assert!(items[0].needs_setup);
 
-    // An existing config file is enough: the contents are never read.
+    // The required keys present means configured; contents are never read.
     let cfg = home.path().join(".config/gray-discord");
     std::fs::create_dir_all(&cfg).unwrap();
-    std::fs::write(cfg.join("config.json"), "{}").unwrap();
+    std::fs::write(
+        cfg.join("config.json"),
+        r#"{"token": "sk-x", "channel_id": "1", "owner_id": "2"}"#,
+    )
+    .unwrap();
     let items = app_rows_with(&[row("discord", true)], Some(home.path()));
     assert!(!items[0].row.contains("needs setup"), "{}", items[0].row);
+    assert!(!items[0].needs_setup);
+
+    // A config missing one required key is still a setup candidate, and the
+    // row says nothing about which key or any value.
+    std::fs::write(cfg.join("config.json"), r#"{"token": "sk-x"}"#).unwrap();
+    let items = app_rows_with(&[row("discord", true)], Some(home.path()));
+    assert!(items[0].row.contains("needs setup"), "{}", items[0].row);
+    assert!(!items[0].row.contains("channel_id"), "{}", items[0].row);
+    assert!(!items[0].row.contains("sk-x"), "{}", items[0].row);
 }
 
 #[test]

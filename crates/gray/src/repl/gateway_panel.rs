@@ -2,18 +2,14 @@
 //! rule and one-line pointers at the subsystems that already own a command.
 //!
 //! The app rows come from the merged plugin registry, so a transport shows up
-//! the day it is installed (slack, telegram, …) — nothing here is per-app
-//! except [`SETUP_PROBES`]. Daemon/cron/memory are *pointed at*, never
+//! the day it is installed (slack, telegram, …). Setup state comes from each
+//! app own declaration via `crate::plugin_cli::setup_decl`.
+//! Daemon/cron/memory are *pointed at*, never
 //! restated: `gray gateway status`, `/cron` and `/memory` already print
 //! everything about them.
 
 use super::*;
 use crate::setup::{ManagerItem, ManagerSpec, format_plugin_row_parts, run_install_manager};
-
-/// Catalog apps whose setup state gray can see without reading their private
-/// config: the default config path's *existence*, never its contents (it
-/// holds the bot token). Absent file = the app still needs its wizard.
-const SETUP_PROBES: &[(&str, &str)] = &[("discord", ".config/gray-discord/config.json")];
 
 /// Subsystems whose own command prints everything: `/gateway` names the
 /// command instead of duplicating its output.
@@ -45,15 +41,6 @@ fn separator() -> ManagerItem {
     }
 }
 
-/// True when the app's default config file is absent under `home`. The path
-/// is only ever tested for existence.
-fn setup_missing(home: &Path, name: &str) -> bool {
-    match SETUP_PROBES.iter().find(|(n, _)| *n == name) {
-        Some((_, rel)) => !home.join(rel).exists(),
-        None => false,
-    }
-}
-
 /// Subcommands an app declares for itself. Empty when it registered no
 /// manifest (or no home resolves) — nothing is invented on its behalf.
 fn declared(home: Option<&Path>, name: &str) -> Vec<String> {
@@ -63,7 +50,7 @@ fn declared(home: Option<&Path>, name: &str) -> Vec<String> {
 
 /// One toggleable row per installed app: the `/plugin` row shape plus what
 /// the app still needs (setup) and what it says it can do. `home` is the gray
-/// home the manifests and config probes are read from.
+/// home the manifests and app configs are read from.
 pub(crate) fn app_rows_with(
     rows: &[crate::plugin_cli::ManagedRow],
     home: Option<&Path>,
@@ -73,10 +60,13 @@ pub(crate) fn app_rows_with(
             let mut row =
                 format_plugin_row_parts(&r.name, &r.version, &r.scope, &r.ecosystem, r.on);
             let mut extras: Vec<String> = Vec::new();
+            let mut needs_setup = false;
             if let Some(home) = home
-                && setup_missing(home, &r.name)
+                && let Some(decl) = crate::plugin_cli::setup_decl(&r.name)
+                && let crate::setup::registry::AppSetupState::NeedsSetup(_) = decl.state(home)
             {
-                extras.push(format!("needs setup \u{2014} gray {} setup", r.name));
+                extras.push("needs setup".to_string());
+                needs_setup = true;
             }
             extras.extend(declared(home, &r.name));
             if !extras.is_empty() {
@@ -89,7 +79,7 @@ pub(crate) fn app_rows_with(
                 lit: r.on,
                 enabled: r.on,
                 read_only: false,
-                needs_setup: false,
+                needs_setup,
             }
         })
         .collect()
