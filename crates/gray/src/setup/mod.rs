@@ -38,6 +38,7 @@ impl Drop for TuiSession {
 
 pub mod catalog;
 pub mod registry;
+pub mod write_config;
 pub(crate) use catalog::save_auth_key;
 pub use catalog::{
     AUTH_MODE_API_KEY, AUTH_MODE_NONE, Catalog, CatalogProvider, ConnectItem, PROVIDERS_JSON,
