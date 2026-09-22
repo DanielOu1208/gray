@@ -38,6 +38,7 @@ impl Drop for TuiSession {
 
 pub mod app_flow;
 pub mod catalog;
+pub mod channel_picker;
 pub mod registry;
 pub mod write_config;
 pub(crate) use catalog::save_auth_key;

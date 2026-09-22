@@ -37,20 +37,20 @@ pub static DISCORD_SETUP: SetupDecl = SetupDecl {
             picker: None,
         },
         SetupField {
-            key: "channel_id",
-            kind: FieldKind::Required,
-            description: "Where the bot posts — pick a channel or DM below, or paste an ID",
-            url: None,
-            secret: false,
-            picker: Some(crate::setup::registry::PICKER_CHANNELS),
-        },
-        SetupField {
             key: "owner_id",
             kind: FieldKind::Required,
             description: "Your Discord user ID (Developer Mode, Copy User ID) — gates who can trigger the bot",
             url: None,
             secret: false,
             picker: None,
+        },
+        SetupField {
+            key: "channel_id",
+            kind: FieldKind::Required,
+            description: "Where the bot posts — pick a channel or DM below, or paste an ID",
+            url: None,
+            secret: false,
+            picker: Some(crate::setup::registry::PICKER_CHANNELS),
         },
         SetupField {
             key: "allowed_users",
@@ -1078,7 +1078,7 @@ mod tests {
             .filter(|f| f.is_required())
             .map(|f| f.key)
             .collect();
-        assert_eq!(required, ["token", "channel_id", "owner_id"]);
+        assert_eq!(required, ["token", "owner_id", "channel_id"]);
         assert_eq!(decl.config_path, ".config/gray-discord/config.json");
         assert_eq!(decl.verify, &["gray-discord", "doctor"][..]);
         assert_eq!(decl.post_steps, &["register", "start"][..]);

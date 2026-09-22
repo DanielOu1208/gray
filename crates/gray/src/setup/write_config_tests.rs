@@ -77,6 +77,7 @@ fn writes_privately_and_atomically() {
 #[test]
 fn unknown_keys_survive_a_rewrite() {
     let tmp = tempfile::tempdir().unwrap();
+    let gray_home = tmp.path().join(".gray");
     let path = tmp.path().join(DECL.config_path);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, r#"{"future_key": 42, "token": "old"}"#).unwrap();
@@ -96,6 +97,7 @@ fn unknown_keys_survive_a_rewrite() {
 #[test]
 fn an_unparseable_config_is_replaced_not_corrupted() {
     let tmp = tempfile::tempdir().unwrap();
+    let gray_home = tmp.path().join(".gray");
     let path = tmp.path().join(DECL.config_path);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "{not json").unwrap();
@@ -120,6 +122,7 @@ fn a_secret_never_renders_in_debug_or_errors() {
 
     // A failed write reports the path problem, never the value.
     let tmp = tempfile::tempdir().unwrap();
+    let gray_home = tmp.path().join(".gray");
     let blocked = tmp.path().join("blocked");
     fs::create_dir_all(&blocked).unwrap();
     #[cfg(unix)]
@@ -137,6 +140,7 @@ fn a_secret_never_renders_in_debug_or_errors() {
 #[test]
 fn empty_supplied_still_writes_derived_fields() {
     let tmp = tempfile::tempdir().unwrap();
+    let gray_home = tmp.path().join(".gray");
     let path = tmp.path().join(DECL.config_path);
     write_config(&path, &DECL, &Supplied::default(), &gray_home, tmp.path()).unwrap();
     let data: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();

@@ -7,6 +7,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
+use super::channel_picker::{ChannelSource, Destination, RestChannels};
 use super::registry::{FieldKind, SetupDecl, SetupField};
 use super::write_config::{Supplied, write_config};
 
@@ -164,6 +165,11 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
 
     enum Phase {
         Filling,
+        Picking {
+            items: Vec<Destination>,
+            sel: usize,
+            at_guilds: bool,
+        },
         Verifying,
         Failed,
         Done,
@@ -212,7 +218,7 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
                         .add_modifier(Modifier::BOLD)
                         .bg(box_bg),
                 ))];
-                match phase {
+                match &phase {
                     Phase::Filling => {
                         let field = fields[idx];
                         lines.push(Line::from(Span::styled(
@@ -241,6 +247,43 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
                         if let Some(status) = &status {
                             lines.push(Line::from(Span::styled(
                                 status.clone(),
+                                Style::default().fg(text_dim).bg(box_bg),
+                            )));
+                        }
+                        if field.picker.is_some() && supplied.get("token").is_some() {
+                            lines.push(Line::from(Span::styled(
+                                "Tab \u{2014} pick from a server instead of pasting an ID",
+                                Style::default().fg(text_dim).bg(box_bg),
+                            )));
+                        }
+                    }
+                    Phase::Picking {
+                        items,
+                        sel,
+                        at_guilds,
+                    } => {
+                        lines.push(Line::from(Span::styled(
+                            if *at_guilds {
+                                "pick a server (the bot sees these)"
+                            } else {
+                                "pick a channel, or the DM"
+                            },
+                            Style::default().fg(text_dim).bg(box_bg),
+                        )));
+                        let shown = items.len().min(8);
+                        let start = sel.saturating_sub(shown.saturating_sub(1));
+                        for (i, item) in items.iter().enumerate().skip(start).take(shown) {
+                            let marker = if i == *sel { "\u{25b8} " } else { "  " };
+                            lines.push(Line::from(Span::styled(
+                                format!("{marker}{}", item.label),
+                                Style::default()
+                                    .fg(if i == *sel { accent } else { text_dim })
+                                    .bg(box_bg),
+                            )));
+                        }
+                        if items.is_empty() {
+                            lines.push(Line::from(Span::styled(
+                                "(nothing to pick \u{2014} paste an ID instead)",
                                 Style::default().fg(text_dim).bg(box_bg),
                             )));
                         }
@@ -294,9 +337,110 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
                         KeyCode::Backspace => {
                             buf.pop();
                         }
+                        KeyCode::Tab if fields[idx].picker.is_some() => {
+                            if let Some(token) = supplied.get("token") {
+                                match RestChannels::new(token).and_then(|source| source.guilds()) {
+                                    Ok(guilds) if !guilds.is_empty() => {
+                                        let items = guilds
+                                            .into_iter()
+                                            .map(|g| Destination {
+                                                id: g.id,
+                                                label: g.name,
+                                                sort_key: 0,
+                                                is_dm: false,
+                                            })
+                                            .collect();
+                                        phase = Phase::Picking {
+                                            items,
+                                            sel: 0,
+                                            at_guilds: true,
+                                        };
+                                    }
+                                    Ok(_) => {
+                                        status = Some("the bot is in no servers yet".to_string());
+                                    }
+                                    Err(e) => {
+                                        status = Some(format!("{e:#}"));
+                                    }
+                                }
+                            } else {
+                                status = Some("the token comes first".to_string());
+                            }
+                        }
                         KeyCode::Char(c) => buf.push(c),
                         _ => {}
                     },
+                    Phase::Picking { .. } => {
+                        let (len, _sel, at_guilds) = match &phase {
+                            Phase::Picking {
+                                items,
+                                sel,
+                                at_guilds,
+                            } => (items.len(), *sel, *at_guilds),
+                            _ => unreachable!("matched Picking above"),
+                        };
+                        match code {
+                            KeyCode::Esc => {
+                                phase = Phase::Filling;
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if let Phase::Picking { sel, .. } = &mut phase {
+                                    *sel = sel.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if let Phase::Picking { sel, .. } = &mut phase {
+                                    *sel = (*sel + 1).min(len.saturating_sub(1));
+                                }
+                            }
+                            KeyCode::Enter => {
+                                let picked = match &phase {
+                                    Phase::Picking { items, sel, .. } => items[*sel].clone(),
+                                    _ => unreachable!("matched Picking above"),
+                                };
+                                if at_guilds {
+                                    let token =
+                                        supplied.get("token").unwrap_or_default().to_string();
+                                    let owner = supplied
+                                        .get("owner_id")
+                                        .map(str::to_string)
+                                        .unwrap_or_default();
+                                    match RestChannels::new(&token).and_then(|source| {
+                                        super::channel_picker::destinations_for(
+                                            &source, &picked.id, &owner,
+                                        )
+                                    }) {
+                                        Ok(list) if !list.is_empty() => {
+                                            phase = Phase::Picking {
+                                                items: list,
+                                                sel: 0,
+                                                at_guilds: false,
+                                            };
+                                        }
+                                        Ok(_) => {
+                                            status =
+                                                Some("that server has no channels".to_string());
+                                            phase = Phase::Filling;
+                                        }
+                                        Err(e) => {
+                                            status = Some(format!("{e:#}"));
+                                            phase = Phase::Filling;
+                                        }
+                                    }
+                                } else {
+                                    supplied.insert("channel_id", picked.id, false);
+                                    buf.clear();
+                                    idx += 1;
+                                    phase = if idx >= fields.len() {
+                                        Phase::Verifying
+                                    } else {
+                                        Phase::Filling
+                                    };
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     Phase::Failed => match code {
                         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                             anyhow::bail!("{}", report.clone().unwrap_or_default())

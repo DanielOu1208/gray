@@ -109,7 +109,7 @@ fn unreadable_or_invalid_config_counts_as_needs_setup() {
 fn derived_fields_resolve_to_absolute_paths() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path();
-    let derived = TEST_DECL.derived(home);
+    let derived = TEST_DECL.derived(&home.join(".gray"), home);
     let get = |k: &str| {
         derived
             .iter()
@@ -118,7 +118,7 @@ fn derived_fields_resolve_to_absolute_paths() {
             .unwrap_or_else(|| panic!("missing derived field {k}"))
     };
     assert!(Path::new(&get("gray_bin")).is_absolute());
-    assert_eq!(get("gray_home"), home.to_string_lossy());
+    assert_eq!(get("gray_home"), home.join(".gray").to_string_lossy());
     assert_eq!(
         get("workdir"),
         home.join(".config/test-app").to_string_lossy()
