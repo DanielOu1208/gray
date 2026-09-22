@@ -103,12 +103,13 @@ fn items_end_with_a_rule_and_the_command_pointers() {
     assert!(items[1].row.chars().all(|c| c == '\u{2500}'));
     assert!(items[1].read_only);
     let labels: Vec<&str> = items[2..].iter().map(|i| i.row.as_str()).collect();
-    assert!(
-        labels[0].starts_with("daemon \u{2014} gray gateway status"),
+    // /cron and /memory carry their own interactive panels and slash
+    // commands; the gateway picker no longer narrates them.
+    assert_eq!(
+        labels,
+        ["daemon \u{2014} gray gateway status \u{b7} gray gateway on|off"],
         "{labels:?}"
     );
-    assert!(labels[1].starts_with("cron \u{2014} /cron"));
-    assert!(labels[2].starts_with("memory \u{2014} /memory"));
     assert!(items[2..].iter().all(|i| i.read_only));
 }
 

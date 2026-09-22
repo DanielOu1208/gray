@@ -13,11 +13,7 @@ use crate::setup::{ManagerItem, ManagerSpec, format_plugin_row_parts, run_instal
 
 /// Subsystems whose own command prints everything: `/gateway` names the
 /// command instead of duplicating its output.
-const POINTERS: &[(&str, &str)] = &[
-    ("daemon", "gray gateway status · gray gateway on|off"),
-    ("cron", "/cron · /cron on|off"),
-    ("memory", "/memory · /memory on|off"),
-];
+const POINTERS: &[(&str, &str)] = &[("daemon", "gray gateway status · gray gateway on|off")];
 
 const GATEWAY_SPEC: ManagerSpec = ManagerSpec {
     title: "Connections",
