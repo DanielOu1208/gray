@@ -2,6 +2,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::setup::registry::{FieldKind, SetupDecl, SetupField};
 use anyhow::Context;
 use gray_plugin::Plugin;
 use gray_plugin::lock::{LockEntry, LockFile};
@@ -17,7 +18,77 @@ struct Catalog {
     bin: &'static str,
     /// Arguments that make the binary serve the sidecar wire.
     sidecar_args: &'static [&'static str],
+    /// What setup needs from the user, and how gray proves it worked.
+    setup: &'static SetupDecl,
 }
+
+/// The Discord app's setup declaration: one secret from the Developer
+/// Portal, one destination (pickable), one owner ID; paths are derived;
+/// no budget, no quiz.
+pub static DISCORD_SETUP: SetupDecl = SetupDecl {
+    config_path: ".config/gray-discord/config.json",
+    fields: &[
+        SetupField {
+            key: "token",
+            kind: FieldKind::Required,
+            description: "Discord bot token — Developer Portal, your app, Bot, Reset Token",
+            url: Some("https://discord.com/developers/applications"),
+            secret: true,
+            picker: None,
+        },
+        SetupField {
+            key: "channel_id",
+            kind: FieldKind::Required,
+            description: "Where the bot posts — pick a channel or DM below, or paste an ID",
+            url: None,
+            secret: false,
+            picker: Some(crate::setup::registry::PICKER_CHANNELS),
+        },
+        SetupField {
+            key: "owner_id",
+            kind: FieldKind::Required,
+            description: "Your Discord user ID (Developer Mode, Copy User ID) — gates who can trigger the bot",
+            url: None,
+            secret: false,
+            picker: None,
+        },
+        SetupField {
+            key: "allowed_users",
+            kind: FieldKind::Optional,
+            description: "Extra user IDs allowed to trigger the bot (comma-separated)",
+            url: None,
+            secret: false,
+            picker: None,
+        },
+        SetupField {
+            key: "gray_bin",
+            kind: FieldKind::Derived,
+            description: "gray binary",
+            url: None,
+            secret: false,
+            picker: None,
+        },
+        SetupField {
+            key: "gray_home",
+            kind: FieldKind::Derived,
+            description: "gray home",
+            url: None,
+            secret: false,
+            picker: None,
+        },
+        SetupField {
+            key: "workdir",
+            kind: FieldKind::Derived,
+            description: "working directory",
+            url: None,
+            secret: false,
+            picker: None,
+        },
+    ],
+    verify: &["gray-discord", "doctor"],
+    post_steps: &["register", "start"],
+    service: Some(&["gray-discord", "run"]),
+};
 
 /// First-party plugins, pinned by commit. Every entry is a Rust crate built
 /// locally: gray itself ships no Python, and its own plugins must not
@@ -28,7 +99,13 @@ const CATALOG: &[Catalog] = &[Catalog {
     source: "git+https://github.com/vstaln/gray-discord-plugin.git@648952dc01a78a5eee031846f5f964877bfdac9b",
     bin: "gray-discord",
     sidecar_args: &["sidecar"],
+    setup: &DISCORD_SETUP,
 }];
+
+/// The app's setup declaration, when gray ships one.
+pub fn setup_decl(name: &str) -> Option<&'static SetupDecl> {
+    catalog(name).ok().map(|entry| entry.setup)
+}
 
 fn catalog(name: &str) -> anyhow::Result<&'static Catalog> {
     CATALOG
@@ -968,6 +1045,44 @@ mod tests {
         assert_eq!(entry.sidecar_args, &["sidecar"][..]);
         let miss = catalog("nope").err().expect("an unknown name must fail");
         assert!(miss.to_string().contains("Unknown plugin"), "{miss}");
+    }
+
+    #[test]
+    fn discord_setup_declaration_asks_for_exactly_what_it_needs() {
+        let decl = setup_decl("discord").expect("discord ships a declaration");
+        let required: Vec<&str> = decl
+            .fields
+            .iter()
+            .filter(|f| f.is_required())
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(required, ["token", "channel_id", "owner_id"]);
+        assert_eq!(decl.config_path, ".config/gray-discord/config.json");
+        assert_eq!(decl.verify, &["gray-discord", "doctor"][..]);
+        assert_eq!(decl.post_steps, &["register", "start"][..]);
+        assert_eq!(decl.service, Some(&["gray-discord", "run"][..]));
+        let token = decl.field("token").unwrap();
+        assert!(token.secret);
+        assert_eq!(
+            token.url,
+            Some("https://discord.com/developers/applications")
+        );
+        let channel = decl.field("channel_id").unwrap();
+        assert_eq!(
+            channel.picker,
+            Some(crate::setup::registry::PICKER_CHANNELS)
+        );
+        let derived: Vec<&str> = decl
+            .fields
+            .iter()
+            .filter(|f| matches!(f.kind, FieldKind::Derived))
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(derived, ["gray_bin", "gray_home", "workdir"]);
+        // No budget key anywhere: setup never asks about money.
+        assert!(decl.field("budget").is_none());
+        assert!(decl.field("daily_usd").is_none());
+        assert!(setup_decl("nope").is_none());
     }
 }
 
