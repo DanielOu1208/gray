@@ -102,6 +102,8 @@ fn parse_skill_name_toggle(rest: &str) -> Option<(bool, String)> {
 /// manual `/skills <name>` still runs. `on` re-enables auto-loading and
 /// clears the per-skill disabled set so it truly turns all skills on.
 pub(crate) fn apply_skills_auto_toggle(config_path: &Path, on: bool) -> Result<String, String> {
+    let _cfg_lock =
+        crate::setup::lock_saved_config_at(config_path).map_err(|e| format!("{e:#}"))?;
     let mut saved = crate::setup::load_saved_config_at(config_path);
     saved.skills_auto = if on { None } else { Some(false) };
     if on {
@@ -135,6 +137,7 @@ pub(crate) fn apply_skill_toggle(
             if names.is_empty() { "(none)" } else { &names }
         ));
     }
+    let _cfg_lock = crate::setup::lock_saved_config_at(config_path).ok();
     let mut saved = crate::setup::load_saved_config_at(config_path);
     if on {
         saved.disabled_skills.remove(name);
@@ -226,6 +229,7 @@ pub(crate) fn apply_subsystem_toggle(
     subsystem: Subsystem,
     on: bool,
 ) -> Result<String, String> {
+    let _cfg_lock = crate::setup::lock_saved_config_at(config_path).ok();
     let mut saved = crate::setup::load_saved_config_at(config_path);
     *subsystem.field(&mut saved) = if on { None } else { Some(false) };
     crate::setup::save_saved_config_at(config_path, &saved).map_err(|e| format!("{e:#}"))?;

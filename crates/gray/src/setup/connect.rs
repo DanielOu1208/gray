@@ -37,6 +37,7 @@ fn forget_provider_at(
     let name = item.name.clone();
     if normalize_custom_base_url(&config.base_url) == normalize_custom_base_url(&item.base_url) {
         config.api_key = None;
+        let _cfg_lock = crate::setup::lock_saved_config_at(saved_path).ok();
         let mut saved = load_saved_config_at(saved_path);
         // Only rewrite when there was something to drop: an untouched
         // config file must stay untouched (mtime, unrelated fields).
@@ -485,6 +486,7 @@ pub fn run_connect_modal(
                             } else if existing_key.is_some() && item.id != "custom" {
                                 save_auth_key(&item.id, &final_key)?;
                                 let path = saved_config_path()?;
+                                let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
                                 let mut saved = load_saved_config_at(&path);
                                 let is_switching =
                                     saved.base_url.as_deref() != Some(item.base_url.as_str());
@@ -653,6 +655,7 @@ pub fn run_connect_modal(
                                 config.model = Some(chosen_model.clone());
 
                                 let path = saved_config_path()?;
+                                let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
                                 let mut saved = load_saved_config_at(&path);
                                 saved.base_url = Some(config.base_url.clone());
                                 saved.api_key = config.api_key.clone();
