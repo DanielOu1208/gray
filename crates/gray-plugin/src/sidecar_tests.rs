@@ -54,3 +54,32 @@ async fn notify_sends_no_id_and_needs_no_reply() {
     .await;
     assert!(t.elapsed() < std::time::Duration::from_secs(5));
 }
+
+#[tokio::test]
+async fn a_child_that_stopped_reading_fails_the_request_not_the_protocol() {
+    // The wedged stub answers the handshake, then never reads stdin again.
+    // The request frame is far larger than the pipe buffer, so its write
+    // cannot complete: the call must fail within WRITE_TIMEOUT instead of
+    // tearing the frame and desyncing every later request.
+    let p = SidecarPlugin::spawn(vec!["testdata/wedged_stdin_plugin.sh".into()])
+        .await
+        .unwrap();
+    let blob = "x".repeat(200 * 1024);
+    let t = std::time::Instant::now();
+    let err = p
+        .transport
+        .request(
+            "echo",
+            Some(serde_json::json!({"blob": blob})),
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .err()
+        .expect("a wedged child must fail the request");
+    assert!(t.elapsed() < std::time::Duration::from_secs(15), "{err:#}");
+    let text = err.to_string();
+    assert!(
+        text.contains("stopped reading stdin") || text.contains("child closed stdout"),
+        "got: {text}"
+    );
+}
