@@ -509,6 +509,9 @@ pub enum GatewayCmd {
         /// repeatable; anything still missing is reported, not guessed
         #[arg(long = "field")]
         fields: Vec<String>,
+        /// Also start the daemon (runit/systemd/gray-supervised)
+        #[arg(long)]
+        start: bool,
     },
     /// Turn the gateway master switch on (run/start allowed again)
     On,

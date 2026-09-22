@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 
 use super::channel_picker::{ChannelSource, Destination, RestChannels};
 use super::registry::{FieldKind, SetupDecl, SetupField};
+use super::supervise::start_daemon;
 use super::write_config::{Supplied, write_config};
 
 /// The OS user's home (config files, workdir) — distinct from gray's own
@@ -123,7 +124,7 @@ pub fn run_step(argv: &[String]) -> StepOutput {
 /// with the app's doctor, register the app's tool, and say so. Anything
 /// missing is reported, never guessed; nothing success-shaped is printed
 /// until the doctor agrees.
-pub fn run_headless(app: &str, fields: &[String]) -> Result<()> {
+pub fn run_headless(app: &str, fields: &[String], start: bool) -> Result<()> {
     let (gray_home, user) = (crate::plugin_cli::home()?, user_home()?);
     let decl = crate::plugin_cli::setup_decl(app)
         .with_context(|| format!("gray has no setup declaration for '{app}'"))?;
@@ -132,8 +133,10 @@ pub fn run_headless(app: &str, fields: &[String]) -> Result<()> {
     if !missing.is_empty() {
         anyhow::bail!("{} still needs:\n  {}", app, describe_missing(&missing));
     }
-    finish_after_answers(app, decl, &gray_home, &user, &supplied)?;
-    println!("{app} is set up.");
+    println!(
+        "{}",
+        finish_after_answers(app, decl, &gray_home, &user, &supplied, start)?
+    );
     Ok(())
 }
 
@@ -156,7 +159,11 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
     let fields = plan_missing(decl, &user);
     if fields.is_empty() {
         // Nothing to ask: prove the app works or report why it does not.
-        return finish_after_answers(app, decl, &gray_home, &user, &Supplied::default());
+        // (Before the modal owns the screen, so a line to stderr is fine.)
+        let report =
+            finish_after_answers(app, decl, &gray_home, &user, &Supplied::default(), true)?;
+        eprintln!("{report}");
+        return Ok(());
     }
 
     let box_bg = crate::theme::theme().surface_bg;
@@ -460,9 +467,9 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
                 _ => {}
             }
             if matches!(phase, Phase::Verifying) && report.is_none() {
-                match finish_after_answers(app, decl, &gray_home, &user, &supplied) {
-                    Ok(()) => {
-                        report = Some(format!("{app} is set up."));
+                match finish_after_answers(app, decl, &gray_home, &user, &supplied, true) {
+                    Ok(line) => {
+                        report = Some(line);
                         phase = Phase::Done;
                     }
                     Err(e) => {
@@ -485,7 +492,8 @@ fn finish_after_answers(
     gray_home: &Path,
     user_home: &Path,
     supplied: &Supplied,
-) -> anyhow::Result<()> {
+    start: bool,
+) -> anyhow::Result<String> {
     let missing = missing_required(decl, supplied);
     if !missing.is_empty() {
         anyhow::bail!("{} still needs:\n  {}", app, describe_missing(&missing));
@@ -513,7 +521,20 @@ fn finish_after_answers(
             register.output.trim()
         );
     }
-    Ok(())
+    let mut report = format!("{app} is set up.");
+    if start && let Some(service) = decl.service {
+        let mut argv = crate::plugin_cli::command_argv(gray_home, app)?;
+        argv.extend(service.iter().skip(1).map(|a| a.to_string()));
+        let config_dir = user_home
+            .join(decl.config_path)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| user_home.to_path_buf());
+        let line = start_daemon(app, &argv, &config_dir)?;
+        report.push('\n');
+        report.push_str(&line);
+    }
+    Ok(report)
 }
 
 /// Rendered width of masked input: one bullet per character.
