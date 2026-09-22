@@ -146,6 +146,254 @@ pub fn run_headless(app: &str, fields: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The REPL flow: one field at a time, secrets masked, the app's own doctor
+/// as the referee. `gray gateway setup` rides [`run_headless`]; this is the
+/// same core behind a modal.
+pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read};
+    use crossterm::terminal::EnterAlternateScreen;
+    use ratatui::Terminal;
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Clear, Paragraph};
+    use std::time::Duration;
+
+    let home = crate::plugin_cli::home()?;
+    let decl = crate::plugin_cli::setup_decl(app)
+        .with_context(|| format!("gray has no setup declaration for '{app}'"))?;
+    let fields = plan_missing(decl, &home);
+    if fields.is_empty() {
+        // Nothing to ask: prove the app works or report why it does not.
+        return finish_after_answers(app, decl, &home, &Supplied::default());
+    }
+
+    let box_bg = crate::theme::theme().surface_bg;
+    let accent = crate::theme::theme().accent;
+    let text_dim = crate::theme::theme().text_dim;
+
+    enum Phase {
+        Filling,
+        Verifying,
+        Failed,
+        Done,
+    }
+    let mut supplied = Supplied::default();
+    let mut idx = 0usize;
+    let mut buf = String::new();
+    let mut status: Option<String> = None;
+    let mut phase = Phase::Filling;
+    let mut report: Option<String> = None;
+
+    let _session = super::TuiSession::acquire()?;
+    let mut stdout = std::io::stdout();
+    crossterm::execute!(stdout, EnterAlternateScreen, crossterm::cursor::Hide)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let outcome = (|| -> anyhow::Result<()> {
+        loop {
+            terminal.draw(|frame| {
+                let area = frame.area();
+                if area.width < 30 || area.height < 10 {
+                    return;
+                }
+                let w = (area.width.saturating_sub(4))
+                    .clamp(40, 100)
+                    .min(area.width);
+                let rect = ratatui::layout::Rect::new(
+                    (area.width.saturating_sub(w)) / 2,
+                    area.height / 4,
+                    w,
+                    12.min(area.height.saturating_sub(2).max(10)),
+                );
+                frame.render_widget(Clear, rect);
+                frame.render_widget(Block::default().style(Style::default().bg(box_bg)), rect);
+                let inner = ratatui::layout::Rect::new(
+                    rect.x + 2,
+                    rect.y + 1,
+                    rect.width.saturating_sub(4),
+                    rect.height.saturating_sub(2),
+                );
+                let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+                    format!("Set up {app}"),
+                    Style::default()
+                        .fg(accent)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(box_bg),
+                ))];
+                match phase {
+                    Phase::Filling => {
+                        let field = fields[idx];
+                        lines.push(Line::from(Span::styled(
+                            format!("{}/{}", idx + 1, fields.len()),
+                            Style::default().fg(text_dim).bg(box_bg),
+                        )));
+                        lines.push(Line::from(Span::styled(
+                            field.description,
+                            Style::default().fg(text_dim).bg(box_bg),
+                        )));
+                        if let Some(url) = field.url {
+                            lines.push(Line::from(Span::styled(
+                                format!("get it at {url}"),
+                                Style::default().fg(text_dim).bg(box_bg),
+                            )));
+                        }
+                        let shown = if field.secret {
+                            mask(&buf)
+                        } else {
+                            buf.clone()
+                        };
+                        lines.push(Line::from(Span::styled(
+                            format!("> {shown}"),
+                            Style::default().fg(accent).bg(box_bg),
+                        )));
+                        if let Some(status) = &status {
+                            lines.push(Line::from(Span::styled(
+                                status.clone(),
+                                Style::default().fg(text_dim).bg(box_bg),
+                            )));
+                        }
+                    }
+                    Phase::Verifying | Phase::Failed | Phase::Done => {
+                        let text = report.clone().unwrap_or_default();
+                        for line in text.lines().take(6) {
+                            lines.push(Line::from(Span::styled(
+                                line.to_string(),
+                                Style::default().fg(text_dim).bg(box_bg),
+                            )));
+                        }
+                    }
+                }
+                frame.render_widget(Paragraph::new(lines), inner);
+            })?;
+            if !poll(Duration::from_millis(100))? {
+                continue;
+            }
+            match read()? {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers,
+                    kind: KeyEventKind::Press,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                Event::Key(KeyEvent {
+                    code,
+                    kind: KeyEventKind::Press,
+                    ..
+                }) => match phase {
+                    Phase::Filling => match code {
+                        KeyCode::Esc => return Ok(()),
+                        KeyCode::Enter => {
+                            let field = fields[idx];
+                            let value = buf.trim().to_string();
+                            if value.is_empty() && field.is_required() {
+                                status = Some("this one is required".to_string());
+                                continue;
+                            }
+                            if !value.is_empty() {
+                                supplied.insert(field.key, value, field.secret);
+                            }
+                            buf.clear();
+                            status = None;
+                            idx += 1;
+                            if idx >= fields.len() {
+                                phase = Phase::Verifying;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            buf.pop();
+                        }
+                        KeyCode::Char(c) => buf.push(c),
+                        _ => {}
+                    },
+                    Phase::Failed => match code {
+                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                            anyhow::bail!("{}", report.clone().unwrap_or_default())
+                        }
+                        _ => {}
+                    },
+                    Phase::Verifying | Phase::Done => match code {
+                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => return Ok(()),
+                        _ => {}
+                    },
+                },
+                Event::Paste(text) => {
+                    if matches!(phase, Phase::Filling) {
+                        super::connect::insert_paste(&mut buf, &text);
+                    }
+                }
+                _ => {}
+            }
+            if matches!(phase, Phase::Verifying) && report.is_none() {
+                match finish_after_answers(app, decl, &home, &supplied) {
+                    Ok(()) => {
+                        report = Some(format!("{app} is set up."));
+                        phase = Phase::Done;
+                    }
+                    Err(e) => {
+                        report = Some(format!("{e:#}"));
+                        phase = Phase::Failed;
+                    }
+                }
+            }
+        }
+    })();
+    drop(terminal);
+    outcome
+}
+
+/// Prove the answers, write nothing more, register the app's tool. The
+/// doctor's own text is the only success report.
+fn finish_after_answers(
+    app: &str,
+    decl: &SetupDecl,
+    home: &Path,
+    supplied: &Supplied,
+) -> anyhow::Result<()> {
+    let missing = missing_required(decl, supplied);
+    if !missing.is_empty() {
+        anyhow::bail!("{} still needs:\n  {}", app, describe_missing(&missing));
+    }
+    write_config(&home.join(decl.config_path), decl, supplied, home)?;
+    let verify = run_step(&verify_argv(app, home, decl)?);
+    if !verify.ok {
+        anyhow::bail!(
+            "the config was written, but {}'s doctor disagrees:\n{}",
+            app,
+            verify.output.trim()
+        );
+    }
+    if decl.post_steps.contains(&"register") {
+        let register = run_step(&register_argv(app, home)?);
+        anyhow::ensure!(
+            register.ok,
+            "the config works but registering the tool failed:\n{}",
+            register.output.trim()
+        );
+    }
+    Ok(())
+}
+
+/// Rendered width of masked input: one bullet per character.
+fn mask(buf: &str) -> String {
+    "\u{2022}".repeat(buf.chars().count())
+}
+
+#[cfg(test)]
+mod modal_tests {
+    use super::mask;
+
+    #[test]
+    fn masking_hides_every_character() {
+        assert_eq!(mask(""), "");
+        assert_eq!(
+            mask("sk-abc"),
+            "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"
+        );
+    }
+}
+
 #[path = "app_flow_tests.rs"]
 #[cfg(test)]
 mod tests;

@@ -61,7 +61,7 @@ fn forget_provider(item: &ConnectItem, config: &mut Config) -> anyhow::Result<St
 /// filter input is one line: strip line breaks (clipboards often trail
 /// `\n`) so a paste lands whole and never submits. Otherwise identical to
 /// typing the same text character by character.
-fn insert_paste(buf: &mut String, pasted: &str) {
+pub(crate) fn insert_paste(buf: &mut String, pasted: &str) {
     buf.push_str(&pasted.replace(['\r', '\n'], ""));
 }
 

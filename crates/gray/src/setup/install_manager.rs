@@ -267,7 +267,7 @@ pub(crate) fn run_install_manager(
     set_enabled: impl Fn(&str, bool) -> anyhow::Result<()>,
 ) -> anyhow::Result<bool> {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read};
-    use crossterm::terminal::EnterAlternateScreen;
+    use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
     use ratatui::Terminal;
     use ratatui::backend::CrosstermBackend;
     use ratatui::layout::Rect;
@@ -637,7 +637,21 @@ pub(crate) fn run_install_manager(
                         match enter_action(items.get(sel), setup.is_some(), spec) {
                             EnterAction::Setup => {
                                 let item = items[sel].clone();
-                                match (setup.unwrap())(&item) {
+                                // The nested modal owns the screen while it
+                                // runs: leave alternate mode (raw stays on,
+                                // both modals want it), then take it back.
+                                let _ = crossterm::execute!(
+                                    std::io::stdout(),
+                                    LeaveAlternateScreen,
+                                    crossterm::cursor::Show
+                                );
+                                let outcome = (setup.unwrap())(&item);
+                                let _ = crossterm::execute!(
+                                    std::io::stdout(),
+                                    EnterAlternateScreen,
+                                    crossterm::cursor::Hide
+                                );
+                                match outcome {
                                     Ok(()) => {
                                         changed = true;
                                         op_err = None;

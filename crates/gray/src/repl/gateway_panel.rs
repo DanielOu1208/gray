@@ -131,9 +131,12 @@ pub(crate) fn format_text() -> String {
 pub(crate) fn run_gateway_modal(
     bg: Option<&crate::setup::BackgroundSnapshot>,
 ) -> anyhow::Result<bool> {
+    // Enter on a needs-setup row opens that app's setup flow.
+    let setup: crate::setup::SetupAction<'_> =
+        &|item: &ManagerItem| crate::setup::app_flow::run_app_setup_modal(&item.name);
     run_install_manager(
         bg,
-        None,
+        Some(setup),
         &GATEWAY_SPEC,
         || Some(items()),
         // Removal is not offered here: /plugin owns it.
