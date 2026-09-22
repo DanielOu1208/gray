@@ -43,12 +43,24 @@ pub fn supplied_from_flags(decl: &SetupDecl, fields: &[String]) -> Result<Suppli
     Ok(out)
 }
 
-/// Required fields the flags did not answer. Non-empty means the flow cannot
-/// finish yet — the caller reports these instead of writing a half-config.
-pub fn missing_required<'a>(decl: &'a SetupDecl, supplied: &Supplied) -> Vec<&'a SetupField> {
+/// Required fields neither this run nor the app's existing config answered.
+/// A key already written counts as answered: hand-edited configs (the
+/// documented path) and a re-run after a partial setup must be able to
+/// finish with `--field`-less invocations instead of being demanded again.
+/// Non-empty means the flow cannot finish yet — the caller reports these
+/// instead of writing a half-config.
+pub fn missing_required<'a>(
+    decl: &'a SetupDecl,
+    supplied: &Supplied,
+    config_path: &Path,
+) -> Vec<&'a SetupField> {
     decl.fields
         .iter()
-        .filter(|f| f.is_required() && supplied.get(f.key).is_none())
+        .filter(|f| {
+            f.is_required()
+                && supplied.get(f.key).is_none()
+                && !super::registry::key_present(config_path, f.key)
+        })
         .collect()
 }
 
@@ -122,7 +134,7 @@ pub fn run_headless(app: &str, fields: &[String], start: bool) -> Result<()> {
     let decl = crate::plugin_cli::setup_decl(app)
         .with_context(|| format!("gray has no setup declaration for '{app}'"))?;
     let supplied = supplied_from_flags(decl, fields)?;
-    let missing = missing_required(decl, &supplied);
+    let missing = missing_required(decl, &supplied, &user.join(decl.config_path));
     if !missing.is_empty() {
         anyhow::bail!("{} still needs:\n  {}", app, describe_missing(&missing));
     }
@@ -487,7 +499,7 @@ fn finish_after_answers(
     supplied: &Supplied,
     start: bool,
 ) -> anyhow::Result<String> {
-    let missing = missing_required(decl, supplied);
+    let missing = missing_required(decl, supplied, &user_home.join(decl.config_path));
     if !missing.is_empty() {
         anyhow::bail!("{} still needs:\n  {}", app, describe_missing(&missing));
     }

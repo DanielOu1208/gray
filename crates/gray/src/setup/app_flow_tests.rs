@@ -100,8 +100,10 @@ fn supplied_from_flags_parses_marks_secrets_and_rejects_unknown() {
 
 #[test]
 fn missing_required_stops_the_flow_before_any_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let absent = tmp.path().join("config.json");
     let empty = Supplied::default();
-    let missing = missing_required(&DECL, &empty);
+    let missing = missing_required(&DECL, &empty, &absent);
     let keys: Vec<&str> = missing.iter().map(|f| f.key).collect();
     assert_eq!(keys, ["token", "channel_id"]);
     let described = describe_missing(&missing);
@@ -110,7 +112,31 @@ fn missing_required_stops_the_flow_before_any_write() {
 
     let mut partial = Supplied::default();
     partial.insert("token", "sk-x".to_string(), true);
-    let keys: Vec<&str> = missing_required(&DECL, &partial)
+    let keys: Vec<&str> = missing_required(&DECL, &partial, &absent)
+        .iter()
+        .map(|f| f.key)
+        .collect();
+    assert_eq!(keys, ["channel_id"]);
+}
+
+#[test]
+fn an_existing_config_answers_the_required_fields() {
+    // A hand-edited or partially-set-up config means those keys are already
+    // answered: the flow proceeds to verify instead of demanding flags that
+    // the file already carries. Values are never read here, only presence.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.json");
+    std::fs::write(&path, r#"{"token": "sk-x", "channel_id": "42"}"#).unwrap();
+    let missing = missing_required(&DECL, &Supplied::default(), &path);
+    assert!(
+        missing.is_empty(),
+        "{:?}",
+        missing.iter().map(|f| f.key).collect::<Vec<_>>()
+    );
+
+    // One key still absent still blocks, by key name only.
+    std::fs::write(&path, r#"{"token": "sk-x"}"#).unwrap();
+    let keys: Vec<&str> = missing_required(&DECL, &Supplied::default(), &path)
         .iter()
         .map(|f| f.key)
         .collect();
