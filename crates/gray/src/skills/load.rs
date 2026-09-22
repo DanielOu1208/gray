@@ -196,8 +196,17 @@ pub(crate) fn load_skills_from_dir_internal(
     include_root_files: bool,
     matcher: &mut IgnoreMatcher,
     root_dir: &Path,
+    visited: &mut std::collections::HashSet<PathBuf>,
 ) -> LoadSkillsResult {
     let mut skills = Vec::new();
+    // Audit #11: symlinked directories are followed, and nothing kept the
+    // walk from re-entering a directory it was already inside (a symlink
+    // back to an ancestor). Canonical paths make the cycle a set lookup:
+    // a repeat reads as already-visited and yields nothing.
+    let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if !visited.insert(canon) {
+        return LoadSkillsResult { skills };
+    }
 
     if !dir.exists() {
         return LoadSkillsResult { skills };
@@ -283,8 +292,9 @@ pub(crate) fn load_skills_from_dir_internal(
         }
 
         if is_dir {
-            let mut sub =
-                load_skills_from_dir_internal(&full_path, source, false, matcher, root_dir);
+            let mut sub = load_skills_from_dir_internal(
+                &full_path, source, false, matcher, root_dir, visited,
+            );
             skills.append(&mut sub.skills);
             continue;
         }

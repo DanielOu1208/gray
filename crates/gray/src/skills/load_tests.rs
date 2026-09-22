@@ -80,3 +80,27 @@ fn frontmatter_preserves_crlf_unicode_and_body() {
         assert_eq!(body, format!("Body…{nl}"));
     }
 }
+
+#[test]
+fn a_symlink_cycle_terminates() {
+    // Audit #11: root/a/loop -> root/a. Discovery follows symlinked
+    // directories, so without a visited set this recursion is unbounded.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let inner = root.join("a");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::write(
+        inner.join("SKILL.md"),
+        "---\nname: cycleskill\ndescription: d\n---\n\nbody\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&inner, inner.join("loop")).unwrap();
+    let found = load_skills_from_dir(root, "user").skills;
+    assert_eq!(
+        found.len(),
+        1,
+        "{:?}",
+        found.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+    );
+}

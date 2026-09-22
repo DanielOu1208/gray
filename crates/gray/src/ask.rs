@@ -158,18 +158,28 @@ pub async fn handle_ask(params: serde_json::Value) -> serde_json::Value {
         .lock()
         .expect("ask pending")
         .insert(id, PendingAsk { questions, tx });
-    // Drive the UI: whichever surface answers first wins (oneshot send).
-    if svc.interactive && svc.tui.is_some() {
-        drive_tui(&svc, id).await;
-    } else {
-        drive_stdin(&svc, id).await;
-    }
-    svc.pending.lock().expect("ask pending").remove(&id);
+    // Drive the UI on its own task so the TTL and the cancel token are
+    // already armed while it runs (audit #2): awaiting the driver *before*
+    // the select meant a blocked stdin read or a TUI that never answers
+    // suspended the 300s timeout and the cancellation branch entirely.
+    let drive_svc = svc.clone();
+    let drive = tokio::spawn(async move {
+        if drive_svc.interactive && drive_svc.tui.is_some() {
+            drive_tui(&drive_svc, id).await;
+        } else {
+            drive_stdin(&drive_svc, id).await;
+        }
+    });
     let answers = tokio::select! {
         Ok(a) = rx => a,
         _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => Vec::new(),
         _ = svc.cancel.cancelled() => Vec::new(),
+        _ = drive => Vec::new(),
     };
+    // The driver may still be alive (a TUI waiting on a human after the
+    // TTL): drop the pending entry so its send finds nothing and it exits
+    // instead of holding the question open.
+    svc.pending.lock().expect("ask pending").remove(&id);
     answers_json(&answers)
 }
 
