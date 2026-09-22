@@ -1,4 +1,7 @@
-use super::{format_error_row, format_plugin_row_parts};
+use super::{
+    EnterAction, ManagerItem, ManagerSpec, enter_action, enter_label, format_error_row,
+    format_plugin_row_parts,
+};
 use crate::skills::Skill;
 use gray_pkg::errors::ErrorEntry;
 use gray_pkg::ops::LockEntry;
@@ -190,4 +193,87 @@ fn cli_ecosystem_labels_plugin_commands() {
         format_plugin_row_parts("demo", "1.2.3", "user", "gray-cli", false),
         format_plugin_row("demo", &entry("gray-cli", false))
     );
+}
+
+fn setup_row(needs_setup: bool) -> ManagerItem {
+    ManagerItem {
+        name: "discord".to_string(),
+        row: "discord — needs setup".to_string(),
+        lit: false,
+        enabled: true,
+        read_only: false,
+        needs_setup,
+    }
+}
+
+fn toggle_spec() -> ManagerSpec {
+    ManagerSpec {
+        title: "Connections",
+        empty_hint: "none",
+        error_verb: "toggle failed",
+        supports_toggle: true,
+        supports_remove: false,
+        errors_tab: false,
+        keep_stale_on_relist_error: true,
+    }
+}
+
+#[test]
+fn enter_routes_to_setup_only_for_flagged_rows_with_a_flow() {
+    let spec = toggle_spec();
+    assert!(matches!(
+        enter_action(Some(&setup_row(true)), true, &spec),
+        EnterAction::Setup
+    ));
+    // No flow supplied: the flagged row still toggles, exactly as before.
+    assert!(matches!(
+        enter_action(Some(&setup_row(true)), false, &spec),
+        EnterAction::Toggle
+    ));
+    // A configured row toggles even when a flow exists.
+    assert!(matches!(
+        enter_action(Some(&setup_row(false)), true, &spec),
+        EnterAction::Toggle
+    ));
+}
+
+#[test]
+fn enter_ignores_rows_that_never_carried_an_action() {
+    let spec = toggle_spec();
+    let separator = ManagerItem {
+        read_only: true,
+        ..setup_row(false)
+    };
+    assert!(matches!(
+        enter_action(Some(&separator), true, &spec),
+        EnterAction::Ignore
+    ));
+    assert!(matches!(
+        enter_action(None, true, &spec),
+        EnterAction::Ignore
+    ));
+    // A remove-only manager never toggles.
+    let remove_only = ManagerSpec {
+        supports_toggle: false,
+        supports_remove: true,
+        ..toggle_spec()
+    };
+    assert!(matches!(
+        enter_action(Some(&setup_row(false)), false, &remove_only),
+        EnterAction::Ignore
+    ));
+}
+
+#[test]
+fn enter_label_announces_the_setup_flow() {
+    let spec = toggle_spec();
+    assert_eq!(
+        enter_label(Some(&setup_row(true)), true, &spec),
+        "set up \u{b7} "
+    );
+    assert_eq!(
+        enter_label(Some(&setup_row(false)), true, &spec),
+        "toggle \u{b7} "
+    );
+    assert_eq!(enter_label(None, true, &spec), "");
 }

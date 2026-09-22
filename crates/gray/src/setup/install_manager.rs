@@ -24,6 +24,7 @@ use super::*;
 use gray_pkg::errors::ErrorEntry;
 
 /// One installed row in the manager's own display terms.
+#[derive(Clone)]
 pub(crate) struct ManagerItem {
     pub name: String,
     pub row: String,
@@ -34,6 +35,56 @@ pub(crate) struct ManagerItem {
     /// Rows the toggle/remove branches skip: separators, pointers at another
     /// command, and every row of a read-only listing.
     pub read_only: bool,
+    /// Enter runs the setup flow (not the toggle) when the panel passed one.
+    pub needs_setup: bool,
+}
+
+/// The setup flow a panel may bind to Enter on a needs-setup row.
+pub(crate) type SetupAction<'a> = &'a dyn Fn(&ManagerItem) -> anyhow::Result<()>;
+
+/// What Enter does to the selected row. A pure decision the tests own.
+pub(crate) enum EnterAction {
+    /// Run the panel's setup flow for this row.
+    Setup,
+    /// Flip `enabled` (today's behavior).
+    Toggle,
+    /// Nothing: a separator, a pointer, or a remove-only manager.
+    Ignore,
+}
+
+/// Enter routes to setup only for a flagged row when the panel supplied a
+/// flow; every other row toggles exactly as before.
+pub(crate) fn enter_action(
+    item: Option<&ManagerItem>,
+    has_setup: bool,
+    spec: &ManagerSpec,
+) -> EnterAction {
+    let Some(item) = item else {
+        return EnterAction::Ignore;
+    };
+    if item.read_only {
+        return EnterAction::Ignore;
+    }
+    if item.needs_setup && has_setup {
+        return EnterAction::Setup;
+    }
+    if spec.supports_toggle {
+        return EnterAction::Toggle;
+    }
+    EnterAction::Ignore
+}
+
+/// The footer's Enter hint, separator included; empty when Enter does nothing.
+pub(crate) fn enter_label(
+    item: Option<&ManagerItem>,
+    has_setup: bool,
+    spec: &ManagerSpec,
+) -> &'static str {
+    match enter_action(item, has_setup, spec) {
+        EnterAction::Setup => "set up \u{b7} ",
+        EnterAction::Toggle => "toggle \u{b7} ",
+        EnterAction::Ignore => "",
+    }
 }
 
 /// The only axes the managers differ on.
@@ -117,6 +168,7 @@ pub fn run_skills_modal(
 ) -> anyhow::Result<bool> {
     run_install_manager(
         bg,
+        None,
         &SKILLS_SPEC,
         || {
             Some(
@@ -137,6 +189,7 @@ pub fn run_skills_modal(
                             lit: true,
                             enabled: true,
                             read_only: false,
+                            needs_setup: false,
                         }
                     })
                     .collect(),
@@ -175,6 +228,7 @@ pub fn run_skills_modal(
 pub fn run_plugins_modal(bg: Option<&BackgroundSnapshot>) -> anyhow::Result<bool> {
     run_install_manager(
         bg,
+        None,
         &PLUGINS_SPEC,
         || {
             // Merged view: `lock.json` sidecars + `commands.json` native/CLI
@@ -193,6 +247,7 @@ pub fn run_plugins_modal(bg: Option<&BackgroundSnapshot>) -> anyhow::Result<bool
                         lit: r.on,
                         enabled: r.on,
                         read_only: false,
+                        needs_setup: false,
                         name: r.name,
                     })
                     .collect()
@@ -205,6 +260,7 @@ pub fn run_plugins_modal(bg: Option<&BackgroundSnapshot>) -> anyhow::Result<bool
 
 pub(crate) fn run_install_manager(
     bg: Option<&BackgroundSnapshot>,
+    setup: Option<SetupAction<'_>>,
     spec: &ManagerSpec,
     load: impl Fn() -> Option<Vec<ManagerItem>>,
     remove: impl Fn(&str) -> anyhow::Result<()>,
@@ -485,14 +541,21 @@ pub(crate) fn run_install_manager(
                     ]
                 }
                 // Tab-specific (key, description) pairs, then the shared tail.
-                let middle: &[(&str, &str)] = match tab {
-                    Tab::Errors => &[("c ", "clear · ")],
-                    Tab::Installed if spec.supports_toggle && spec.supports_remove => {
-                        &[("Enter ", "toggle · "), ("u ", "remove · ")]
+                // Enter's verb follows the selected row: a needs-setup row
+                // announces the flow, everything else toggles as before.
+                let enter = enter_label(items.get(sel), setup.is_some(), spec);
+                let middle: Vec<(&str, &str)> = match tab {
+                    Tab::Errors => vec![("c ", "clear · ")],
+                    Tab::Installed => {
+                        let mut arms = Vec::new();
+                        if !enter.is_empty() {
+                            arms.push(("Enter ", enter));
+                        }
+                        if spec.supports_remove {
+                            arms.push(("u ", "remove · "));
+                        }
+                        arms
                     }
-                    Tab::Installed if spec.supports_toggle => &[("Enter ", "toggle · ")],
-                    Tab::Installed if spec.supports_remove => &[("u ", "remove · ")],
-                    Tab::Installed => &[],
                 };
                 let mut footer_spans = vec![Span::styled(
                     "↑↓ ",
@@ -570,25 +633,27 @@ pub(crate) fn run_install_manager(
                     }
                     KeyCode::Esc => return Ok(changed),
                     KeyCode::Enter | KeyCode::Char(' ') => {
-                        if !spec.supports_toggle {
-                            // Manager is remove-only: Enter/Space never run
-                            // anything (no toggle like the plugins manager).
-                            pending_remove = None;
-                        } else {
-                            pending_remove = None;
-                            if tab != Tab::Installed {
-                                // Errors tab is read-only.
-                            } else {
-                                if items.is_empty() {
-                                    return Ok(changed);
+                        pending_remove = None;
+                        match enter_action(items.get(sel), setup.is_some(), spec) {
+                            EnterAction::Setup => {
+                                let item = items[sel].clone();
+                                match (setup.unwrap())(&item) {
+                                    Ok(()) => {
+                                        changed = true;
+                                        op_err = None;
+                                        // Re-read and stay open, as the toggle does;
+                                        // items only ever come from a fresh list().
+                                        relist(&mut items);
+                                    }
+                                    Err(e) => {
+                                        op_err = Some(format!("{e:#}"));
+                                    }
                                 }
-                                if items[sel].read_only {
-                                    // Separators and pointers carry no switch.
-                                    continue;
-                                }
+                                sel = sel.min(items.len().saturating_sub(1));
+                            }
+                            EnterAction::Toggle => {
                                 let name = items[sel].name.clone();
-                                let enabled =
-                                    items.get(sel).map(|item| item.enabled).unwrap_or(true);
+                                let enabled = items[sel].enabled;
                                 match set_enabled(&name, !enabled) {
                                     Ok(()) => {
                                         changed = true;
@@ -603,6 +668,7 @@ pub(crate) fn run_install_manager(
                                 }
                                 sel = sel.min(items.len().saturating_sub(1));
                             }
+                            EnterAction::Ignore => {}
                         }
                     }
                     KeyCode::Char('u') | KeyCode::Delete => {

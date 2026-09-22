@@ -72,6 +72,7 @@ fn items_end_with_a_rule_and_the_command_pointers() {
             lit: false,
             enabled: false,
             read_only: true,
+            needs_setup: false,
         });
     }
     // Apps first, then the break, then the pointers — none of them toggleable.

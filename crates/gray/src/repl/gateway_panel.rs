@@ -41,6 +41,7 @@ fn separator() -> ManagerItem {
         lit: false,
         enabled: false,
         read_only: true,
+        needs_setup: false,
     }
 }
 
@@ -88,6 +89,7 @@ pub(crate) fn app_rows_with(
                 lit: r.on,
                 enabled: r.on,
                 read_only: false,
+                needs_setup: false,
             }
         })
         .collect()
@@ -109,6 +111,7 @@ pub(crate) fn items() -> Vec<ManagerItem> {
             lit: false,
             enabled: false,
             read_only: true,
+            needs_setup: false,
         });
     }
     out.push(separator());
@@ -119,6 +122,7 @@ pub(crate) fn items() -> Vec<ManagerItem> {
             lit: false,
             enabled: false,
             read_only: true,
+            needs_setup: false,
         });
     }
     out
@@ -139,6 +143,7 @@ pub(crate) fn run_gateway_modal(
 ) -> anyhow::Result<bool> {
     run_install_manager(
         bg,
+        None,
         &GATEWAY_SPEC,
         || Some(items()),
         // Removal is not offered here: /plugin owns it.

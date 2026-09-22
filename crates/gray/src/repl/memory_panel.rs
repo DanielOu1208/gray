@@ -26,6 +26,7 @@ fn problem_row(what: &str) -> ManagerItem {
         lit: false,
         enabled: false,
         read_only: true,
+        needs_setup: false,
     }
 }
 
@@ -58,6 +59,7 @@ pub(crate) fn items_for(store: &crate::memory::MemoryStore) -> Vec<ManagerItem> 
                         lit: true,
                         enabled: false,
                         read_only: true,
+                        needs_setup: false,
                     });
                 }
             }
@@ -68,6 +70,7 @@ pub(crate) fn items_for(store: &crate::memory::MemoryStore) -> Vec<ManagerItem> 
                     lit: false,
                     enabled: false,
                     read_only: true,
+                    needs_setup: false,
                 });
             }
         }
@@ -82,6 +85,7 @@ pub(crate) fn run_memory_modal(
 ) -> anyhow::Result<bool> {
     run_install_manager(
         bg,
+        None,
         &MEMORY_SPEC,
         || {
             // Both steps fold into one Result: an unresolvable home and an
