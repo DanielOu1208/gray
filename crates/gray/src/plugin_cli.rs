@@ -96,7 +96,7 @@ pub static DISCORD_SETUP: SetupDecl = SetupDecl {
 /// `GRAY_PLUGIN_PATH` in [`install`] and [`gray_plugin::builder::resolve_argv`].
 const CATALOG: &[Catalog] = &[Catalog {
     name: "discord",
-    source: "git+https://github.com/vstaln/gray-discord-plugin.git@648952dc01a78a5eee031846f5f964877bfdac9b",
+    source: "git+https://github.com/vstaln/gray-discord-plugin.git@310a48e74e42f1c83133e2f78871bdcc8b79f0e0",
     bin: "gray-discord",
     sidecar_args: &["sidecar"],
     setup: &DISCORD_SETUP,
@@ -1062,18 +1062,18 @@ mod tests {
     #[test]
     fn git_source_splits_url_from_pinned_commit() {
         let (url, pin) = parse_git_source(
-            "git+https://github.com/vstaln/gray-discord-plugin.git@648952dc01a78a5eee031846f5f964877bfdac9b",
+            "git+https://github.com/vstaln/gray-discord-plugin.git@310a48e74e42f1c83133e2f78871bdcc8b79f0e0",
         )
         .unwrap();
         assert_eq!(url, "https://github.com/vstaln/gray-discord-plugin.git");
-        assert_eq!(pin, "648952dc01a78a5eee031846f5f964877bfdac9b");
+        assert_eq!(pin, "310a48e74e42f1c83133e2f78871bdcc8b79f0e0");
         // An ssh URL carries its own '@': the pin is the last segment.
         let (url, pin) = parse_git_source(
-            "git+ssh://git@github.com/vstaln/gray-discord-plugin.git@648952dc01a78a5eee031846f5f964877bfdac9b",
+            "git+ssh://git@github.com/vstaln/gray-discord-plugin.git@310a48e74e42f1c83133e2f78871bdcc8b79f0e0",
         )
         .unwrap();
         assert_eq!(url, "ssh://git@github.com/vstaln/gray-discord-plugin.git");
-        assert_eq!(pin, "648952dc01a78a5eee031846f5f964877bfdac9b");
+        assert_eq!(pin, "310a48e74e42f1c83133e2f78871bdcc8b79f0e0");
     }
 
     #[test]
@@ -1083,9 +1083,9 @@ mod tests {
             "git+https://github.com/vstaln/gray-discord-plugin.git",
             "git+https://github.com/vstaln/gray-discord-plugin.git@main",
             "git+https://github.com/vstaln/gray-discord-plugin.git@648952d",
-            "git+https://github.com/vstaln/gray-discord-plugin.git@648952dc01a78a5eee031846f5f964877bfdac9b0",
-            "git+http://example.invalid/x.git@648952dc01a78a5eee031846f5f964877bfdac9b",
-            "git+file:///tmp/x.git@648952dc01a78a5eee031846f5f964877bfdac9b",
+            "git+https://github.com/vstaln/gray-discord-plugin.git@310a48e74e42f1c83133e2f78871bdcc8b79f0e00",
+            "git+http://example.invalid/x.git@310a48e74e42f1c83133e2f78871bdcc8b79f0e0",
+            "git+file:///tmp/x.git@310a48e74e42f1c83133e2f78871bdcc8b79f0e0",
             "git+https://github.com/vstaln/gray-discord-plugin.git@648952dc01a78a5eee031846f5f964877bfdac9g",
         ] {
             assert!(parse_git_source(source).is_err(), "{source}");
