@@ -47,7 +47,15 @@ fn supplied_token(value: &str) -> Supplied {
 fn writes_privately_and_atomically() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(DECL.config_path);
-    write_config(&path, &DECL, &supplied_token("sk-abc"), tmp.path()).unwrap();
+    let gray_home = tmp.path().join(".gray");
+    write_config(
+        &path,
+        &DECL,
+        &supplied_token("sk-abc"),
+        &gray_home,
+        tmp.path(),
+    )
+    .unwrap();
 
     let data: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(data["token"], "sk-abc");
@@ -72,7 +80,14 @@ fn unknown_keys_survive_a_rewrite() {
     let path = tmp.path().join(DECL.config_path);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, r#"{"future_key": 42, "token": "old"}"#).unwrap();
-    write_config(&path, &DECL, &supplied_token("sk-new"), tmp.path()).unwrap();
+    write_config(
+        &path,
+        &DECL,
+        &supplied_token("sk-new"),
+        &gray_home,
+        tmp.path(),
+    )
+    .unwrap();
     let data: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(data["future_key"], 42);
     assert_eq!(data["token"], "sk-new");
@@ -84,7 +99,14 @@ fn an_unparseable_config_is_replaced_not_corrupted() {
     let path = tmp.path().join(DECL.config_path);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "{not json").unwrap();
-    write_config(&path, &DECL, &supplied_token("sk-x"), tmp.path()).unwrap();
+    write_config(
+        &path,
+        &DECL,
+        &supplied_token("sk-x"),
+        &gray_home,
+        tmp.path(),
+    )
+    .unwrap();
     let data: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(data["token"], "sk-x");
 }
@@ -103,7 +125,7 @@ fn a_secret_never_renders_in_debug_or_errors() {
     #[cfg(unix)]
     fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).unwrap();
     let path = blocked.join(".config/test-app/config.json");
-    let err = write_config(&path, &DECL, &supplied, tmp.path())
+    let err = write_config(&path, &DECL, &supplied, &gray_home, tmp.path())
         .err()
         .expect("a read-only directory must fail");
     let text = format!("{err:#}");
@@ -116,7 +138,7 @@ fn a_secret_never_renders_in_debug_or_errors() {
 fn empty_supplied_still_writes_derived_fields() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(DECL.config_path);
-    write_config(&path, &DECL, &Supplied::default(), tmp.path()).unwrap();
+    write_config(&path, &DECL, &Supplied::default(), &gray_home, tmp.path()).unwrap();
     let data: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert!(data.get("gray_bin").is_some());
     assert!(data.get("workdir").is_some());

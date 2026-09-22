@@ -10,6 +10,13 @@ use anyhow::{Context, Result};
 use super::registry::{FieldKind, SetupDecl, SetupField};
 use super::write_config::{Supplied, write_config};
 
+/// The OS user's home (config files, workdir) — distinct from gray's own
+/// home, which is where gray keeps its registries.
+fn user_home() -> anyhow::Result<std::path::PathBuf> {
+    gray_core::paths::user_home()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve the user home; set HOME"))
+}
+
 /// Fields the flow must still ask about: everything non-derived the app's
 /// config does not already answer. Required first, in declaration order.
 pub fn plan_missing<'a>(decl: &'a SetupDecl, home: &Path) -> Vec<&'a SetupField> {
@@ -116,7 +123,7 @@ pub fn run_step(argv: &[String]) -> StepOutput {
 /// missing is reported, never guessed; nothing success-shaped is printed
 /// until the doctor agrees.
 pub fn run_headless(app: &str, fields: &[String]) -> Result<()> {
-    let home = crate::plugin_cli::home()?;
+    let (gray_home, user) = (crate::plugin_cli::home()?, user_home()?);
     let decl = crate::plugin_cli::setup_decl(app)
         .with_context(|| format!("gray has no setup declaration for '{app}'"))?;
     let supplied = supplied_from_flags(decl, fields)?;
@@ -124,24 +131,7 @@ pub fn run_headless(app: &str, fields: &[String]) -> Result<()> {
     if !missing.is_empty() {
         anyhow::bail!("{} still needs:\n  {}", app, describe_missing(&missing));
     }
-    write_config(&home.join(decl.config_path), decl, &supplied, &home)
-        .context("could not write the app's config")?;
-    let verify = run_step(&verify_argv(app, &home, decl)?);
-    if !verify.ok {
-        anyhow::bail!(
-            "{} was written but its doctor disagrees:\n{}",
-            app,
-            verify.output.trim()
-        );
-    }
-    if decl.post_steps.contains(&"register") {
-        let register = run_step(&register_argv(app, &home)?);
-        anyhow::ensure!(
-            register.ok,
-            "the config works but registering the tool failed:\n{}",
-            register.output.trim()
-        );
-    }
+    finish_after_answers(app, decl, &gray_home, &user, &supplied)?;
     println!("{app} is set up.");
     Ok(())
 }
@@ -159,13 +149,13 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
     use ratatui::widgets::{Block, Clear, Paragraph};
     use std::time::Duration;
 
-    let home = crate::plugin_cli::home()?;
+    let (gray_home, user) = (crate::plugin_cli::home()?, user_home()?);
     let decl = crate::plugin_cli::setup_decl(app)
         .with_context(|| format!("gray has no setup declaration for '{app}'"))?;
-    let fields = plan_missing(decl, &home);
+    let fields = plan_missing(decl, &user);
     if fields.is_empty() {
         // Nothing to ask: prove the app works or report why it does not.
-        return finish_after_answers(app, decl, &home, &Supplied::default());
+        return finish_after_answers(app, decl, &gray_home, &user, &Supplied::default());
     }
 
     let box_bg = crate::theme::theme().surface_bg;
@@ -326,7 +316,7 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
                 _ => {}
             }
             if matches!(phase, Phase::Verifying) && report.is_none() {
-                match finish_after_answers(app, decl, &home, &supplied) {
+                match finish_after_answers(app, decl, &gray_home, &user, &supplied) {
                     Ok(()) => {
                         report = Some(format!("{app} is set up."));
                         phase = Phase::Done;
@@ -348,15 +338,22 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
 fn finish_after_answers(
     app: &str,
     decl: &SetupDecl,
-    home: &Path,
+    gray_home: &Path,
+    user_home: &Path,
     supplied: &Supplied,
 ) -> anyhow::Result<()> {
     let missing = missing_required(decl, supplied);
     if !missing.is_empty() {
         anyhow::bail!("{} still needs:\n  {}", app, describe_missing(&missing));
     }
-    write_config(&home.join(decl.config_path), decl, supplied, home)?;
-    let verify = run_step(&verify_argv(app, home, decl)?);
+    write_config(
+        &user_home.join(decl.config_path),
+        decl,
+        supplied,
+        gray_home,
+        user_home,
+    )?;
+    let verify = run_step(&verify_argv(app, gray_home, decl)?);
     if !verify.ok {
         anyhow::bail!(
             "the config was written, but {}'s doctor disagrees:\n{}",
@@ -365,7 +362,7 @@ fn finish_after_answers(
         );
     }
     if decl.post_steps.contains(&"register") {
-        let register = run_step(&register_argv(app, home)?);
+        let register = run_step(&register_argv(app, gray_home)?);
         anyhow::ensure!(
             register.ok,
             "the config works but registering the tool failed:\n{}",

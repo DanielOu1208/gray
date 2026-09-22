@@ -58,13 +58,14 @@ pub fn write_config(
     config_path: &Path,
     decl: &SetupDecl,
     supplied: &Supplied,
-    home: &Path,
+    gray_home: &Path,
+    user_home: &Path,
 ) -> anyhow::Result<()> {
     let mut data = read_object(config_path);
     for (key, value) in &supplied.values {
         data.insert(key.clone(), Value::String(value.clone()));
     }
-    for (key, value) in decl.derived(home) {
+    for (key, value) in decl.derived(gray_home, user_home) {
         data.insert(key.to_string(), Value::String(value));
     }
     atomic_write(config_path, &Value::Object(data))

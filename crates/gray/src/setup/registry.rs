@@ -82,19 +82,20 @@ impl SetupDecl {
         }
     }
 
-    /// Values for every derived field, resolved against the gray home and
-    /// the config file's directory (workdir).
-    pub fn derived(&self, home: &Path) -> Vec<(&'static str, String)> {
+    /// Values for every derived field. `gray_home` is gray's own home (the
+    /// app spawns gray sessions under it); the config file — and therefore
+    /// `workdir` — lives under the *user's* home.
+    pub fn derived(&self, gray_home: &Path, user_home: &Path) -> Vec<(&'static str, String)> {
         let config_dir = self
-            .config_file(home)
+            .config_file(user_home)
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| home.to_path_buf());
+            .unwrap_or_else(|| user_home.to_path_buf());
         self.fields
             .iter()
             .filter(|f| matches!(f.kind, FieldKind::Derived))
             .filter_map(|f| {
-                resolve_derived(f.key, home, &config_dir)
+                resolve_derived(f.key, gray_home, &config_dir)
                     .map(|value| (f.key, value.to_string_lossy().into_owned()))
             })
             .collect()
@@ -102,10 +103,10 @@ impl SetupDecl {
 }
 
 /// The three derived keys gray knows how to fill.
-fn resolve_derived(key: &str, home: &Path, config_dir: &Path) -> Option<PathBuf> {
+fn resolve_derived(key: &str, gray_home: &Path, config_dir: &Path) -> Option<PathBuf> {
     match key {
         "gray_bin" => std::env::current_exe().ok(),
-        "gray_home" => Some(home.to_path_buf()),
+        "gray_home" => Some(gray_home.to_path_buf()),
         "workdir" => Some(config_dir.to_path_buf()),
         _ => None,
     }
