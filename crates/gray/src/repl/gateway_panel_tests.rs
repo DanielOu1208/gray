@@ -60,6 +60,20 @@ fn missing_config_marks_the_app_as_needing_setup() {
 }
 
 #[test]
+fn setup_probe_reads_the_user_home_not_the_gray_home() {
+    // App configs live under the *user's* home (`~/.config/<app>`, the
+    // plugin's own default path); gray's home holds only gray's registries.
+    // Probing the gray home would report "needs setup" forever even after
+    // a successful `gray gateway setup discord`.
+    let user = crate::setup::user_home().unwrap();
+    assert_eq!(
+        user,
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+    );
+    assert_ne!(user, crate::plugin_cli::home().unwrap());
+}
+
+#[test]
 fn unknown_apps_get_no_setup_probe_and_no_invented_commands() {
     let home = tempfile::tempdir().unwrap();
     let items = app_rows_with(&[row("slack", true)], Some(home.path()));

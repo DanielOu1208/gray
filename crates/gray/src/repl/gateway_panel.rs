@@ -87,7 +87,10 @@ pub(crate) fn app_rows_with(
 
 /// One toggleable row per installed app, read from the live registry.
 pub(crate) fn app_rows(rows: &[crate::plugin_cli::ManagedRow]) -> Vec<ManagerItem> {
-    app_rows_with(rows, crate::plugin_cli::home().ok().as_deref())
+    // The needs-setup state reads the *user's* home (apps write their
+    // configs under ~/.config); the gray home holds only gray's own
+    // registries. Unresolvable home -> no probe, never "needs setup".
+    app_rows_with(rows, crate::setup::user_home().ok().as_deref())
 }
 
 /// The whole panel: apps (or the install hint), the rule, the pointers.

@@ -52,6 +52,13 @@ pub use catalog::{
     skills_auto_enabled, skills_auto_enabled_at,
 };
 
+/// The OS user's home, where app configs live (`~/.config/<app>/…`) —
+/// distinct from gray's own home, which holds gray's registries.
+pub fn user_home() -> anyhow::Result<std::path::PathBuf> {
+    gray_core::paths::user_home()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve the user home; set HOME"))
+}
+
 pub mod context;
 pub use context::{
     ContextParts, DEFAULT_KEEP_RECENT_TOKENS, ModelRate, cache_model_context,

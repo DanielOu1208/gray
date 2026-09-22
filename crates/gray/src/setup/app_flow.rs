@@ -12,13 +12,6 @@ use super::registry::{FieldKind, SetupDecl, SetupField};
 use super::supervise::start_daemon;
 use super::write_config::{Supplied, write_config};
 
-/// The OS user's home (config files, workdir) — distinct from gray's own
-/// home, which is where gray keeps its registries.
-fn user_home() -> anyhow::Result<std::path::PathBuf> {
-    gray_core::paths::user_home()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve the user home; set HOME"))
-}
-
 /// Fields the flow must still ask about: everything non-derived the app's
 /// config does not already answer. Required first, in declaration order.
 pub fn plan_missing<'a>(decl: &'a SetupDecl, home: &Path) -> Vec<&'a SetupField> {
@@ -125,7 +118,7 @@ pub fn run_step(argv: &[String]) -> StepOutput {
 /// missing is reported, never guessed; nothing success-shaped is printed
 /// until the doctor agrees.
 pub fn run_headless(app: &str, fields: &[String], start: bool) -> Result<()> {
-    let (gray_home, user) = (crate::plugin_cli::home()?, user_home()?);
+    let (gray_home, user) = (crate::plugin_cli::home()?, super::user_home()?);
     let decl = crate::plugin_cli::setup_decl(app)
         .with_context(|| format!("gray has no setup declaration for '{app}'"))?;
     let supplied = supplied_from_flags(decl, fields)?;
@@ -153,7 +146,7 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
     use ratatui::widgets::{Block, Clear, Paragraph};
     use std::time::Duration;
 
-    let (gray_home, user) = (crate::plugin_cli::home()?, user_home()?);
+    let (gray_home, user) = (crate::plugin_cli::home()?, super::user_home()?);
     let decl = crate::plugin_cli::setup_decl(app)
         .with_context(|| format!("gray has no setup declaration for '{app}'"))?;
     let fields = plan_missing(decl, &user);
