@@ -81,36 +81,22 @@ fn unknown_apps_get_no_setup_probe_and_no_invented_commands() {
 }
 
 #[test]
-fn items_end_with_a_rule_and_the_command_pointers() {
+fn the_panel_is_apps_only() {
+    // The gateway picker lists the apps and nothing else: daemon/cron/memory
+    // own their commands (`gray gateway status`, `/cron`, `/memory`) and this
+    // panel narrates none of them — no rule, no pointer lines.
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join(".config/gray-discord")).unwrap();
     std::fs::write(home.path().join(".config/gray-discord/config.json"), "{}").unwrap();
     let rows = [row("discord", true)];
-    let mut items = app_rows_with(&rows, Some(home.path()));
-    items.push(separator());
-    for (label, detail) in POINTERS {
-        items.push(ManagerItem {
-            name: String::new(),
-            row: format!("{label} \u{2014} {detail}"),
-            lit: false,
-            enabled: false,
-            read_only: true,
-            needs_setup: false,
-        });
-    }
-    // Apps first, then the break, then the pointers — none of them toggleable.
+    let items = app_rows_with(&rows, Some(home.path()));
+    assert_eq!(items.len(), 1);
     assert!(items[0].row.contains("discord"));
-    assert!(items[1].row.chars().all(|c| c == '\u{2500}'));
-    assert!(items[1].read_only);
-    let labels: Vec<&str> = items[2..].iter().map(|i| i.row.as_str()).collect();
-    // /cron and /memory carry their own interactive panels and slash
-    // commands; the gateway picker no longer narrates them.
-    assert_eq!(
-        labels,
-        ["daemon \u{2014} gray gateway status \u{b7} gray gateway on|off"],
-        "{labels:?}"
-    );
-    assert!(items[2..].iter().all(|i| i.read_only));
+
+    // With no apps there are no rows either; the hint is the spec's only
+    // fallback, and nothing decorative rides alongside it.
+    assert!(app_rows_with(&[], Some(home.path())).is_empty());
+    assert!(GATEWAY_SPEC.empty_hint.contains("no apps installed"));
 }
 
 #[test]
