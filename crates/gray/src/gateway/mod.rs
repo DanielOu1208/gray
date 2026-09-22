@@ -111,6 +111,7 @@ pub async fn run_cli(cmd: crate::GatewayCmd, config: &crate::config::Config) -> 
             println!("{}", service::install(&home, &exe, no_start, print)?);
             Ok(())
         }
+        GatewayCmd::Setup { app, fields } => crate::setup::app_flow::run_headless(&app, &fields),
         GatewayCmd::Uninstall => {
             println!("{}", service::uninstall()?);
             Ok(())

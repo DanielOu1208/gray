@@ -591,6 +591,28 @@ pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
     }
 }
 
+/// The registered argv (binary plus its own args) for an installed command
+/// plugin. The setup flow runs the app's subcommands (`doctor`, `register`)
+/// through this instead of re-deriving a path.
+pub fn command_argv(home: &Path, name: &str) -> anyhow::Result<Vec<String>> {
+    validate_name(name)?;
+    let entry = load(home)?
+        .plugins
+        .get(name)
+        .with_context(|| {
+            format!(
+                "no plugin command '{name}' \u{2014} install it with: gray install plugin {name}"
+            )
+        })?
+        .clone();
+    anyhow::ensure!(
+        enabled(home, name, &entry),
+        "plugin command '{name}' is disabled"
+    );
+    anyhow::ensure!(!entry.argv.is_empty(), "plugin command has no entry point");
+    Ok(entry.argv)
+}
+
 /// Register a user-selected native executable; registration runs its manifest.
 /// The executable and widgets remain owned by the separate plugin repository.
 pub async fn register_native(home: &Path, name: &str, binary: &Path) -> anyhow::Result<()> {

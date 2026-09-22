@@ -501,6 +501,15 @@ pub enum GatewayCmd {
     },
     /// Stop and remove the installed service
     Uninstall,
+    /// Set an app up from flags (headless twin of the /gateway flow)
+    Setup {
+        /// The app to set up (its setup declaration lives in gray's catalog)
+        app: String,
+        /// `key=value` answers for the declaration's non-derived fields,
+        /// repeatable; anything still missing is reported, not guessed
+        #[arg(long = "field")]
+        fields: Vec<String>,
+    },
     /// Turn the gateway master switch on (run/start allowed again)
     On,
     /// Turn the gateway master switch off (run/start refuse until re-enabled)

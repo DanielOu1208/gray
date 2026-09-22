@@ -111,7 +111,7 @@ fn resolve_derived(key: &str, home: &Path, config_dir: &Path) -> Option<PathBuf>
     }
 }
 
-fn key_present(path: &Path, key: &str) -> bool {
+pub(crate) fn key_present(path: &Path, key: &str) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
     };
