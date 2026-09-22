@@ -1583,3 +1583,75 @@ fn sanitize_npm_key_keeps_backslashes_illegal() {
     assert!(install_key(r"C:\tmp\repo").is_err());
     assert!(validate_install_key("C--tmp-repo").is_ok());
 }
+
+#[test]
+fn registry_lock_times_out_when_held() {
+    use crate::ops::hold_registry_lock_timeout;
+    let home = tempfile::tempdir().unwrap();
+    let _g = ENV_GUARD.lock().unwrap();
+    // SAFETY: serialized by ENV_GUARD.
+    unsafe { std::env::set_var("GRAY_HOME", home.path()) };
+    // Somebody else holds the registry lock for longer than the caller's patience.
+    let lock_path = crate::plugins_dir().join(".registry.lock");
+    std::fs::create_dir_all(crate::plugins_dir()).unwrap();
+    let holder = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    holder.try_lock().unwrap();
+    let err = hold_registry_lock_timeout(std::time::Duration::from_millis(50))
+        .err()
+        .expect("a contended registry lock must fail");
+    assert!(
+        err.to_string().contains("another plugin operation"),
+        "{err}"
+    );
+    drop(holder);
+    assert!(hold_registry_lock_timeout(std::time::Duration::from_millis(50)).is_ok());
+}
+
+#[test]
+fn remove_keeps_files_when_the_registry_write_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let _g = ENV_GUARD.lock().unwrap();
+    // SAFETY: serialized by ENV_GUARD.
+    unsafe { std::env::set_var("GRAY_HOME", home.path()) };
+    let plugin_dir = crate::plugins_dir().join("demo");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(plugin_dir.join("marker"), "here").unwrap();
+    let mut lock = LockFile::default();
+    lock.plugins.insert(
+        "demo".to_string(),
+        LockEntry {
+            ecosystem: "gray-native".to_string(),
+            version: "1.0.0".to_string(),
+            hash: String::new(),
+            source: String::new(),
+            argv: vec![],
+            adapter_version: "1".to_string(),
+            installed_at: "0".to_string(),
+            scope: "user".to_string(),
+            enabled: true,
+        },
+    );
+    write_lock(&lock).unwrap();
+    // Make the registry file unwritable so the write fails mid-remove.
+    let registry = crate::plugins_dir().join("lock.json");
+    std::fs::write(&registry, "sentinel").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o400)).unwrap();
+    }
+    let err = remove("demo")
+        .err()
+        .expect("a failed registry write must propagate");
+    assert!(!err.to_string().is_empty());
+    // The files are still there: the registry is committed only after it
+    // can be written, so a failed remove leaves a re-removable plugin.
+    assert!(
+        plugin_dir.join("marker").exists(),
+        "files must survive a failed remove"
+    );
+}

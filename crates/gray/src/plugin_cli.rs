@@ -157,20 +157,53 @@ fn load(home: &Path) -> anyhow::Result<LockFile> {
     Ok(registry)
 }
 
-/// Best-effort exclusive guard for registry writes: held for the caller's
+/// How long a registry write waits for a competing plugin-manager operation
+/// (the same discipline as the gray-pkg and session-store locks).
+const COMMANDS_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Exclusive cross-process guard for registry writes: held for the caller's
 /// whole read-modify-write via the returned handle. Advisory only (a crashed
-/// holder releases on close); when the lock file itself is unusable there is
-/// simply no guard — the op still runs (matches the pre-existing
-/// fire-and-forget use of `.commands.lock`).
-fn hold_commands_lock(home: &Path) -> Option<std::fs::File> {
+/// holder releases on close). A *contended* lock is retried until
+/// [`COMMANDS_LOCK_TIMEOUT`] and then fails the operation — the previous
+/// code dropped the `try_lock` error, so two managers could edit
+/// `commands.json` concurrently and one silently won. A filesystem without
+/// flock still degrades to no guard rather than breaking the op.
+fn hold_commands_lock_timeout(
+    home: &Path,
+    timeout: std::time::Duration,
+) -> anyhow::Result<Option<std::fs::File>> {
+    let path = home.join("plugins/.commands.lock");
     let f = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(home.join("plugins/.commands.lock"))
-        .ok()?;
-    let _ = f.try_lock();
-    Some(f)
+        .open(&path)?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Ok(Some(f)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "another plugin operation is modifying the registry ({}); try again",
+                        path.display()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                log::warn!(
+                    "plugin registry locking unsupported on {} ({e}); proceeding unlocked",
+                    path.display()
+                );
+                return Ok(None);
+            }
+        }
+    }
+}
+
+fn hold_commands_lock(home: &Path) -> anyhow::Result<Option<std::fs::File>> {
+    hold_commands_lock_timeout(home, COMMANDS_LOCK_TIMEOUT)
 }
 
 fn validate_name(name: &str) -> anyhow::Result<()> {
@@ -459,7 +492,7 @@ pub fn list_rows() -> anyhow::Result<Vec<ManagedRow>> {
 /// sidecars stay on `gray-pkg::ops`). Miss message matches `ops::remove`.
 pub fn set_command_enabled(home: &Path, name: &str, on: bool) -> anyhow::Result<()> {
     validate_name(name)?;
-    let _guard = hold_commands_lock(home);
+    let _guard = hold_commands_lock(home)?;
     let mut registry = load(home)?;
     let Some(entry) = registry.plugins.get_mut(name) else {
         anyhow::bail!("not installed: {name}");
@@ -478,7 +511,7 @@ pub fn remove_command(home: &Path, name: &str) -> anyhow::Result<()> {
     if name.is_empty() || name.contains('/') || name.contains("..") {
         anyhow::bail!("not installed: {name}");
     }
-    let _guard = hold_commands_lock(home);
+    let _guard = hold_commands_lock(home)?;
     let mut registry = load(home)?;
     // `register_native` mirrors the entry into `lock.json` as a zero-tool
     // sidecar: drop the mirror too, or its ghost row outlives the remove.
@@ -1110,3 +1143,32 @@ mod tests {
 
 #[path = "plugin_native.rs"]
 mod native;
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn commands_lock_fails_loudly_when_contended() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("plugins")).unwrap();
+        let lock_path = home.path().join("plugins/.commands.lock");
+        let holder = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        holder.try_lock().unwrap();
+        let err = hold_commands_lock_timeout(home.path(), std::time::Duration::from_millis(50))
+            .err()
+            .expect("a contended commands lock must fail the op");
+        assert!(
+            err.to_string().contains("another plugin operation"),
+            "{err}"
+        );
+        drop(holder);
+        assert!(
+            hold_commands_lock_timeout(home.path(), std::time::Duration::from_millis(50)).is_ok()
+        );
+    }
+}

@@ -1076,7 +1076,14 @@ impl JsonlSessionStore {
                 Ok(h) => h,
                 Err(e) => {
                     log::warn!("skipping corrupt header in {}: {}", path.display(), e);
-                    Self::quarantine_corrupt_file(&path).await;
+                    // Quarantine only a *complete* first line that will
+                    // not parse. A file whose first line has no terminating
+                    // newline is a creator mid-write (create streams the
+                    // header into a `create_new` file), so renaming it away
+                    // would steal a session that is about to be valid.
+                    if content.contains('\n') {
+                        Self::quarantine_corrupt_file(&path).await;
+                    }
                     continue;
                 }
             };
@@ -1120,6 +1127,10 @@ impl JsonlSessionStore {
     }
 
     pub async fn delete(&self, id: &SessionId) -> Result<()> {
+        // Cross-process lock first, in-memory second: without the file lock
+        // a delete can race another process's append and leave that writer
+        // appending to an unlinked inode (its writes vanish silently).
+        let _lock = self.lock_session_file(id).await?;
         let _guard = self.lock.lock().await;
         let path = self.session_path(id)?;
         match tokio::fs::remove_file(&path).await {

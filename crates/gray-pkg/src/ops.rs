@@ -316,6 +316,61 @@ fn read_lock() -> anyhow::Result<Option<LockFile>> {
     }
 }
 
+/// How long a registry write waits for another process's read-modify-write
+/// before failing loudly (the same doctrine as the session store's locks).
+const REGISTRY_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Exclusive cross-process guard for the whole read-modify-write on
+/// `lock.json`: the file is kept (it is the lock itself), `WouldBlock` is
+/// retried until `timeout`, and only a *contended* lock fails the op. A
+/// filesystem without flock degrades to unlocked-with-warning, so an exotic
+/// filesystem never breaks `install`/`remove`.
+pub fn hold_registry_lock_timeout(
+    timeout: std::time::Duration,
+) -> anyhow::Result<Option<std::fs::File>> {
+    let path = crate::plugins_dir().join(".registry.lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .ok();
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Ok(Some(f)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "another plugin operation is modifying the registry ({}); try again",
+                        path.display()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                eprintln!(
+                    "warning: plugin registry locking unsupported on {} ({e}); proceeding unlocked",
+                    path.display()
+                );
+                return Ok(None);
+            }
+        }
+    }
+}
+
+pub fn hold_registry_lock() -> anyhow::Result<Option<std::fs::File>> {
+    hold_registry_lock_timeout(REGISTRY_LOCK_TIMEOUT)
+}
+
 fn write_lock(lock: &LockFile) -> anyhow::Result<()> {
     let path = lock_path();
     if let Some(parent) = path.parent() {
@@ -341,6 +396,7 @@ fn record_install(
     scope: String,
     argv: Vec<String>,
 ) -> anyhow::Result<()> {
+    let _guard = hold_registry_lock()?;
     let mut lock = read_lock()?.unwrap_or_default();
     let enabled = lock.plugins.get(name).map(|e| e.enabled).unwrap_or(true);
     lock.plugins.insert(
@@ -1300,10 +1356,15 @@ fn remove_inner(name: &str) -> anyhow::Result<()> {
     if name.is_empty() || name.contains('/') || name.contains("..") {
         anyhow::bail!("not installed: {name}");
     }
+    let _guard = hold_registry_lock()?;
     let mut lock = read_lock()?.unwrap_or_default();
     if lock.plugins.remove(name).is_none() {
         anyhow::bail!("not installed: {name}");
     }
+    // Commit the registry first: a failed write must leave the files on disk
+    // (a stale entry the user can re-remove), never the reverse, where the
+    // registry would claim a plugin whose files are gone.
+    write_lock(&lock)?;
     // Gray-native/URL installs live at `<plugins_dir>/<name>`; pi installs
     // at `<plugins_dir>/pi/<name>` (R13: sanitized keys hold no `/`).
     for dir in [
@@ -1314,7 +1375,6 @@ fn remove_inner(name: &str) -> anyhow::Result<()> {
             std::fs::remove_dir_all(&dir)?;
         }
     }
-    write_lock(&lock)?;
     Ok(())
 }
 
@@ -1328,6 +1388,7 @@ pub fn set_enabled(name: &str, on: bool) -> anyhow::Result<()> {
 }
 
 fn set_enabled_inner(name: &str, on: bool) -> anyhow::Result<()> {
+    let _guard = hold_registry_lock()?;
     let mut lock = read_lock()?.unwrap_or_default();
     let Some(entry) = lock.plugins.get_mut(name) else {
         anyhow::bail!("not installed: {name}");
