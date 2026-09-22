@@ -8,6 +8,10 @@ pub(crate) const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// and `gray.log`->`.1`, silently losing one segment per renaming loser.
 /// Advisory, best-effort: no flock means no guard, exactly like the rest
 /// of rotation.
+pub(crate) fn rotation_guard(path: &Path) -> Option<std::fs::File> {
+    lock_rotation(path)
+}
+
 fn lock_rotation(path: &Path) -> Option<std::fs::File> {
     let lock_path = path.with_extension("log.lock");
     let f = std::fs::OpenOptions::new()

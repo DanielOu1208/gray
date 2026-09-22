@@ -62,15 +62,9 @@ impl Log for FileLogger {
         }
         // Serialize the shuffle, then swap in a fresh file (best-effort).
         let rotated = {
-            let _guard = {
-                let lock_path = self.path.with_extension("log.lock");
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .write(true)
-                    .open(&lock_path)
-                    .ok()
-            };
+            // The guard is the acquire, not the open: without the try_lock
+            // inside rotation_guard the file existing buys no exclusion.
+            let _guard = crate::rotation::rotation_guard(&self.path);
             let _ = std::fs::remove_file(self.path.with_extension("log.2"));
             let _ = std::fs::rename(
                 self.path.with_extension("log.1"),
