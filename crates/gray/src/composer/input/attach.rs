@@ -132,8 +132,12 @@ pub(crate) fn try_attach_clipboard_image(tui: &mut Tui) -> bool {
             vec!["-selection", "clipboard", "-t", "image/png", "-o"],
         ),
     ] {
-        if let Ok(out) = std::process::Command::new(cmd).args(&args).output()
-            && !out.stdout.is_empty()
+        // The image probe gets the same bounded spawn the text path uses:
+        // a wedged wl-paste/xclip must not freeze Ctrl+V (audit #16).
+        if let Some(out) = super::clipboard::output_with_timeout(
+            std::path::Path::new(cmd),
+            &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        ) && !out.stdout.is_empty()
             && out.status.success()
             && let Ok(mut tmp) = tempfile::Builder::new().suffix(".png").tempfile()
             && std::io::Write::write_all(&mut tmp, &out.stdout).is_ok()

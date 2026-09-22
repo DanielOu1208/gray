@@ -5,7 +5,6 @@
 //! OpenAI-compatible providers — reported loudly, never silently dropped.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 // Image downscale lives in gray-tools (the `read` tool attaches vision
 // blocks too); re-exported so existing users keep working.
@@ -98,13 +97,46 @@ pub fn extract_inline_image_paths(text: &str, cwd: &Path) -> Vec<PathBuf> {
     }
     out
 }
+/// External media helpers (`pdftotext`, `ffmpeg`) run bounded: a malformed
+/// file or a wedged helper must not hold the attach flow forever (audit
+/// #15). Same mpsc pattern as the clipboard text path.
+const MEDIA_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn output_with_timeout_in(
+    cmd: &str,
+    args: &[&str],
+    limit: std::time::Duration,
+) -> Result<std::process::Output, MediaError> {
+    let program = cmd.to_string();
+    let argv: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(
+            std::process::Command::new(&program)
+                .args(&argv)
+                .output()
+                .map_err(|e| std::io::Error::other(e.to_string())),
+        );
+    });
+    match rx.recv_timeout(limit) {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(e)) => Err(MediaError::Extract(format!("{cmd} not available: {e}"))),
+        Err(_) => Err(MediaError::Extract(format!(
+            "{cmd} timed out after {}s",
+            limit.as_secs()
+        ))),
+    }
+}
+
+fn output_with_timeout(cmd: &str, args: &[&str]) -> Result<std::process::Output, MediaError> {
+    output_with_timeout_in(cmd, args, MEDIA_CMD_TIMEOUT)
+}
+
 /// PDF → text via poppler (`pdftotext -layout file -`). Universal: works on
 /// every model with zero provider changes.
 pub fn pdf_text(path: &Path) -> Result<String, MediaError> {
-    let out = Command::new("pdftotext")
-        .args(["-layout", &path.display().to_string(), "-"])
-        .output()
-        .map_err(|e| MediaError::Extract(format!("pdftotext not available: {e}")))?;
+    let arg_path = path.display().to_string();
+    let out = output_with_timeout("pdftotext", &["-layout", &arg_path, "-"])?;
     if !out.status.success() {
         let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(MediaError::Extract(if detail.is_empty() {
@@ -130,8 +162,9 @@ pub fn pdf_text(path: &Path) -> Result<String, MediaError> {
 /// Video → first-frame JPEG via ffmpeg (capped 1600px wide), fed back
 /// through the image normalizer by the caller.
 pub fn video_frame(path: &Path) -> Result<Vec<u8>, MediaError> {
-    let out = Command::new("ffmpeg")
-        .args([
+    let out = output_with_timeout(
+        "ffmpeg",
+        &[
             "-hide_banner",
             "-loglevel",
             "error",
@@ -146,9 +179,8 @@ pub fn video_frame(path: &Path) -> Result<Vec<u8>, MediaError> {
             "-vcodec",
             "mjpeg",
             "-",
-        ])
-        .output()
-        .map_err(|e| MediaError::Extract(format!("ffmpeg not available: {e}")))?;
+        ],
+    )?;
     if !out.status.success() || out.stdout.is_empty() {
         let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(MediaError::Extract(if detail.is_empty() {

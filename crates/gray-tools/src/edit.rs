@@ -316,6 +316,13 @@ impl Tool for EditTool {
                 },
             };
         let final_content = bom.bom + &restore_line_endings(&applied.new_content, ending);
+        // Audit #8: the freshness checks above ran before the (slow) edit
+        // application; re-prove the file is still what we read, right here.
+        let recheck_hash = self.ledger.get(&full).and_then(|e| e.content_hash);
+        let recheck_meta = std::fs::metadata(&full).ok();
+        if !crate::write::still_fresh(&full, recheck_meta.as_ref(), recheck_hash) {
+            return fail(notices::edit_changed(&full.display().to_string()));
+        }
         // Atomic replace (temp + rename, mode preserved); see
         // crate::write::atomic_write for symlink/hardlink semantics.
         if let Err(e) = crate::write::atomic_write(&full, final_content.as_bytes()).await {

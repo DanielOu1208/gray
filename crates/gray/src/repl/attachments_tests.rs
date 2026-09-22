@@ -105,3 +105,17 @@ fn inline_relative_resolves_against_cwd() {
     let got = extract_inline_image_paths("check shot.png", dir.path());
     assert_eq!(got, vec![rel]);
 }
+
+#[test]
+fn a_hanging_media_helper_times_out() {
+    // `sh -c 'sleep 30'` stands in for a wedged pdftotext/ffmpeg: the call
+    // must fail at the bound, not hold the attach flow forever.
+    let err = super::output_with_timeout_in(
+        "sh",
+        &["-c", "sleep 30"],
+        std::time::Duration::from_millis(150),
+    )
+    .err()
+    .expect("a hanging helper must fail");
+    assert!(err.to_string().contains("timed out"), "{err}");
+}

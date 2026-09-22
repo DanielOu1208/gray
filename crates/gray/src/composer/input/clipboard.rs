@@ -113,7 +113,10 @@ const CLIPBOARD_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_mil
 /// helper can't block the UI thread. `None` on spawn failure/timeout —
 /// same as the old blocking `.ok()?` path. The orphaned thread exits on
 /// its own when the helper does; its send then fails silently.
-fn output_with_timeout(full: &std::path::Path, args: &[String]) -> Option<std::process::Output> {
+pub(crate) fn output_with_timeout(
+    full: &std::path::Path,
+    args: &[String],
+) -> Option<std::process::Output> {
     let (tx, rx) = std::sync::mpsc::channel();
     let full = full.to_path_buf();
     let args = args.to_owned();

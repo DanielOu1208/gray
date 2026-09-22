@@ -83,6 +83,37 @@ impl Default for WriteTool {
     }
 }
 
+/// Verify-at-apply (audit #8): the staleness check and the atomic replace
+/// are separate syscalls, so a file that changed *between* them would be
+/// clobbered by a guard that already passed. Re-prove freshness immediately
+/// before the replace: the metadata the check saw must still describe the
+/// file, and when the ledger knows the old bytes' hash the current bytes
+/// must still hash to it (mtime granularity can lie; the bytes cannot).
+pub(crate) fn still_fresh(
+    path: &std::path::Path,
+    expected_meta: Option<&std::fs::Metadata>,
+    expected_hash: Option<u64>,
+) -> bool {
+    let current = std::fs::metadata(path).ok();
+    match (expected_meta, current) {
+        (None, None) => {} // still absent: the replace creates it
+        (Some(want), Some(got)) => {
+            let same_meta = got.len() == want.len() && got.modified().ok() == want.modified().ok();
+            if !same_meta {
+                return false;
+            }
+        }
+        _ => return false, // appeared or vanished under us
+    }
+    match expected_hash {
+        Some(want) => match std::fs::read(path) {
+            Ok(bytes) => FileLedger::hash_bytes(&bytes) == Some(want),
+            Err(_) => false,
+        },
+        None => true,
+    }
+}
+
 /// Atomic file replace via temp + rename with mode preservation.
 ///
 /// Symlink/hardlink semantics: rename replaces the directory entry itself, so
@@ -230,6 +261,11 @@ impl Tool for WriteTool {
             return fail(msg);
         }
         let existed = disk_meta.is_some();
+        // Audit #8: re-prove freshness at the rename, not just at the check.
+        let recheck_hash = self.ledger.get(&full).and_then(|e| e.content_hash);
+        if !still_fresh(&full, disk_meta.as_ref(), recheck_hash) {
+            return fail(notices::write_changed(&display));
+        }
         match atomic_write(&full, content.as_bytes()).await {
             Ok(()) => {
                 // T3.2 ledger: the whole new content is known — the next write
