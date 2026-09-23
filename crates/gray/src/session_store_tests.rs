@@ -627,3 +627,34 @@ async fn store_dir_and_files_are_owner_only() {
         "session file must be 0600, got {file_mode:o}"
     );
 }
+
+#[tokio::test]
+async fn a_torn_header_is_left_for_its_writer() {
+    let dir = tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path());
+    // A creator between `create_new` and the end of its header write: the
+    // first line exists but is not terminated yet.
+    let id = SessionId::new("torn");
+    let path = store.session_path(&id).unwrap();
+    std::fs::write(&path, "{\"kind\":\"head").unwrap();
+    let summaries = store.list().await;
+    assert!(summaries.is_empty(), "a torn header must not be listed");
+    assert!(path.exists(), "the writer's file must survive a list");
+    let quarantined: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("corrupt"))
+        .collect();
+    assert!(quarantined.is_empty(), "{quarantined:?}");
+    // A complete, unparseable header is still real corruption: it goes.
+    std::fs::write(&path, "not json\n").unwrap();
+    assert_eq!(store.list().await.len(), 0);
+    let quarantined: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("corrupt"))
+        .collect();
+    assert_eq!(quarantined.len(), 1, "{quarantined:?}");
+}

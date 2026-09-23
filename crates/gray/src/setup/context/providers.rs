@@ -291,18 +291,51 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
     None
 }
 
-/// Levels from `THINKING_LEVELS` the model actually accepts (`off` always
-/// offered). Unknown family → full catalog; known non-reasoning → just `off`.
+/// The step family: StepFun's API always reasons. `thinking: {"type":
+/// "disabled"}` is ignored — measured against api.stepfun.ai, 1088
+/// reasoning deltas still streamed at effort=off — and its `/models`
+/// advertises `reasoning: false`, so both the disable flag and the
+/// advertised metadata are lies this family has to override.
+pub fn step_family(model_id: &str) -> bool {
+    let id = model_id.rsplit('/').next().unwrap_or(model_id);
+    id.starts_with("step-") || id.starts_with("step_")
+}
+
+/// Whether `off` really stops reasoning on this model. A family that
+/// ignores the disable flag (the step family, measured) must not be
+/// offered `off — No reasoning`: the row would be a lie, and selecting it
+/// hides text the provider keeps streaming and keeps billing.
+pub fn reasoning_off_is_honest(model_id: &str) -> bool {
+    !step_family(model_id)
+}
+
+/// The levels the step family accepts — there is no `off` to offer.
+pub const STEP_LEVELS: &[(&str, &str)] = &[
+    ("low", "Light reasoning"),
+    ("medium", "Moderate reasoning"),
+    ("high", "Deep reasoning"),
+    ("max", "Maximum reasoning"),
+];
+
+/// Levels from `THINKING_LEVELS` the model actually accepts. `off` is
+/// offered when the model honors it (see [`reasoning_off_is_honest`]).
+/// Unknown family → full catalog; known non-reasoning → just `off`.
 pub fn supported_thinking_levels(model_id: &str) -> Vec<(&'static str, &'static str)> {
+    // Family truth outranks advertised metadata: the step family always
+    // reasons, whatever its /models endpoint or the models.dev cache says.
+    if step_family(model_id) {
+        return STEP_LEVELS.to_vec();
+    }
     if model_supports_reasoning(model_id) == Some(false) {
         return vec![("off", "No reasoning")];
     }
     let Some(want) = supported_efforts(model_id) else {
         return super::super::THINKING_LEVELS.to_vec();
     };
+    let off_ok = reasoning_off_is_honest(model_id);
     super::super::THINKING_LEVELS
         .iter()
-        .filter(|(l, _)| *l == "off" || want.contains(l))
+        .filter(|(l, _)| (*l == "off" && off_ok) || want.contains(l))
         .copied()
         .collect()
 }
@@ -1049,7 +1082,14 @@ pub fn save_models_cache_to_disk() {
     {
         return;
     }
-    let tmp = path.with_extension("json.tmp");
+    // Audit #18: a shared models.json.tmp lets two concurrent refreshes
+    // clobber or rename each other's temporary write; the pid+random
+    // suffix makes each rename target distinct.
+    let tmp = path.with_extension(format!(
+        "json.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
     if std::fs::write(&tmp, s).is_err() {
         return;
     }

@@ -175,6 +175,7 @@ pub(crate) async fn handle_resume(
             {
                 config.thinking_effort = Some(new.clone());
                 if let Ok(path) = crate::setup::saved_config_path() {
+                    let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
                     let mut saved = crate::setup::load_saved_config_at(&path);
                     saved.thinking_effort = Some(new.clone());
                     let _ = crate::setup::save_saved_config_at(&path, &saved);

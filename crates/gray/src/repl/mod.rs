@@ -208,6 +208,7 @@ pub(crate) fn clamp_thinking_to_model_name(
     let (old, new) = (current, clamped.to_string());
     config.thinking_effort = Some(new.clone());
     if let Ok(path) = crate::setup::saved_config_path() {
+        let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
         let mut saved = crate::setup::load_saved_config_at(&path);
         saved.thinking_effort = Some(new.clone());
         let _ = crate::setup::save_saved_config_at(&path, &saved);
@@ -621,6 +622,9 @@ pub async fn run_repl_mode(
             if let Some(m) = &config.model {
                 t.set_model(m.clone());
             }
+            // A level this model no longer offers (a step-family `off` saved
+            // before family truth won) must not ride into the footer.
+            let _ = clamp_thinking_to_model(config);
             if let Some(eff) = &config.thinking_effort {
                 t.set_thinking_effort(eff.clone());
             }
@@ -738,6 +742,7 @@ pub async fn run_repl_mode(
     {
         config.thinking_effort = Some("high".to_string());
         if let Ok(path) = crate::setup::saved_config_path() {
+            let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
             let mut saved = crate::setup::load_saved_config_at(&path);
             if saved.thinking_effort.is_none() {
                 saved.thinking_effort = Some("high".to_string());

@@ -15,12 +15,50 @@ fn editor_program(editor: Option<&str>) -> &str {
         .unwrap_or("vi")
 }
 
-/// Splits `$EDITOR` into program + args on whitespace; the caller appends
-/// the file path (git-style `$EDITOR <file>`).
+/// Splits `$EDITOR` into program + args on *unquoted* whitespace (see
+/// `split_editor_words`); the caller appends the file path (git-style
+/// `$EDITOR <file>`).
+/// Split an `$EDITOR` value on unquoted whitespace, honouring single and
+/// double quotes (audit #22): `split_whitespace` breaks
+/// `"/c/Program Files/Notepad++/notepad++.exe" -multiInst` and any quoted
+/// argument. An unterminated quote runs to the end of the value.
+pub fn split_editor_words(editor: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut has_token = false;
+    for c in editor.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => cur.push(c),
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    has_token = true;
+                }
+                c if c.is_whitespace() => {
+                    if has_token {
+                        out.push(std::mem::take(&mut cur));
+                        has_token = false;
+                    }
+                }
+                _ => {
+                    cur.push(c);
+                    has_token = true;
+                }
+            },
+        }
+    }
+    if has_token {
+        out.push(cur);
+    }
+    out
+}
+
 pub fn parse_editor_cmd(editor: &str) -> (String, Vec<String>) {
-    let mut parts = editor.split_whitespace();
-    let prog = parts.next().unwrap_or_default().to_string();
-    (prog, parts.map(str::to_string).collect())
+    let mut parts = split_editor_words(editor).into_iter();
+    let prog = parts.next().unwrap_or_default();
+    (prog, parts.collect())
 }
 
 /// Copies `path` to `<name>.bak` (`<name>.bak-2`… on collision — same `-N`

@@ -246,17 +246,14 @@ pub fn unpack_zip(archive: &Path, dest: &Path) -> anyhow::Result<()> {
         if name.ends_with('/') {
             continue;
         }
-        // Raw-prefix check, not just is_absolute(): on Windows "/abs" and
-        // "\abs" are drive-relative (not absolute), but must still be refused.
-        if name.starts_with('/')
-            || name.starts_with('\\')
-            || Path::new(name)
-                .components()
-                .any(|c| matches!(c, Component::ParentDir))
-        {
+        if unsafe_entry_name(name) {
             anyhow::bail!("refusing unsafe archive entry: {name}");
         }
         let rel = Path::new(name);
+        anyhow::ensure!(
+            confined(dest, rel),
+            "refusing archive entry outside the install dir: {name}"
+        );
         // Local header: skip name+extra to reach the data.
         if bytes.get(local_off..local_off + 4) != Some(b"PK\x03\x04".as_slice()) {
             anyhow::bail!("invalid zip archive");
@@ -297,6 +294,33 @@ pub fn unpack_zip(archive: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// True when an archive entry name cannot be safely joined onto the
+/// destination. Beyond the obvious absolute and `..` cases this refuses
+/// Windows drive names: `C:\evil` and `C:evil` are neither absolute nor
+/// parent components, but `dest.join()` with a drive-prefixed path
+/// *replaces* the base on Windows, so the entry lands outside the install
+/// directory. A gray-native archive never legitimately contains a drive
+/// name, so the refusal is safe everywhere.
+fn unsafe_entry_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let drive_name = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    drive_name
+        || name.starts_with('/')
+        || name.starts_with('\\')
+        || Path::new(name).components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
+}
+
+/// Belt-and-braces containment: the joined target must still live inside
+/// the destination after the name check above.
+fn confined(dest: &Path, rel: &Path) -> bool {
+    dest.join(rel).starts_with(dest)
+}
+
 /// Unpack a tar.gz, rejecting absolute paths and `..` entries.
 /// Total expanded output is capped at 256 MiB and entry counts/types are
 /// bounded (regular files and directories only).
@@ -317,14 +341,8 @@ pub fn unpack_tar_gz(archive: &Path, dest: &Path) -> anyhow::Result<()> {
             .checked_add(entry.size())
             .ok_or_else(|| anyhow::anyhow!("archive size overflow"))?;
         anyhow::ensure!(total <= MAX_OUT, "tar archive exceeds output cap");
-        // Raw-prefix check, not just is_absolute(): on Windows "/abs" is
-        // drive-relative (not absolute), but must still be refused.
         let path = entry.path()?.into_owned();
-        let raw = path.to_string_lossy();
-        if raw.starts_with('/')
-            || raw.starts_with('\\')
-            || path.components().any(|c| matches!(c, Component::ParentDir))
-        {
+        if unsafe_entry_name(&path.to_string_lossy()) || !confined(dest, &path) {
             anyhow::bail!("refusing unsafe archive entry: {}", path.display());
         }
         entry.unpack_in(dest)?;

@@ -15,6 +15,13 @@ async fn main() -> anyhow::Result<()> {
     if let Some(gray::Commands::Memory(args)) = &cli.command {
         return gray::memory::run_cli(args);
     }
+    // Same reason as memory: a local file is nobody's provider concern. The
+    // bash tool also claims `gray view <path>` before the shell runs, so in
+    // an agent session the image is attached as a vision block and this only
+    // prints when a human runs it.
+    if let Some(gray::Commands::View { paths }) = &cli.command {
+        return gray::view::run_cli(paths);
+    }
     // Account commands run before provider configuration: enrolling a fresh
     // machine must not require a model and a key first.
     match &cli.command {
@@ -102,6 +109,9 @@ async fn main() -> anyhow::Result<()> {
             // Same reason, one step earlier still: no provider needed to log in.
             gray::Commands::Login { .. } | gray::Commands::Whoami | gray::Commands::Logout => {
                 unreachable!("account CLI dispatch happens before configuration")
+            }
+            gray::Commands::View { .. } => {
+                unreachable!("view CLI dispatch happens before configuration")
             }
         }
     }

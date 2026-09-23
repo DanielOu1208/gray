@@ -248,6 +248,7 @@ pub(crate) async fn handle_context_window(
     }
     fn persist_window(config: &Config) {
         if let Ok(path) = crate::setup::saved_config_path() {
+            let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
             let mut saved = crate::setup::load_saved_config_at(&path);
             saved.context_window = config.context_window;
             saved.context_reserve = config.context_reserve;

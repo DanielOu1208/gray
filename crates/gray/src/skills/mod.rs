@@ -222,7 +222,8 @@ pub(crate) use load::load_skills_from_dir_internal;
 pub fn load_skills_from_dir(dir: &Path, source: &str) -> LoadSkillsResult {
     let root = dir.to_path_buf();
     let mut matcher = IgnoreMatcher::new(&root);
-    load_skills_from_dir_internal(dir, source, true, &mut matcher, &root)
+    let mut visited = std::collections::HashSet::new();
+    load_skills_from_dir_internal(dir, source, true, &mut matcher, &root, &mut visited)
 }
 
 // ---------------------------------------------------------------------------

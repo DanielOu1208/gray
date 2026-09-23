@@ -45,19 +45,39 @@ impl Log for FileLogger {
         // Runtime cap: boot rotation alone lets a long-lived process grow
         // gray.log unbounded. Mirrors rotation::rotate_if_needed, but the
         // handle is open, so rename then swap in a fresh file (best-effort).
+        // Audit #19: another gray process may have rotated the log since
+        // our last line (our handle then writes into a renamed-away
+        // inode). Re-anchor before deciding whether *this* log needs it.
+        if crate::rotation::handle_drifted(&self.path, &file)
+            && let Ok(fresh) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+        {
+            *file = fresh;
+            return;
+        }
         if !should_rotate(file.metadata().map(|m| m.len()).unwrap_or(0)) {
             return;
         }
-        let _ = std::fs::remove_file(self.path.with_extension("log.2"));
-        let _ = std::fs::rename(
-            self.path.with_extension("log.1"),
-            self.path.with_extension("log.2"),
-        );
-        let _ = std::fs::rename(&self.path, self.path.with_extension("log.1"));
-        if let Ok(fresh) = std::fs::File::create(&self.path) {
-            *file = fresh;
-        } else {
-            let _ = file.set_len(0);
+        // Serialize the shuffle, then swap in a fresh file (best-effort).
+        let rotated = {
+            // The guard is the acquire, not the open: without the try_lock
+            // inside rotation_guard the file existing buys no exclusion.
+            let _guard = crate::rotation::rotation_guard(&self.path);
+            let _ = std::fs::remove_file(self.path.with_extension("log.2"));
+            let _ = std::fs::rename(
+                self.path.with_extension("log.1"),
+                self.path.with_extension("log.2"),
+            );
+            let _ = std::fs::rename(&self.path, self.path.with_extension("log.1"));
+            std::fs::File::create(&self.path)
+        };
+        match rotated {
+            Ok(fresh) => *file = fresh,
+            Err(_) => {
+                let _ = file.set_len(0);
+            }
         }
     }
 

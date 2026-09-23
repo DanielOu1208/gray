@@ -17,6 +17,7 @@ pub mod read;
 pub mod shell;
 pub mod stats;
 pub mod truncate;
+pub mod view;
 pub mod write;
 
 use std::sync::Arc;

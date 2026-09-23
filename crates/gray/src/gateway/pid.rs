@@ -135,6 +135,55 @@ pub fn running(home: &Path) -> Option<PidRecord> {
     read(home).filter(alive)
 }
 
+/// How long a starter waits for a competing claim before failing (the
+/// claim decision itself must not be observable in two halves by two
+/// processes).
+const CLAIM_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Exclusive cross-process guard for the whole claim decision (audit #1):
+/// the stale-record replacement path *reads* the record and *removes* it in
+/// separate filesystem operations, so two starters can each decide the
+/// record is stale, and the loser's `remove_file` can delete the winner's
+/// freshly created claim — both then believe they own the home. Holding one
+/// lock across read -> remove -> create makes the decision atomic. The
+/// lock file itself is never removed (it is the lock), and a filesystem
+/// without flock degrades to no guard rather than failing startup.
+fn hold_claim_lock(home: &Path) -> Option<std::fs::File> {
+    let path = record_path(home).with_extension("pid.lock");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .ok()?;
+    let deadline = std::time::Instant::now() + CLAIM_LOCK_TIMEOUT;
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Some(f),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    log::warn!(
+                        "another starter is claiming {}; proceeding unlocked",
+                        home.display()
+                    );
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                log::warn!(
+                    "gateway claim locking unsupported on {} ({e}); proceeding unlocked",
+                    path.display()
+                );
+                return None;
+            }
+        }
+    }
+}
+
 /// Claim `home` for this process; `Err` when a live sibling already owns it.
 /// A stale or corrupt record is replaced — the retry keeps the race window
 /// exactly one `create_new` wide.
@@ -150,6 +199,9 @@ pub fn claim(home: &Path) -> anyhow::Result<PidRecord> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         started_at: crate::cron::now_secs(),
     };
+    // The whole read -> remove -> create decision runs under one lock (the
+    // retry loop is unchanged; only the window is now atomic).
+    let _guard = hold_claim_lock(home);
     for _ in 0..2 {
         match write_new(home, &rec) {
             Ok(()) => return Ok(rec),

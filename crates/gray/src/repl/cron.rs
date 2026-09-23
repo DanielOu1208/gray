@@ -96,6 +96,7 @@ pub(crate) fn items(
                 lit,
                 enabled: toggleable && j.state == crate::cron::store::JobState::Active,
                 read_only: !toggleable,
+                needs_setup: false,
             }
         })
         .collect();
@@ -110,6 +111,7 @@ pub(crate) fn items(
             lit: true,
             enabled: false,
             read_only: true,
+            needs_setup: false,
         });
     }
     out
@@ -123,6 +125,7 @@ pub(crate) fn run_cron_modal(
 ) -> anyhow::Result<bool> {
     run_install_manager(
         bg,
+        None,
         &CRON_SPEC,
         || {
             let store = crate::cron::CronStore::open(home.join("cron")).ok()?;

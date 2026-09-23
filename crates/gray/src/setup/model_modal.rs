@@ -25,6 +25,7 @@ pub(crate) fn provider_models_for(
 pub(super) fn picker_models_for(base_url: &str, api_key: Option<&str>) -> Vec<(String, String)> {
     let mut models = fetch_live_provider_models(base_url, api_key);
     if let Ok(path) = saved_config_path() {
+        let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
         load_saved_config_at(&path).sort_models(base_url, &mut models);
     }
     models
@@ -390,6 +391,7 @@ pub fn run_model_modal(
                         config.model = Some(chosen_model.clone());
 
                         let path = saved_config_path()?;
+                        let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
                         let mut saved = load_saved_config_at(&path);
                         saved.base_url = Some(config.base_url.clone());
                         saved.model = config.model.clone();

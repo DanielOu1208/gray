@@ -315,3 +315,73 @@ fn subsystem_switches_default_on_and_only_explicit_false_turns_them_off() {
     std::fs::write(&cfg, r#"{"memory_auto":"yes"}"#).unwrap();
     assert!(crate::setup::memory_auto_enabled_at(&cfg));
 }
+
+#[test]
+fn a_corrupt_auth_store_is_refused_not_overwritten() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("auth.json");
+    std::fs::write(&path, "{not json at all").unwrap();
+
+    // A save must fail and leave the original bytes untouched.
+    let err = crate::setup::catalog::save_auth_key_at(&path, "openrouter", "sk-new")
+        .err()
+        .expect("a corrupt store must not be written over");
+    assert!(err.to_string().contains("not valid JSON"), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json at all");
+
+    // Removal likewise refuses.
+    assert!(crate::setup::catalog::remove_auth_entry_at(&path, "openrouter").is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json at all");
+}
+
+#[test]
+fn a_valid_store_still_round_trips_through_the_strict_loader() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("auth.json");
+    // Missing file reads as empty, not an error.
+    assert!(
+        crate::setup::catalog::load_mixed_store_strict(&path)
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::write(
+        &path,
+        r#"{"openrouter": "sk-a", "codex": {"provider": "codex", "access_token": "t", "expires_at": 0}}"#,
+    )
+        .unwrap();
+    let store = crate::setup::catalog::load_mixed_store_strict(&path).unwrap();
+    assert_eq!(store.len(), 2);
+    // The lenient reader keeps its old meaning for display paths.
+    assert_eq!(crate::setup::catalog::load_mixed_store(&path).len(), 2);
+}
+
+#[test]
+fn the_config_lock_serializes_writers_then_releases() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let first = super::lock_saved_config_at(&path).unwrap();
+    let lock_path = path.with_extension("lock");
+    assert!(lock_path.exists(), "the lock file is the lock itself");
+    // A second transaction waits for the holder, then succeeds: a wedged
+    // holder never locks everyone out forever.
+    let waiter = {
+        std::thread::spawn(move || {
+            let t = std::time::Instant::now();
+            let second = super::lock_saved_config_at(&path).expect("the waiter must get it");
+            let waited = t.elapsed();
+            drop(second);
+            waited
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    drop(first);
+    let waited = waiter.join().unwrap();
+    assert!(
+        waited >= std::time::Duration::from_millis(300),
+        "the waiter did not wait for the holder: {waited:?}"
+    );
+    assert!(
+        waited < std::time::Duration::from_secs(4),
+        "release took too long: {waited:?}"
+    );
+}

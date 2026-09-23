@@ -281,6 +281,55 @@ where
 
 /// Writes the config pretty-printed so users can hand-edit it too.
 /// Mode 0600: the file stores the plaintext api_key.
+/// How long a saved-config transaction waits for a competing writer
+/// before failing loudly (audit #23: two simultaneous setting changes
+/// must not last-writer-wins each other's fields).
+const CONFIG_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Cross-process guard spanning a whole load-modify-save on the saved
+/// config. Take it, then call [`load_saved_config_at`] and
+/// [`save_saved_config_at`] as before: the lock — not the two calls — is
+/// what makes the transaction atomic against another gray process. A
+/// filesystem without flock degrades to no guard rather than failing.
+pub struct SavedConfigLock {
+    _file: Option<std::fs::File>,
+}
+
+/// Acquire the guard for `path`'s config (`<path>.lock` sibling).
+pub fn lock_saved_config_at(path: &Path) -> anyhow::Result<SavedConfigLock> {
+    let lock_path = path.with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    let deadline = std::time::Instant::now() + CONFIG_LOCK_TIMEOUT;
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Ok(SavedConfigLock { _file: Some(f) }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "another gray process is writing the config ({}); try again",
+                        lock_path.display()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                log::warn!(
+                    "config locking unsupported on {} ({e}); proceeding unlocked",
+                    lock_path.display()
+                );
+                return Ok(SavedConfigLock { _file: None });
+            }
+        }
+    }
+}
+
 pub fn save_saved_config_at(path: &Path, cfg: &SavedConfig) -> anyhow::Result<()> {
     let previous = load_saved_config_at(path);
     let mut persisted = cfg.clone();
@@ -399,15 +448,28 @@ impl std::fmt::Debug for AuthEntry {
 }
 
 pub fn load_mixed_store(path: &Path) -> BTreeMap<String, AuthEntry> {
+    load_mixed_store_strict(path).unwrap_or_default()
+}
+
+/// Same, but a file that exists and will not parse is an error, never an
+/// empty store: writing one back would take every other credential in the
+/// file with it. Only a missing file reads as empty.
+pub fn load_mixed_store_strict(path: &Path) -> anyhow::Result<BTreeMap<String, AuthEntry>> {
     let Ok(body) = std::fs::read_to_string(path) else {
-        return BTreeMap::new();
+        return Ok(BTreeMap::new());
     };
     if let Ok(single) = serde_json::from_str::<StoredAuth>(&body) {
         let mut map = BTreeMap::new();
         map.insert(single.provider.clone(), AuthEntry::OAuth(single));
-        return map;
+        return Ok(map);
     }
-    serde_json::from_str::<BTreeMap<String, AuthEntry>>(&body).unwrap_or_default()
+    serde_json::from_str::<BTreeMap<String, AuthEntry>>(&body).map_err(|e| {
+        anyhow::anyhow!(
+            "{} is not valid JSON ({}); fix or remove it before changing credentials",
+            path.display(),
+            e
+        )
+    })
 }
 
 pub fn save_mixed_store(path: &Path, store: &BTreeMap<String, AuthEntry>) -> anyhow::Result<()> {
@@ -435,14 +497,18 @@ pub fn load_auth_keys() -> BTreeMap<String, String> {
 /// preserving any OAuth entries in the same file.
 pub(crate) fn save_auth_key(pid: &str, key: &str) -> anyhow::Result<()> {
     let path = auth_store_path()?;
-    let mut store = load_mixed_store(&path);
+    save_auth_key_at(&path, pid, key)
+}
+
+pub(crate) fn save_auth_key_at(path: &Path, pid: &str, key: &str) -> anyhow::Result<()> {
+    let mut store = load_mixed_store_strict(path)?;
     store.insert(pid.to_string(), AuthEntry::Key(key.to_string()));
-    save_mixed_store(&path, &store)
+    save_mixed_store(path, &store)
 }
 
 /// Explicit-path seam for the provider-removal path (tests).
 pub(crate) fn remove_auth_entry_at(path: &Path, pid: &str) -> anyhow::Result<()> {
-    let mut store = load_mixed_store(path);
+    let mut store = load_mixed_store_strict(path)?;
     store.remove(pid);
     save_mixed_store(path, &store)
 }

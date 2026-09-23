@@ -36,16 +36,28 @@ impl Drop for TuiSession {
     }
 }
 
+pub mod app_flow;
 pub mod catalog;
+pub mod channel_picker;
+pub mod registry;
+pub mod supervise;
+pub mod write_config;
 pub(crate) use catalog::save_auth_key;
 pub use catalog::{
     AUTH_MODE_API_KEY, AUTH_MODE_NONE, Catalog, CatalogProvider, ConnectItem, PROVIDERS_JSON,
     SavedConfig, build_connect_items, cron_auto_enabled, cron_auto_enabled_at,
     disabled_skill_names, gray_home, gw_auto_enabled, gw_auto_enabled_at, load_auth_keys,
-    load_catalog, load_saved_config_at, mask_key_pretty, memory_auto_enabled,
+    load_catalog, load_saved_config_at, lock_saved_config_at, mask_key_pretty, memory_auto_enabled,
     memory_auto_enabled_at, normalize_custom_base_url, save_saved_config_at, saved_config_path,
     skills_auto_enabled, skills_auto_enabled_at,
 };
+
+/// The OS user's home, where app configs live (`~/.config/<app>/…`) —
+/// distinct from gray's own home, which holds gray's registries.
+pub fn user_home() -> anyhow::Result<std::path::PathBuf> {
+    gray_core::paths::user_home()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve the user home; set HOME"))
+}
 
 pub mod context;
 pub use context::{
@@ -83,7 +95,7 @@ mod connect_models;
 pub use connect::{ConnectOutcome, run_connect_modal};
 pub use effort::run_effort_modal;
 pub(crate) use install_manager::{
-    ManagerItem, ManagerSpec, format_plugin_row_parts, run_install_manager,
+    ManagerItem, ManagerSpec, SetupAction, format_plugin_row_parts, run_install_manager,
 };
 pub use install_manager::{run_plugins_modal, run_skills_modal};
 pub(crate) use model_modal::{provider_models_for, run_model_modal, validate_direct_model_id};

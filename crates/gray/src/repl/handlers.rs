@@ -102,6 +102,8 @@ fn parse_skill_name_toggle(rest: &str) -> Option<(bool, String)> {
 /// manual `/skills <name>` still runs. `on` re-enables auto-loading and
 /// clears the per-skill disabled set so it truly turns all skills on.
 pub(crate) fn apply_skills_auto_toggle(config_path: &Path, on: bool) -> Result<String, String> {
+    let _cfg_lock =
+        crate::setup::lock_saved_config_at(config_path).map_err(|e| format!("{e:#}"))?;
     let mut saved = crate::setup::load_saved_config_at(config_path);
     saved.skills_auto = if on { None } else { Some(false) };
     if on {
@@ -135,6 +137,7 @@ pub(crate) fn apply_skill_toggle(
             if names.is_empty() { "(none)" } else { &names }
         ));
     }
+    let _cfg_lock = crate::setup::lock_saved_config_at(config_path).ok();
     let mut saved = crate::setup::load_saved_config_at(config_path);
     if on {
         saved.disabled_skills.remove(name);
@@ -226,6 +229,7 @@ pub(crate) fn apply_subsystem_toggle(
     subsystem: Subsystem,
     on: bool,
 ) -> Result<String, String> {
+    let _cfg_lock = crate::setup::lock_saved_config_at(config_path).ok();
     let mut saved = crate::setup::load_saved_config_at(config_path);
     *subsystem.field(&mut saved) = if on { None } else { Some(false) };
     crate::setup::save_saved_config_at(config_path, &saved).map_err(|e| format!("{e:#}"))?;
@@ -739,6 +743,24 @@ pub(crate) async fn handle_thinking(
         println!("thinking effort: {cur} — levels: {levels}; /thinking <level> to set");
         return;
     }
+    // One option is not a picker. A model that only accepts `off` (no
+    // reasoning at all) gets the fact as a line, not a modal whose single
+    // row pretends a choice exists.
+    let model_name = config.model.clone().unwrap_or_default();
+    let levels = crate::setup::supported_thinking_levels(&model_name);
+    if levels.len() <= 1 {
+        let msg = format!("{model_name} has no reasoning levels — nothing to pick");
+        if let Some(shared) = tui {
+            let mut t = shared.lock().expect("tui lock");
+            t.push_dim(msg);
+            t.ensure_gap(1);
+            let _ = t.draw();
+        } else {
+            println!("{msg}");
+        }
+        return;
+    }
+
     let has_explicit_level = config.thinking_effort.is_some();
     let bg = tui.map(|shared| shared.lock().expect("tui lock").snapshot());
     let result = with_modal(tui, crate::setup::run_effort_menu(config, bg.as_ref())).await;

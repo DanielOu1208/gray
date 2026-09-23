@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use gray_core::agent::{Tool, ToolContext, ToolOutput};
+use gray_core::agent::{AttachedImage, Tool, ToolContext, ToolOutput};
 use gray_core::message::ToolDef;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
@@ -93,7 +93,13 @@ impl Tool for BashTool {
              can await a job instead of polling. Jobs belong to this session and stop when Gray exits. \
              timeout is an optional total runtime limit (no default: commands run until they exit; \
              capped at 3600s), NOT the yield window. \
-             Non-zero exits are data, not tool errors. Full output is logged; inline output is bounded.",
+             Non-zero exits are data, not tool errors. Full output is logged; inline output is bounded. \
+             Imaging: to show an image to yourself run\
+             `cat <path>` (full resolution) or `gray view <path>... ` (downscaled,\
+             several at once) as the whole command — bare paths only, so pipes,\
+             globs, `$`, quotes and flags fall through to a normal run. That returns the\
+             image as an image; bash output is otherwise text only, so never\
+             pixel-dump or ASCII-art an image to inspect it.",
             json!({
                 "type": "object",
                 "properties": {
@@ -170,10 +176,8 @@ impl Tool for BashTool {
         if ctx.cancel.is_cancelled() {
             return fail("command not started: cancelled".into());
         }
-        // `cat <image>` shows the image instead of streaming binary garbage:
-        // bash's one vision path, so no separate tool is needed for it.
         let cwd = self.session_cwd(ctx);
-        if let Some(out) = cat_image(&command, &cwd) {
+        if let Some(out) = image_command(&command, &cwd) {
             return out;
         }
         if background || window.is_some() {
@@ -266,37 +270,154 @@ fn session_key(ctx: &ToolContext) -> String {
 /// and multi-file cats all fall through to a normal run. A missing or
 /// non-image file falls through too, so the shell's own error message or
 /// text output is what the model sees.
-fn cat_image(command: &str, cwd: &Path) -> Option<ToolOutput> {
+/// `cat <one image>` and `gray view <one or more images>` both hand images
+/// back instead of streaming binary garbage through the shell: bash's vision
+/// path, so no separate tool is needed for it. `cat` is the full-resolution
+/// exception a pasted attachment needs; `view` is the everyday path and
+/// downscales to the 2000px cap, the same cap pasted attachments and `read`
+/// use.
+///
+/// The command is claimed before the shell ever runs, so anything the shell
+/// would interpret (flags, pipes, redirects, globs, quotes, `$`) falls through
+/// to a normal run — as does a missing file, so the shell's own error is what
+/// the model sees. A leading `~` is the one thing expanded here: the shell
+/// would have done it and nothing else would, and without it `cat ~/shot.png`
+/// streams binary garbage while `cat /home/me/shot.png` shows the image. A
+/// missing, undecodable or non-image path is skipped with a note and the valid
+/// ones still ship; when nothing is usable the claim is dropped and the shell
+/// gives the error, which reads better than a note attached to nothing.
+// Cap multi-image claims: 8 paths (the per-turn inline-attach cap) and 20 MiB
+// of aggregate base64 (4x the 5 MiB per-image cap in `crate::images`). Past
+// the path cap the claim is cut to the prefix with a note; past the byte
+// budget intake stops with a note. Either way the valid prefix still returns
+// vision blocks instead of the whole command falling through to a text-only
+// run.
+const MAX_IMAGE_CLAIM_PATHS: usize = 8;
+const MAX_IMAGE_CLAIM_BYTES: usize = 20 * 1024 * 1024;
+
+fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
     use base64::Engine as _;
     let mut parts = command.split_whitespace();
-    let (Some(cmd), Some(arg), None) = (parts.next(), parts.next(), parts.next()) else {
-        return None;
+    let (cmd, sub) = (parts.next()?, parts.next()?);
+    let rest: Vec<&str> = parts.collect();
+    let (paths, full_res) = match (cmd, rest.is_empty()) {
+        ("cat", true) => (vec![sub], true),
+        ("gray", false) if sub == "view" => (rest, false),
+        _ => return None,
     };
-    if cmd != "cat" {
+    if paths.iter().any(|p| shell_meta(p)) {
         return None;
     }
-    // Anything the shell would interpret beyond a bare path is not ours.
-    if arg.chars().any(|c| {
-        matches!(
-            c,
-            '|' | '&' | ';' | '<' | '>' | '$' | '`' | '"' | '\'' | '*' | '?' | '(' | ')'
-        )
-    }) {
+    // A path that is not there is skipped like a decode failure, not fatal:
+    // the common case is one typo among several paths, and sinking the valid
+    // ones with it is the whole complaint this claim shape exists to avoid.
+    // A lone bad path still yields nothing usable, and the `images.is_empty()`
+    // bail below hands it to the shell, which reports the path itself.
+    let mut files: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    let mut failed: Vec<String> = Vec::new();
+    for raw in paths {
+        match resolve_bare_path(cwd, raw) {
+            Some(full) => files.push(full),
+            None => failed.push(format!("{raw}: no such file")),
+        }
+    }
+    let total = files.len();
+    let capped = total > MAX_IMAGE_CLAIM_PATHS;
+    files.truncate(MAX_IMAGE_CLAIM_PATHS);
+    let mut shown = Vec::with_capacity(files.len());
+    let mut images = Vec::with_capacity(files.len());
+    let mut bytes: usize = 0;
+    for full in files {
+        let (mime, data) = if full_res {
+            match std::fs::read(&full)
+                .ok()
+                .and_then(|raw| crate::images::encode_image_full(&raw).ok())
+            {
+                Some(pair) => (
+                    pair.0,
+                    base64::engine::general_purpose::STANDARD.encode(&pair.1),
+                ),
+                None => {
+                    failed.push(format!("{}: unreadable or undecodable", full.display()));
+                    continue;
+                }
+            }
+        } else {
+            match crate::view::load(&full) {
+                Ok(part) => (part.media_type, part.data),
+                Err(e) => {
+                    failed.push(e.to_string());
+                    continue;
+                }
+            }
+        };
+        if !images.is_empty() && bytes + data.len() > MAX_IMAGE_CLAIM_BYTES {
+            failed.push(format!(
+                "{}: skipped past the multi-image byte budget",
+                full.display()
+            ));
+            break;
+        }
+        bytes += data.len();
+        shown.push(full.display().to_string());
+        images.push(AttachedImage {
+            media_type: mime,
+            data,
+        });
+    }
+    if images.is_empty() {
+        // Every path failed: drop the claim so the shell (or the CLI it runs)
+        // reports the errors directly, which beats a note attached to no image.
         return None;
     }
-    let full = resolve_path(cwd, arg);
-    if !crate::images::is_image_extension(&full) {
-        return None;
+    let mut content = format!("Image shown: {}", shown.join(", "));
+    if capped {
+        content.push_str(&format!(
+            " (showing first {MAX_IMAGE_CLAIM_PATHS} of {total} paths)"
+        ));
     }
-    // Magic bytes decide inside the encoder, so a mislabeled file falls
-    // through to the shell rather than sending an undecodable part.
-    let bytes = std::fs::read(&full).ok()?;
-    let (mime, out) = crate::images::encode_image_full(&bytes).ok()?;
-    Some(ToolOutput::image(
-        format!("Image shown: {}", full.display()),
-        mime,
-        base64::engine::general_purpose::STANDARD.encode(&out),
-    ))
+    for f in &failed {
+        content.push_str(&format!("; skipped: {f}"));
+    }
+    Some(ToolOutput {
+        content,
+        is_error: false,
+        images,
+    })
+}
+
+/// True when the shell would read more than a bare path into this argument:
+/// flags, pipes, redirects, substitution, globs, quotes. Those fall through,
+/// where the shell is there to interpret them.
+fn shell_meta(arg: &str) -> bool {
+    arg.starts_with('-')
+        || arg.chars().any(|c| {
+            matches!(
+                c,
+                '|' | '&' | ';' | '<' | '>' | '$' | '`' | '"' | '\'' | '*' | '?' | '(' | ')'
+            )
+        })
+}
+
+/// One bare path, expanded and resolved, when the shell would have found it:
+/// a leading `~`/`~/` — the shell's job, now ours since it never runs — over a
+/// plain relative or absolute path. None when the file is not there, so the
+/// shell reports the missing path instead of a tool error.
+fn resolve_bare_path(cwd: &Path, raw: &str) -> Option<PathBuf> {
+    let expanded = expand_tilde(raw);
+    let full = resolve_path(cwd, expanded.as_deref().unwrap_or(raw));
+    full.is_file().then_some(full)
+}
+
+/// `~/shot.png` -> `$HOME/shot.png`, `~` -> `$HOME`. The one expansion the
+/// shell would have done, since the fast path claims the command first.
+fn expand_tilde(raw: &str) -> Option<String> {
+    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
+    if raw == "~" {
+        return Some(home);
+    }
+    let rest = raw.strip_prefix("~/")?;
+    Some(format!("{home}/{rest}"))
 }
 
 fn log_path(ctx: &ToolContext) -> PathBuf {

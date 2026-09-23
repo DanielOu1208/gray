@@ -236,3 +236,66 @@ fn url_policy_uses_downloader_authority() {
         assert!(check_url(url).is_err(), "accepted {url}");
     }
 }
+
+#[test]
+fn zip_refuses_windows_drive_prefixed_entries() {
+    // The Windows path-confinement hole: "C:\evil" is neither absolute
+    // (no leading / or \) nor a `..` component, so it passed the old
+    // checks — and `dest.join("C:\evil")` *replaces* the base on Windows,
+    // writing outside the install dir.
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out");
+    let archive = dir.path().join("a.zip");
+    for name in ["C:\\evil", "C:evil", "\\\\.\\pipe\\x", "//server/share/x"] {
+        std::fs::write(&archive, tiny_zip(&[(name, b"x", 0)])).unwrap();
+        assert!(
+            unpack_zip(&archive, &dest).is_err(),
+            "drive/UNC entry must be refused: {name}"
+        );
+        assert!(!dest.join(name).exists() || !dest.exists());
+    }
+    // Ordinary names still unpack.
+    std::fs::write(
+        &archive,
+        tiny_zip(&[("SKILL.md", b"# hi\n", 0), ("sub/notes.md", b"n\n", 8)]),
+    )
+    .unwrap();
+    unpack_zip(&archive, &dest).unwrap();
+    assert!(dest.join("SKILL.md").exists());
+    assert!(dest.join("sub/notes.md").exists());
+}
+
+#[test]
+fn tar_gz_refuses_windows_drive_prefixed_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out");
+    let archive = dir.path().join("a.tar.gz");
+    // Reuse the hand-crafted ustar writer from rejects_dotdot_entries.
+    fn evil_tar_gz(name: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut hdr = [0u8; 512];
+        hdr[..name.len()].copy_from_slice(name.as_bytes());
+        hdr[100..108].copy_from_slice(b"0000777\0");
+        hdr[124..136].copy_from_slice(b"00000000004\0");
+        hdr[148..156].copy_from_slice(b"        ");
+        hdr[156] = b'0';
+        hdr[257..262].copy_from_slice(b"ustar");
+        hdr[263..265].copy_from_slice(b"00");
+        let cks: u32 = hdr[..148].iter().map(|b| *b as u32).sum::<u32>() + 256;
+        let s = format!("{cks:06o}\0 ");
+        hdr[148..156].copy_from_slice(s.as_bytes());
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&hdr);
+        raw.extend_from_slice(b"evil");
+        raw.extend_from_slice(&[0u8; 512 - 4]);
+        raw.extend_from_slice(&[0u8; 1024]);
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&raw).unwrap();
+        enc.finish().unwrap()
+    }
+    std::fs::write(&archive, evil_tar_gz("C:\\evil")).unwrap();
+    assert!(
+        unpack_tar_gz(&archive, &dest).is_err(),
+        "a drive-prefixed tar entry must be refused"
+    );
+}

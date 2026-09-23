@@ -116,9 +116,16 @@ pub fn tail_gray_log(home: &Path) -> (Vec<String>, usize) {
     if capped && !lines.is_empty() {
         lines.remove(0);
     }
-    let total = lines.len();
+    // Audit #21: the byte cap reads only the tail, so counting its lines
+    // reports the tail length under the field's name. Count the whole file
+    // (a separate scan of the full bytes) and return the last
+    // LOGS_TAIL_LINES of the tail lines as the retained window.
+    let total = std::str::from_utf8(&body)
+        .map(|s| s.lines().count())
+        .unwrap_or(lines.len());
     let kept = if total > LOGS_TAIL_LINES {
-        lines[total - LOGS_TAIL_LINES..].to_vec()
+        let from = lines.len().saturating_sub(LOGS_TAIL_LINES);
+        lines.split_off(from)
     } else {
         lines
     };
@@ -192,13 +199,52 @@ pub async fn serve(
     }
     // We hold the pid claim, so any file at this path is stale or ours.
     let _ = std::fs::remove_file(&path);
-    // umask is process-wide: 0177 also removes OWNER directory traversal
-    // from mkdir on unrelated threads (cron status then gets EACCES). 0077
-    // keeps owner access and denies all group/other access even before chmod.
-    let previous = unsafe { libc::umask(0o077) };
-    let listener = tokio::net::UnixListener::bind(&path);
-    unsafe { libc::umask(previous) };
-    let listener = listener?;
+    /// Bind the control socket without ever touching the process-wide umask
+    /// (audit #20): the dance `umask(0077) -> bind -> umask(old)` makes every
+    /// *other* thread's mkdir/write in that window fail closed. Instead the
+    /// socket is created inside a fresh 0700 staging directory and renamed
+    /// into place (same parent, so one filesystem): it never exists in a
+    /// traversable directory with default permissions.
+    #[cfg(unix)]
+    fn bind_gateway_socket(path: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let staging = parent.join(format!(
+            ".gray-sock-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&staging)?;
+        let staged_sock = staging.join("gateway.sock");
+        let listener = match tokio::net::UnixListener::bind(&staged_sock) {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+        };
+        let _ = std::fs::set_permissions(&staged_sock, std::fs::Permissions::from_mode(0o600));
+        let renamed = std::fs::rename(&staged_sock, path);
+        let _ = std::fs::remove_dir_all(&staging);
+        renamed?;
+        Ok(listener)
+    }
+
+    // Prefer the staging-directory bind (no process-wide umask change);
+    // fall back to the old dance only where staging is not possible.
+    let listener = match bind_gateway_socket(&path) {
+        Ok(l) => l,
+        Err(e) => {
+            log::debug!("gateway: staged socket bind unavailable ({e}); using the umask dance");
+            let previous = unsafe { libc::umask(0o077) };
+            let listener = tokio::net::UnixListener::bind(&path);
+            unsafe { libc::umask(previous) };
+            listener?
+        }
+    };
     let _ = std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
     log::info!("gateway: control socket listening at {}", path.display());
     loop {

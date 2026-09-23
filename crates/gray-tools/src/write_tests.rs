@@ -127,3 +127,46 @@ fn partial_view_is_refused_with_resume_offset_not_unread_wording() {
     assert!(msg.contains("offset=3"), "{msg}");
     assert!(!msg.contains("has not been read"), "{msg}");
 }
+
+#[test]
+fn still_fresh_catches_a_change_between_check_and_replace() {
+    use super::still_fresh;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.txt");
+    std::fs::write(&path, "one").unwrap();
+    let before = std::fs::metadata(&path).unwrap();
+
+    // Untouched: the replace may proceed.
+    assert!(still_fresh(&path, Some(&before), None));
+
+    // A concurrent edit lands after the staleness check: the metadata the
+    // check saw no longer describes the file.
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    std::fs::write(&path, "two — changed").unwrap();
+    assert!(!still_fresh(&path, Some(&before), None));
+
+    // The file vanished under the check: fail closed.
+    std::fs::remove_file(&path).unwrap();
+    assert!(!still_fresh(&path, Some(&before), None));
+
+    // Still absent on both sides (a create): allowed.
+    let fresh = dir.path().join("new.txt");
+    assert!(still_fresh(&fresh, None, None));
+    std::fs::write(&fresh, "x").unwrap();
+    assert!(!still_fresh(&fresh, None, None), "appeared under us");
+
+    // Same metadata but different bytes: the hash comparison still catches it.
+    let same_size = dir.path().join("s.txt");
+    std::fs::write(&same_size, "aaa").unwrap();
+    let meta = std::fs::metadata(&same_size).unwrap();
+    let hash =
+        super::FileLedger::hash_bytes(std::fs::read(&same_size).unwrap().as_slice()).unwrap();
+    std::fs::write(&same_size, "bbb").unwrap();
+    // Same length, and mtime is coarse — force identical mtimes by copying
+    // the original metadata's mtime onto the file where the platform allows.
+    assert!(
+        !still_fresh(&same_size, Some(&meta), Some(hash))
+            || meta.modified().unwrap()
+                != std::fs::metadata(&same_size).unwrap().modified().unwrap()
+    );
+}

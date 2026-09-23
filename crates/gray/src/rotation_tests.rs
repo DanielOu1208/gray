@@ -18,3 +18,43 @@ fn small_log_untouched() {
     rotate_if_needed(&log);
     assert_eq!(std::fs::read(&log).unwrap(), b"tiny");
 }
+
+#[test]
+fn handle_drifted_detects_a_log_rotated_away() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gray.log");
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(f, "one").unwrap();
+    assert!(
+        !super::handle_drifted(&path, &f),
+        "a handle on its own path is not drifted"
+    );
+    // Another process rotates the log: our handle now writes into the
+    // renamed-away inode until the next log line re-anchors it.
+    std::fs::rename(&path, dir.path().join("gray.log.1")).unwrap();
+    std::fs::File::create(&path).unwrap();
+    assert!(
+        super::handle_drifted(&path, &f),
+        "a handle on a rotated-away inode must read as drifted"
+    );
+}
+
+#[test]
+fn rotation_takes_the_lock_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gray.log");
+    std::fs::write(&path, vec![b'x'; super::LOG_MAX_BYTES as usize + 1]).unwrap();
+    super::rotate_if_needed(&path);
+    assert!(path.with_extension("log.1").exists());
+    assert!(path.exists(), "a fresh file follows the rotate");
+    assert!(path.with_extension("log.lock").exists());
+    // Oversize again: .1 shifts to .2 rather than being lost.
+    std::fs::write(&path, vec![b'y'; super::LOG_MAX_BYTES as usize + 1]).unwrap();
+    super::rotate_if_needed(&path);
+    assert!(path.with_extension("log.2").exists());
+}

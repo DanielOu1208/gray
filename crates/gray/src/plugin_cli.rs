@@ -2,6 +2,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::setup::registry::{FieldKind, SetupDecl, SetupField};
 use anyhow::Context;
 use gray_plugin::Plugin;
 use gray_plugin::lock::{LockEntry, LockFile};
@@ -17,7 +18,80 @@ struct Catalog {
     bin: &'static str,
     /// Arguments that make the binary serve the sidecar wire.
     sidecar_args: &'static [&'static str],
+    /// What setup needs from the user, and how gray proves it worked.
+    setup: &'static SetupDecl,
 }
+
+/// The Discord app's setup declaration: one secret from the Developer
+/// Portal, one destination (pickable), one owner ID; paths are derived;
+/// no budget, no quiz.
+pub static DISCORD_SETUP: SetupDecl = SetupDecl {
+    config_path: ".config/gray-discord/config.json",
+    fields: &[
+        SetupField {
+            key: "token",
+            kind: FieldKind::Required,
+            description: "Discord bot token — Developer Portal, your app, Bot, Reset Token",
+            url: Some("https://discord.com/developers/applications"),
+            secret: true,
+            picker: None,
+        },
+        SetupField {
+            key: "owner_id",
+            // Not Required: the app runs ownerless and admits its first human
+            // through the Discord-side pairing reply (their own ID, told to
+            // them by the bot), so nobody has to hunt a snowflake.
+            kind: FieldKind::Optional,
+            description: "Your Discord user ID (Developer Mode, Copy User ID) — gates who can trigger the bot",
+            url: None,
+            secret: false,
+            picker: None,
+        },
+        SetupField {
+            key: "channel_id",
+            kind: FieldKind::Required,
+            description: "Where the bot posts — pick a channel or DM below, or paste an ID",
+            url: None,
+            secret: false,
+            picker: Some(crate::setup::registry::PICKER_CHANNELS),
+        },
+        SetupField {
+            key: "allowed_users",
+            kind: FieldKind::Optional,
+            description: "Extra user IDs allowed to trigger the bot (comma-separated)",
+            url: None,
+            secret: false,
+            picker: None,
+        },
+        SetupField {
+            key: "gray_bin",
+            kind: FieldKind::Derived,
+            description: "gray binary",
+            url: None,
+            secret: false,
+            picker: None,
+        },
+        SetupField {
+            key: "gray_home",
+            kind: FieldKind::Derived,
+            description: "gray home",
+            url: None,
+            secret: false,
+            picker: None,
+        },
+        SetupField {
+            key: "workdir",
+            kind: FieldKind::Derived,
+            description: "working directory",
+            url: None,
+            secret: false,
+            picker: None,
+        },
+    ],
+    verify: &["gray-discord", "doctor"],
+    post_steps: &["register", "start"],
+    service: Some(&["gray-discord", "run"]),
+};
 
 /// First-party plugins, pinned by commit. Every entry is a Rust crate built
 /// locally: gray itself ships no Python, and its own plugins must not
@@ -25,10 +99,16 @@ struct Catalog {
 /// `GRAY_PLUGIN_PATH` in [`install`] and [`gray_plugin::builder::resolve_argv`].
 const CATALOG: &[Catalog] = &[Catalog {
     name: "discord",
-    source: "git+https://github.com/vstaln/gray-discord-plugin.git@648952dc01a78a5eee031846f5f964877bfdac9b",
+    source: "git+https://github.com/vstaln/gray-discord-plugin.git@07f3d2e6b5782589e4fa27826e8b42c57467c66f",
     bin: "gray-discord",
     sidecar_args: &["sidecar"],
+    setup: &DISCORD_SETUP,
 }];
+
+/// The app's setup declaration, when gray ships one.
+pub fn setup_decl(name: &str) -> Option<&'static SetupDecl> {
+    catalog(name).ok().map(|entry| entry.setup)
+}
 
 fn catalog(name: &str) -> anyhow::Result<&'static Catalog> {
     CATALOG
@@ -80,20 +160,53 @@ fn load(home: &Path) -> anyhow::Result<LockFile> {
     Ok(registry)
 }
 
-/// Best-effort exclusive guard for registry writes: held for the caller's
+/// How long a registry write waits for a competing plugin-manager operation
+/// (the same discipline as the gray-pkg and session-store locks).
+const COMMANDS_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Exclusive cross-process guard for registry writes: held for the caller's
 /// whole read-modify-write via the returned handle. Advisory only (a crashed
-/// holder releases on close); when the lock file itself is unusable there is
-/// simply no guard — the op still runs (matches the pre-existing
-/// fire-and-forget use of `.commands.lock`).
-fn hold_commands_lock(home: &Path) -> Option<std::fs::File> {
+/// holder releases on close). A *contended* lock is retried until
+/// [`COMMANDS_LOCK_TIMEOUT`] and then fails the operation — the previous
+/// code dropped the `try_lock` error, so two managers could edit
+/// `commands.json` concurrently and one silently won. A filesystem without
+/// flock still degrades to no guard rather than breaking the op.
+fn hold_commands_lock_timeout(
+    home: &Path,
+    timeout: std::time::Duration,
+) -> anyhow::Result<Option<std::fs::File>> {
+    let path = home.join("plugins/.commands.lock");
     let f = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(home.join("plugins/.commands.lock"))
-        .ok()?;
-    let _ = f.try_lock();
-    Some(f)
+        .open(&path)?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Ok(Some(f)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "another plugin operation is modifying the registry ({}); try again",
+                        path.display()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                log::warn!(
+                    "plugin registry locking unsupported on {} ({e}); proceeding unlocked",
+                    path.display()
+                );
+                return Ok(None);
+            }
+        }
+    }
+}
+
+fn hold_commands_lock(home: &Path) -> anyhow::Result<Option<std::fs::File>> {
+    hold_commands_lock_timeout(home, COMMANDS_LOCK_TIMEOUT)
 }
 
 fn validate_name(name: &str) -> anyhow::Result<()> {
@@ -382,7 +495,7 @@ pub fn list_rows() -> anyhow::Result<Vec<ManagedRow>> {
 /// sidecars stay on `gray-pkg::ops`). Miss message matches `ops::remove`.
 pub fn set_command_enabled(home: &Path, name: &str, on: bool) -> anyhow::Result<()> {
     validate_name(name)?;
-    let _guard = hold_commands_lock(home);
+    let _guard = hold_commands_lock(home)?;
     let mut registry = load(home)?;
     let Some(entry) = registry.plugins.get_mut(name) else {
         anyhow::bail!("not installed: {name}");
@@ -401,7 +514,7 @@ pub fn remove_command(home: &Path, name: &str) -> anyhow::Result<()> {
     if name.is_empty() || name.contains('/') || name.contains("..") {
         anyhow::bail!("not installed: {name}");
     }
-    let _guard = hold_commands_lock(home);
+    let _guard = hold_commands_lock(home)?;
     let mut registry = load(home)?;
     // `register_native` mirrors the entry into `lock.json` as a zero-tool
     // sidecar: drop the mirror too, or its ghost row outlives the remove.
@@ -512,6 +625,28 @@ pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
             .context("could not start installed plugin command")?;
         std::process::exit(status.code().unwrap_or(1));
     }
+}
+
+/// The registered argv (binary plus its own args) for an installed command
+/// plugin. The setup flow runs the app's subcommands (`doctor`, `register`)
+/// through this instead of re-deriving a path.
+pub fn command_argv(home: &Path, name: &str) -> anyhow::Result<Vec<String>> {
+    validate_name(name)?;
+    let entry = load(home)?
+        .plugins
+        .get(name)
+        .with_context(|| {
+            format!(
+                "no plugin command '{name}' \u{2014} install it with: gray install plugin {name}"
+            )
+        })?
+        .clone();
+    anyhow::ensure!(
+        enabled(home, name, &entry),
+        "plugin command '{name}' is disabled"
+    );
+    anyhow::ensure!(!entry.argv.is_empty(), "plugin command has no entry point");
+    Ok(entry.argv)
 }
 
 /// Register a user-selected native executable; registration runs its manifest.
@@ -930,18 +1065,18 @@ mod tests {
     #[test]
     fn git_source_splits_url_from_pinned_commit() {
         let (url, pin) = parse_git_source(
-            "git+https://github.com/vstaln/gray-discord-plugin.git@648952dc01a78a5eee031846f5f964877bfdac9b",
+            "git+https://github.com/vstaln/gray-discord-plugin.git@07f3d2e6b5782589e4fa27826e8b42c57467c66f",
         )
         .unwrap();
         assert_eq!(url, "https://github.com/vstaln/gray-discord-plugin.git");
-        assert_eq!(pin, "648952dc01a78a5eee031846f5f964877bfdac9b");
+        assert_eq!(pin, "07f3d2e6b5782589e4fa27826e8b42c57467c66f");
         // An ssh URL carries its own '@': the pin is the last segment.
         let (url, pin) = parse_git_source(
-            "git+ssh://git@github.com/vstaln/gray-discord-plugin.git@648952dc01a78a5eee031846f5f964877bfdac9b",
+            "git+ssh://git@github.com/vstaln/gray-discord-plugin.git@07f3d2e6b5782589e4fa27826e8b42c57467c66f",
         )
         .unwrap();
         assert_eq!(url, "ssh://git@github.com/vstaln/gray-discord-plugin.git");
-        assert_eq!(pin, "648952dc01a78a5eee031846f5f964877bfdac9b");
+        assert_eq!(pin, "07f3d2e6b5782589e4fa27826e8b42c57467c66f");
     }
 
     #[test]
@@ -951,9 +1086,9 @@ mod tests {
             "git+https://github.com/vstaln/gray-discord-plugin.git",
             "git+https://github.com/vstaln/gray-discord-plugin.git@main",
             "git+https://github.com/vstaln/gray-discord-plugin.git@648952d",
-            "git+https://github.com/vstaln/gray-discord-plugin.git@648952dc01a78a5eee031846f5f964877bfdac9b0",
-            "git+http://example.invalid/x.git@648952dc01a78a5eee031846f5f964877bfdac9b",
-            "git+file:///tmp/x.git@648952dc01a78a5eee031846f5f964877bfdac9b",
+            "git+https://github.com/vstaln/gray-discord-plugin.git@07f3d2e6b5782589e4fa27826e8b42c57467c66f0",
+            "git+http://example.invalid/x.git@07f3d2e6b5782589e4fa27826e8b42c57467c66f",
+            "git+file:///tmp/x.git@07f3d2e6b5782589e4fa27826e8b42c57467c66f",
             "git+https://github.com/vstaln/gray-discord-plugin.git@648952dc01a78a5eee031846f5f964877bfdac9g",
         ] {
             assert!(parse_git_source(source).is_err(), "{source}");
@@ -969,7 +1104,57 @@ mod tests {
         let miss = catalog("nope").err().expect("an unknown name must fail");
         assert!(miss.to_string().contains("Unknown plugin"), "{miss}");
     }
+
+    #[test]
+    fn discord_setup_declaration_asks_for_exactly_what_it_needs() {
+        let required: Vec<&str> = DISCORD_SETUP
+            .fields
+            .iter()
+            .filter(|f| f.is_required())
+            .map(|f| f.key)
+            .collect();
+        // Token and home channel only: the owner is discovered by the
+        // Discord-side pairing reply instead of typed, and the extras
+        // (allowed_users) plus derived paths are filled in around them.
+        assert_eq!(required, ["token", "channel_id"]);
+        let owner = DISCORD_SETUP.field("owner_id").unwrap();
+        assert!(matches!(owner.kind, FieldKind::Optional));
+        assert_eq!(
+            DISCORD_SETUP.field("allowed_users").unwrap().kind,
+            FieldKind::Optional
+        );
+        assert!(DISCORD_SETUP.field("token").unwrap().secret);
+    }
 }
 
 #[path = "plugin_native.rs"]
 mod native;
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn commands_lock_fails_loudly_when_contended() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("plugins")).unwrap();
+        let lock_path = home.path().join("plugins/.commands.lock");
+        let holder = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        holder.try_lock().unwrap();
+        let err = hold_commands_lock_timeout(home.path(), std::time::Duration::from_millis(50))
+            .err()
+            .expect("a contended commands lock must fail the op");
+        assert!(
+            err.to_string().contains("another plugin operation"),
+            "{err}"
+        );
+        drop(holder);
+        assert!(
+            hold_commands_lock_timeout(home.path(), std::time::Duration::from_millis(50)).is_ok()
+        );
+    }
+}

@@ -34,7 +34,7 @@ fn systemd_unit_restarts_on_failure_and_waits_out_drains() {
         body.contains("ExecStart=\"/usr/bin/gray\" gateway run"),
         "{body}"
     );
-    assert!(body.contains("Environment=GRAY_HOME=/tmp/gh"), "{body}");
+    assert!(body.contains("Environment=GRAY_HOME=\"/tmp/gh\""), "{body}");
     assert!(body.contains("Restart=always"), "{body}");
     assert!(body.contains("TimeoutStopSec=75"), "{body}");
 }
@@ -52,4 +52,26 @@ fn linger_warning_fires_only_without_linger_yes() {
     assert_eq!(linger_warning_for("Linger=yes\n"), None);
     assert!(linger_warning_for("Linger=no\n").is_some());
     assert!(linger_warning_for("").is_some());
+}
+
+#[test]
+fn the_unit_quotes_gray_home() {
+    // Audit #17: an unquoted Environment=GRAY_HOME breaks on any home with
+    // whitespace, and misparses the rest of the unit.
+    let home = std::path::Path::new("/home/it s home");
+    let exe = std::path::Path::new("/usr/local/bin/gray");
+    let body = super::systemd_unit_body(home, exe);
+    assert!(
+        body.contains("Environment=GRAY_HOME=\"/home/it s home\""),
+        "{body}"
+    );
+    // A double quote inside the path must not break out of the quoting.
+    let body = super::systemd_unit_body(
+        std::path::Path::new("/home/we\"ird"),
+        std::path::Path::new("/usr/local/bin/gray"),
+    );
+    assert!(
+        body.contains("Environment=GRAY_HOME=\"/home/we\\\"ird\""),
+        "{body}"
+    );
 }

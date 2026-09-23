@@ -99,3 +99,34 @@ The host replies `{"id": "q1", "result": {"answers": …}}` or
 No TTY prompt exists there: piped stdin takes one number-or-free-text
 line per question (blank/EOF skips); anything else resolves empty
 immediately. Permissions denies; questions reports no user reachable.
+
+## App setup (`/gateway`)
+
+Apps that gray talks to (Discord today; slack, telegram, … tomorrow) each
+declare what setup needs, and `/gateway` drives it — no separate wizard,
+no TTY requirement, no systemd assumption:
+
+```text
+/gateway            # connections picker; a needs-setup row opens the flow
+gray gateway setup discord --field token=… --field owner_id=… --field channel_id=…
+```
+
+The flow asks for exactly what the app declares (masked for secrets, with
+the portal URL beside each field), writes the app's config privately
+(dir `0700`, file `0600`, atomic merge that keeps unknown keys), runs the
+app's own `doctor` as the referee, registers the app's outgoing tool, and
+starts the daemon under whatever init the box has — runit, systemd user,
+or gray itself (detached, pidfile next to the config). A failed doctor is
+reported verbatim; nothing prints success until it is true. Secrets never
+appear in logs, errors, or anything the model can see.
+
+A `channel`-kind field (Discord's home channel) offers a picker instead of
+paste-an-ID: the bot's servers, then that server's channels newest-first
+(snowflake IDs are time-ordered), with the DM between the bot and its
+owner on top. Paste-an-ID always remains, and is the headless path.
+
+Declarations live in gray's catalog for first-party apps
+(`plugin_cli::setup_decl`); second-party apps self-declare through the
+sidecar `plugin/manifest` wire. Budgets are not part of setup — an app's
+own accounting command (`gray discord budget set`) turns that on if you
+want it.

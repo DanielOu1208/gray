@@ -1,27 +1,14 @@
-//! `/gateway` connections panel: the apps gray talks to (toggleable) plus a
-//! rule and one-line pointers at the subsystems that already own a command.
+//! `/gateway` connections panel: just the apps gray talks to (toggleable).
 //!
 //! The app rows come from the merged plugin registry, so a transport shows up
-//! the day it is installed (slack, telegram, …) — nothing here is per-app
-//! except [`SETUP_PROBES`]. Daemon/cron/memory are *pointed at*, never
-//! restated: `gray gateway status`, `/cron` and `/memory` already print
-//! everything about them.
+//! the day it is installed (slack, telegram, …). Setup state comes from each
+//! app own declaration via `crate::plugin_cli::setup_decl`.
+//! Daemon/cron/memory are named nowhere here: `gray gateway status`, `/cron`
+//! and `/memory` are the commands that own them, and this panel repeating
+//! those names was narration with nothing to do.
 
 use super::*;
 use crate::setup::{ManagerItem, ManagerSpec, format_plugin_row_parts, run_install_manager};
-
-/// Catalog apps whose setup state gray can see without reading their private
-/// config: the default config path's *existence*, never its contents (it
-/// holds the bot token). Absent file = the app still needs its wizard.
-const SETUP_PROBES: &[(&str, &str)] = &[("discord", ".config/gray-discord/config.json")];
-
-/// Subsystems whose own command prints everything: `/gateway` names the
-/// command instead of duplicating its output.
-const POINTERS: &[(&str, &str)] = &[
-    ("daemon", "gray gateway status · gray gateway on|off"),
-    ("cron", "/cron · /cron on|off"),
-    ("memory", "/memory · /memory on|off"),
-];
 
 const GATEWAY_SPEC: ManagerSpec = ManagerSpec {
     title: "Connections",
@@ -34,25 +21,6 @@ const GATEWAY_SPEC: ManagerSpec = ManagerSpec {
 };
 
 /// A rule row: the visual break between apps and the pointers.
-fn separator() -> ManagerItem {
-    ManagerItem {
-        name: String::new(),
-        row: "\u{2500}".repeat(44),
-        lit: false,
-        enabled: false,
-        read_only: true,
-    }
-}
-
-/// True when the app's default config file is absent under `home`. The path
-/// is only ever tested for existence.
-fn setup_missing(home: &Path, name: &str) -> bool {
-    match SETUP_PROBES.iter().find(|(n, _)| *n == name) {
-        Some((_, rel)) => !home.join(rel).exists(),
-        None => false,
-    }
-}
-
 /// Subcommands an app declares for itself. Empty when it registered no
 /// manifest (or no home resolves) — nothing is invented on its behalf.
 fn declared(home: Option<&Path>, name: &str) -> Vec<String> {
@@ -62,7 +30,7 @@ fn declared(home: Option<&Path>, name: &str) -> Vec<String> {
 
 /// One toggleable row per installed app: the `/plugin` row shape plus what
 /// the app still needs (setup) and what it says it can do. `home` is the gray
-/// home the manifests and config probes are read from.
+/// home the manifests and app configs are read from.
 pub(crate) fn app_rows_with(
     rows: &[crate::plugin_cli::ManagedRow],
     home: Option<&Path>,
@@ -72,10 +40,19 @@ pub(crate) fn app_rows_with(
             let mut row =
                 format_plugin_row_parts(&r.name, &r.version, &r.scope, &r.ecosystem, r.on);
             let mut extras: Vec<String> = Vec::new();
+            let mut needs_setup = false;
             if let Some(home) = home
-                && setup_missing(home, &r.name)
+                && let Some(decl) = crate::plugin_cli::setup_decl(&r.name)
             {
-                extras.push(format!("needs setup \u{2014} gray {} setup", r.name));
+                match app_state(&home.join(decl.config_path), decl) {
+                    AppState::NeedsSetup => {
+                        extras.push("needs setup".to_string());
+                        needs_setup = true;
+                    }
+                    AppState::Stopped => extras.push("stopped".to_string()),
+                    AppState::Connected(Some(bot)) => extras.push(format!("connected as {bot}")),
+                    AppState::Connected(None) => extras.push("connected".to_string()),
+                }
             }
             extras.extend(declared(home, &r.name));
             if !extras.is_empty() {
@@ -88,14 +65,78 @@ pub(crate) fn app_rows_with(
                 lit: r.on,
                 enabled: r.on,
                 read_only: false,
+                needs_setup,
             }
         })
         .collect()
 }
 
+/// The app's live state, from files only: the config the app itself writes,
+/// the pidfile the daemon keeps next to it, and the identity the daemon
+/// writes when its gateway connects. Nothing here opens a socket or reads a
+/// token; a daemon whose process died reports stopped even if its state file
+/// is still warm on disk.
+pub(crate) enum AppState {
+    NeedsSetup,
+    Stopped,
+    /// The daemon is connected; the name it reports, when it wrote one.
+    Connected(Option<String>),
+}
+
+/// The gateway's portable probe (kill(0) on unix, OpenProcess on Windows).
+/// Never re-read /proc here: this row renders on macOS and Windows too.
+fn pid_alive(pid: u64) -> bool {
+    crate::gateway::pid::pid_alive(pid as u32)
+}
+
+fn json_at(path: &std::path::Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+pub(crate) fn app_state(
+    config_path: &std::path::Path,
+    decl: &crate::setup::registry::SetupDecl,
+) -> AppState {
+    if !config_path.exists() {
+        return AppState::NeedsSetup;
+    }
+    // A config missing a required key (a token with no home channel) is a
+    // partial setup, not a stopped daemon — the row still routes Enter to
+    // the setup flow. Values are never read, only key presence.
+    if decl
+        .fields
+        .iter()
+        .filter(|f| f.is_required())
+        .any(|f| !crate::setup::registry::key_present(config_path, f.key))
+    {
+        return AppState::NeedsSetup;
+    }
+    let Some(dir) = config_path.parent() else {
+        return AppState::Stopped;
+    };
+    let daemon = json_at(&dir.join("daemon.json"));
+    let alive = daemon
+        .as_ref()
+        .and_then(|v| v.get("pid").and_then(serde_json::Value::as_u64))
+        .is_some_and(pid_alive);
+    if !alive {
+        return AppState::Stopped;
+    }
+    let bot = json_at(&dir.join("state.json")).and_then(|v| {
+        v.get("bot")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    });
+    AppState::Connected(bot)
+}
+
 /// One toggleable row per installed app, read from the live registry.
 pub(crate) fn app_rows(rows: &[crate::plugin_cli::ManagedRow]) -> Vec<ManagerItem> {
-    app_rows_with(rows, crate::plugin_cli::home().ok().as_deref())
+    // The needs-setup state reads the *user's* home (apps write their
+    // configs under ~/.config); the gray home holds only gray's own
+    // registries. Unresolvable home -> no probe, never "needs setup".
+    app_rows_with(rows, crate::setup::user_home().ok().as_deref())
 }
 
 /// The whole panel: apps (or the install hint), the rule, the pointers.
@@ -109,16 +150,7 @@ pub(crate) fn items() -> Vec<ManagerItem> {
             lit: false,
             enabled: false,
             read_only: true,
-        });
-    }
-    out.push(separator());
-    for (label, detail) in POINTERS {
-        out.push(ManagerItem {
-            name: String::new(),
-            row: format!("{label} \u{2014} {detail}"),
-            lit: false,
-            enabled: false,
-            read_only: true,
+            needs_setup: false,
         });
     }
     out
@@ -137,8 +169,12 @@ pub(crate) fn format_text() -> String {
 pub(crate) fn run_gateway_modal(
     bg: Option<&crate::setup::BackgroundSnapshot>,
 ) -> anyhow::Result<bool> {
+    // Enter on a needs-setup row opens that app's setup flow.
+    let setup: crate::setup::SetupAction<'_> =
+        &|item: &ManagerItem| crate::setup::app_flow::run_app_setup_modal(&item.name);
     run_install_manager(
         bg,
+        Some(setup),
         &GATEWAY_SPEC,
         || Some(items()),
         // Removal is not offered here: /plugin owns it.

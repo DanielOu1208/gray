@@ -149,3 +149,24 @@ fn unknown_verbs_still_list_all_four() {
         );
     }
 }
+
+#[test]
+fn logs_tail_reports_the_real_total_after_the_byte_cap() {
+    // Audit #21: a log far bigger than the 64KiB read cap must still report
+    // the file's total line count, not the retained tail's.
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let path = logs.join("gray.log");
+    let filler = "x".repeat(2048);
+    let mut body = String::new();
+    for i in 0..800 {
+        body.push_str(&format!("{i:05} {filler}\n"));
+    }
+    std::fs::write(&path, &body).unwrap();
+    assert!(body.len() as u64 > super::LOGS_TAIL_MAX_BYTES);
+    let (kept, total) = super::tail_gray_log(dir.path());
+    assert_eq!(total, 800, "the total must count the whole file");
+    assert!(kept.len() <= super::LOGS_TAIL_LINES);
+    assert!(!kept.is_empty());
+}

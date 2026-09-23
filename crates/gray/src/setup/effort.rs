@@ -278,6 +278,7 @@ pub fn run_effort_modal(
                             let shown = !config.show_reasoning.unwrap_or(true);
                             config.show_reasoning = Some(shown);
                             let path = saved_config_path()?;
+                            let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
                             let mut saved = load_saved_config_at(&path);
                             saved.show_reasoning = Some(shown);
                             save_saved_config_at(&path, &saved)?;
@@ -287,6 +288,7 @@ pub fn run_effort_modal(
                         config.thinking_effort = Some(chosen.to_string());
 
                         let path = saved_config_path()?;
+                        let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
                         let mut saved = load_saved_config_at(&path);
                         saved.thinking_effort = config.thinking_effort.clone();
                         save_saved_config_at(&path, &saved)?;

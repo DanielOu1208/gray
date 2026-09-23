@@ -102,6 +102,29 @@ fn session_json(id: &str, cwd: &str) -> Value {
 /// In-flight request senders, keyed by request id. `epoch` marks the child
 /// generation: a stale reader exiting late must not fail a new child's
 /// requests (bumped on every respawn).
+/// A torn frame poisons the child's stdin stream: no later request can be
+/// framed correctly. Every write therefore gets its own bound — a TTL
+/// expiry elsewhere must never cancel `write_all` mid-line, and a child
+/// that stopped reading must not park a caller (or, in the host-reply
+/// path, a concurrency permit) forever.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Outcome of one attempt to hand a whole frame to the child.
+enum FrameWrite {
+    Ok,
+    Failed(String),
+    TimedOut,
+}
+
+async fn try_write_frame(stdin: &std::sync::Arc<Mutex<ChildStdin>>, frame: &str) -> FrameWrite {
+    let mut guard = stdin.lock().await;
+    match timeout(WRITE_TIMEOUT, guard.write_all(frame.as_bytes())).await {
+        Ok(Ok(())) => FrameWrite::Ok,
+        Ok(Err(e)) => FrameWrite::Failed(format!("{e}")),
+        Err(_) => FrameWrite::TimedOut,
+    }
+}
+
 struct Pending {
     epoch: u64,
     map: HashMap<u64, oneshot::Sender<Value>>,
@@ -252,11 +275,15 @@ fn spawn_reader(
                 // instead of spawning unbounded work.
                 let Ok(_permit) = host_slots.try_acquire_owned() else {
                     let reply = json!({"id": id, "result": {"error": "host overloaded"}});
-                    let _ = stdin
-                        .lock()
-                        .await
-                        .write_all(format!("{reply}\n").as_bytes())
-                        .await;
+                    // Bounded like every other frame: a wedged child must
+                    // not park the read loop itself (it would stall every
+                    // later reply behind the stuck one).
+                    if !matches!(
+                        try_write_frame(&stdin, &format!("{reply}\n")).await,
+                        FrameWrite::Ok
+                    ) {
+                        log::warn!("sidecar overload reply could not be written");
+                    }
                     continue;
                 };
                 // `host/ask` waits on a human: extended handler budget.
@@ -278,11 +305,17 @@ fn spawn_reader(
                         None => json!({"error": format!("no host handler for {method_owned}")}),
                     };
                     let reply = json!({"id": id, "result": result});
-                    let _ = stdin
-                        .lock()
-                        .await
-                        .write_all(format!("{reply}\n").as_bytes())
-                        .await;
+                    match try_write_frame(&stdin, &format!("{reply}\n")).await {
+                        FrameWrite::Ok => {}
+                        FrameWrite::Failed(e) => {
+                            log::warn!("sidecar reply write failed ({e}); dropping the permit");
+                        }
+                        FrameWrite::TimedOut => {
+                            // A wedged child holds the permit for nothing:
+                            // end the task so the slot is reclaimed.
+                            log::warn!("sidecar stopped reading stdin; dropping a host permit");
+                        }
+                    }
                 });
                 continue;
             }
@@ -366,19 +399,15 @@ impl Transport {
     /// `plugin/shutdown` — pre-v1 sidecars already ignore unknown lines.
     async fn send_notification(&self, method: &str, params: Value) -> bool {
         let req = json!({"method": method, "params": params});
-        timeout(Duration::from_secs(5), async {
-            if !self.ensure_alive().await {
-                return false;
-            }
-            self.stdin
-                .lock()
-                .await
-                .write_all(format!("{req}\n").as_bytes())
-                .await
-                .is_ok()
-        })
-        .await
-        .unwrap_or_default()
+        if !self.ensure_alive().await {
+            return false;
+        }
+        // The write carries its own bound (WRITE_TIMEOUT): a torn
+        // notification would desync every later frame on this stdin.
+        matches!(
+            try_write_frame(&self.stdin, &format!("{req}\n")).await,
+            FrameWrite::Ok
+        )
     }
 
     async fn request(
@@ -410,9 +439,20 @@ impl Transport {
             }
             let (tx, rx) = oneshot::channel();
             self.pending.lock().await.map.insert(id, tx);
-            {
-                let mut stdin = self.stdin.lock().await;
-                stdin.write_all(format!("{req}\n").as_bytes()).await?;
+            match try_write_frame(&self.stdin, &format!("{req}\n")).await {
+                FrameWrite::Ok => {}
+                FrameWrite::Failed(e) => {
+                    self.pending.lock().await.map.remove(&id);
+                    self.child.lock().await.kill().await.ok();
+                    anyhow::bail!("sidecar write failed ({e}); killed this child generation");
+                }
+                FrameWrite::TimedOut => {
+                    self.pending.lock().await.map.remove(&id);
+                    self.child.lock().await.kill().await.ok();
+                    anyhow::bail!(
+                        "sidecar stopped reading stdin; killed this child generation ({method})"
+                    );
+                }
             }
             rx.await
                 .map_err(|_| anyhow::anyhow!("sidecar child closed stdout"))

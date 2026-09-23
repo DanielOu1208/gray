@@ -46,11 +46,18 @@ pub async fn run_prompt_child(cwd: &Path, prompt: &str) -> Value {
     let mut piped = child.stdout.take();
     let drain = tokio::spawn(async move {
         let mut v = Vec::new();
-        if let Some(ref mut o) = piped {
-            let _ = tokio::io::AsyncReadExt::take(o, MAX_CHILD_OUT + 1)
-                .read_to_end(&mut v)
-                .await;
+        let Some(ref mut o) = piped else {
+            return v;
+        };
+        {
+            let mut capped = (&mut *o).take(MAX_CHILD_OUT + 1);
+            let _ = capped.read_to_end(&mut v).await;
         }
+        // Keep draining to EOF (audit #7): dropping the read half here
+        // would hand a chatty child SIGPIPE/EPIPE, which no shell user
+        // would see. The cap holds the *memory*, not the pipe open.
+        let mut sink = tokio::io::sink();
+        let _ = tokio::io::copy(o, &mut sink).await;
         v
     });
     let status = match tokio::time::timeout(Duration::from_secs(28), child.wait()).await {
