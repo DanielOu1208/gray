@@ -678,8 +678,7 @@ const GROWTH_STREAK_WARN: usize = 3;
 pub const INGEST_DAILY_WRITE_CAP: usize = 10;
 pub const INGEST_DAILY_USER_WRITE_CAP: usize = 2;
 
-const INGEST_RATIONALE_HINT: &str =
-    "daily-ingest entries must carry `Why:` (the user's quoted failure or correction) and `falsified:` (`nothing yet` if none)";
+const INGEST_RATIONALE_HINT: &str = "daily-ingest entries must carry `Why:` (the user's quoted failure or correction) and `falsified:` (`nothing yet` if none)";
 
 fn has_rationale(text: &str) -> bool {
     text.contains("Why:") && text.contains("falsified:")
