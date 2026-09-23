@@ -1,15 +1,72 @@
 use super::*;
 use gray_core::message::Message;
 
+fn summary(
+    first: Option<&str>,
+    last: Option<&str>,
+    started_at: u64,
+    last_message_at: u64,
+) -> SessionSummary {
+    SessionSummary {
+        id: SessionId::new("30e3f464-aaaa-bbbb-cccc-d60f2104dcd9"),
+        started_at,
+        cwd: std::path::PathBuf::from("/tmp"),
+        first_user_text: first.map(str::to_string),
+        last_user_text: last.map(str::to_string),
+        last_message_at,
+    }
+}
+
 #[test]
 fn headless_row_shows_short_id_preview_and_age() {
-    let s = SessionSummary {
-        id: SessionId::new("30e3f464-aaaa-bbbb-cccc-d60f2104dcd9"),
-        started_at: now_millis(),
-        cwd: std::path::PathBuf::from("/tmp"),
-        first_user_text: Some("hi there".to_string()),
-    };
+    let s = summary(None, Some("hi there"), now_millis(), now_millis());
     assert_eq!(format_summary_row(&s), "30e3f464 — hi there (just now)");
+}
+
+#[test]
+fn row_previews_the_latest_message_and_its_timestamp() {
+    // A session opened an hour ago whose latest message just landed.
+    let s = summary(
+        Some("how do I fix the resume picker"),
+        Some("ok that worked, thanks"),
+        now_millis().saturating_sub(3_600_000),
+        now_millis(),
+    );
+    let row = format_summary_row(&s);
+    assert!(
+        row.starts_with("30e3f464 \u{2014} ok that worked, thanks"),
+        "the row must preview the latest message: {row}"
+    );
+    assert!(
+        row.ends_with("(just now)"),
+        "age must be the latest message's: {row}"
+    );
+    assert!(
+        !row.contains("resume picker"),
+        "the first message must not be the preview: {row}"
+    );
+}
+
+#[test]
+fn row_without_any_user_message_says_so() {
+    let s = summary(None, None, now_millis(), now_millis());
+    assert!(format_summary_row(&s).contains("(no message yet)"));
+}
+
+#[test]
+fn search_matches_the_latest_message() {
+    let s = summary(
+        Some("old topic about sqlite"),
+        Some("now polishing the resume row"),
+        now_millis(),
+        now_millis(),
+    );
+    assert!(session_matches(&s, "resume row", None));
+    assert!(session_matches(&s, "RESUME ROW", None));
+    // The opener stays searchable too: a session is still *about* a topic it
+    // opened with, so the filter keeps both ends rather than narrowing.
+    assert!(session_matches(&s, "sqlite", None));
+    assert!(!session_matches(&s, "sqlite resume row", None));
 }
 
 async fn seed(

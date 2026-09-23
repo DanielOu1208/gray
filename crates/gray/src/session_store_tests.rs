@@ -269,6 +269,83 @@ async fn compaction_replacement_reloads_as_active_transcript() {
 }
 
 #[tokio::test]
+async fn list_reports_the_latest_user_message_and_its_timestamp() {
+    let dir = tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path());
+    let id = store
+        .create(SessionMeta::new(SessionId::new("latest1"), 1, "/tmp", "m"))
+        .await
+        .unwrap();
+    for t in ["opener", "middle", "newest topic"] {
+        store.append(&id, &Message::user(t)).await.unwrap();
+    }
+    let (_, entries) = store.load(&id).await.unwrap();
+    let last_ts = entries.last().unwrap().timestamp;
+    let summaries = store.list().await;
+    assert_eq!(summaries.len(), 1);
+    let s = &summaries[0];
+    assert_eq!(
+        s.first_user_text.as_deref(),
+        Some("opener"),
+        "the opener stays available for callers that want it"
+    );
+    assert_eq!(
+        s.last_user_text.as_deref(),
+        Some("newest topic"),
+        "the list must describe the latest message, not the first: {s:?}"
+    );
+    assert_eq!(
+        s.last_message_at, last_ts,
+        "the timestamp must be when the latest message was sent"
+    );
+}
+
+#[tokio::test]
+async fn list_reports_latest_message_after_compaction() {
+    let dir = tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path());
+    let id = store
+        .create(SessionMeta::new(SessionId::new("latest2"), 5, "/tmp", "m"))
+        .await
+        .unwrap();
+    for t in ["one", "two"] {
+        store.append(&id, &Message::user(t)).await.unwrap();
+    }
+    store
+        .append_compaction_replacement(&id, &[Message::user("summary")])
+        .await
+        .unwrap();
+    let s = &store.list().await[0];
+    assert_eq!(s.last_user_text.as_deref(), Some("summary"));
+    // Post-compact turns keep it current.
+    store.append(&id, &Message::user("after")).await.unwrap();
+    let s = &store.list().await[0];
+    assert_eq!(s.last_user_text.as_deref(), Some("after"));
+    assert!(s.last_message_at > 5);
+}
+
+#[tokio::test]
+async fn list_falls_back_to_the_header_timestamp_without_messages() {
+    let dir = tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path());
+    store
+        .create(SessionMeta::new(
+            SessionId::new("latest3"),
+            4242,
+            "/tmp",
+            "m",
+        ))
+        .await
+        .unwrap();
+    let s = &store.list().await[0];
+    assert_eq!(s.last_user_text, None);
+    assert_eq!(
+        s.last_message_at, 4242,
+        "an empty session must still report a usable timestamp"
+    );
+}
+
+#[tokio::test]
 async fn corrupt_header_is_quarantined_on_load() {
     let dir = tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path());
