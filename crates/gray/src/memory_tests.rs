@@ -468,10 +468,7 @@ fn first_sentence_ignores_abbreviations_and_decimals() {
 
 #[test]
 fn first_sentence_serves_whole_when_unbounded() {
-    assert_eq!(
-        first_sentence("No terminal period"),
-        "No terminal period"
-    );
+    assert_eq!(first_sentence("No terminal period"), "No terminal period");
 }
 
 #[test]
@@ -489,13 +486,98 @@ fn profile_matches_list_when_every_entry_is_one_sentence() {
 fn snapshot_carries_summaries_by_default_and_full_text_on_request() {
     let (_dir, store) = setup();
     store
-        .set(Scope::Project, "long", "First bit. Second bit that is long.")
+        .set(
+            Scope::Project,
+            "long",
+            "First bit. Second bit that is long.",
+        )
         .unwrap();
-    let summary = store
-        .snapshot_with(None, MemoryInjection::Summary)
-        .unwrap();
+    let summary = store.snapshot_with(None, MemoryInjection::Summary).unwrap();
     assert!(summary.contains("First bit."));
     assert!(!summary.contains("Second bit"));
     let full = store.snapshot_with(None, MemoryInjection::Full).unwrap();
     assert!(full.contains("Second bit that is long."));
+}
+
+// --- ingest guard: the daily job's verbs physically cannot overwrite,
+// delete, skip the rationale contract, or blow the daily caps. The prompt
+// contract leaked (a dry run overwrote five entries and invented a quote),
+// so these are enforced in the write path, not in prose.
+
+#[test]
+fn ingest_set_refuses_an_existing_key() {
+    let (_dir, store) = setup();
+    let text = "Fact. Why: user: \"x\"; falsified: nothing yet";
+    assert!(store.ingest_set(Scope::Project, "a", text).unwrap());
+    let err = store
+        .ingest_set(Scope::Project, "a", "Other. Why: y; falsified: z")
+        .unwrap_err();
+    assert!(err.to_string().contains("exists"), "{err}");
+    // The original text is intact.
+    assert_eq!(store.get(Scope::Project, "a").unwrap().as_deref(), Some(text));
+}
+
+#[test]
+fn ingest_set_requires_why_and_falsified() {
+    let (_dir, store) = setup();
+    assert!(store.ingest_set(Scope::Project, "a", "Fact.").is_err());
+    assert!(store
+        .ingest_set(Scope::Project, "a", "Fact. Why: user: \"x\"")
+        .is_err());
+    assert!(store
+        .ingest_set(Scope::Project, "a", "Fact. falsified: nothing yet")
+        .is_err());
+    assert!(store
+        .ingest_set(Scope::Project, "a", "Fact. Why: user: \"x\"; falsified: nothing yet")
+        .is_ok());
+    // A rejected write leaves no trace.
+    assert_eq!(store.entry_count(), 1);
+}
+
+#[test]
+fn ingest_edit_is_append_only_and_keeps_both_claims() {
+    let (_dir, store) = setup();
+    let old = "Claim A. Why: user: \"x\"; falsified: nothing yet";
+    store.ingest_set(Scope::Project, "k", old).unwrap();
+    // Unknown key: edit fails.
+    assert!(store.ingest_edit(Scope::Project, "nope", "New. Why: y; falsified: z").is_err());
+    // A replacement that drops the old claim fails.
+    assert!(store
+        .ingest_edit(Scope::Project, "k", "Claim B. Why: y; falsified: z")
+        .is_err());
+    // The reconciliation shape passes and keeps both.
+    let new = format!("as of 2026-09-23: Claim B. Why: user: \"y\"; falsified: nothing yet (was: {old})");
+    assert!(store.ingest_edit(Scope::Project, "k", &new).unwrap());
+    let served = store.get(Scope::Project, "k").unwrap().unwrap();
+    assert!(served.contains("Claim A."));
+    assert!(served.contains("Claim B."));
+}
+
+#[test]
+fn ingest_daily_caps_stop_the_tenth_write_and_the_third_user_write() {
+    let (_dir, store) = setup();
+    let text = "Fact. Why: user: \"x\"; falsified: nothing yet";
+    for i in 0..INGEST_DAILY_WRITE_CAP {
+        store
+            .ingest_set(Scope::Project, &format!("p{i}"), text)
+            .unwrap();
+    }
+    let err = store.ingest_set(Scope::Project, "overflow", text).unwrap_err();
+    assert!(err.to_string().contains("daily ingest cap"), "{err}");
+    // Fresh day: the budget resets.
+    std::fs::remove_file(store.ingest_counter_path()).unwrap();
+    assert!(store.ingest_set(Scope::Project, "newday", text).is_ok());
+}
+
+#[test]
+fn ingest_user_scope_caps_at_two_per_day() {
+    let (_dir, store) = setup();
+    let text = "Pref. Why: user: \"x\"; falsified: nothing yet";
+    for i in 0..INGEST_DAILY_USER_WRITE_CAP {
+        store.ingest_set(Scope::User, &format!("u{i}"), text).unwrap();
+    }
+    let err = store.ingest_set(Scope::User, "u-overflow", text).unwrap_err();
+    assert!(err.to_string().contains("user-scope ingest cap"), "{err}");
+    // Project writes are unaffected by the user cap.
+    assert!(store.ingest_set(Scope::Project, "p", text).is_ok());
 }

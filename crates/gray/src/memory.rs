@@ -44,6 +44,10 @@ pub enum MemoryCommand {
     Clear,
     /// Review entries against the keep/delete rule (advisory; deletes nothing)
     Audit,
+    /// Daily-ingest add: refuses an existing key (the ingest never overwrites)
+    IngestSet { key: String, text: String },
+    /// Daily-ingest reconcile: the new text must keep the old one verbatim
+    IngestEdit { key: String, text: String },
 }
 
 pub fn disabled() -> bool {
@@ -113,6 +117,32 @@ pub fn run_cli(args: &MemoryArgs) -> anyhow::Result<()> {
         }
         MemoryCommand::Audit => {
             print!("{}", store.audit(args.scope)?);
+        }
+        MemoryCommand::IngestSet { key, text } => {
+            ensure!(!disabled(), "memory saving disabled by GRAY_NO_MEMORY");
+            let changed = store.ingest_set(args.scope, key, text)?;
+            println!(
+                "{}",
+                if changed {
+                    "Memory added."
+                } else {
+                    "Memory unchanged."
+                }
+            );
+            warn_on_growth(&store, args.scope, changed);
+        }
+        MemoryCommand::IngestEdit { key, text } => {
+            ensure!(!disabled(), "memory saving disabled by GRAY_NO_MEMORY");
+            let changed = store.ingest_edit(args.scope, key, text)?;
+            println!(
+                "{}",
+                if changed {
+                    "Memory reconciled (both claims kept)."
+                } else {
+                    "Memory unchanged."
+                }
+            );
+            warn_on_growth(&store, args.scope, changed);
         }
     }
     Ok(())
@@ -372,6 +402,60 @@ impl MemoryStore {
         Ok(changed)
     }
 
+    /// Daily-ingest add. Unlike [`set`](Self::set) this can never replace an
+    /// existing entry, must carry the rationale contract, and spends from a
+    /// hard daily budget: the prompt contract leaked once already (a dry run
+    /// overwrote five entries and invented a quote), so the verbs enforce it.
+    pub fn ingest_set(&self, scope: Scope, key: &str, text: &str) -> anyhow::Result<bool> {
+        validate_key(key)?;
+        validate_text(text)?;
+        ensure!(has_rationale(text), INGEST_RATIONALE_HINT);
+        let trimmed = text.trim().to_owned();
+        let changed = self.change(scope, |entries| {
+            ensure!(
+                !entries.contains_key(key),
+                "memory entry '{key}' exists; the daily ingest never overwrites — skip it, or use ingest-edit to record a contradiction"
+            );
+            self.ensure_ingest_budget(scope)?;
+            entries.insert(key.to_owned(), trimmed.clone());
+            Ok(true)
+        })?;
+        if changed {
+            self.record_ingest_write(scope)?;
+        }
+        Ok(changed)
+    }
+
+    /// Daily-ingest reconcile. Append-only by construction: the new text must
+    /// contain the old one verbatim (`as of <date>: <new> (was: <old>)`), so a
+    /// contradiction is recorded, never a silent replacement.
+    pub fn ingest_edit(&self, scope: Scope, key: &str, text: &str) -> anyhow::Result<bool> {
+        validate_key(key)?;
+        validate_text(text)?;
+        ensure!(has_rationale(text), INGEST_RATIONALE_HINT);
+        let trimmed = text.trim().to_owned();
+        let changed = self.change(scope, |entries| {
+            let old = entries
+                .get(key)
+                .with_context(|| format!("no memory entry named '{key}'"))?
+                .clone();
+            ensure!(
+                trimmed.contains(&old),
+                "ingest edits are append-only: keep the previous text verbatim, e.g. `as of <today>: <new> (was: <old>)`"
+            );
+            if old == trimmed {
+                return Ok(false);
+            }
+            self.ensure_ingest_budget(scope)?;
+            entries.insert(key.to_owned(), trimmed.clone());
+            Ok(true)
+        })?;
+        if changed {
+            self.record_ingest_write(scope)?;
+        }
+        Ok(changed)
+    }
+
     /// Remove every entry in the scope; returns how many were dropped.
     pub fn clear(&self, scope: Scope) -> anyhow::Result<usize> {
         let mut dropped = 0;
@@ -499,6 +583,43 @@ impl MemoryStore {
         })
     }
 
+    fn ingest_counter_path(&self) -> PathBuf {
+        self.root.join(format!(".ingest-{}.json", today()))
+    }
+
+    fn ingest_counters(&self) -> anyhow::Result<IngestCounters> {
+        let text = read_text(&self.ingest_counter_path())?.unwrap_or_default();
+        Ok(serde_json::from_str(&text).unwrap_or_default())
+    }
+
+    fn ensure_ingest_budget(&self, scope: Scope) -> anyhow::Result<()> {
+        let counters = self.ingest_counters()?;
+        let total = counters.project + counters.user;
+        ensure!(
+            total < INGEST_DAILY_WRITE_CAP,
+            "daily ingest cap reached ({INGEST_DAILY_WRITE_CAP} writes for today); skip the rest"
+        );
+        if matches!(scope, Scope::User) {
+            ensure!(
+                counters.user < INGEST_DAILY_USER_WRITE_CAP,
+                "user-scope ingest cap reached ({INGEST_DAILY_USER_WRITE_CAP} writes for today); skip the rest"
+            );
+        }
+        Ok(())
+    }
+
+    fn record_ingest_write(&self, scope: Scope) -> anyhow::Result<()> {
+        let path = self.ingest_counter_path();
+        private_dir(&self.root)?;
+        let _lock = lock(&path.with_extension("lock"))?;
+        let mut counters = self.ingest_counters()?;
+        match scope {
+            Scope::Project => counters.project += 1,
+            Scope::User => counters.user += 1,
+        }
+        atomic_write(&path, &serde_json::to_string(&counters)?)
+    }
+
     fn growth(&self, scope: Scope) -> Option<Growth> {
         let text = std::fs::read_to_string(self.growth_path()).ok()?;
         let all: BTreeMap<String, Growth> = serde_json::from_str(&text).ok()?;
@@ -551,6 +672,26 @@ impl MemoryStore {
 
 /// How many consecutive net-growth saves with no removal trip the warning.
 const GROWTH_STREAK_WARN: usize = 3;
+
+/// Hard daily budget for the unattended ingest, per GRAY_HOME (shared by
+/// every project so a fleet of jobs cannot flood the store in one day).
+pub const INGEST_DAILY_WRITE_CAP: usize = 10;
+pub const INGEST_DAILY_USER_WRITE_CAP: usize = 2;
+
+const INGEST_RATIONALE_HINT: &str =
+    "daily-ingest entries must carry `Why:` (the user's quoted failure or correction) and `falsified:` (`nothing yet` if none)";
+
+fn has_rationale(text: &str) -> bool {
+    text.contains("Why:") && text.contains("falsified:")
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct IngestCounters {
+    #[serde(default)]
+    project: usize,
+    #[serde(default)]
+    user: usize,
+}
 
 /// Per-scope growth record: the peak entry count, how many consecutive
 /// net-growth saves produced it, and how many removals have happened.
