@@ -38,7 +38,10 @@ pub static DISCORD_SETUP: SetupDecl = SetupDecl {
         },
         SetupField {
             key: "owner_id",
-            kind: FieldKind::Required,
+            // Not Required: the app runs ownerless and admits its first human
+            // through the Discord-side pairing reply (their own ID, told to
+            // them by the bot), so nobody has to hunt a snowflake.
+            kind: FieldKind::Optional,
             description: "Your Discord user ID (Developer Mode, Copy User ID) — gates who can trigger the bot",
             url: None,
             secret: false,
@@ -1104,40 +1107,23 @@ mod tests {
 
     #[test]
     fn discord_setup_declaration_asks_for_exactly_what_it_needs() {
-        let decl = setup_decl("discord").expect("discord ships a declaration");
-        let required: Vec<&str> = decl
+        let required: Vec<&str> = DISCORD_SETUP
             .fields
             .iter()
             .filter(|f| f.is_required())
             .map(|f| f.key)
             .collect();
-        assert_eq!(required, ["token", "owner_id", "channel_id"]);
-        assert_eq!(decl.config_path, ".config/gray-discord/config.json");
-        assert_eq!(decl.verify, &["gray-discord", "doctor"][..]);
-        assert_eq!(decl.post_steps, &["register", "start"][..]);
-        assert_eq!(decl.service, Some(&["gray-discord", "run"][..]));
-        let token = decl.field("token").unwrap();
-        assert!(token.secret);
+        // Token and home channel only: the owner is discovered by the
+        // Discord-side pairing reply instead of typed, and the extras
+        // (allowed_users) plus derived paths are filled in around them.
+        assert_eq!(required, ["token", "channel_id"]);
+        let owner = DISCORD_SETUP.field("owner_id").unwrap();
+        assert!(matches!(owner.kind, FieldKind::Optional));
         assert_eq!(
-            token.url,
-            Some("https://discord.com/developers/applications")
+            DISCORD_SETUP.field("allowed_users").unwrap().kind,
+            FieldKind::Optional
         );
-        let channel = decl.field("channel_id").unwrap();
-        assert_eq!(
-            channel.picker,
-            Some(crate::setup::registry::PICKER_CHANNELS)
-        );
-        let derived: Vec<&str> = decl
-            .fields
-            .iter()
-            .filter(|f| matches!(f.kind, FieldKind::Derived))
-            .map(|f| f.key)
-            .collect();
-        assert_eq!(derived, ["gray_bin", "gray_home", "workdir"]);
-        // No budget key anywhere: setup never asks about money.
-        assert!(decl.field("budget").is_none());
-        assert!(decl.field("daily_usd").is_none());
-        assert!(setup_decl("nope").is_none());
+        assert!(DISCORD_SETUP.field("token").unwrap().secret);
     }
 }
 

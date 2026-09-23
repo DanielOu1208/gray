@@ -23,6 +23,25 @@ pub fn plan_missing<'a>(decl: &'a SetupDecl, home: &Path) -> Vec<&'a SetupField>
         .collect()
 }
 
+/// The initial pass asks Required fields only, in declaration order (token,
+/// then home channel). Optional keys come after \u{2014} by then the token
+/// works, so an app can discover them (Discord pairing learns the owner's ID)
+/// instead of making the operator type them.
+pub fn plan_required<'a>(decl: &'a SetupDecl, home: &Path) -> Vec<&'a SetupField> {
+    plan_missing(decl, home)
+        .into_iter()
+        .filter(|f| f.is_required())
+        .collect()
+}
+
+/// Optional keys still unanswered \u{2014} what the setup report calls "later".
+pub fn missing_optional<'a>(decl: &'a SetupDecl, home: &Path) -> Vec<&'a SetupField> {
+    plan_missing(decl, home)
+        .into_iter()
+        .filter(|f| !f.is_required())
+        .collect()
+}
+
 /// `--field key=value` answers, checked against the declaration. Secrets are
 /// flagged so `Supplied` can redact them everywhere else.
 pub fn supplied_from_flags(decl: &SetupDecl, fields: &[String]) -> Result<Supplied> {
@@ -161,7 +180,7 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
     let (gray_home, user) = (crate::plugin_cli::home()?, super::user_home()?);
     let decl = crate::plugin_cli::setup_decl(app)
         .with_context(|| format!("gray has no setup declaration for '{app}'"))?;
-    let fields = plan_missing(decl, &user);
+    let fields = plan_required(decl, &user);
     if fields.is_empty() {
         // Nothing to ask: prove the app works or report why it does not.
         // (Before the modal owns the screen, so a line to stderr is fine.)
@@ -526,7 +545,21 @@ fn finish_after_answers(
             register.output.trim()
         );
     }
+    let config_path = user_home.join(decl.config_path);
     let mut report = format!("{app} is set up.");
+    // An ownerless app is finished, not broken: the bot tells their own ID
+    // to whoever DMs it, and one command admits them. Say so here so the
+    // operator never has to guess what to do with the pairing code.
+    if decl.field("owner_id").is_some() && !super::registry::key_present(&config_path, "owner_id") {
+        report.push_str(
+            "\n\nOwner: nobody admitted yet.\n1. DM the bot anything.\n2. It replies with your own Discord ID and a one-time code.\n3. gray discord pairing approve discord <code>",
+        );
+    }
+    let later = missing_optional(decl, user_home);
+    if !later.is_empty() {
+        let names: Vec<&str> = later.iter().map(|f| f.key).collect();
+        report.push_str(&format!("\n\nSet later: {}", names.join(", ")));
+    }
     if start && let Some(service) = decl.service {
         let mut argv = crate::plugin_cli::command_argv(gray_home, app)?;
         argv.extend(service.iter().skip(1).map(|a| a.to_string()));

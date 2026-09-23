@@ -43,10 +43,16 @@ pub(crate) fn app_rows_with(
             let mut needs_setup = false;
             if let Some(home) = home
                 && let Some(decl) = crate::plugin_cli::setup_decl(&r.name)
-                && let crate::setup::registry::AppSetupState::NeedsSetup(_) = decl.state(home)
             {
-                extras.push("needs setup".to_string());
-                needs_setup = true;
+                match app_state(&home.join(decl.config_path), decl) {
+                    AppState::NeedsSetup => {
+                        extras.push("needs setup".to_string());
+                        needs_setup = true;
+                    }
+                    AppState::Stopped => extras.push("stopped".to_string()),
+                    AppState::Connected(Some(bot)) => extras.push(format!("connected as {bot}")),
+                    AppState::Connected(None) => extras.push("connected".to_string()),
+                }
             }
             extras.extend(declared(home, &r.name));
             if !extras.is_empty() {
@@ -63,6 +69,77 @@ pub(crate) fn app_rows_with(
             }
         })
         .collect()
+}
+
+/// The app's live state, from files only: the config the app itself writes,
+/// the pidfile the daemon keeps next to it, and the identity the daemon
+/// writes when its gateway connects. Nothing here opens a socket or reads a
+/// token; a daemon whose process died reports stopped even if its state file
+/// is still warm on disk.
+pub(crate) enum AppState {
+    NeedsSetup,
+    Stopped,
+    /// The daemon is connected; the name it reports, when it wrote one.
+    Connected(Option<String>),
+}
+
+fn pid_alive(pid: u64) -> bool {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    // Field 3 is the state letter; a reaped-but-unwaited zombie still owns a
+    // /proc entry, so "no process" is not enough to call it connected.
+    match stat
+        .rsplit(')')
+        .next()
+        .and_then(|rest| rest.split_whitespace().next())
+    {
+        Some(state) => state != "Z",
+        None => false,
+    }
+}
+
+fn json_at(path: &std::path::Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+pub(crate) fn app_state(
+    config_path: &std::path::Path,
+    decl: &crate::setup::registry::SetupDecl,
+) -> AppState {
+    if !config_path.exists() {
+        return AppState::NeedsSetup;
+    }
+    // A config missing a required key (a token with no home channel) is a
+    // partial setup, not a stopped daemon — the row still routes Enter to
+    // the setup flow. Values are never read, only key presence.
+    if decl
+        .fields
+        .iter()
+        .filter(|f| f.is_required())
+        .any(|f| !crate::setup::registry::key_present(config_path, f.key))
+    {
+        return AppState::NeedsSetup;
+    }
+    let Some(dir) = config_path.parent() else {
+        return AppState::Stopped;
+    };
+    let daemon = json_at(&dir.join("daemon.json"));
+    let alive = daemon
+        .as_ref()
+        .and_then(|v| v.get("pid").and_then(serde_json::Value::as_u64))
+        .is_some_and(pid_alive);
+    if !alive {
+        return AppState::Stopped;
+    }
+    let bot = json_at(&dir.join("state.json")).and_then(|v| {
+        v.get("bot")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    });
+    AppState::Connected(bot)
 }
 
 /// One toggleable row per installed app, read from the live registry.

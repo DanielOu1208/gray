@@ -113,3 +113,76 @@ fn spec_is_a_toggle_listing_without_removal_or_errors() {
         assert!(!GATEWAY_SPEC.errors_tab);
     }
 }
+
+/// The row reads three files per app: the app's config (existence),
+/// the daemon pidfile (liveness), the identity the daemon writes on connect.
+/// All three live under a temp home here.
+fn write_app_files(home: &std::path::Path, config: bool, daemon: Option<u64>, bot: Option<&str>) {
+    let dir = home.join(".config/gray-discord");
+    std::fs::create_dir_all(&dir).unwrap();
+    if config {
+        // Required keys only — grey never reads the value back.
+        std::fs::write(
+            dir.join("config.json"),
+            b"{\"token\":\"T\",\"channel_id\":\"1\"}",
+        )
+        .unwrap();
+    }
+    if let Some(pid) = daemon {
+        std::fs::write(
+            dir.join("daemon.json"),
+            format!("{{\"pid\":{pid},\"started_at\":\"0\"}}"),
+        )
+        .unwrap();
+    }
+    if let Some(bot) = bot {
+        std::fs::write(dir.join("state.json"), format!("{{\"bot\":\"{bot}\"}}")).unwrap();
+    }
+}
+
+#[test]
+fn a_running_daemon_with_its_identity_shows_as_connected() {
+    let home = tempfile::tempdir().unwrap();
+    write_app_files(
+        home.path(),
+        true,
+        Some(std::process::id().into()),
+        Some("graytest#0148"),
+    );
+    let items = app_rows_with(&[row("discord", true)], Some(home.path()));
+    assert!(
+        items[0].row.contains("connected as graytest#0148"),
+        "{}",
+        items[0].row
+    );
+    // A running, configured app is not a setup candidate.
+    assert!(!items[0].needs_setup);
+}
+
+#[test]
+fn a_running_daemon_without_an_identity_shows_as_connected() {
+    let home = tempfile::tempdir().unwrap();
+    write_app_files(home.path(), true, Some(std::process::id().into()), None);
+    let items = app_rows_with(&[row("discord", true)], Some(home.path()));
+    assert!(items[0].row.contains("connected"), "{}", items[0].row);
+    assert!(!items[0].row.contains("connected as"), "{}", items[0].row);
+}
+
+#[test]
+fn a_dead_pid_reports_stopped_even_with_a_stale_identity_file() {
+    let home = tempfile::tempdir().unwrap();
+    // PID 999_999_999 cannot exist; zombies stay out of the way too.
+    write_app_files(home.path(), true, Some(999_999_999), Some("graytest#0148"));
+    let items = app_rows_with(&[row("discord", true)], Some(home.path()));
+    assert!(items[0].row.contains("stopped"), "{}", items[0].row);
+    assert!(!items[0].row.contains("connected"), "{}", items[0].row);
+}
+
+#[test]
+fn a_configured_but_unstarted_app_reports_stopped() {
+    let home = tempfile::tempdir().unwrap();
+    write_app_files(home.path(), true, None, None);
+    let items = app_rows_with(&[row("discord", true)], Some(home.path()));
+    assert!(items[0].row.contains("stopped"), "{}", items[0].row);
+    assert!(!items[0].needs_setup);
+}
