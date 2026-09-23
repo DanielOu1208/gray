@@ -83,21 +83,10 @@ pub(crate) enum AppState {
     Connected(Option<String>),
 }
 
+/// The gateway's portable probe (kill(0) on unix, OpenProcess on Windows).
+/// Never re-read /proc here: this row renders on macOS and Windows too.
 fn pid_alive(pid: u64) -> bool {
-    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    // Field 3 is the state letter; a reaped-but-unwaited zombie still owns a
-    // /proc entry, so "no process" is not enough to call it connected.
-    match stat
-        .rsplit(')')
-        .next()
-        .and_then(|rest| rest.split_whitespace().next())
-    {
-        Some(state) => state != "Z",
-        None => false,
-    }
+    crate::gateway::pid::pid_alive(pid as u32)
 }
 
 fn json_at(path: &std::path::Path) -> Option<serde_json::Value> {
