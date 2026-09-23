@@ -1604,89 +1604,46 @@ fn cached_turn_req() -> gray_core::message::ChatRequest {
 }
 
 #[test]
-fn anthropic_cache_control_rides_content_parts() {
-    // pi `applyAnthropicCacheControl`: OpenRouter/Anthropic read
-    // `cache_control` on content blocks only, so a message-level marker
-    // cached nothing. Breakpoints: system, last tool, last message.
-    let model = "anthropic/claude-sonnet-4.5";
-    let body = map_chat_request(cached_turn_req(), model, None).expect("maps");
-    let v = serde_json::to_value(&body).expect("serializes");
-    let msgs = v["messages"].as_array().expect("messages");
-    assert!(
-        msgs.iter().all(|m| m.get("cache_control").is_none()),
-        "never on the message object: {v}"
-    );
-    assert_eq!(msgs[0]["role"], "system");
-    assert_eq!(msgs[0]["content"][0]["text"], "sys");
-    assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
-    let last = msgs.last().expect("tool result is last");
-    assert_eq!(last["role"], "tool");
-    assert_eq!(last["content"][0]["text"], "out");
-    assert_eq!(last["content"][0]["cache_control"]["type"], "ephemeral");
-    let marked = msgs
-        .iter()
-        .filter(|m| m.to_string().contains("cache_control"))
-        .count();
-    assert_eq!(marked, 2, "system + last message only: {v}");
-    assert_eq!(v["tools"][0]["cache_control"]["type"], "ephemeral");
+fn no_model_carries_cache_control() {
+    // The Anthropic `cache_control` breakpoint path was removed: prompt-cache
+    // affinity rides the Responses `prompt_cache_key` alone, so no model — and
+    // specifically not Claude/Anthropic — may emit a `cache_control` marker,
+    // and plain string content must stay a string (never promoted to a
+    // one-part array).
+    for model in ["anthropic/claude-sonnet-4.5", "openai/gpt-5"] {
+        let body = map_chat_request(cached_turn_req(), model, None).expect("maps");
+        let v = serde_json::to_value(&body).expect("serializes");
+        assert!(!v.to_string().contains("cache_control"), "{model}: {v}");
+        let msgs = v["messages"].as_array().expect("messages");
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(
+            msgs[0]["content"], "sys",
+            "{model}: plain string content kept"
+        );
+        assert_eq!(
+            v["tools"][0]["function"]["name"], "bash",
+            "{model}: tool def intact"
+        );
+    }
 }
 
 #[test]
-fn anthropic_cache_control_marks_text_part_of_image_turn() {
-    use gray_core::message::Message;
-    let req = gray_core::message::ChatRequest {
-        system: None,
-        messages: vec![Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::text("what is this"),
-                ContentBlock::image("image/png", "AAAA"),
-            ],
-        }],
-        tools: Vec::new(),
-    };
-    let body = map_chat_request(req, "claude-opus-5", None).expect("maps");
-    let v = serde_json::to_value(&body).expect("serializes");
-    let parts = v["messages"][0]["content"].as_array().expect("parts");
-    assert_eq!(parts[0]["type"], "text");
-    assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
-    assert!(
-        parts[1].get("cache_control").is_none(),
-        "image part untouched: {v}"
-    );
-}
-
-#[test]
-fn non_anthropic_models_carry_no_cache_control() {
-    let model = "openai/gpt-5";
-    let body = map_chat_request(cached_turn_req(), model, None).expect("maps");
-    let v = serde_json::to_value(&body).expect("serializes");
-    assert!(!v.to_string().contains("cache_control"), "{v}");
-    assert_eq!(
-        v["messages"][0]["content"], "sys",
-        "plain string content kept"
-    );
-}
-
-#[test]
-fn openrouter_and_commandcode_get_sticky_session_header() {
-    // pi `sendSessionAffinityHeaders`: OpenRouter/CommandCode pin a session to one
-    // upstream (and its prompt cache) only when told the session id.
+fn session_affinity_header_is_host_independent() {
+    // The per-host `x-session-id` sticky-routing header was removed: the only
+    // session header is `x-opencode-session` (required by Console Go), sent for
+    // every non-empty session regardless of upstream, and dropped entirely when
+    // there is no session.
     let openrouter = Url::parse("https://openrouter.ai/api/v1").expect("url");
-    assert_eq!(
-        session_affinity_headers(&openrouter, Some("s1")),
-        vec![("x-opencode-session", "s1"), ("x-session-id", "s1")]
-    );
     let commandcode = Url::parse("https://api.commandcode.ai/provider/v1").expect("url");
-    assert_eq!(
-        session_affinity_headers(&commandcode, Some("s1")),
-        vec![("x-opencode-session", "s1"), ("x-session-id", "s1")]
-    );
     let other = Url::parse("https://api.deepseek.com/v1").expect("url");
-    assert_eq!(
-        session_affinity_headers(&other, Some("s1")),
-        vec![("x-opencode-session", "s1")]
-    );
-    assert!(session_affinity_headers(&openrouter, None).is_empty());
-    assert!(session_affinity_headers(&openrouter, Some("")).is_empty());
+    for url in [&openrouter, &commandcode, &other] {
+        assert_eq!(
+            session_affinity_headers(Some("s1")),
+            vec![("x-opencode-session", "s1")],
+            "{}: only x-opencode-session, host-independent",
+            url.host_str().unwrap_or("")
+        );
+    }
+    assert!(session_affinity_headers(None).is_empty());
+    assert!(session_affinity_headers(Some("")).is_empty());
 }

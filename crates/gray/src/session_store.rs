@@ -182,6 +182,16 @@ pub struct SessionSummary {
     pub cwd: PathBuf,
     /// The text content of the first user message in the session, if present.
     pub first_user_text: Option<String>,
+    /// The text content of the most recent user message in the session, if
+    /// present — what the resume list previews, so a long session reads as
+    /// what it was last about rather than how it opened.
+    #[serde(default)]
+    pub last_user_text: Option<String>,
+    /// Unix timestamp in milliseconds of the most recent entry in the session
+    /// (any role), i.e. when the session was last active. Falls back to
+    /// [`started_at`](Self::started_at) for a session that has no entries yet.
+    #[serde(default)]
+    pub last_message_at: u64,
 }
 
 /// Errors that can occur during session storage operations.
@@ -1095,21 +1105,29 @@ impl JsonlSessionStore {
                 continue;
             }
 
+            // A header-only session still has a usable "last active" time.
+            let mut last_message_at = header.timestamp;
             let mut first_user_text = None;
+            let mut last_user_text = None;
             for line in lines {
                 let Ok(entry) = serde_json::from_str::<SessionEntry>(line) else {
                     continue;
                 };
+                last_message_at = last_message_at.max(entry.timestamp);
                 if entry.compaction_boundary {
-                    // Replacement follows: the pre-compact opener no longer
-                    // describes the session.
+                    // Replacement follows: the pre-compact messages no longer
+                    // describe the session (both ends of the range move).
                     first_user_text = None;
+                    last_user_text = None;
                     continue;
                 }
-                if first_user_text.is_none() && entry.message.role == Role::User {
+                if entry.message.role == Role::User {
                     let text = entry.message.text_content();
                     if !text.is_empty() {
-                        first_user_text = Some(text);
+                        if first_user_text.is_none() {
+                            first_user_text = Some(text.clone());
+                        }
+                        last_user_text = Some(text);
                     }
                 }
             }
@@ -1117,8 +1135,10 @@ impl JsonlSessionStore {
             summaries.push(SessionSummary {
                 id: header.id,
                 started_at: header.timestamp,
+                last_message_at,
                 cwd: header.cwd,
                 first_user_text,
+                last_user_text,
             });
         }
 

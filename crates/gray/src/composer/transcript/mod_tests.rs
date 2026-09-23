@@ -30,24 +30,46 @@ fn word_flush_cut_budgets_cells_not_chars() {
 }
 
 #[test]
-fn thought_duration_matches_opencode_locale() {
-    assert_eq!(fmt_thought_duration(Duration::from_millis(198)), "198ms");
-    assert_eq!(fmt_thought_duration(Duration::from_millis(5800)), "5.8s");
-    assert_eq!(fmt_thought_duration(Duration::from_millis(9800)), "9.8s");
-    assert_eq!(fmt_thought_duration(Duration::from_millis(61_500)), "1m 1s");
+fn gap_need_fills_one_above_content() {
+    assert_eq!(gap_need(&[Line::from("text")], 1), 1);
 }
 
 #[test]
-fn thought_summary_line_names_duration() {
-    let line = thought_summary_line(Duration::from_millis(5800));
-    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert_eq!(text, "✻ Thought for 5.8s");
-    assert_eq!(
-        line.spans[0].style.fg,
-        // Single gray palette (no global read — keeps this test
-        // hermetic under parallel execution).
-        Some(crate::theme::GRAY_UI_THEME.text_muted)
-    );
+fn gap_need_is_idempotent_above_a_gap() {
+    // Checkpoint spacers (thinking close, tool-box edges, turn footer) must
+    // never stack a second blank onto an existing gap: closing a run right
+    // after another gap leaves the tail alone, so every seam shows exactly
+    // one break instead of two.
+    let t = vec![Line::from("text"), Line::from("")];
+    assert_eq!(gap_need(&t, 1), 0);
+}
+
+#[test]
+fn gap_need_counts_partial_tail() {
+    let t = vec![Line::from("text"), Line::from("")];
+    assert_eq!(gap_need(&t, 2), 1);
+}
+
+#[test]
+fn gap_need_treats_card_margins_as_edges() {
+    // Tinted padding rows are card edges, not gaps: content ending on a
+    // tool-box margin still earns its separating gap.
+    let bg = Style::default().bg(crate::theme::GRAY_UI_THEME.surface_bg);
+    let t = vec![Line::from("text"), Line::from("").style(bg)];
+    assert_eq!(gap_need(&t, 1), 1);
+}
+
+#[test]
+fn gap_need_sees_left_padded_rows_as_blank() {
+    // Live thinking rows carry the 1-space left pad; a pad-only tail is a
+    // gap, never a reason for another blank.
+    let t = vec![Line::from(vec![Span::raw(" ")])];
+    assert_eq!(gap_need(&t, 1), 0);
+}
+
+#[test]
+fn gap_need_empty_transcript_still_gaps() {
+    assert_eq!(gap_need(&[], 1), 1);
 }
 
 #[test]

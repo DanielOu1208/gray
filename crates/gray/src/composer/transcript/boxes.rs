@@ -72,10 +72,6 @@ impl Tui {
         let _ = std::io::stdout().flush();
     }
 
-    pub fn push_line_spans(&mut self, line: Line<'static>) {
-        self.push_styled_lines_with_hyperlinks(vec![line], &[], 0);
-    }
-
     pub(crate) fn render_and_insert_styled_lines(
         &mut self,
         lines: &[Line<'static>],

@@ -60,6 +60,36 @@ pub(crate) fn format_thought_line(
     line
 }
 
+/// The turn-end footer: the SINGLE `✻ Thought for …` line per turn (per-run
+/// summaries were deleted — they duplicated every reasoning round and
+/// re-stamped bogus 0ms lines on stray trailing chunks, each bringing its
+/// own pair of blanks). `N tokens` is this turn's billed output (exact, from
+/// the TurnEnd usage report; reasoning is already included in output, never
+/// split out) — a per-run line could never know it, and a chars/4 fallback
+/// here would reintroduce the 2.5M-on-a-14s-turn inflation the pill dropped.
+/// `None` (cancelled/errored before any usage report) prints the bare
+/// elapsed. Rate over streaming time only; the clock stays whole-turn on
+/// purpose (it is a duration, not a rate denominator). Pure for testability
+/// (`Tui::new` needs a TTY).
+pub(crate) fn turn_footer_line(
+    had_thinking: bool,
+    elapsed: Duration,
+    turn_toks: Option<usize>,
+    stream_ms: u64,
+) -> String {
+    let elapsed_str =
+        crate::repl::format::fmt_duration_ms(elapsed.as_millis().min(u128::from(u64::MAX)) as u64);
+    let verb = if had_thinking {
+        "Thought for"
+    } else {
+        "Worked for"
+    };
+    // Other billed Σ-per-round totals stay out of the TUI line entirely
+    // (cost basis lives in `totals` / headless `turn_footer` only).
+    let tps = turn_toks.and_then(|toks| crate::repl::turn_tokens_per_second(toks, stream_ms));
+    format_thought_line(verb, &elapsed_str, turn_toks, tps)
+}
+
 /// Elapsed time for the working pill: anchored to the turn start so the
 /// per-tool `set_status` re-stamps (`Preparing tool:` -> `Working`) never
 /// reset the visible clock mid-turn. omp parity
@@ -266,7 +296,6 @@ pub struct Tui {
     pub local_command: Option<String>,
     pending: String,
     thinking: bool,
-    thinking_started: Option<Instant>,
     hide_thinking: bool,
     pub(crate) history: Vec<String>,
     pub(crate) history_idx: Option<usize>,
@@ -483,7 +512,6 @@ impl Tui {
             local_command: None,
             pending: String::new(),
             thinking: false,
-            thinking_started: None,
             hide_thinking: false,
             history: Vec::new(),
             history_idx: None,
@@ -1090,23 +1118,7 @@ impl Tui {
         }
 
         if let Some(elapsed) = elapsed {
-            let elapsed_str = crate::repl::format::fmt_duration_ms(
-                elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
-            );
-            let verb = if had_thinking {
-                "Thought for"
-            } else {
-                "Worked for"
-            };
-            // `✻ Thought for … · N tokens` is billed output (exact, reasoning
-            // included). Other billed Σ-per-round totals stay out of the TUI
-            // entirely.
-            // Rate over streaming time only; the `Thought for 6s` clock
-            // above stays whole-turn on purpose (it is a duration, not a
-            // rate denominator).
-            let tps =
-                turn_toks.and_then(|toks| crate::repl::turn_tokens_per_second(toks, stream_ms));
-            let line = format_thought_line(verb, &elapsed_str, turn_toks, tps);
+            let line = turn_footer_line(had_thinking, elapsed, turn_toks, stream_ms);
             self.ensure_gap(1);
             self.push_dim(line);
             self.ensure_gap(1);

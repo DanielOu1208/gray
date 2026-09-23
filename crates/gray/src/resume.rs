@@ -52,8 +52,15 @@ fn cwd_display(cwd: &Path, width: usize) -> String {
     }
 }
 
+/// Row preview: the latest user message, so a session reads as what it was
+/// last about. Falls back to the opener for a session whose only user text is
+/// empty, then to the empty-session placeholder.
 fn preview_text(s: &SessionSummary, width: usize) -> String {
-    let raw = s.first_user_text.as_deref().unwrap_or("(no message yet)");
+    let raw = s
+        .last_user_text
+        .as_deref()
+        .or(s.first_user_text.as_deref())
+        .unwrap_or("(no message yet)");
     let one_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.chars().count() <= width {
         one_line
@@ -75,8 +82,9 @@ fn paths_match(a: &Path, b: &Path) -> bool {
     ca == cb
 }
 
-/// Picker filter: cwd scope plus case-insensitive query over id, cwd, and
-/// first user text. Shared by the draw loop and the Down/Enter handlers.
+/// Picker filter: cwd scope plus case-insensitive query over id, cwd, and user
+/// text (both ends — the preview shows the latest, a remembered opener still
+/// identifies the session). Shared by the draw loop and the Down/Enter handlers.
 fn session_matches(s: &SessionSummary, query: &str, cwd_filter: Option<&Path>) -> bool {
     if let Some(f) = cwd_filter
         && !paths_match(&s.cwd, f)
@@ -90,6 +98,11 @@ fn session_matches(s: &SessionSummary, query: &str, cwd_filter: Option<&Path>) -
     s.id.as_str().to_lowercase().contains(&q)
         || s.cwd.display().to_string().to_lowercase().contains(&q)
         || s.first_user_text
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains(&q)
+        || s.last_user_text
             .as_deref()
             .unwrap_or("")
             .to_lowercase()
@@ -131,13 +144,14 @@ pub async fn recent_summaries(store: &JsonlSessionStore, all: bool) -> Vec<Sessi
     out
 }
 
-/// One text row for headless session lists: short id, preview, age.
+/// One text row for headless session lists: short id, preview, age. Both the
+/// preview and the age describe the session's latest message, not its opener.
 pub fn format_summary_row(s: &SessionSummary) -> String {
     format!(
         "{} — {} ({})",
         short_id(&s.id),
         preview_text(s, 80),
-        format_relative(s.started_at)
+        format_relative(s.last_message_at)
     )
 }
 
@@ -530,7 +544,9 @@ fn run_picker_sync(
                         }
                         let s = filtered[idx];
                         let is_sel = idx == sel;
-                        let date = format_relative(s.started_at);
+                        // When the latest message was sent, matching the
+                        // preview beside it — not when the session opened.
+                        let date = format_relative(s.last_message_at);
                         let cwd_s = cwd_display(&s.cwd, cwd_w);
                         let prev = preview_text(s, prev_w);
                         let sid = short_id(&s.id);
