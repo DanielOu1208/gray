@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::ops::Range;
-use std::time::{Duration, Instant};
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -39,20 +38,24 @@ pub(crate) fn cap_history_entries(entries: &mut Vec<super::TranscriptEntry>) {
     }
 }
 
+/// How many of `n` requested blank rows are still missing above the
+/// transcript tail: idempotent, so checkpoint spacers (thinking close,
+/// tool-box edges, turn footer) never stack a second blank onto an existing
+/// gap. Same blank predicate as the paint path (`transcript_row_is_blank`),
+/// so card/code padding rows (tinted bg) count as edges, not gaps. Pure for
+/// testability (`Tui::new` needs a TTY).
+pub(crate) fn gap_need(transcript: &[Line<'static>], n: usize) -> usize {
+    let trailing = transcript
+        .iter()
+        .rev()
+        .take_while(|l| transcript_row_is_blank(l))
+        .count();
+    n.saturating_sub(trailing)
+}
+
 impl Tui {
     pub(crate) fn ensure_gap(&mut self, n: usize) {
-        let trailing = self
-            .transcript
-            .iter()
-            .rev()
-            .take_while(|l| {
-                l.style.bg.is_none()
-                    && l.spans
-                        .iter()
-                        .all(|s| s.style.bg.is_none() && s.content.trim().is_empty())
-            })
-            .count();
-        let need = n.saturating_sub(trailing);
+        let need = gap_need(&self.transcript, n);
         if need == 0 {
             return;
         }
@@ -116,7 +119,6 @@ impl Tui {
         }
         if !self.thinking {
             self.ensure_gap(1);
-            self.thinking_started = Some(Instant::now());
         }
         if self.status.as_ref().map(|s| s.1.as_str()) != Some("Thinking") {
             self.set_status(Some("Thinking"));
@@ -198,9 +200,12 @@ impl Tui {
         if !self.thinking && self.pending.is_empty() {
             return;
         }
-        // The run's rows already streamed live; only the tail (never
-        // flushed) and the `✻ Thought for <duration>` summary land here.
-        let elapsed = self.thinking_started.take().map(|s| s.elapsed());
+        // The run's rows already streamed live; only the never-flushed tail
+        // lands here. No `✻ Thought for` summary: the turn-end footer in
+        // `end_turn` is the single Thought line per turn — it alone knows the
+        // billed output tokens (exact TurnEnd usage, reasoning included),
+        // while a per-run duration line duplicated every reasoning round and
+        // re-stamped bogus 0ms lines on stray trailing chunks.
         self.thinking = false;
         if self.hide_thinking {
             self.pending.clear();
@@ -210,10 +215,6 @@ impl Tui {
             let rest = std::mem::take(&mut self.pending);
             self.append_thinking_text(&rest, false);
             self.paint_thinking_fragment(rest);
-        }
-        if let Some(d) = elapsed {
-            self.ensure_gap(1);
-            self.push_line_spans(thought_summary_line(d));
         }
         if spacer {
             self.ensure_gap(1);
@@ -256,34 +257,6 @@ impl Tui {
         cap_history_entries(&mut self.history_entries);
         let _ = std::io::stdout().flush();
     }
-}
-
-/// Port of opencode's `Locale.duration`: `198ms`, `5.8s`, `1m 2s`.
-pub(crate) fn fmt_thought_duration(d: Duration) -> String {
-    let ms = d.as_millis();
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else if ms < 3_600_000 {
-        let secs = ms as f64 / 1000.0;
-        if secs < 60.0 {
-            format!("{secs:.1}s")
-        } else {
-            format!("{}m {}s", ms / 60_000, (ms % 60_000) / 1000)
-        }
-    } else {
-        format!("{}h {}m", ms / 3_600_000, (ms % 3_600_000) / 60_000)
-    }
-}
-
-/// Bottom summary: gray `✻ Thought for <duration>` under the body, matching
-/// the turn-end Thought line (same star marker; duration-only — the
-/// provider's true reasoning count isn't known until TurnEnd, and a
-/// streamed estimate here would under-report billed reasoning).
-fn thought_summary_line(elapsed: Duration) -> Line<'static> {
-    Line::from(vec![Span::styled(
-        format!("✻ Thought for {}", fmt_thought_duration(elapsed)),
-        Style::default().fg(crate::theme::theme().text_muted),
-    )])
 }
 
 #[path = "mod_tests.rs"]
