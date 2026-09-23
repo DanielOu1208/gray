@@ -312,3 +312,30 @@ fn breakdown_free_and_grid_sum_to_window() {
     // saturates instead of underflowing when over budget
     assert_eq!(p.free(10_000, reserve), 0);
 }
+
+#[test]
+fn step_models_are_never_offered_a_dishonest_off() {
+    // StepFun ignores `thinking: disabled` (measured: 1088 reasoning deltas
+    // still streamed at effort=off), so the picker must not claim "No
+    // reasoning" for it.
+    assert!(!super::providers::reasoning_off_is_honest("step-5-preview"));
+    assert!(!super::providers::reasoning_off_is_honest(
+        "stepfun/step-5-preview"
+    ));
+    assert!(super::providers::reasoning_off_is_honest(
+        "anthropic/claude-opus-4-6"
+    ));
+
+    let step: Vec<&str> = supported_thinking_levels("step-5-preview")
+        .iter()
+        .map(|(l, _)| *l)
+        .collect();
+    assert_eq!(step, vec!["low", "medium", "high", "max"]);
+    assert!(!step.contains(&"off"));
+
+    // A non-reasoning model keeps the honest single "off" (that one is true).
+    assert_eq!(
+        supported_thinking_levels("prov/test-reason-plain"),
+        vec![("off", "No reasoning")]
+    );
+}

@@ -283,6 +283,14 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
     if id.contains("deepseek-v4") || id.contains("deepseek_v4") {
         return Some(vec!["low", "medium", "high", "max"]);
     }
+    // StepFun step models: the API always reasons. `thinking: {"type":
+    // "disabled"}` is ignored (measured against api.stepfun.ai: 1088
+    // reasoning deltas still streamed at effort=off), so `off` is not an
+    // option here — see `reasoning_off_is_honest`.
+    let step_id = id.rsplit('/').next().unwrap_or(&id);
+    if step_id.starts_with("step-") || step_id.starts_with("step_") {
+        return Some(vec!["low", "medium", "high", "max"]);
+    }
     // Muse Spark / Glimmer: effort values per models.dev reasoning_options —
     // [minimal, low, medium, high, xhigh] (no `max`; the provider 400-rejects it).
     if id.contains("muse") || id.contains("spark") || id.contains("glimmer") {
@@ -291,8 +299,18 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
     None
 }
 
-/// Levels from `THINKING_LEVELS` the model actually accepts (`off` always
-/// offered). Unknown family → full catalog; known non-reasoning → just `off`.
+/// Whether `off` really stops reasoning on this model. A family that
+/// ignores the disable flag (StepFun's, measured) must not be offered
+/// `off — No reasoning`: the row would be a lie, and selecting it hides
+/// text the provider keeps streaming and keeps billing.
+pub fn reasoning_off_is_honest(model_id: &str) -> bool {
+    let step_id = model_id.rsplit('/').next().unwrap_or(model_id);
+    !(step_id.starts_with("step-") || step_id.starts_with("step_"))
+}
+
+/// Levels from `THINKING_LEVELS` the model actually accepts. `off` is
+/// offered when the model honors it (see [`reasoning_off_is_honest`]).
+/// Unknown family → full catalog; known non-reasoning → just `off`.
 pub fn supported_thinking_levels(model_id: &str) -> Vec<(&'static str, &'static str)> {
     if model_supports_reasoning(model_id) == Some(false) {
         return vec![("off", "No reasoning")];
@@ -300,9 +318,10 @@ pub fn supported_thinking_levels(model_id: &str) -> Vec<(&'static str, &'static 
     let Some(want) = supported_efforts(model_id) else {
         return super::super::THINKING_LEVELS.to_vec();
     };
+    let off_ok = reasoning_off_is_honest(model_id);
     super::super::THINKING_LEVELS
         .iter()
-        .filter(|(l, _)| *l == "off" || want.contains(l))
+        .filter(|(l, _)| (*l == "off" && off_ok) || want.contains(l))
         .copied()
         .collect()
 }
