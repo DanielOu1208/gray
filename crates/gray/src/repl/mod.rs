@@ -622,6 +622,9 @@ pub async fn run_repl_mode(
             if let Some(m) = &config.model {
                 t.set_model(m.clone());
             }
+            // A level this model no longer offers (a step-family `off` saved
+            // before family truth won) must not ride into the footer.
+            let _ = clamp_thinking_to_model(config);
             if let Some(eff) = &config.thinking_effort {
                 t.set_thinking_effort(eff.clone());
             }
