@@ -58,11 +58,13 @@ fn transcript_collects_text_and_tool_names() {
     assert!(t.contains("hello world"));
 }
 
-/// Write an executable script fixture. Written to a staging name and
-/// renamed into place: on overlayfs, exec'ing a file that was just written
-/// in place can fail with ETXTBSY (the write is still being copied up), and
-/// the rename breaks that association. The same fixture otherwise fails
-/// once every few runs.
+/// Write an executable script fixture, staged and renamed into place so
+/// the path that gets exec'd is never one a writer still holds. ETXTBSY
+/// ("text file busy") means the executable was open for writing at the
+/// instant of the exec; it showed up here roughly 1 run in 5-20 with no
+/// process holding the file by the time it could be checked, so the real
+/// fix is the one retry in `run_pre_script_with_timeout`. This keeps the
+/// fixture out of that window too.
 #[cfg(unix)]
 fn write_script(path: &std::path::Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -72,6 +74,7 @@ fn write_script(path: &std::path::Path, body: &str) {
     std::fs::rename(&staging, path).unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn script_success_captures_stdout() {
     let dir = tempfile::tempdir().unwrap();
@@ -82,6 +85,7 @@ async fn script_success_captures_stdout() {
     assert!(out.stdout.contains("hello"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn script_failure_marks_not_ok() {
     let dir = tempfile::tempdir().unwrap();
