@@ -469,6 +469,45 @@ async fn gray_view_refuses_a_text_file_rather_than_pixel_soup() {
 }
 
 #[tokio::test]
+async fn gray_view_keeps_valid_images_when_one_path_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("good.png"), png_bytes()).unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "text").unwrap();
+    // One bad path must not sink the good one: the valid image still
+    // returns a vision block, with the failure named in the content.
+    let out = image_command("gray view good.png notes.txt", dir.path())
+        .expect("partial failure must keep the valid image");
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.images.len(), 1, "{}", out.content);
+    assert!(out.content.contains("good.png"), "{}", out.content);
+    assert!(out.content.contains("skipped"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn gray_view_caps_the_claim_at_eight_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    for n in 0..10 {
+        std::fs::write(dir.path().join(format!("p{n}.png")), png_bytes()).unwrap();
+    }
+    let cmd = format!(
+        "gray view {}",
+        (0..10)
+            .map(|n| format!("p{n}.png"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let out =
+        image_command(&cmd, dir.path()).expect("the capped prefix must still claim");
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.images.len(), 8, "{}", out.content);
+    assert!(
+        out.content.contains("showing first 8 of 10 paths"),
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
 async fn gray_view_only_claims_gray_view() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.png"), png_bytes()).unwrap();
@@ -543,17 +582,24 @@ async fn cat_resolves_a_tilde_path_only_when_the_file_is_there() {
     if home.is_empty() || !std::path::Path::new(&home).is_dir() {
         return;
     }
-    let at_home = std::path::Path::new(&home).join("gray-rs-tilde-probe.png");
-    std::fs::write(&at_home, png_bytes()).unwrap();
-    let out = image_command("cat ~/gray-rs-tilde-probe.png", Path::new("."));
-    let _ = std::fs::remove_file(&at_home);
+    let at_home = tempfile::Builder::new()
+        .prefix("gray-rs-tilde-probe-")
+        .suffix(".png")
+        .tempfile_in(&home)
+        .expect("unique probe file in $HOME");
+    // Create-new semantics: a random name that never overwrites user data.
+    // The handle deletes the file on drop, so no manual remove can race it.
+    std::fs::write(at_home.path(), png_bytes()).unwrap();
+    let name = at_home
+        .path()
+        .file_name()
+        .expect("probe has a file name")
+        .to_string_lossy()
+        .into_owned();
+    let out = image_command(&format!("cat ~/{name}"), Path::new("."));
     let out = out.expect("cat ~/probe.png must show the image");
     assert_eq!(out.images.len(), 1);
-    assert!(
-        out.content.contains("gray-rs-tilde-probe.png"),
-        "{}",
-        out.content
-    );
+    assert!(out.content.contains(&name), "{}", out.content);
 }
 
 #[tokio::test]

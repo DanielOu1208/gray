@@ -283,6 +283,15 @@ fn session_key(ctx: &ToolContext) -> String {
 /// the model sees. A leading `~` is the one thing expanded here: the shell
 /// would have done it and nothing else would, and without it `cat ~/shot.png`
 /// streams binary garbage while `cat /home/me/shot.png` shows the image.
+// Cap multi-image claims: 8 paths (the per-turn inline-attach cap) and 20 MiB
+// of aggregate base64 (4x the 5 MiB per-image cap in `crate::images`). Past
+// the path cap the claim is cut to the prefix with a note; past the byte
+// budget intake stops with a note. Either way the valid prefix still returns
+// vision blocks instead of the whole command falling through to a text-only
+// run.
+const MAX_IMAGE_CLAIM_PATHS: usize = 8;
+const MAX_IMAGE_CLAIM_BYTES: usize = 20 * 1024 * 1024;
+
 fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
     use base64::Engine as _;
     let mut parts = command.split_whitespace();
@@ -296,32 +305,74 @@ fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
     if paths.iter().any(|p| shell_meta(p)) {
         return None;
     }
-    let files: Vec<PathBuf> = paths
+    let mut files: Vec<PathBuf> = paths
         .iter()
         .filter_map(|raw| resolve_bare_path(cwd, raw))
         .collect();
     if files.len() != paths.len() {
         return None;
     }
+    let total = files.len();
+    let capped = total > MAX_IMAGE_CLAIM_PATHS;
+    files.truncate(MAX_IMAGE_CLAIM_PATHS);
     let mut shown = Vec::with_capacity(files.len());
     let mut images = Vec::with_capacity(files.len());
+    let mut failed: Vec<String> = Vec::new();
+    let mut bytes: usize = 0;
     for full in files {
         let (mime, data) = if full_res {
-            let bytes = std::fs::read(&full).ok()?;
-            let (mime, out) = crate::images::encode_image_full(&bytes).ok()?;
-            (mime, base64::engine::general_purpose::STANDARD.encode(&out))
+            match std::fs::read(&full)
+                .ok()
+                .and_then(|raw| crate::images::encode_image_full(&raw).ok())
+            {
+                Some(pair) => (
+                    pair.0,
+                    base64::engine::general_purpose::STANDARD.encode(&pair.1),
+                ),
+                None => {
+                    failed.push(format!("{}: unreadable or undecodable", full.display()));
+                    continue;
+                }
+            }
         } else {
-            let shown = crate::view::load(&full).ok()?;
-            (shown.media_type, shown.data)
+            match crate::view::load(&full) {
+                Ok(part) => (part.media_type, part.data),
+                Err(e) => {
+                    failed.push(e.to_string());
+                    continue;
+                }
+            }
         };
+        if !images.is_empty() && bytes + data.len() > MAX_IMAGE_CLAIM_BYTES {
+            failed.push(format!(
+                "{}: skipped past the multi-image byte budget",
+                full.display()
+            ));
+            break;
+        }
+        bytes += data.len();
         shown.push(full.display().to_string());
         images.push(AttachedImage {
             media_type: mime,
             data,
         });
     }
+    if images.is_empty() {
+        // Nothing usable: let the shell report it. Missing-file and
+        // not-an-image errors read better from the shell/CLI than here.
+        return None;
+    }
+    let mut content = format!("Image shown: {}", shown.join(", "));
+    if capped {
+        content.push_str(&format!(
+            " (showing first {MAX_IMAGE_CLAIM_PATHS} of {total} paths)"
+        ));
+    }
+    for f in &failed {
+        content.push_str(&format!("; skipped: {f}"));
+    }
     Some(ToolOutput {
-        content: format!("Image shown: {}", shown.join(", ")),
+        content,
         is_error: false,
         images,
     })

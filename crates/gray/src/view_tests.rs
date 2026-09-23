@@ -57,6 +57,65 @@ fn run_cli_reports_a_missing_file() {
 }
 
 #[test]
+fn kitty_sequence_frames_one_png() {
+    let seq = kitty_sequence("QUJD");
+    assert!(seq.starts_with("\x1b_Ga=T,f=100,m=0;"), "{seq:?}");
+    assert!(seq.contains("QUJD"), "{seq:?}");
+    assert!(seq.ends_with("\x1b\\\n"), "{seq:?}");
+}
+
+#[test]
+fn kitty_sequence_chunks_a_large_payload() {
+    let big = "Q".repeat(5000);
+    let seq = kitty_sequence(&big);
+    // First chunk says more follows, last says it is done.
+    assert!(seq.contains("\x1b_Ga=T,f=100,m=1;"), "{seq:?}");
+    assert!(seq.contains("\x1b_Gm=0;"), "{seq:?}");
+    assert_eq!(seq.matches("\x1b\\").count(), 2, "{seq:?}");
+}
+
+#[test]
+fn kitty_sequence_of_nothing_is_nothing() {
+    assert!(kitty_sequence("").is_empty());
+}
+
+#[test]
+fn terminal_support_reads_known_env() {
+    // One test, sequential cases: env is process-global and tests run in
+    // parallel, so the save/mutate/restore cycle must not span tests.
+    let keep_kitty = std::env::var("KITTY_WINDOW_ID").ok();
+    let keep_wez = std::env::var("WEZTERM_VERSION").ok();
+    let keep_prog = std::env::var("TERM_PROGRAM").ok();
+    unsafe {
+        std::env::remove_var("KITTY_WINDOW_ID");
+        std::env::remove_var("WEZTERM_VERSION");
+        std::env::remove_var("TERM_PROGRAM");
+    }
+    assert!(!terminal_supports_images(), "bare env draws nothing");
+
+    unsafe { std::env::set_var("KITTY_WINDOW_ID", "0") };
+    assert!(terminal_supports_images(), "kitty window id means kitty");
+    unsafe { std::env::remove_var("KITTY_WINDOW_ID") };
+
+    unsafe { std::env::set_var("TERM_PROGRAM", "ghostty") };
+    assert!(terminal_supports_images(), "ghostty speaks kitty graphics");
+    unsafe { std::env::set_var("TERM_PROGRAM", "Apple_Terminal") };
+    assert!(!terminal_supports_images(), "apple terminal does not");
+
+    match keep_kitty {
+        Some(v) => unsafe { std::env::set_var("KITTY_WINDOW_ID", v) },
+        None => unsafe { std::env::remove_var("KITTY_WINDOW_ID") },
+    }
+    match keep_wez {
+        Some(v) => unsafe { std::env::set_var("WEZTERM_VERSION", v) },
+        None => unsafe { std::env::remove_var("WEZTERM_VERSION") },
+    }
+    match keep_prog {
+        Some(v) => unsafe { std::env::set_var("TERM_PROGRAM", v) },
+        None => unsafe { std::env::remove_var("TERM_PROGRAM") },
+    }
+}
+#[test]
 fn run_cli_with_no_paths_is_not_an_error() {
     // The CLI layer requires >=1; the parser is the only guard, so the empty
     // case is a no-op rather than a crash.
