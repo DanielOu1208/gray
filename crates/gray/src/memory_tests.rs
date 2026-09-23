@@ -579,7 +579,7 @@ fn ingest_daily_caps_stop_the_tenth_write_and_the_third_user_write() {
     let text = "Fact. Why: user: \"x\"; falsified: nothing yet";
     for i in 0..INGEST_DAILY_WRITE_CAP {
         store
-            .ingest_set(Scope::Project, &format!("p{i}"), text)
+            .ingest_set(Scope::Project, &format!("p{i}"), &format!("{text} ({i})"))
             .unwrap();
     }
     let err = store
@@ -597,7 +597,7 @@ fn ingest_user_scope_caps_at_two_per_day() {
     let text = "Pref. Why: user: \"x\"; falsified: nothing yet";
     for i in 0..INGEST_DAILY_USER_WRITE_CAP {
         store
-            .ingest_set(Scope::User, &format!("u{i}"), text)
+            .ingest_set(Scope::User, &format!("u{i}"), &format!("{text} ({i})"))
             .unwrap();
     }
     let err = store
@@ -606,4 +606,15 @@ fn ingest_user_scope_caps_at_two_per_day() {
     assert!(err.to_string().contains("user-scope ingest cap"), "{err}");
     // Project writes are unaffected by the user cap.
     assert!(store.ingest_set(Scope::Project, "p", text).is_ok());
+}
+
+#[test]
+fn ingest_set_refuses_a_verbatim_duplicate_under_a_new_key() {
+    let (_dir, store) = setup();
+    let text = "Fact. Why: user: \"x\"; falsified: nothing yet";
+    store.ingest_set(Scope::Project, "a", text).unwrap();
+    let err = store.ingest_set(Scope::Project, "b", text).unwrap_err();
+    assert!(err.to_string().contains("already stored"), "{err}");
+    // One write was spent, not two.
+    assert_eq!(store.entry_count(), 1);
 }

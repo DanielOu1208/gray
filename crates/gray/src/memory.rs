@@ -416,6 +416,10 @@ impl MemoryStore {
                 !entries.contains_key(key),
                 "memory entry '{key}' exists; the daily ingest never overwrites — skip it, or use ingest-edit to record a contradiction"
             );
+            ensure!(
+                !entries.values().any(|old| old == &trimmed),
+                "that text is already stored under another key; the ingest never duplicates — skip it"
+            );
             self.ensure_ingest_budget(scope)?;
             entries.insert(key.to_owned(), trimmed.clone());
             Ok(true)
