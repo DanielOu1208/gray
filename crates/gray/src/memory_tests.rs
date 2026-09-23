@@ -444,3 +444,58 @@ fn the_snapshot_never_carries_trailers() {
     assert!(!durable.contains("<!-- gray:"), "{durable}");
     let _ = dir;
 }
+
+#[test]
+fn first_sentence_cuts_at_period_space() {
+    assert_eq!(first_sentence("One thing. Then another."), "One thing.");
+}
+
+#[test]
+fn first_sentence_ignores_abbreviations_and_decimals() {
+    assert_eq!(
+        first_sentence("Use v1.3, e.g. this. Next."),
+        "Use v1.3, e.g. this."
+    );
+    assert_eq!(
+        first_sentence("Costs 3.5 USD total. Next."),
+        "Costs 3.5 USD total."
+    );
+    assert_eq!(
+        first_sentence("See i.e. this file. Next."),
+        "See i.e. this file."
+    );
+}
+
+#[test]
+fn first_sentence_serves_whole_when_unbounded() {
+    assert_eq!(
+        first_sentence("No terminal period"),
+        "No terminal period"
+    );
+}
+
+#[test]
+fn profile_matches_list_when_every_entry_is_one_sentence() {
+    let (_dir, store) = setup();
+    store.set(Scope::Project, "a", "Short.").unwrap();
+    store.set(Scope::Project, "b", "Also short.").unwrap();
+    assert_eq!(
+        store.profile(Scope::Project).unwrap(),
+        store.list(Scope::Project).unwrap()
+    );
+}
+
+#[test]
+fn snapshot_carries_summaries_by_default_and_full_text_on_request() {
+    let (_dir, store) = setup();
+    store
+        .set(Scope::Project, "long", "First bit. Second bit that is long.")
+        .unwrap();
+    let summary = store
+        .snapshot_with(None, MemoryInjection::Summary)
+        .unwrap();
+    assert!(summary.contains("First bit."));
+    assert!(!summary.contains("Second bit"));
+    let full = store.snapshot_with(None, MemoryInjection::Full).unwrap();
+    assert!(full.contains("Second bit that is long."));
+}

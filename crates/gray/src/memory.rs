@@ -125,6 +125,56 @@ fn warn_on_growth(store: &MemoryStore, scope: Scope, changed: bool) {
     }
 }
 
+/// What lands in the system prompt's memory block. `Summary` injects one
+/// sentence per entry (full text via `gray memory show KEY`); `Full`
+/// restores the pre-2026-09-23 bytes. The snapshot is frozen per durable
+/// session either way, so a mode switch only changes new sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryInjection {
+    #[default]
+    Summary,
+    Full,
+}
+
+impl MemoryInjection {
+    /// Parsed from saved config; unknown values fall back to the default
+    /// rather than failing a user's whole config load.
+    pub fn from_saved(raw: &str) -> Self {
+        if raw.trim().eq_ignore_ascii_case("full") {
+            Self::Full
+        } else {
+            Self::default()
+        }
+    }
+}
+
+/// First sentence of an entry: cut at the first ". " whose preceding token
+/// is at least 2 characters, so "e.g. ", "i.e. " and "3.5 " never end a
+/// sentence. No truncation: an unbounded value is served whole.
+fn first_sentence(text: &str) -> &str {
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(". ") {
+        let dot = from + rel;
+        // The token is the alphanumeric run touching the period, so an
+        // abbreviation's own dot ("e.g.", "3.5") is not part of it.
+        let mut start = dot;
+        while start > 0 {
+            let Some(prev) = text[..start].chars().next_back() else {
+                break;
+            };
+            if !prev.is_alphanumeric() {
+                break;
+            }
+            start -= prev.len_utf8();
+        }
+        if dot - start >= 2 {
+            return &text[..dot + 1];
+        }
+        from = dot + 2;
+    }
+    text
+}
+
 pub struct MemoryStore {
     root: PathBuf,
     project: String,
@@ -186,11 +236,28 @@ impl MemoryStore {
     /// process rebuilding the same session gets identical bytes. Anonymous
     /// headless runs take a fresh snapshot and leave no snapshot file.
     pub fn snapshot(&self, session: Option<&str>) -> anyhow::Result<String> {
+        self.snapshot_with(session, MemoryInjection::default())
+    }
+
+    /// [`snapshot`](Self::snapshot) with an explicit injection mode. The
+    /// frozen-on-disk path, project check and read-back validation are
+    /// identical in both modes; only the rendered text differs.
+    pub fn snapshot_with(
+        &self,
+        session: Option<&str>,
+        mode: MemoryInjection,
+    ) -> anyhow::Result<String> {
         let capture = || -> anyhow::Result<String> {
+            let render = |scope| -> anyhow::Result<String> {
+                match mode {
+                    MemoryInjection::Summary => self.profile(scope),
+                    MemoryInjection::Full => self.list(scope),
+                }
+            };
             Ok(serde_json::to_string(&serde_json::json!({
                 "project": self.project,
-                "user": self.list(Scope::User)?,
-                "decisions": self.list(Scope::Project)?,
+                "user": render(Scope::User)?,
+                "decisions": render(Scope::Project)?,
             }))?)
         };
         let Some(id) = session else {
@@ -232,6 +299,19 @@ impl MemoryStore {
     /// reaches the snapshot and the model.
     pub fn list(&self, scope: Scope) -> anyhow::Result<String> {
         Ok(render_served(&self.read_store(scope)?.entries))
+    }
+
+    /// Served text reduced to each entry's first sentence. This is what the
+    /// system prompt injects by default; `list` remains the full text behind
+    /// `gray memory list` / `gray memory show KEY`.
+    pub fn profile(&self, scope: Scope) -> anyhow::Result<String> {
+        let entries = self
+            .read_store(scope)?
+            .entries
+            .iter()
+            .map(|(key, text)| (key.clone(), first_sentence(text).to_owned()))
+            .collect();
+        Ok(render_served(&entries))
     }
 
     /// CLI view with provenance, so a human can see how old each entry is and
