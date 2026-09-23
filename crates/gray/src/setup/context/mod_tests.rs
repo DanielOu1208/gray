@@ -315,6 +315,14 @@ fn breakdown_free_and_grid_sum_to_window() {
 
 #[test]
 fn step_models_are_never_offered_a_dishonest_off() {
+    // The reasoning cache is process-global, so this test primes the
+    // non-reasoning fixture itself rather than trusting test order.
+    let v: serde_json::Value = serde_json::json!({
+        "prov": {"models": {
+            "test-reason-plain": {"reasoning": false, "limit": {"context": 32000}},
+        }},
+    });
+    parse_models_dev_json(&v);
     // StepFun ignores `thinking: disabled` (measured: 1088 reasoning deltas
     // still streamed at effort=off), so the picker must not claim "No
     // reasoning" for it.
@@ -338,4 +346,13 @@ fn step_models_are_never_offered_a_dishonest_off() {
         supported_thinking_levels("prov/test-reason-plain"),
         vec![("off", "No reasoning")]
     );
+    // ...and the step family stays truthful even when the provider's own
+    // /models says reasoning:false (StepFun's does — cached at runtime).
+    super::cache_model_reasoning("step-5-preview", false);
+    assert_eq!(model_supports_reasoning("step-5-preview"), Some(false));
+    let step: Vec<&str> = supported_thinking_levels("step-5-preview")
+        .iter()
+        .map(|(l, _)| *l)
+        .collect();
+    assert_eq!(step, vec!["low", "medium", "high", "max"]);
 }

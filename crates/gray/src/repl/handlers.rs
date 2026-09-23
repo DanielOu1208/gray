@@ -743,6 +743,24 @@ pub(crate) async fn handle_thinking(
         println!("thinking effort: {cur} — levels: {levels}; /thinking <level> to set");
         return;
     }
+    // One option is not a picker. A model that only accepts `off` (no
+    // reasoning at all) gets the fact as a line, not a modal whose single
+    // row pretends a choice exists.
+    let model_name = config.model.clone().unwrap_or_default();
+    let levels = crate::setup::supported_thinking_levels(&model_name);
+    if levels.len() <= 1 {
+        let msg = format!("{model_name} has no reasoning levels — nothing to pick");
+        if let Some(shared) = tui {
+            let mut t = shared.lock().expect("tui lock");
+            t.push_dim(msg);
+            t.ensure_gap(1);
+            let _ = t.draw();
+        } else {
+            println!("{msg}");
+        }
+        return;
+    }
+
     let has_explicit_level = config.thinking_effort.is_some();
     let bg = tui.map(|shared| shared.lock().expect("tui lock").snapshot());
     let result = with_modal(tui, crate::setup::run_effort_menu(config, bg.as_ref())).await;
