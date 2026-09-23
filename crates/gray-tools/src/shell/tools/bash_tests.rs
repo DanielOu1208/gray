@@ -496,8 +496,7 @@ async fn gray_view_caps_the_claim_at_eight_paths() {
             .collect::<Vec<_>>()
             .join(" ")
     );
-    let out =
-        image_command(&cmd, dir.path()).expect("the capped prefix must still claim");
+    let out = image_command(&cmd, dir.path()).expect("the capped prefix must still claim");
     assert!(!out.is_error, "{}", out.content);
     assert_eq!(out.images.len(), 8, "{}", out.content);
     assert!(
