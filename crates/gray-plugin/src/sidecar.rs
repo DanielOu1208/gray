@@ -178,7 +178,13 @@ pub struct SidecarPlugin {
 /// One short retry turns a spurious "text file busy" into a non-event.
 /// Measured on this box: a test that exec'd a just-written script failed
 /// roughly 1 run in 5-20, with no process holding the file at the time.
-fn spawn_retrying_etxtbsy(spawn: impl Fn() -> std::io::Result<Child>) -> std::io::Result<Child> {
+/// `FnMut`, not `Fn`: the Windows branch configures a `Command` in place
+/// (`.stdin()` takes `&mut self`), and a plain `Fn` closure cannot borrow
+/// its capture mutably. That branch is `#[cfg(windows)]`, so only the
+/// Windows CI job ever compiles it.
+fn spawn_retrying_etxtbsy(
+    mut spawn: impl FnMut() -> std::io::Result<Child>,
+) -> std::io::Result<Child> {
     match spawn() {
         Err(e) if e.raw_os_error() == Some(26) => {
             std::thread::sleep(std::time::Duration::from_millis(25));
