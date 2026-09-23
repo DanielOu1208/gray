@@ -282,7 +282,10 @@ fn session_key(ctx: &ToolContext) -> String {
 /// to a normal run — as does a missing file, so the shell's own error is what
 /// the model sees. A leading `~` is the one thing expanded here: the shell
 /// would have done it and nothing else would, and without it `cat ~/shot.png`
-/// streams binary garbage while `cat /home/me/shot.png` shows the image.
+/// streams binary garbage while `cat /home/me/shot.png` shows the image. A
+/// missing, undecodable or non-image path is skipped with a note and the valid
+/// ones still ship; when nothing is usable the claim is dropped and the shell
+/// gives the error, which reads better than a note attached to nothing.
 // Cap multi-image claims: 8 paths (the per-turn inline-attach cap) and 20 MiB
 // of aggregate base64 (4x the 5 MiB per-image cap in `crate::images`). Past
 // the path cap the claim is cut to the prefix with a note; past the byte
@@ -305,19 +308,24 @@ fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
     if paths.iter().any(|p| shell_meta(p)) {
         return None;
     }
-    let mut files: Vec<PathBuf> = paths
-        .iter()
-        .filter_map(|raw| resolve_bare_path(cwd, raw))
-        .collect();
-    if files.len() != paths.len() {
-        return None;
+    // A path that is not there is skipped like a decode failure, not fatal:
+    // the common case is one typo among several paths, and sinking the valid
+    // ones with it is the whole complaint this claim shape exists to avoid.
+    // A lone bad path still yields nothing usable, and the `images.is_empty()`
+    // bail below hands it to the shell, which reports the path itself.
+    let mut files: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    let mut failed: Vec<String> = Vec::new();
+    for raw in paths {
+        match resolve_bare_path(cwd, raw) {
+            Some(full) => files.push(full),
+            None => failed.push(format!("{raw}: no such file")),
+        }
     }
     let total = files.len();
     let capped = total > MAX_IMAGE_CLAIM_PATHS;
     files.truncate(MAX_IMAGE_CLAIM_PATHS);
     let mut shown = Vec::with_capacity(files.len());
     let mut images = Vec::with_capacity(files.len());
-    let mut failed: Vec<String> = Vec::new();
     let mut bytes: usize = 0;
     for full in files {
         let (mime, data) = if full_res {
@@ -358,8 +366,8 @@ fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
         });
     }
     if images.is_empty() {
-        // Nothing usable: let the shell report it. Missing-file and
-        // not-an-image errors read better from the shell/CLI than here.
+        // Every path failed: drop the claim so the shell (or the CLI it runs)
+        // reports the errors directly, which beats a note attached to no image.
         return None;
     }
     let mut content = format!("Image shown: {}", shown.join(", "));

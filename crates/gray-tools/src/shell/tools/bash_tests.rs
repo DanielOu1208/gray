@@ -469,6 +469,33 @@ async fn gray_view_refuses_a_text_file_rather_than_pixel_soup() {
 }
 
 #[tokio::test]
+async fn gray_view_skips_a_missing_path_and_keeps_the_rest() {
+    // One typo among several paths must not sink the good images: that is the
+    // complaint the claim shape exists to avoid. A lone missing path still
+    // falls through, so the shell gives the error.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("good.png"), png_bytes()).unwrap();
+    let out = image_command("gray view good.png typo.png", dir.path())
+        .expect("a missing path must not drop the valid one");
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(
+        out.images.len(),
+        1,
+        "only the path that exists: {}",
+        out.content
+    );
+    assert!(out.content.contains("good.png"), "{}", out.content);
+    assert!(
+        out.content.contains("typo.png: no such file"),
+        "the skipped path is named: {}",
+        out.content
+    );
+    // Alone, a missing path is nothing usable, so the shell reports it.
+    assert!(image_command("gray view typo.png", dir.path()).is_none());
+    assert!(image_command("cat typo.png", dir.path()).is_none());
+}
+
+#[tokio::test]
 async fn gray_view_keeps_valid_images_when_one_path_fails() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("good.png"), png_bytes()).unwrap();
