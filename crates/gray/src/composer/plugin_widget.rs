@@ -196,7 +196,7 @@ fi
 "#;
         std::fs::write(&exe, program).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        crate::plugin_cli::register_native(home.path(), "sample", &exe)
+        crate::plugin_cli::register_native(home.path(), "sample", &exe, false)
             .await
             .unwrap();
         // Injected slot argv must never be executed; only the registered owner is.

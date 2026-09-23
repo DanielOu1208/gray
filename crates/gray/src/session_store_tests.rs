@@ -735,3 +735,168 @@ async fn a_torn_header_is_left_for_its_writer() {
         .collect();
     assert_eq!(quarantined.len(), 1, "{quarantined:?}");
 }
+
+// ── listing reads the two ends, not the whole file ──
+
+/// Write a session file directly: big enough that the head and tail
+/// cannot both fit in one `SUMMARY_END_BYTES` slice, with a user turn at
+/// each end and a wall of assistant text between. Built as bytes rather
+/// than 4,000 locked appends — the reader is what is under test, not the
+/// writer.
+fn write_big_session(dir: &std::path::Path, id: &str, tail_turn: &str) {
+    let header = serde_json::json!({
+        "version": 1, "id": id, "timestamp": 1_000u64, "cwd": "/tmp", "model": "test",
+    });
+    let entry = |role: &str, text: String, ts: u64| {
+        serde_json::json!({
+            "compaction_boundary": false,
+            "entry_id": ts,
+            "parent_id": null,
+            "timestamp": ts,
+            "message": {"role": role, "content": [{"type": "text", "text": text}]},
+        })
+        .to_string()
+    };
+    let mut out = String::new();
+    out.push_str(&header.to_string());
+    out.push('\n');
+    out.push_str(&entry("user", "the opening question".to_string(), 1_001));
+    out.push('\n');
+    for i in 0..4_000 {
+        out.push_str(&entry(
+            "assistant",
+            format!("filler {i} {}", "x".repeat(200)),
+            2_000 + i as u64,
+        ));
+        out.push('\n');
+    }
+    out.push_str(&entry("user", tail_turn.to_string(), 9_000));
+    out.push('\n');
+    std::fs::write(dir.join(format!("{id}.jsonl")), out).unwrap();
+}
+
+#[tokio::test]
+async fn list_summarizes_a_large_session_from_its_two_ends() {
+    let dir = tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path());
+    write_big_session(dir.path(), "big1", "the latest question");
+    let size = std::fs::metadata(dir.path().join("big1.jsonl"))
+        .unwrap()
+        .len();
+    assert!(
+        size > SUMMARY_END_BYTES * 2,
+        "fixture must exceed both slices: {size}"
+    );
+
+    let listed = store.list().await;
+    assert_eq!(listed.len(), 1);
+    let s = &listed[0];
+    assert_eq!(s.id, SessionId::new("big1"));
+    assert_eq!(s.started_at, 1_000);
+    assert_eq!(
+        s.first_user_text.as_deref(),
+        Some("the opening question"),
+        "the first turn lives in the head"
+    );
+    assert_eq!(
+        s.last_user_text.as_deref(),
+        Some("the latest question"),
+        "the newest turn lives in the tail"
+    );
+    assert!(
+        s.last_message_at >= s.started_at,
+        "activity time comes from the tail, not the header"
+    );
+}
+
+#[tokio::test]
+async fn listing_order_is_newest_activity_first() {
+    let dir = tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path());
+    // Started oldest-first, but the middle session is touched last: the
+    // row's age column must come out monotonic.
+    for (id, started) in [("old", 100_u64), ("mid", 200), ("new", 300)] {
+        let sid = SessionId::new(id);
+        store
+            .create(SessionMeta::new(sid.clone(), started, "/tmp", "test"))
+            .await
+            .unwrap();
+        store.append(&sid, &Message::user(id)).await.unwrap();
+    }
+    let listed = store.list().await;
+    let ages: Vec<u64> = listed.iter().map(|s| s.last_message_at).collect();
+    let mut descending = ages.clone();
+    descending.sort_by(|a, b| b.cmp(a));
+    assert_eq!(ages, descending, "list must be ordered by the age it shows");
+}
+
+#[tokio::test]
+async fn a_small_session_is_still_summarized_exactly() {
+    let dir = tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path());
+    let sid = SessionId::new("small");
+    store
+        .create(SessionMeta::new(sid.clone(), 7, "/tmp", "test"))
+        .await
+        .unwrap();
+    store
+        .append(&sid, &Message::user("only question"))
+        .await
+        .unwrap();
+    store
+        .append(&sid, &Message::assistant("only answer"))
+        .await
+        .unwrap();
+    let listed = store.list().await;
+    assert_eq!(listed[0].first_user_text.as_deref(), Some("only question"));
+    assert_eq!(listed[0].last_user_text.as_deref(), Some("only question"));
+}
+
+#[tokio::test]
+async fn a_compaction_boundary_in_the_tail_resets_the_preview() {
+    let dir = tempdir().unwrap();
+    write_big_session(dir.path(), "compacted", "after compaction");
+    // A boundary just before the last turn: what the head remembered
+    // before it is superseded.
+    let path = dir.path().join("compacted.jsonl");
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    let boundary = serde_json::json!({
+        "compaction_boundary": true,
+        "entry_id": 8_999,
+        "parent_id": null,
+        "timestamp": 8_999,
+        "message": {"role": "system", "content": [{"type": "text", "text": "compaction boundary"}]},
+    })
+    .to_string();
+    let last_two = text.rfind('\n').unwrap();
+    let cut = text[..last_two].rfind('\n').unwrap() + 1;
+    text.insert_str(cut, &format!("{boundary}\n"));
+    std::fs::write(&path, text).unwrap();
+
+    let store = JsonlSessionStore::new(dir.path());
+    let listed = store.list().await;
+    assert_eq!(
+        listed[0].last_user_text.as_deref(),
+        Some("after compaction"),
+        "the tail's boundary supersedes what the head remembered"
+    );
+}
+
+#[tokio::test]
+async fn a_session_being_written_is_not_quarantined_by_the_tail_read() {
+    // A creator streams the header into a create_new file: the first line
+    // has no newline yet. Listing must skip it, never rename it away.
+    let dir = tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path());
+    std::fs::write(
+        dir.path().join("halfwritten.jsonl"),
+        br#"{"id":"halfwritten","timestamp":1,"cwd":"/tmp","model":"test"}"#,
+    )
+    .unwrap();
+    let listed = store.list().await;
+    assert!(listed.is_empty(), "{listed:?}");
+    assert!(
+        dir.path().join("halfwritten.jsonl").exists(),
+        "a mid-write session must survive listing"
+    );
+}

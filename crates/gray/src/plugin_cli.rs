@@ -263,19 +263,19 @@ fn metadata(home: &Path, name: &str) -> anyhow::Result<serde_json::Value> {
 /// its own prebuilt-binary path; every other entry is a Rust crate built from
 /// source. A file lock serializes registry updates; temp dirs roll back
 /// failed installs.
-async fn install_catalog(home: &Path, name: &str) -> anyhow::Result<()> {
+async fn install_catalog(home: &Path, name: &str, force: bool) -> anyhow::Result<()> {
     validate_name(name)?;
     if name == "background" {
         return native::install(home).await;
     }
-    install_cargo(home, catalog(name)?).await
+    install_cargo(home, catalog(name)?, force).await
 }
 
 /// Build a Rust plugin from its pinned source and register it as a sidecar.
 /// No interpreter is involved at any step: `cargo build --release` produces
 /// the binary gray spawns, so a first-party plugin install needs neither
 /// Python nor a package index.
-async fn install_cargo(home: &Path, entry: &Catalog) -> anyhow::Result<()> {
+async fn install_cargo(home: &Path, entry: &Catalog, force: bool) -> anyhow::Result<()> {
     let name = entry.name;
     let (url, pin) = parse_git_source(entry.source)?;
     let root = home.join("plugins");
@@ -301,6 +301,9 @@ async fn install_cargo(home: &Path, entry: &Catalog) -> anyhow::Result<()> {
     );
     let (_repo, repo_dir) = gray_pkg::sources::clone_into_tmp(url, &[], false)?;
     gray_pkg::sources::checkout_pinned_commit(&repo_dir, name, pin)?;
+    // Scan the exact source this pin resolves to, before it is compiled:
+    // building unvetted code is a bigger commitment than reading it.
+    scan_or_block(&repo_dir, force)?;
     let built = build_plugin(&repo_dir, entry.bin)?;
     // Prove the artifact speaks the sidecar wire while it is still inside the
     // build tempdir: a plugin that fails this check leaves nothing behind.
@@ -313,6 +316,7 @@ async fn install_cargo(home: &Path, entry: &Catalog) -> anyhow::Result<()> {
         "built plugin reports name '{}', expected '{name}'",
         manifest.name
     );
+    let (granted, capabilities_hash) = consent_capabilities(name, &manifest.capabilities);
     // Publish under <home>/plugins/<name>/ so the recorded argv stays valid
     // once the build tempdir is dropped.
     let dest = root.join(name);
@@ -338,9 +342,18 @@ async fn install_cargo(home: &Path, entry: &Catalog) -> anyhow::Result<()> {
             installed_at: chrono::Utc::now().to_rfc3339(),
             scope: "user".into(),
             enabled: true,
+            granted_capabilities: granted.clone(),
+            capabilities_hash,
         },
     );
     sidecars.save(&gray_plugin::lock::lock_path(home))?;
+    // Cache the manifest beside the install: same file `register_native`
+    // writes, so `plugin capabilities` and command lookup work for
+    // catalog plugins too.
+    let mut cached = tempfile::NamedTempFile::new_in(&root)?;
+    use std::io::Write as _;
+    writeln!(cached, "{}", serde_json::to_string_pretty(&manifest)?)?;
+    cached.persist(root.join(format!("{name}-manifest.json")))?;
     println!("Installed '{name}'. Next: gray {name} setup");
     Ok(())
 }
@@ -385,25 +398,211 @@ fn build_plugin(repo_dir: &Path, bin: &str) -> anyhow::Result<PathBuf> {
 
 /// Register a separately built native plugin. No hardcoded plugin catalog.
 /// Download/version resolution remains the existing `gray plugin install` API.
-pub async fn install(home: &Path, name: &str) -> anyhow::Result<()> {
+pub async fn install(home: &Path, name: &str, force: bool) -> anyhow::Result<()> {
     validate_name(name)?;
     if let Some(path) = std::env::var_os("GRAY_PLUGIN_PATH") {
-        return register_native(home, name, Path::new(&path)).await;
+        return register_native(home, name, Path::new(&path), force).await;
     }
     if matches!(name, "background" | "discord") {
-        return install_catalog(home, name).await;
+        return install_catalog(home, name, force).await;
     }
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
             let path = dir.join(format!("gray-{name}{}", std::env::consts::EXE_SUFFIX));
             if path.is_file() {
-                return register_native(home, name, &path).await;
+                return register_native(home, name, &path, force).await;
             }
         }
     }
     anyhow::bail!(
         "Unknown plugin '{name}'. Catalog: background, discord. For a local native plugin, put gray-{name} on PATH or set GRAY_PLUGIN_PATH to its executable"
     )
+}
+
+/// Run the install-time security scan and act on its verdict.
+///
+/// `dangerous` blocks with no override: the operator may be impatient,
+/// but a reverse shell is not a preference. `caution` needs either an
+/// interactive yes or `--force`; a session that cannot ask refuses
+/// instead of installing code nobody reviewed.
+fn scan_or_block(root: &Path, force: bool) -> anyhow::Result<()> {
+    use gray_plugin::scan::{Verdict, scan_tree};
+    let report = scan_tree(root)?;
+    match report.verdict() {
+        Verdict::Safe => {
+            println!(
+                "  plugin scan: {} — {}",
+                report.summary(),
+                Verdict::Safe.label()
+            );
+            Ok(())
+        }
+        Verdict::Caution => {
+            println!("  plugin scan: caution — {}", report.summary());
+            print!("{}", report.render());
+            if force {
+                println!("  continuing (--force)");
+                return Ok(());
+            }
+            if !interactive() {
+                anyhow::bail!(
+                    "plugin scan reported caution ({}) and this session cannot ask; \
+                     re-run interactively, or pass --force to accept the findings",
+                    report.summary()
+                );
+            }
+            let granted = confirm("Review the findings above. Install anyway? [y/N] ")?;
+            anyhow::ensure!(granted, "install cancelled after a caution scan");
+            Ok(())
+        }
+        Verdict::Dangerous => {
+            let critical: Vec<String> = report
+                .criticals()
+                .iter()
+                .map(|f| format!("{} ({}:{})", f.rule, f.path, f.line))
+                .collect();
+            print!("{}", report.render());
+            anyhow::bail!(
+                "plugin scan blocked the install: {} critical of {} findings ({}); \
+                 --force does not override a dangerous verdict",
+                critical.len(),
+                report.findings.len(),
+                critical.join(", ")
+            );
+        }
+    }
+}
+
+/// Whether this process can ask the operator a question.
+fn interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+/// One yes/no question on the terminal. `false` when it cannot be answered.
+fn confirm(prompt: &str) -> anyhow::Result<bool> {
+    use std::io::Write as _;
+    print!("{prompt}");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line)? == 0 {
+        return Ok(false);
+    }
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
+/// Show what a plugin declares, ask for a grant, and return
+/// `(granted, consent hash)`.
+///
+/// Nothing declared → no hash and no grant (an undeclared capability is
+/// not a capability). A session that cannot prompt grants nothing but
+/// still records the hash, so the plugin runs ungranted rather than
+/// grandfathered, and `gray plugin capabilities <name>` can grant later.
+fn consent_capabilities(name: &str, declared: &[String]) -> (Vec<String>, Option<String>) {
+    if declared.is_empty() {
+        return (Vec::new(), None);
+    }
+    let hash = gray_plugin::capabilities::consent_hash(declared);
+    println!("'{name}' declares {} capability(ies):", declared.len());
+    for id in declared {
+        let what = gray_plugin::capabilities::spec(id)
+            .map(|s| s.description)
+            .unwrap_or("(unknown to this build)");
+        println!("  - {id}: {what}");
+    }
+    if !interactive() {
+        println!(
+            "  not granted (non-interactive session). Grant later: gray plugin capabilities {name}"
+        );
+        return (Vec::new(), Some(hash));
+    }
+    let granted = confirm("Grant these to this plugin? [y/N] ").unwrap_or(false);
+    if granted {
+        println!("  granted");
+        (declared.to_vec(), Some(hash))
+    } else {
+        println!("  not granted; the plugin will run without them");
+        (Vec::new(), Some(hash))
+    }
+}
+
+/// `gray plugin capabilities [name]` — declared vs granted, per plugin,
+/// with the exact command that grants. Reads the cached manifest every
+/// install writes, so a plugin that never booted still lists correctly.
+pub fn print_capabilities(only: Option<&str>) -> anyhow::Result<()> {
+    let home = home()?;
+    let sidecars = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(&home))?;
+    let rows = list_managed(&home)?;
+    let mut shown = 0usize;
+    for row in &rows {
+        if let Some(want) = only
+            && row.name != want
+        {
+            continue;
+        }
+        shown += 1;
+        let entry = sidecars.plugins.get(&row.name);
+        let declared = entry
+            .and_then(|_| metadata(&home, &row.name).ok())
+            .and_then(|m| {
+                m["capabilities"].as_array().map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default();
+        let (granted, hash) = match entry {
+            Some(e) => (
+                gray_plugin::capabilities::granted_for(e, &declared),
+                e.capabilities_hash.clone(),
+            ),
+            None => (Default::default(), None),
+        };
+        println!(
+            "{} ({}, {})",
+            row.name, row.entry.ecosystem, row.entry.version
+        );
+        if declared.is_empty() {
+            println!("  declares: none");
+        } else {
+            for id in &declared {
+                let mark = if granted.contains(id) {
+                    "granted"
+                } else {
+                    "not granted"
+                };
+                println!("  - {id}: {mark}");
+            }
+        }
+        match hash {
+            None if !declared.is_empty() => println!(
+                "  consent: never asked (grandfathered). Grant: gray plugin capabilities {} --all",
+                row.name
+            ),
+            Some(h) => {
+                let drift = gray_plugin::capabilities::needs_reconsent(
+                    entry.expect("hashed entry"),
+                    &declared,
+                );
+                if drift {
+                    println!(
+                        "  consent: hash {h} no longer matches the manifest — re-run `gray plugin update {}`",
+                        row.name
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    if shown == 0 {
+        if let Some(want) = only {
+            anyhow::bail!("no plugin named '{want}'");
+        }
+        println!("no plugins installed");
+    }
+    Ok(())
 }
 
 /// One installed plugin in the merged manager view (`lock.json` sidecars +
@@ -651,7 +850,12 @@ pub fn command_argv(home: &Path, name: &str) -> anyhow::Result<Vec<String>> {
 
 /// Register a user-selected native executable; registration runs its manifest.
 /// The executable and widgets remain owned by the separate plugin repository.
-pub async fn register_native(home: &Path, name: &str, binary: &Path) -> anyhow::Result<()> {
+pub async fn register_native(
+    home: &Path,
+    name: &str,
+    binary: &Path,
+    force: bool,
+) -> anyhow::Result<()> {
     validate_name(name)?;
     let binary = std::fs::canonicalize(binary)?;
     let mut command = tokio::process::Command::new(&binary);
@@ -662,6 +866,20 @@ pub async fn register_native(home: &Path, name: &str, binary: &Path) -> anyhow::
         manifest["name"].as_str() == Some(name),
         "manifest name does not match requested plugin"
     );
+    // A directory plugin is source we can read; a bare binary is not, so
+    // scanning (and every verdict about its code) is skipped there.
+    if binary.is_dir() {
+        scan_or_block(binary.as_ref(), force)?;
+    }
+    let declared = manifest["capabilities"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let (granted, capabilities_hash) = consent_capabilities(name, &declared);
     std::fs::create_dir_all(home.join("plugins"))?;
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -694,6 +912,8 @@ pub async fn register_native(home: &Path, name: &str, binary: &Path) -> anyhow::
             installed_at: chrono::Utc::now().to_rfc3339(),
             scope: "user".into(),
             enabled: true,
+            granted_capabilities: granted.clone(),
+            capabilities_hash,
         },
     );
     registry.save(&registry_path(home))?;
@@ -848,6 +1068,7 @@ mod tests {
             installed_at: "2026-09-18T00:00:00Z".into(),
             scope: "user".into(),
             enabled,
+            ..Default::default()
         }
     }
 
@@ -884,6 +1105,7 @@ mod tests {
                 // Disabled here: `register_native` mirrors native entries
                 // into `lock.json`, and `enabled()` reads that overlay.
                 enabled: false,
+                ..Default::default()
             },
         );
         sidecars.plugins.insert(
@@ -898,6 +1120,7 @@ mod tests {
                 installed_at: String::new(),
                 scope: "user".into(),
                 enabled: false,
+                ..Default::default()
             },
         );
         sidecars.save(&gray_plugin::lock::lock_path(home)).unwrap();
@@ -964,6 +1187,7 @@ mod tests {
                 installed_at: String::new(),
                 scope: "user".into(),
                 enabled: true,
+                ..Default::default()
             },
         );
         sidecars.save(&gray_plugin::lock::lock_path(home)).unwrap();
@@ -992,6 +1216,7 @@ mod tests {
                 installed_at: String::new(),
                 scope: "user".into(),
                 enabled: true,
+                ..Default::default()
             },
         );
         sidecars.save(&gray_plugin::lock::lock_path(home)).unwrap();

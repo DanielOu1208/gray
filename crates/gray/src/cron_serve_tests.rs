@@ -256,6 +256,7 @@ async fn origin_delivery_appends_to_session_and_keeps_file_on_failure() {
             platform: "local".to_string(),
             chat: chat.to_string(),
             thread: None,
+            route: None,
         }),
         workdir: None,
         fire_claim: None,
@@ -303,17 +304,19 @@ async fn origin_delivery_appends_to_session_and_keeps_file_on_failure() {
         session_text.contains("\"role\":\"user\""),
         "mirror must be a USER turn, never assistant"
     );
-    // Failure path: unknown session -> Err (caller records DeliveryFailed),
-    // file still saved.
-    let err = deliver
+    // No session for the chat id: the mirror is skipped, NOT a delivery
+    // failure. A host whose chat id has no session yet (a job added in a
+    // conversation's first turn) must still receive the message; only the
+    // in-context mirror is lost.
+    let saved = deliver
         .deliver(
             &mk_job("j-bad", "no-such-session"),
             1_700_000_002,
             "kept output",
         )
         .await
-        .unwrap_err();
-    assert!(err.contains("no-such-session"), "unexpected: {err}");
+        .expect("a missing session must not swallow the delivery");
+    assert!(saved.to_chat, "the route still gets the message");
     let kept = std::fs::read_to_string(
         home.path()
             .join("cron")
@@ -447,4 +450,157 @@ async fn tick_fires_nothing_while_the_switch_is_off_but_keeps_ticking() {
     .await
     .unwrap();
     assert_eq!(rep.fired, 1);
+}
+
+// ── chat delivery: the line a platform host routes ──
+
+fn delivered() -> DeliveredFire {
+    DeliveredFire {
+        id: "job1".into(),
+        name: "daily check".into(),
+        path: std::path::PathBuf::from("/tmp/out.md"),
+        excerpt: "all clear".into(),
+        to_chat: true,
+    }
+}
+
+#[test]
+fn delivery_json_carries_the_route_and_the_hermes_frame() {
+    let origin = crate::cron::store::Origin {
+        platform: "discord".into(),
+        chat: "chat:one".into(),
+        thread: None,
+        route: Some("1234567890".into()),
+    };
+    let v: serde_json::Value = serde_json::from_str(&crate::cron_serve::delivery_json(
+        &delivered(),
+        Some(&origin),
+    ))
+    .unwrap();
+    assert_eq!(v["type"], "cron_delivery");
+    assert_eq!(v["job_id"], "job1");
+    assert_eq!(v["platform"], "discord");
+    assert_eq!(v["chat"], "chat:one");
+    assert_eq!(v["route"], "1234567890");
+    // The frame is Hermes' byte-exact wrapper, rendered by core: the
+    // platform carries bytes, it does not re-render the job.
+    let text = v["text"].as_str().unwrap();
+    assert!(text.starts_with("Cronjob Response: daily check\n(job_id: job1)\n"));
+    assert!(text.contains("all clear"));
+    assert!(text.contains("Full output: /tmp/out.md"));
+}
+
+#[test]
+fn delivery_json_without_an_origin_still_renders() {
+    let v: serde_json::Value =
+        serde_json::from_str(&crate::cron_serve::delivery_json(&delivered(), None)).unwrap();
+    assert_eq!(v["route"], serde_json::Value::Null);
+    assert!(v["text"].as_str().unwrap().contains("Cronjob Response:"));
+}
+
+#[tokio::test]
+async fn a_platform_chat_id_gets_its_own_transcript() {
+    // A host passes the real session id when it knows one (so a reply
+    // continues in context); otherwise the chat id names the transcript.
+    // Either way the delivery is a chat delivery, never local-only.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().to_path_buf();
+    let store_dir = home.join("sessions");
+    {
+        use crate::session_store::{JsonlSessionStore, SessionId, SessionMeta};
+        JsonlSessionStore::new(store_dir.clone())
+            .create(SessionMeta::new(
+                SessionId::new("4f3c2b1a9d8e7f6a5b4c3d2e1f0a9b8c"),
+                1_700_000_000_000,
+                tmp.path(),
+                "test",
+            ))
+            .await
+            .unwrap();
+    }
+    let job = crate::cron::CronJob {
+        id: "job1".into(),
+        name: "nightly".into(),
+        prompt: "p".into(),
+        schedule: crate::cron::Schedule::Interval { secs: 3600 },
+        enabled: true,
+        state: Default::default(),
+        created_at: 1,
+        next_run_at: Some(1),
+        last_run_at: None,
+        last_status: None,
+        last_error: None,
+        last_delivery_error: None,
+        deliver: crate::cron::Deliver::Origin,
+        origin: Some(crate::cron::store::Origin {
+            platform: "discord".into(),
+            // A host passes a session-safe id: the live session uuid when it
+            // knows one, else its conversation key. Anything the session
+            // store would reject cannot be mirrored.
+            chat: "4f3c2b1a9d8e7f6a5b4c3d2e1f0a9b8c".into(),
+            thread: None,
+            route: Some("42".into()),
+        }),
+        workdir: None,
+        fire_claim: None,
+        skills: vec![],
+        script: None,
+    };
+    let deliver = SaveLocalDeliver { home: home.clone() };
+    let saved = deliver.deliver(&job, 1, "hello").await.unwrap();
+    assert!(saved.to_chat, "a routed delivery is still a chat delivery");
+    let transcript =
+        std::fs::read_to_string(store_dir.join("4f3c2b1a9d8e7f6a5b4c3d2e1f0a9b8c.jsonl")).unwrap();
+    assert!(
+        transcript.contains("[Cron delivery: nightly]"),
+        "the mirrored turn is what makes a reply continue in context"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_origin_session_still_delivers_to_the_route() {
+    // A job added in a conversation's first turn: the host has a chat id
+    // but no session for it yet. The mirror is best-effort context; losing
+    // it must not swallow the delivery the platform is waiting for.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().to_path_buf();
+    let job = crate::cron::CronJob {
+        id: "job1".into(),
+        name: "nightly".into(),
+        prompt: "p".into(),
+        schedule: crate::cron::Schedule::Interval { secs: 3600 },
+        enabled: true,
+        state: Default::default(),
+        created_at: 1,
+        next_run_at: Some(1),
+        last_run_at: None,
+        last_status: None,
+        last_error: None,
+        last_delivery_error: None,
+        deliver: crate::cron::Deliver::Origin,
+        origin: Some(crate::cron::store::Origin {
+            platform: "discord".into(),
+            chat: "4f3c2b1a9d8e7f6a".into(),
+            thread: None,
+            route: Some("1234567890".into()),
+        }),
+        workdir: None,
+        fire_claim: None,
+        skills: vec![],
+        script: None,
+    };
+    let deliver = SaveLocalDeliver { home: home.clone() };
+    let saved = deliver
+        .deliver(&job, 1, "the deploy is green")
+        .await
+        .expect("a missing session is not a delivery failure");
+    assert!(saved.to_chat);
+    assert!(saved.excerpt.contains("the deploy is green"));
+    // The local transcript of the run still exists either way.
+    let out = home.join("cron").join("output").join("job1").join("1.md");
+    assert!(
+        std::fs::read_to_string(&out)
+            .unwrap()
+            .contains("the deploy is green")
+    );
 }

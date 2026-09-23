@@ -362,12 +362,16 @@ done
 "#,
         log.display()
     );
-    std::fs::write(&script, body).unwrap();
+    // Write-then-rename: nothing ever holds the executed path open, so
+    // the spawn cannot race a writer (ETXTBSY).
+    let staging = dir.join("caller.sh.new");
+    std::fs::write(&staging, body).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    std::fs::rename(&staging, &script).unwrap();
     let p = SidecarPlugin::spawn(vec![script.to_string_lossy().to_string()])
         .await
         .unwrap();
@@ -480,6 +484,92 @@ async fn pre_v1_sidecar_never_receives_shutdown_line() {
 }
 
 #[tokio::test]
+async fn an_ungranted_host_call_is_refused_with_the_grant_command() {
+    use gray_plugin::capabilities::capability_for_host_method;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::SeqCst);
+    // Unique per attempt, not per process: a stale directory from an
+    // earlier run could still hold the script open for writing, and
+    // execve on a file another process is writing fails with ETXTBSY.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("gray-nogrant-{}-{n}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("host.log");
+    let script = dir.join("caller.sh");
+    let body = format!(
+        r#"#!/bin/sh
+LOG="{}"
+while IFS= read -r line; do
+  case "$line" in
+    *plugin/manifest*)
+      id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9][0-9]*\).*/\1/')
+      printf '{{"id":%s,"result":{{"name":"caller","version":"0.1.0","protocol":"1.1","tools":[],"capabilities":["host.ask"]}}}}\n' "$id"
+      sleep 0.2
+      printf '{{"id":"s1","method":"host/ask","params":{{"questions":[],"blocking":true}}}}\n'
+      ;;
+    *'"result"'*)
+      printf '%s\n' "$line" >> "$LOG"
+      ;;
+  esac
+done
+"#,
+        log.display()
+    );
+    // Write-then-rename: nothing ever holds the executed path open, so
+    // the spawn cannot race a writer (ETXTBSY).
+    let staging = dir.join("caller.sh.new");
+    std::fs::write(&staging, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::rename(&staging, &script).unwrap();
+    // Spawn with no host handler at all: proving the refusal happens
+    // before any handler could run. Also never grant anything, so the
+    // sidecar's declared `host/ask` stays exactly that — declared.
+    let p = SidecarPlugin::spawn(vec![script.to_string_lossy().to_string()])
+        .await
+        .unwrap();
+    let cap = capability_for_host_method("host/ask").expect("host/ask maps to a capability");
+    assert!(
+        p.manifest().capabilities.contains(&"host.ask".to_string()),
+        "the fixture declares what it wants"
+    );
+    assert!(
+        p.capabilities().is_empty(),
+        "nothing is granted until the host grants it"
+    );
+    let t = std::time::Instant::now();
+    while t.elapsed() < std::time::Duration::from_secs(5) {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("capability_not_granted") {
+            assert!(
+                text.contains(cap),
+                "the error names the capability, got: {text}"
+            );
+            assert!(
+                text.contains("gray plugin capabilities"),
+                "the error names how to grant it, got: {text}"
+            );
+            // And nothing answered the question: no handler was needed.
+            assert!(!text.contains("no host handler"));
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!(
+        "ungranted host/ask was not refused; log: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+}
+
+#[tokio::test]
 async fn host_requests_round_trip_with_string_ids() {
     use gray_plugin::HostHandler;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -498,7 +588,7 @@ while IFS= read -r line; do
   case "$line" in
     *plugin/manifest*)
       id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9][0-9]*\).*/\1/')
-      printf '{{"id":%s,"result":{{"name":"caller","version":"0.1.0","protocol":"1.1","tools":[]}}}}\n' "$id"
+      printf '{{"id":%s,"result":{{"name":"caller","version":"0.1.0","protocol":"1.1","tools":[],"capabilities":["host.say","host.turn"]}}}}\n' "$id"
       sleep 0.2
       printf '{{"id":"s1","method":"host/say","params":{{"text":"hello host"}}}}\n'
       printf '{{"id":"s2","method":"host/run","params":{{"session":{{"id":"","cwd":"/tmp"}},"prompt":"do x"}}}}\n'
@@ -511,12 +601,16 @@ done
 "#,
         log.display()
     );
-    std::fs::write(&script, body).unwrap();
+    // Write-then-rename: nothing ever holds the executed path open, so
+    // the spawn cannot race a writer (ETXTBSY).
+    let staging = dir.join("caller.sh.new");
+    std::fs::write(&staging, body).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    std::fs::rename(&staging, &script).unwrap();
     let p = SidecarPlugin::spawn(vec![script.to_string_lossy().to_string()])
         .await
         .unwrap();
@@ -539,6 +633,9 @@ done
         fut
     });
     p.set_host_handler(handler).await;
+    // Consent is a separate step from declaring: without it the host
+    // refuses. This test grants, so the round trip proceeds.
+    p.set_capabilities(vec!["host.say".into(), "host.turn".into()]);
     // Poll for both replies (string ids echoed back, separate namespace).
     let t = std::time::Instant::now();
     while t.elapsed() < std::time::Duration::from_secs(5) {

@@ -30,6 +30,7 @@ pub mod skills;
 pub mod skills_tool;
 pub mod sys_editor;
 pub mod system_prompt;
+pub mod term_keys;
 pub(crate) mod text_width;
 pub mod theme;
 pub mod tool_fmt;
@@ -410,6 +411,9 @@ pub enum InstallCmd {
         /// Plugin name
         #[arg(value_name = "NAME")]
         name: String,
+        /// Accept a caution scan verdict (never overrides `dangerous`)
+        #[arg(short, long)]
+        force: bool,
     },
 }
 
@@ -458,7 +462,11 @@ pub enum CronCmd {
         script: Option<PathBuf>,
     },
     /// One claim→fire→record pass (also the OS-cron/runit entry point)
-    Tick,
+    Tick {
+        /// Emit one `cron_delivery` JSON line per chat-bound fire (for a host that routes them)
+        #[arg(long)]
+        json: bool,
+    },
     /// Tick every 60s until SIGINT/SIGTERM
     Serve,
     /// Suspend a job (id or name)
@@ -540,6 +548,9 @@ pub enum PluginCmd {
         /// Index name or https URL
         #[arg(value_parser = |s: &str| Ok::<_, std::convert::Infallible>(gray_pkg::ops::parse_spec(s)))]
         spec: gray_pkg::ops::NameOrUrl,
+        /// Accept a caution scan verdict (never overrides `dangerous`)
+        #[arg(short, long)]
+        force: bool,
     },
     /// Remove an installed plugin
     Remove {
@@ -566,6 +577,11 @@ pub enum PluginCmd {
     Check {
         /// Plugin directory (executable, plugin.sh, or single executable)
         dir: String,
+    },
+    /// Show declared vs granted plugin capabilities
+    Capabilities {
+        /// Plugin name (default: every installed plugin)
+        name: Option<String>,
     },
 }
 

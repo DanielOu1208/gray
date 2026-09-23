@@ -33,6 +33,11 @@ pub(crate) fn spawn_key_watcher_with_typing(
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read};
+        // The turn-time watcher owns stdin exactly like the idle prompt
+        // does, so it negotiates the same keyboard enhancement: without it
+        // Shift+Enter typed *during* a turn arrives as a bare Enter and
+        // submits instead of breaking the line. Popped with the task.
+        let _keyboard_enhancement = crate::term_keys::KeyboardEnhancementGuard::push();
         loop {
             if watcher_stopped.load(std::sync::atomic::Ordering::Relaxed) {
                 return;

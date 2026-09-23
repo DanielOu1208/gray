@@ -146,17 +146,25 @@ impl SaveLocalDeliver {
                 // `USER`, never assistant — an assistant-role mirror lands
                 // assistant→assistant and breaks strict alternation;
                 // consecutive user turns merge safely.
+                // The mirror is context for a later reply, not the delivery.
+                // A host whose chat id has no session yet (a job added in a
+                // conversation's first turn) must still get its message, so
+                // a failed mirror logs and the delivery stands.
                 let note = crate::cron_fire::mirror_message(&job.name, &excerpt);
                 let sessions =
                     crate::session_store::JsonlSessionStore::new(self.home.join("sessions"));
                 let sid = crate::session_store::SessionId::new(origin.chat.clone());
-                sessions
+                if let Err(e) = sessions
                     .append(&sid, &gray_core::message::Message::user(note))
                     .await
-                    .map(|_| saved(true))
-                    .map_err(|e| {
-                        format!("origin append failed for session {:?}: {e:#}", origin.chat)
-                    })
+                {
+                    log::warn!(
+                        "cron {}: no session {:?} to mirror into ({e:#}); delivering anyway",
+                        job.id,
+                        origin.chat
+                    );
+                }
+                Ok(saved(true))
             }
         }
     }
@@ -349,6 +357,33 @@ pub(crate) async fn tick_once_with(
 pub fn format_fire_chat(saved: &DeliveredFire) -> String {
     let body = crate::cron_fire::format_delivery(&saved.name, &saved.id, &saved.excerpt);
     format!("{body}\nFull output: {}", saved.path.display())
+}
+
+/// The `cron_delivery` line `gray cron tick --json` prints: the rendered
+/// frame plus the routing the host needs. Core renders, the platform
+/// carries — `route` stays opaque here.
+pub fn delivery_json(saved: &DeliveredFire, origin: Option<&crate::cron::store::Origin>) -> String {
+    let (platform, chat, thread, route) = match origin {
+        Some(o) => (
+            o.platform.clone(),
+            o.chat.clone(),
+            o.thread.clone(),
+            o.route.clone(),
+        ),
+        None => (String::new(), String::new(), None, None),
+    };
+    serde_json::json!({
+        "type": "cron_delivery",
+        "job_id": saved.id,
+        "name": saved.name,
+        "platform": platform,
+        "chat": chat,
+        "thread": thread,
+        "route": route,
+        "text": format_fire_chat(saved),
+        "path": saved.path.display().to_string(),
+    })
+    .to_string()
 }
 
 /// Tick every 60s until SIGINT. Supervision owns the process; there is no

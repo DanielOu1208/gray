@@ -59,9 +59,9 @@ async fn main() -> anyhow::Result<()> {
     // Plugin terminal commands do not depend on provider configuration.
     match &cli.command {
         Some(gray::Commands::Install {
-            cmd: gray::InstallCmd::Plugin { name },
+            cmd: gray::InstallCmd::Plugin { name, force },
         }) => {
-            return gray::plugin_cli::install(&gray::plugin_cli::home()?, name).await;
+            return gray::plugin_cli::install(&gray::plugin_cli::home()?, name, *force).await;
         }
         Some(gray::Commands::External(args)) => {
             let (name, rest) = args
@@ -231,8 +231,9 @@ async fn run_plugin(cmd: gray::PluginCmd) -> anyhow::Result<()> {
 async fn run_plugin_inner(cmd: gray::PluginCmd) -> anyhow::Result<()> {
     use gray::PluginCmd;
     match cmd {
-        PluginCmd::Check { dir } => {
-            gray::plugin_check::check_plugin_dir(&dir).await?;
+        PluginCmd::Check { dir } => gray::plugin_check::check_plugin_dir(&dir).await,
+        PluginCmd::Capabilities { name } => {
+            gray::plugin_cli::print_capabilities(name.as_deref())?;
             Ok(())
         }
         PluginCmd::List => {
@@ -251,7 +252,7 @@ async fn run_plugin_inner(cmd: gray::PluginCmd) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        PluginCmd::Install { spec } => {
+        PluginCmd::Install { spec, force: _ } => {
             let r = gray_pkg::ops::install(spec, gray_pkg::ops::InstallOpts::default()).await?;
             println!("installed {} {} at {}", r.name, r.version, r.path.display());
             Ok(())
@@ -355,6 +356,33 @@ fn parse_deliver_flag(raw: Option<&str>) -> gray::cron::Deliver {
     }
 }
 
+/// The chat a job belongs to, declared by the host that runs the turn
+/// (`GRAY_CRON_ORIGIN={"platform":"discord","chat":"...","route":"..."}`).
+/// Unparseable or empty is no declaration, never a failure: a job added
+/// outside a chat is just a local job.
+fn origin_from_env() -> Option<gray::cron::store::Origin> {
+    let raw = std::env::var("GRAY_CRON_ORIGIN").ok()?;
+    let v: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
+    let platform = v.get("platform")?.as_str()?.trim().to_string();
+    let chat = v.get("chat")?.as_str()?.trim().to_string();
+    if platform.is_empty() || chat.is_empty() {
+        return None;
+    }
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    Some(gray::cron::store::Origin {
+        platform,
+        chat,
+        thread: field("thread"),
+        route: field("route"),
+    })
+}
+
 /// Default job name: prompt's first line, truncated to the store's 50-char cap.
 fn default_job_name(prompt: &str) -> String {
     let name: String = prompt
@@ -394,7 +422,12 @@ async fn run_sessions(cmd: gray::SessionsCmd) -> anyhow::Result<()> {
 
 async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::Result<()> {
     use gray::CronCmd;
-    if cfg!(windows) && matches!(&cmd, CronCmd::Tick | CronCmd::Serve | CronCmd::Run { .. }) {
+    if cfg!(windows)
+        && matches!(
+            &cmd,
+            CronCmd::Tick { .. } | CronCmd::Serve | CronCmd::Run { .. }
+        )
+    {
         anyhow::bail!(
             "cron execution is not supported on native Windows; use a WSL execution host"
         );
@@ -454,20 +487,33 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
                     anyhow::bail!("unknown skill {s:?}");
                 }
             }
-            let deliver_kind = parse_deliver_flag(deliver.as_deref());
+            // A host (a chat plugin) declares the chat a job belongs to in
+            // the environment, so the model can add a job with a plain
+            // `gray cron add <schedule> <prompt>` and still have it come
+            // back to the conversation. Explicit flags always win.
+            let env_origin = origin_from_env();
+            let deliver_kind = match (&deliver, &env_origin) {
+                (None, Some(_)) => gray::cron::Deliver::Origin,
+                _ => parse_deliver_flag(deliver.as_deref()),
+            };
             let origin = if matches!(deliver_kind, gray::cron::Deliver::Origin) {
-                let chat = origin_session
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("--deliver origin requires --origin-session <session-id>")
-                    })?;
-                Some(gray::cron::store::Origin {
-                    platform: "local".to_string(),
-                    chat: chat.to_string(),
-                    thread: None,
-                })
+                match (origin_session.as_deref(), &env_origin) {
+                    (Some(chat), _) if !chat.trim().is_empty() => Some(gray::cron::store::Origin {
+                        platform: env_origin
+                            .as_ref()
+                            .map(|o| o.platform.clone())
+                            .unwrap_or_else(|| "local".to_string()),
+                        chat: chat.trim().to_string(),
+                        thread: None,
+                        route: env_origin.as_ref().and_then(|o| o.route.clone()),
+                    }),
+                    (_, Some(o)) => Some(o.clone()),
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "--deliver origin requires --origin-session <session-id>"
+                        ));
+                    }
+                }
             } else {
                 None
             };
@@ -523,7 +569,11 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
             }
             if let Some(o) = &j.origin {
                 let thread = o.thread.as_deref().unwrap_or("-");
-                println!("origin: {}:{} thread:{thread}", o.platform, o.chat);
+                let route = o.route.as_deref().unwrap_or("-");
+                println!(
+                    "origin: {}:{} thread:{thread} route:{route}",
+                    o.platform, o.chat
+                );
             }
             if let Some(w) = &j.workdir {
                 println!("workdir: {}", w.display());
@@ -545,7 +595,7 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
                 anyhow::bail!("unknown cron job {id:?}");
             }
         }
-        CronCmd::Tick => {
+        CronCmd::Tick { json } => {
             let store = cron_store()?;
             let home = gray::setup::gray_home()?;
             let runner = gray::cron_serve::HeadlessRunner {
@@ -554,10 +604,28 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
             };
             let deliver = gray::cron_serve::SaveLocalDeliver { home };
             let rep = gray::cron_serve::tick_once(&store, &runner, &deliver, "cli").await?;
+            // `--json`: one line per chat-bound delivery, for a host that
+            // routes them (a chat plugin). Core renders the frame; the
+            // platform only carries the bytes.
             for saved in rep.delivered.iter().filter(|d| d.to_chat) {
-                println!("{}", gray::cron_serve::format_fire_chat(saved));
+                if json {
+                    let origin = store.get(&saved.id).ok().flatten().and_then(|j| j.origin);
+                    println!(
+                        "{}",
+                        gray::cron_serve::delivery_json(saved, origin.as_ref())
+                    );
+                } else {
+                    println!("{}", gray::cron_serve::format_fire_chat(saved));
+                }
             }
-            println!("tick: fired={} errors={}", rep.fired, rep.errors);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"type": "cron_tick", "fired": rep.fired, "errors": rep.errors})
+                );
+            } else {
+                println!("tick: fired={} errors={}", rep.fired, rep.errors);
+            }
             Ok(())
         }
         CronCmd::Serve => {

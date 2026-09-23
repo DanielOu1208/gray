@@ -14,6 +14,7 @@ gray-core = { workspace = true }
 gray-tools = { workspace = true }
 gray-provider = { workspace = true }
 uuid = { workspace = true }
+sha2 = { workspace = true }
 log = { workspace = true }
 tempfile.workspace = true
 tokio = { workspace = true }

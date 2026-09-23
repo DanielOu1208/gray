@@ -827,6 +827,17 @@ impl Tui {
         self.cache.reset();
     }
 
+    /// Ends the active-turn cache pause on paths that abort before the
+    /// normal `end_turn` lifecycle boundary without refreshing the timer.
+    pub(crate) fn resume_cache(&mut self) {
+        self.cache.resume(Instant::now());
+    }
+
+    /// Ends a completed turn and starts a fresh cache warmth window.
+    pub(crate) fn rearm_cache(&mut self) {
+        self.cache.rearm(Instant::now());
+    }
+
     /// Mirror of the turn's streaming-only elapsed ms (the tps denominator).
     pub(crate) fn set_turn_stream_ms(&mut self, ms: u64) {
         self.turn_stream_ms = ms;
@@ -960,6 +971,8 @@ impl Tui {
     }
 
     pub fn begin_turn(&mut self, label: &str) {
+        let now = Instant::now();
+        self.cache.pause(now);
         // Codex `status_controls.rs`: follow-up input and background activity
         // must not obscure an active compaction — keep its header/clock.
         if let Some(active) = self.active_compaction.clone() {
@@ -968,7 +981,6 @@ impl Tui {
             let _ = self.draw();
             return;
         }
-        let now = Instant::now();
         if self.turn_started.is_none() {
             self.turn_started = Some(now);
             self.turn_had_thinking = false;
@@ -1082,6 +1094,7 @@ impl Tui {
     }
 
     pub fn end_turn(&mut self, stream_ms: u64) {
+        self.rearm_cache();
         // Codex `turn_runtime.rs`: a turn ending without item completion
         // clears a live compaction silently (no `Context compacted` line).
         self.active_compaction = None;

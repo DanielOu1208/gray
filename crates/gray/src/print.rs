@@ -189,6 +189,9 @@ pub async fn run_print_mode_json(
         text: String::new(),
         usage: gray_core::event::Usage::default(),
         meter: None,
+        tools: HashMap::new(),
+        thinking: String::new(),
+        show_reasoning: config.show_reasoning.unwrap_or(true),
     };
     let result = match crate::print_meter::Meter::new(
         max_requests.unwrap_or(32),
@@ -323,12 +326,25 @@ impl std::fmt::Display for PrintFailure {
 
 impl std::error::Error for PrintFailure {}
 
+/// Cap on a disclosed tool detail (chars) and the reasoning buffer flush
+/// threshold. Bounds what a chatty surface (Discord, Telegram, a log tail)
+/// receives per row; the full text stays in the session log.
+const DETAIL_CAP: usize = 240;
+const THINKING_FLUSH: usize = 800;
+
 struct JsonOutput {
     turn_id: String,
     session_id: Option<String>,
     text: String,
     usage: gray_core::event::Usage,
     meter: Option<crate::print_meter::Meter>,
+    /// Tool call id -> name, for rows that carry no name of their own
+    /// (`ToolCallEnd` has args only). Cleared per call by `ToolResult`.
+    tools: HashMap<String, String>,
+    /// Reasoning buffer: flushed as one `thinking` row per THINKING_FLUSH
+    /// chars, never one row per token.
+    thinking: String,
+    show_reasoning: bool,
 }
 
 impl JsonOutput {
@@ -342,19 +358,129 @@ impl JsonOutput {
     }
 
     fn event(&mut self, event: &AgentEvent) -> std::io::Result<()> {
+        for row in self.rows(event) {
+            self.write(row)?;
+        }
+        Ok(())
+    }
+
+    /// Progress rows for one event (thinking flushes first at turn end).
+    /// Pure builder so the narration wire is unit-testable off stdout.
+    fn rows(&mut self, event: &AgentEvent) -> Vec<serde_json::Value> {
+        // Reasoning arrives per token; batch it into capped `thinking` rows.
+        if let AgentEvent::ThinkingDelta { delta } = event {
+            if self.show_reasoning {
+                self.thinking.push_str(delta);
+                if self.thinking.chars().count() >= THINKING_FLUSH {
+                    return self.take_thinking();
+                }
+            }
+            return Vec::new();
+        }
+        let mut row = serde_json::json!({"type": "progress"});
+        let mut rows = Vec::new();
         let phase = match event {
             AgentEvent::Start => "generating",
-            AgentEvent::ToolCallStart { .. } => "tool_started",
-            AgentEvent::ToolResult { .. } => "tool_finished",
-            AgentEvent::StreamError { .. } => "provider_retry",
+            AgentEvent::ToolCallStart { id, name } => {
+                self.tools.insert(id.clone(), name.clone());
+                row["tool"] = name.as_str().into();
+                "tool_started"
+            }
+            AgentEvent::ToolCallEnd { id, args } => {
+                if let Some(name) = self.tools.get(id) {
+                    row["tool"] = name.as_str().into();
+                    if let Some(detail) = tool_detail(name, args) {
+                        row["detail"] = detail.into();
+                    }
+                }
+                "tool_ran"
+            }
+            AgentEvent::ToolResult { id, is_error, .. } => {
+                if let Some(name) = self.tools.remove(id) {
+                    row["tool"] = name.into();
+                }
+                if *is_error {
+                    row["error"] = true.into();
+                }
+                "tool_finished"
+            }
+            AgentEvent::StreamError { message, .. } => {
+                row["detail"] = disclose(message, DETAIL_CAP).into();
+                "provider_retry"
+            }
             AgentEvent::Compacted { .. } => "compacted",
             AgentEvent::TurnEnd { usage, .. } => {
                 self.usage = *usage;
+                rows.append(&mut self.take_thinking());
                 "persisting"
             }
-            _ => return Ok(()),
+            _ => return Vec::new(),
         };
-        self.write(serde_json::json!({"type": "progress", "phase": phase}))
+        row["phase"] = phase.into();
+        rows.push(row);
+        rows
+    }
+
+    /// One `thinking` row for whatever reasoning has accumulated. Redacted
+    /// like every disclosed detail: a model that reads a key file can
+    /// quote it back.
+    fn take_thinking(&mut self) -> Vec<serde_json::Value> {
+        let text = std::mem::take(&mut self.thinking);
+        if text.trim().is_empty() {
+            return Vec::new();
+        }
+        vec![serde_json::json!({
+            "type": "progress", "phase": "thinking", "detail": disclose(&text, DETAIL_CAP)
+        })]
+    }
+}
+
+/// Collapse to one line, cap, and redact. Every `detail` on the wire goes
+/// through here: tool args and model output are untrusted for secrets.
+fn disclose(text: &str, cap: usize) -> String {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let capped: String = flat.chars().take(cap).collect();
+    let capped = if flat.chars().count() > cap {
+        format!("{capped}…")
+    } else {
+        capped
+    };
+    redact_for_disclosure(&capped).into_text()
+}
+
+/// The one-line "what did it just do" for known tools. Returns `None` for
+/// anything else rather than dumping raw args: a value we do not
+/// understand is exactly where a token hides.
+fn tool_detail(name: &str, args: &serde_json::Value) -> Option<String> {
+    let arg = |k: &str| args.get(k).and_then(serde_json::Value::as_str);
+    match name {
+        "bash" | "shell" => arg("command").map(|c| disclose(c, DETAIL_CAP)),
+        "read" | "view" | "cat" => {
+            let path = arg("path")?;
+            // Line range when the reader has one: `config.yaml L110-139`.
+            // `offset` is 1-based and negative means tail; either way the
+            // path alone is the honest summary.
+            let (Some(start), Some(limit)) = (
+                args.get("offset").and_then(|v| v.as_u64()),
+                args.get("limit").and_then(|v| v.as_u64()),
+            ) else {
+                return Some(disclose(path, DETAIL_CAP));
+            };
+            if start == 0 || limit == 0 {
+                return Some(disclose(path, DETAIL_CAP));
+            }
+            Some(disclose(
+                &format!("{path} L{start}-{}", start + limit - 1),
+                DETAIL_CAP,
+            ))
+        }
+        "write" | "edit" | "apply_patch" | "create" | "str_replace" => {
+            arg("path").map(|p| disclose(p, DETAIL_CAP))
+        }
+        "skill" | "use_skill" => arg("skill")
+            .or_else(|| arg("name"))
+            .map(|n| disclose(n, DETAIL_CAP)),
+        _ => None,
     }
 }
 

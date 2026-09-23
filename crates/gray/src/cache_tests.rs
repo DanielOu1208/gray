@@ -64,6 +64,111 @@ fn warmth_expires_at_the_ttl() {
 }
 
 #[test]
+fn active_turn_freezes_then_rearms_the_countdown() {
+    let base = Instant::now();
+    let mut tr = CacheTracker::default();
+    tr.note(&usage(100_000, 500, 90_000, 10_000), "m", None, t(base, 0));
+
+    tr.pause(t(base, 60));
+    // Setup and the normal request path can both reassert `begin_turn`.
+    tr.pause(t(base, 120));
+    assert_eq!(
+        tr.remaining(t(base, 360)),
+        Some(CACHE_TTL - Duration::from_secs(60))
+    );
+
+    tr.rearm(t(base, 360));
+    assert_eq!(tr.remaining(t(base, 360)), Some(CACHE_TTL));
+    assert_eq!(
+        tr.remaining(t(base, 361)),
+        Some(CACHE_TTL - Duration::from_secs(1))
+    );
+}
+
+#[test]
+fn aborted_turn_releases_the_pause_without_rearming() {
+    let base = Instant::now();
+    let mut tr = CacheTracker::default();
+    tr.note(&usage(100_000, 500, 90_000, 10_000), "m", None, t(base, 0));
+    tr.pause(t(base, 60));
+
+    tr.resume(t(base, 360));
+    assert_eq!(
+        tr.remaining(t(base, 361)),
+        Some(CACHE_TTL - Duration::from_secs(61))
+    );
+}
+
+#[test]
+fn usage_during_an_active_turn_rearms_and_freezes_a_fresh_timer() {
+    let base = Instant::now();
+    let mut tr = CacheTracker::default();
+    tr.note(&usage(100_000, 500, 90_000, 10_000), "m", None, t(base, 0));
+    tr.pause(t(base, 10));
+
+    tr.note(
+        &usage(110_000, 500, 100_000, 10_000),
+        "m",
+        None,
+        t(base, 20),
+    );
+    assert_eq!(tr.remaining(t(base, 80)), Some(CACHE_TTL));
+
+    tr.rearm(t(base, 80));
+    assert_eq!(tr.remaining(t(base, 80)), Some(CACHE_TTL));
+    assert_eq!(
+        tr.remaining(t(base, 81)),
+        Some(CACHE_TTL - Duration::from_secs(1))
+    );
+}
+
+#[test]
+fn active_turn_time_does_not_age_the_next_cache_miss() {
+    let base = Instant::now();
+    let mut tr = CacheTracker::default();
+    tr.note(
+        &usage(100_000, 100, 90_000, 10_000),
+        "m",
+        Some(priced()),
+        t(base, 0),
+    );
+    tr.pause(t(base, 60));
+
+    let miss = tr
+        .note(
+            &usage(100_000, 100, 0, 100_000),
+            "m",
+            Some(priced()),
+            t(base, 360),
+        )
+        .expect("total miss");
+    assert_eq!(miss.idle, Duration::from_secs(60));
+    assert!(
+        miss.notice()
+            .is_some_and(|notice| notice.starts_with("Cache miss:")),
+        "active generation time must not be labelled as idle"
+    );
+}
+
+#[test]
+fn reset_during_an_active_turn_keeps_the_next_timer_paused() {
+    let base = Instant::now();
+    let mut tr = CacheTracker::default();
+    tr.pause(t(base, 10));
+    tr.reset();
+
+    tr.note(&usage(60_000, 100, 50_000, 10_000), "m", None, t(base, 20));
+    assert_eq!(tr.remaining(t(base, 80)), Some(CACHE_TTL));
+
+    tr.rearm(t(base, 80));
+    assert_eq!(tr.remaining(t(base, 80)), Some(CACHE_TTL));
+    assert_eq!(
+        tr.remaining(t(base, 81)),
+        Some(CACHE_TTL - Duration::from_secs(1))
+    );
+}
+
+#[test]
 fn provider_without_cache_reporting_never_warns_or_times() {
     let base = Instant::now();
     let mut tr = CacheTracker::default();

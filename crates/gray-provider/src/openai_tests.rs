@@ -1647,3 +1647,95 @@ fn session_affinity_header_is_host_independent() {
     assert!(session_affinity_headers(None).is_empty());
     assert!(session_affinity_headers(Some("")).is_empty());
 }
+
+/// Truncated body: the server opens a chunked SSE response and drops the
+/// socket before terminating it. reqwest reports that as
+/// "error decoding response body", which today is terminal even when
+/// nothing has been shown to the user yet.
+async fn serve_truncated_then_good() -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let mut served = 0usize;
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            // Drain the request head so the client sees a clean reset.
+            let mut buf = [0u8; 4096];
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                tokio::io::AsyncReadExt::read(&mut sock, &mut buf),
+            )
+            .await;
+            served += 1;
+            if served == 1 {
+                // Head + one chunk, then the socket dies: the chunked body
+                // never gets its terminating `0\r\n\r\n`.
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+                if sock.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                let _ = sock.flush().await;
+                drop(sock);
+                continue;
+            }
+            // A complete stream: one delta, then [DONE].
+            let chunk =
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"recovered\"}}]}\n\n";
+            let done = "data: [DONE]\n\n";
+            let mut body = String::new();
+            for part in [chunk, done] {
+                body.push_str(&format!("{:x}\r\n{}\r\n", part.len(), part));
+            }
+            body.push_str("0\r\n\r\n");
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+            if sock
+                .write_all(format!("{head}{body}").as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let _ = sock.flush().await;
+            drop(sock);
+        }
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[tokio::test]
+async fn a_truncated_body_retries_when_nothing_was_emitted() {
+    // The bug: a body that dies before its first delta ended the turn with
+    // "agent error: stream broken: Transport error: error decoding response
+    // body". Nothing reached the user yet, so the retry is invisible.
+    use futures::StreamExt;
+    use gray_core::message::ChatRequest;
+    let (base, server) = serve_truncated_then_good().await;
+    let provider =
+        OpenAiProvider::new("key", "test-model", base, None, None).expect("provider builds");
+    let req = ChatRequest {
+        system: None,
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let events: Vec<_> = provider.stream(req).collect().await;
+    let text: String = events
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .filter_map(|e| match e {
+            StreamEvent::TextDelta { delta } => Some(delta.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text, "recovered",
+        "the retried stream delivered the text: {events:?}"
+    );
+    assert!(
+        events.iter().all(|r| r.is_ok()),
+        "a truncated first body must not end the turn: {events:?}"
+    );
+    server.abort();
+}

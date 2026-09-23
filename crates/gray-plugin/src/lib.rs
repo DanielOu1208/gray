@@ -9,13 +9,20 @@ use gray_core::event::Usage;
 use gray_core::message::ToolDef;
 
 pub mod builder;
+pub mod capabilities;
 pub mod host;
 pub mod lock;
 pub mod profile;
+pub mod scan;
 pub mod sidecar;
 
 pub use sidecar::{
     ASK_HANDLER_TTL, ASK_TTL, HOST_ASK, HOST_RUN, HOST_SAY, HOST_TTL, HostHandler, SidecarPlugin,
+};
+
+pub use capabilities::{
+    CapabilitySpec, HOST_ASK as CAP_HOST_ASK, HOST_SAY as CAP_HOST_SAY, HOST_TURN, TOOL_OVERRIDE,
+    WIDGET_OVERRIDE,
 };
 
 #[derive(Debug, Clone)]
@@ -47,6 +54,12 @@ pub struct Manifest {
     /// (the adapter merges both into [`PluginHooks::commands`]).
     #[serde(default)]
     pub subcommands: Vec<String>,
+    /// Privileged host surfaces this plugin declares (`host.turn`,
+    /// `host.ask`, `tool.override`, …). Declaring is not consent: the
+    /// operator grants them and the grant is enforced at the call site
+    /// (see [`crate::capabilities`]).
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 /// Parse one manifest `tools` entry. Pre-v1 sidecars send bare strings
@@ -114,6 +127,7 @@ impl Manifest {
             hooks: str_list("hooks"),
             protocol: v.get("protocol").and_then(|s| s.as_str()).map(|s| s.into()),
             subcommands: str_list("subcommands"),
+            capabilities: crate::capabilities::parse_declared(&str_list("capabilities")),
         }
     }
 }
@@ -132,6 +146,12 @@ pub trait Plugin: Send + Sync {
     // NOTE: an earlier `provider()` hook was deleted — every
     // impl returned None and nothing called it. `on_event`/`CoreEvent` stay:
     // SidecarPlugin dispatches them to the subprocess over stdio.
+    /// Capabilities the operator granted this plugin (empty = none).
+    /// Sync on purpose: tool assembly (`builder::from_plugins`) runs
+    /// outside async, and the set is written once at boot.
+    fn capabilities(&self) -> Vec<String> {
+        Vec::new()
+    }
     async fn on_event(&self, _e: CoreEvent) {}
     /// `prompt/context` hook (`params: {"cwd"}` → `result: {"text"}`).
     /// Default `None` = no extra context (pre-v1 behavior).

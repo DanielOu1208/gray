@@ -512,6 +512,101 @@ impl JsonlSessionStore {
     }
 }
 
+/// Bytes read from each end of a session file to build its summary. The
+/// first user message and the newest entry both live near an end; the
+/// middle of a conversation cannot change what the row says.
+const SUMMARY_END_BYTES: u64 = 16 * 1024;
+
+/// Extra bytes allowed to find the line boundary a cut landed in, so a
+/// slice never starts or ends mid-line.
+const BOUNDARY_SCAN_BYTES: u64 = 64 * 1024;
+
+/// The two ends of a session file, cut on line boundaries: `head` starts
+/// at byte 0 and ends just after a newline; `tail` starts just after a
+/// newline and runs to EOF. No line is ever split, so every line handed to
+/// the JSON parser is whole. For a file too small to have two ends the head
+/// is the whole file and the tail is empty.
+struct SessionSlices {
+    head: String,
+    tail: String,
+}
+
+/// Read both ends of a session file. Synchronous by design: it runs
+/// inside one blocking-pool task per file, so plain `std::fs` keeps the
+/// whole file to five cheap reads with no per-read task dispatch.
+fn read_session_ends(path: &Path) -> Option<SessionSlices> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok().or_else(|| {
+        log::warn!("failed to open session file {}", path.display());
+        None
+    })?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+
+    // Head: from byte 0, extended past the first newline at or after the
+    // cut so the last head line is complete.
+    let head_len = SUMMARY_END_BYTES.min(len);
+    let mut head_bytes = vec![0u8; head_len as usize];
+    file.read_exact(&mut head_bytes).ok()?;
+    if head_len < len && !head_bytes.last().is_some_and(|b| *b == b'\n') {
+        let mut scan = vec![0u8; BOUNDARY_SCAN_BYTES as usize];
+        let mut got = 0usize;
+        while got < scan.len() {
+            let n = file.read(&mut scan[got..]).ok()?;
+            if n == 0 {
+                break;
+            }
+            got += n;
+            if scan[..got].contains(&b'\n') {
+                break;
+            }
+        }
+        match scan[..got].iter().position(|b| *b == b'\n') {
+            Some(at) => head_bytes.extend_from_slice(&scan[..=at]),
+            // One line longer than the whole scan budget: the header is
+            // unterminated in what we read, so read the file rather than
+            // guess (a mid-write file stays a mid-write file).
+            None => return read_session_whole(path),
+        }
+    }
+    let head = String::from_utf8_lossy(&head_bytes).into_owned();
+
+    // Tail: the last SUMMARY_END_BYTES, advanced to the next newline so it
+    // begins on a line boundary.
+    if len <= head_bytes.len() as u64 + SUMMARY_END_BYTES {
+        return Some(SessionSlices {
+            head,
+            tail: String::new(),
+        });
+    }
+    file.seek(SeekFrom::Start(len - SUMMARY_END_BYTES)).ok()?;
+    let mut tail_bytes = Vec::with_capacity(SUMMARY_END_BYTES as usize);
+    file.read_to_end(&mut tail_bytes).ok()?;
+    let text = String::from_utf8_lossy(&tail_bytes).into_owned();
+    let tail = match text.find('\n') {
+        Some(at) => text[at + 1..].to_string(),
+        None => return read_session_whole(path),
+    };
+    Some(SessionSlices { head, tail })
+}
+
+fn read_session_whole(path: &Path) -> Option<SessionSlices> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("failed to read session file {}: {}", path.display(), e);
+            return None;
+        }
+    };
+    Some(SessionSlices {
+        head: content,
+        tail: String::new(),
+    })
+}
+
 impl JsonlSessionStore {
     // Returns Result — callers decide what a failed
     // session write means instead of five nested warn-and-continue arms.
@@ -1042,7 +1137,10 @@ impl JsonlSessionStore {
             }
         };
 
-        let mut summaries = Vec::new();
+        // Pass one: the directory itself. Cheap, and it collects the paths
+        // so the reads below can overlap instead of serializing behind one
+        // another on a slow disk.
+        let mut paths = Vec::new();
         while let Ok(Some(entry)) = read_dir.next_entry().await {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
@@ -1064,17 +1162,47 @@ impl JsonlSessionStore {
                 log::warn!("skipping session with invalid id: {}", path.display());
                 continue;
             }
+            paths.push(path);
+        }
 
-            let content = match tokio::fs::read_to_string(&path).await {
-                Ok(c) => c,
-                Err(e) => {
-                    log::warn!("failed to read session file {}: {}", path.display(), e);
-                    continue;
+        // Pass two: read both ends of each file on the blocking pool, a
+        // bounded number at a time. One task per file (not per read) keeps
+        // the dispatch count down and lets the disk work in parallel.
+        use futures::StreamExt as _;
+        let mut reads = futures::stream::iter(paths)
+            .map(|path| {
+                let path = path.clone();
+                async move {
+                    let read = tokio::task::spawn_blocking({
+                        let path = path.clone();
+                        move || (read_session_ends(&path), path)
+                    })
+                    .await;
+                    read.ok()
+                        .and_then(|(slices, path)| slices.map(|s| (path, s)))
                 }
+            })
+            .buffer_unordered(64);
+        let mut ends = Vec::new();
+        while let Some(pair) = reads.next().await {
+            if let Some(pair) = pair {
+                ends.push(pair);
+            }
+        }
+        // Directory order is arbitrary; sort for a stable summary order
+        // before the activity sort below decides the list.
+        ends.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut summaries = Vec::new();
+        for (path, slices) in ends {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
             };
 
-            let mut lines = content.lines().filter(|l| !l.trim().is_empty());
-            let header_str = match lines.next() {
+            // A first line with no newline is a creator mid-write.
+            let complete_first_line = slices.head.contains('\n');
+
+            let header_str = match slices.head.lines().find(|l| !l.trim().is_empty()) {
                 Some(h) => h,
                 None => {
                     log::warn!("skipping empty session file: {}", path.display());
@@ -1091,7 +1219,7 @@ impl JsonlSessionStore {
                     // newline is a creator mid-write (create streams the
                     // header into a `create_new` file), so renaming it away
                     // would steal a session that is about to be valid.
-                    if content.contains('\n') {
+                    if complete_first_line {
                         Self::quarantine_corrupt_file(&path).await;
                     }
                     continue;
@@ -1109,25 +1237,31 @@ impl JsonlSessionStore {
             let mut last_message_at = header.timestamp;
             let mut first_user_text = None;
             let mut last_user_text = None;
-            for line in lines {
-                let Ok(entry) = serde_json::from_str::<SessionEntry>(line) else {
-                    continue;
-                };
-                last_message_at = last_message_at.max(entry.timestamp);
-                if entry.compaction_boundary {
-                    // Replacement follows: the pre-compact messages no longer
-                    // describe the session (both ends of the range move).
-                    first_user_text = None;
-                    last_user_text = None;
-                    continue;
-                }
-                if entry.message.role == Role::User {
-                    let text = entry.message.text_content();
-                    if !text.is_empty() {
-                        if first_user_text.is_none() {
-                            first_user_text = Some(text.clone());
+            // Head first, then tail. `in_tail` means "this line came from
+            // the tail slice", not "a boundary was seen": a post-boundary
+            // turn inside the head is still the session's first turn, while
+            // a tail turn never is (the head owns the real beginning).
+            for (in_tail, chunk) in [(false, &slices.head), (true, &slices.tail)] {
+                for line in chunk.lines().filter(|l| !l.trim().is_empty()) {
+                    let Ok(entry) = serde_json::from_str::<SessionEntry>(line) else {
+                        continue;
+                    };
+                    last_message_at = last_message_at.max(entry.timestamp);
+                    if entry.compaction_boundary {
+                        // Replacement follows: the pre-compact messages no
+                        // longer describe the session (both ends move).
+                        first_user_text = None;
+                        last_user_text = None;
+                        continue;
+                    }
+                    if entry.message.role == Role::User {
+                        let text = entry.message.text_content();
+                        if !text.is_empty() {
+                            if first_user_text.is_none() && !in_tail {
+                                first_user_text = Some(text.clone());
+                            }
+                            last_user_text = Some(text);
                         }
-                        last_user_text = Some(text);
                     }
                 }
             }
@@ -1142,7 +1276,11 @@ impl JsonlSessionStore {
             });
         }
 
-        summaries.sort_by_key(|s| s.started_at);
+        // Newest activity first — the same key the row prints, so the list
+        // reads monotonically instead of mixing "when it started" with
+        // "when it was last used".
+        summaries.sort_by_key(|s| s.last_message_at);
+        summaries.reverse();
         summaries
     }
 

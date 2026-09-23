@@ -89,9 +89,18 @@ pub enum Deliver {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Origin {
     pub platform: String,
+    /// The origin chat. When it is a session UUID the fire also mirrors its
+    /// output into that transcript, so a reply continues in context; any
+    /// other opaque id is delivery-only (the mirror is skipped, never
+    /// invented as a phantom session).
     pub chat: String,
     #[serde(default)]
     pub thread: Option<String>,
+    /// Opaque platform routing token — a Discord channel id, a Telegram
+    /// chat id. gray never interprets it; a platform resolves it to the
+    /// surface a delivery goes to.
+    #[serde(default)]
+    pub route: Option<String>,
 }
 
 /// Lifecycle: `Paused`/`Done` (terminal) never fire; `claim_due` skips them.

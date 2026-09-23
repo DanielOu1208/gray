@@ -1193,6 +1193,18 @@ pub(crate) fn is_retryable_error(err: &ProviderError) -> bool {
     )
 }
 
+/// True for the body-level transport failures `eventsource-stream` reports
+/// once the response has started: a truncated chunked body, or a connection
+/// reset mid-body. reqwest has no decompression enabled here (features are
+/// `json,stream,rustls-tls`), so these are framing/connection failures —
+/// always transient, never the model's output.
+///
+/// Deliberately narrow: `Transport` only. `Parse` (a malformed SSE line) and
+/// `InvalidContentType` are the server's own shape and must stay terminal.
+fn is_midstream_transport(err: &eventsource_stream::EventStreamError<reqwest::Error>) -> bool {
+    matches!(err, eventsource_stream::EventStreamError::Transport(_))
+}
+
 /// Codex steal (`notify_stream_error`): `Reconnecting... n/m` + short cause.
 /// Details are capped so a multi-KB upstream blob never reaches the transcript.
 pub(crate) fn retry_notice_event(attempt: usize, max: usize, err: &ProviderError) -> StreamEvent {
@@ -1436,6 +1448,18 @@ enum StreamState {
         last_usage: Option<Usage>,
         pending_events: VecDeque<StreamEvent>,
         completed: bool,
+        // Request state, carried so a body-level transport failure can
+        // re-POST instead of ending the turn.
+        client: reqwest::Client,
+        url: Url,
+        api_key: String,
+        body: OpenAiChatRequest,
+        attempt: usize,
+        /// True once a delta has been yielded to the caller. A retry is
+        /// only invisible while this is false: the agent loop commits
+        /// streamed text to history as it arrives, so replaying after a
+        /// visible delta would duplicate what the user already read.
+        emitted: bool,
     },
     ResponsesStreaming {
         event_stream: BoxedEventStream,
@@ -1640,6 +1664,12 @@ fn stream_unfold_step(
                                 last_usage: None,
                                 pending_events: VecDeque::new(),
                                 completed: false,
+                                client,
+                                url,
+                                api_key,
+                                body,
+                                attempt,
+                                emitted: false,
                             };
                         }
                         Err((err, floor, http_status)) => {
@@ -1848,6 +1878,12 @@ fn stream_unfold_step(
                     mut last_usage,
                     mut pending_events,
                     mut completed,
+                    client,
+                    url,
+                    api_key,
+                    body,
+                    attempt,
+                    mut emitted,
                 } => {
                     if let Some(event) = pending_events.pop_front() {
                         return Some((
@@ -1859,6 +1895,12 @@ fn stream_unfold_step(
                                 last_usage,
                                 pending_events,
                                 completed,
+                                client,
+                                url,
+                                api_key,
+                                body,
+                                attempt,
+                                emitted,
                             },
                         ));
                     }
@@ -1900,6 +1942,7 @@ fn stream_unfold_step(
                                                             delta: delta_text,
                                                         },
                                                     );
+                                                    emitted = true;
                                                 }
                                                 _ => {}
                                             }
@@ -1916,6 +1959,7 @@ fn stream_unfold_step(
                                                 pending_events.push_back(
                                                     StreamEvent::ThinkingDelta { delta: reasoning },
                                                 );
+                                                emitted = true;
                                             }
 
                                             if let Some(tool_calls) = choice.delta.tool_calls {
@@ -1974,14 +2018,64 @@ fn stream_unfold_step(
                                 last_usage,
                                 pending_events,
                                 completed,
+                                client,
+                                url,
+                                api_key,
+                                body,
+                                attempt,
+                                emitted,
                             };
                         }
                         Some(Err(err)) => {
                             log::error!(target: "gray_provider", "stream error: {err}");
-                            return Some((
-                                Err(ProviderError::Stream(err.to_string())),
-                                StreamState::Done,
-                            ));
+                            // A body-level transport failure — a truncated
+                            // chunked body, or a connection reset mid-body —
+                            // is transient, and reqwest can only report it as
+                            // "error decoding response body". While nothing
+                            // has been yielded the re-POST is invisible, so
+                            // retry exactly like a pre-stream failure. Once a
+                            // delta has reached the caller the agent loop has
+                            // already committed it to history, so a replay
+                            // would duplicate what the user read: say so
+                            // instead.
+                            if !emitted && attempt < MAX_ATTEMPTS && is_midstream_transport(&err) {
+                                log::warn!(
+                                    target: "gray_provider",
+                                    "stream body failed before any delta; retrying (attempt {attempt}): {err}"
+                                );
+                                let next = StreamState::Init {
+                                    client,
+                                    url,
+                                    api_key,
+                                    body,
+                                    session_id: None,
+                                    attempt: attempt + 1,
+                                    retry_after: None,
+                                };
+                                // One notice per burst, same rule as the
+                                // pre-stream path: the transcript is
+                                // append-only, so attempts 2+ stay silent.
+                                if attempt == 1 {
+                                    let notice = retry_notice_event(
+                                        attempt,
+                                        MAX_ATTEMPTS,
+                                        &ProviderError::Stream(err.to_string()),
+                                    );
+                                    return Some((Ok(notice), next));
+                                }
+                                state = next;
+                                continue;
+                            }
+                            let terminal = if emitted {
+                                // Name the point of failure: the partial text
+                                // was salvaged into history by the caller.
+                                ProviderError::Stream(format!(
+                                    "{err} (the connection dropped mid-response after the response started;                                      the partial text was kept — retry the turn)"
+                                ))
+                            } else {
+                                ProviderError::Stream(err.to_string())
+                            };
+                            return Some((Err(terminal), StreamState::Done));
                         }
                         None => {
                             if last_finish_reason.is_none() {
@@ -2023,6 +2117,12 @@ fn stream_unfold_step(
                                             last_usage,
                                             pending_events,
                                             completed,
+                                            client,
+                                            url,
+                                            api_key,
+                                            body,
+                                            attempt,
+                                            emitted: true,
                                         };
                                     }
                                     Err(_) => {
@@ -2051,6 +2151,12 @@ fn stream_unfold_step(
                                     last_usage,
                                     pending_events,
                                     completed,
+                                    client,
+                                    url,
+                                    api_key,
+                                    body,
+                                    attempt,
+                                    emitted: true,
                                 };
                             } else {
                                 return None;

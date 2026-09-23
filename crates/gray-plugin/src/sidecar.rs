@@ -18,7 +18,10 @@
 //!
 //! Sidecar→host requests (string `id`, `method: "host/..."`) are served by
 //! the host handler: `host/run` (sub-agent turn), `host/say` (chat line),
-//! `host/ask` (blocking user question; see `HOST_ASK`). `host/ask` has an
+//! `host/ask` (blocking user question; see `HOST_ASK`). Each one is
+//! capability-gated (see [`crate::capabilities`]): the plugin declares the
+//! surfaces it wants, and the host grants or refuses them. An ungranted
+//! call gets a structured error, never the host's power. `host/ask` has an
 //! extended outer deadline (see `ASK_TTL`): everything else keeps the 30s
 //! TTL since only a human answer can legitimately take minutes.
 //!
@@ -32,7 +35,8 @@
 //! `pending`; writers take a short stdin lock only, so concurrent requests
 //! resolve out of order instead of serializing on one mutex.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -144,6 +148,10 @@ struct Transport {
     /// Bound on concurrent plugin→host handler tasks (shared across
     /// respawns so a respawn storm can't multiply it).
     host_slots: Arc<tokio::sync::Semaphore>,
+    /// Capability ids the operator granted this plugin. Empty until the
+    /// host records them, which is also the default: an ungranted
+    /// `host/*` call is refused rather than trusted.
+    grants: Arc<std::sync::Mutex<BTreeSet<String>>>,
 }
 
 pub struct SidecarPlugin {
@@ -163,6 +171,23 @@ pub struct SidecarPlugin {
     asks: bool,
 }
 
+/// ETXTBSY (os error 26) means the executable was open for writing at the
+/// instant we exec'd it. A plugin binary or script written moments earlier
+/// — a fresh install, a rebuild — is enough to trip it, and it is
+/// transient by definition: nobody holds the file once the write lands.
+/// One short retry turns a spurious "text file busy" into a non-event.
+/// Measured on this box: a test that exec'd a just-written script failed
+/// roughly 1 run in 5-20, with no process holding the file at the time.
+fn spawn_retrying_etxtbsy(spawn: impl Fn() -> std::io::Result<Child>) -> std::io::Result<Child> {
+    match spawn() {
+        Err(e) if e.raw_os_error() == Some(26) => {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            spawn()
+        }
+        other => other,
+    }
+}
+
 fn spawn_child(argv: &[String]) -> anyhow::Result<(Child, ChildStdin, ChildStdout)> {
     let (prog, args) = argv
         .split_first()
@@ -179,19 +204,22 @@ fn spawn_child(argv: &[String]) -> anyhow::Result<(Child, ChildStdin, ChildStdou
             .arg("sh")
             .arg(script)
             .args(args);
-        let child = cmd
+        let child = spawn_retrying_etxtbsy(|| {
+            cmd.stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+        })?;
+        return finish_spawn(child);
+    }
+    let child = spawn_retrying_etxtbsy(|| {
+        Command::new(prog)
+            .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
-            .spawn()?;
-        return finish_spawn(child);
-    }
-    let child = Command::new(prog)
-        .args(args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+            .spawn()
+    })?;
     finish_spawn(child)
 }
 
@@ -221,12 +249,16 @@ const MAX_HOST_TASKS: usize = 4;
 /// Max in-flight requests per transport; excess fails fast.
 const MAX_PENDING: usize = 64;
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_reader(
     stdout: ChildStdout,
     stdin: Arc<Mutex<ChildStdin>>,
     pending: Arc<Mutex<Pending>>,
     host_handler: Arc<Mutex<Option<HostHandler>>>,
     host_slots: Arc<tokio::sync::Semaphore>,
+    grants: Arc<std::sync::Mutex<BTreeSet<String>>>,
+    // Plugin name, for the capability error the sidecar can act on.
+    plugin_name: String,
     epoch: u64,
 ) {
     tokio::spawn(async move {
@@ -271,6 +303,34 @@ fn spawn_reader(
                 let stdin = stdin.clone();
                 let host_handler = host_handler.clone();
                 let host_slots = host_slots.clone();
+                // Consent gate: every host/* method maps to one capability,
+                // and the host only runs it when the operator granted it.
+                let grants = grants.clone();
+                let plugin_name = plugin_name.clone();
+                // `grants` is written once, right after spawn, so this
+                // lock is never contended; keeping it async avoids parking
+                // a worker thread on the read path.
+                let ungranted = {
+                    let set = grants.lock().unwrap_or_else(|e| e.into_inner());
+                    crate::capabilities::capability_for_host_method(&method_owned)
+                        .filter(|cap| !set.contains(*cap))
+                        .map(|cap| cap.to_string())
+                };
+                if let Some(cap) = ungranted {
+                    // Fail closed with something the plugin can act on:
+                    // the capability, and the command that grants it.
+                    let reply = json!({"id": id, "result": {
+                        "error": format!("capability_not_granted: {cap}"),
+                        "hint": format!("gray plugin capabilities {plugin_name}"),
+                    }});
+                    if !matches!(
+                        try_write_frame(&stdin, &format!("{reply}\n")).await,
+                        FrameWrite::Ok
+                    ) {
+                        log::warn!("sidecar capability reply could not be written");
+                    }
+                    continue;
+                }
                 // Bounded handler tasks: at capacity, reply overload
                 // instead of spawning unbounded work.
                 let Ok(_permit) = host_slots.try_acquire_owned() else {
@@ -335,6 +395,16 @@ fn spawn_reader(
 }
 
 impl Transport {
+    /// Best-effort plugin name for a capability error: the argv's basename
+    /// without an extension, which is how sidecars are installed
+    /// (`<home>/plugins/<name>/<bin>`).
+    fn name_of(argv: &[String]) -> String {
+        argv.first()
+            .and_then(|p| Path::new(p).file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "this plugin".to_string())
+    }
+
     fn new(child: Child, stdin: ChildStdin, stdout: ChildStdout, argv: Vec<String>) -> Arc<Self> {
         let pending = Arc::new(Mutex::new(Pending {
             epoch: 0,
@@ -343,12 +413,16 @@ impl Transport {
         let stdin = Arc::new(Mutex::new(stdin));
         let host_handler = Arc::new(Mutex::new(None));
         let host_slots = Arc::new(tokio::sync::Semaphore::new(MAX_HOST_TASKS));
+        let grants: Arc<std::sync::Mutex<BTreeSet<String>>> =
+            Arc::new(std::sync::Mutex::new(BTreeSet::new()));
         spawn_reader(
             stdout,
             stdin.clone(),
             pending.clone(),
             host_handler.clone(),
             host_slots.clone(),
+            grants.clone(),
+            Self::name_of(&argv),
             0,
         );
         Arc::new(Self {
@@ -359,6 +433,7 @@ impl Transport {
             argv,
             host_handler,
             host_slots,
+            grants,
         })
     }
 
@@ -383,6 +458,8 @@ impl Transport {
                     self.pending.clone(),
                     self.host_handler.clone(),
                     self.host_slots.clone(),
+                    self.grants.clone(),
+                    Self::name_of(&self.argv),
                     p.epoch,
                 );
                 true
@@ -519,6 +596,33 @@ impl SidecarPlugin {
     /// sets this once after spawn; sidecar requests then dispatch to it
     /// with a 30s TTL each. Without a handler the transport replies
     /// `{"error":...}` (loud failure, never a hang).
+    /// Record the capabilities the operator granted this plugin. Called
+    /// by the host right after spawn; until it is called the plugin has
+    /// none, which is also the correct default for a sidecar nobody asked
+    /// about.
+    pub fn set_capabilities(&self, granted: Vec<String>) {
+        let mut set = self
+            .transport
+            .grants
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *set = granted
+            .into_iter()
+            .filter(|c| !c.trim().is_empty())
+            .collect();
+    }
+
+    /// Capabilities this sidecar currently holds.
+    pub fn capabilities(&self) -> Vec<String> {
+        self.transport
+            .grants
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     pub async fn set_host_handler(&self, handler: HostHandler) {
         *self.transport.host_handler.lock().await = Some(handler);
     }
@@ -532,6 +636,12 @@ impl SidecarPlugin {
 
 #[async_trait]
 impl Plugin for SidecarPlugin {
+    /// Granted capabilities, for tool-assembly checks that run outside
+    /// async (`builder::from_plugins`).
+    fn capabilities(&self) -> Vec<String> {
+        SidecarPlugin::capabilities(self)
+    }
+
     fn manifest(&self) -> Manifest {
         self.manifest.clone()
     }

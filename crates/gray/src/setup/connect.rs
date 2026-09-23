@@ -63,7 +63,11 @@ fn forget_provider(item: &ConnectItem, config: &mut Config) -> anyhow::Result<St
 /// `\n`) so a paste lands whole and never submits. Otherwise identical to
 /// typing the same text character by character.
 pub(crate) fn insert_paste(buf: &mut String, pasted: &str) {
-    buf.push_str(&pasted.replace(['\r', '\n'], ""));
+    // Strip escape sequences too: a paste that arrives still wrapped in
+    // bracketed-paste markers (gray nested in another terminal, or debris
+    // copied out of a rendered page) would otherwise type `^[[200~` into the
+    // API-key / ID field. Control chars other than CR/LF never belong there.
+    buf.push_str(&crate::composer::input::strip_escape_sequences(pasted).replace(['\r', '\n'], ""));
 }
 
 /// What the connect modal did to `config`, so callers can react correctly:

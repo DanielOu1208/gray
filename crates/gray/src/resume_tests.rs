@@ -185,3 +185,37 @@ async fn resumed_line_bogus_errors() {
             .is_err()
     );
 }
+
+// ── the list reads as a timeline ──
+
+fn aged(id: &str, started: u64, last_active: u64) -> SessionSummary {
+    SessionSummary {
+        id: SessionId::new(id),
+        started_at: started,
+        cwd: std::path::PathBuf::from("/tmp"),
+        first_user_text: Some(format!("opened {id}")),
+        last_user_text: Some(format!("left off on {id}")),
+        last_message_at: last_active,
+    }
+}
+
+#[test]
+fn the_last_session_is_the_most_recently_used_not_the_newest_made() {
+    // A session opened last week and used this morning is the one to
+    // continue — sorting by creation put it at the bottom.
+    let summaries = vec![
+        aged("old-but-active", 1_000, 9_000),
+        aged("new-but-stale", 5_000, 2_000),
+    ];
+    let latest = latest_summary(&summaries, None).expect("one session");
+    assert_eq!(latest.id.as_str(), "old-but-active");
+}
+
+#[test]
+fn the_cwd_scope_still_wins_over_recency() {
+    let mut other = aged("elsewhere", 9_999, 9_999);
+    other.cwd = std::path::PathBuf::from("/other");
+    let summaries = vec![aged("here", 1, 1), other];
+    let latest = latest_summary(&summaries, Some(std::path::Path::new("/tmp"))).expect("scoped");
+    assert_eq!(latest.id.as_str(), "here");
+}

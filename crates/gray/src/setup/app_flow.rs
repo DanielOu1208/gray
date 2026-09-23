@@ -508,6 +508,15 @@ pub fn run_app_setup_modal(app: &str) -> anyhow::Result<()> {
     outcome
 }
 
+/// Whether the register post-step still has to run. `gray <app> register`
+/// refuses to overwrite an existing entry, so on a re-setup (the command is
+/// already registered) running it fails and strands the flow before the
+/// daemon can start. Register only when the app declares it AND it is not
+/// registered yet — making `finish_after_answers` idempotent.
+fn needs_registration(decl: &SetupDecl, gray_home: &Path, app: &str) -> bool {
+    decl.post_steps.contains(&"register") && !crate::plugin_cli::is_command(gray_home, app)
+}
+
 /// Prove the answers, write nothing more, register the app's tool. The
 /// doctor's own text is the only success report.
 fn finish_after_answers(
@@ -537,7 +546,7 @@ fn finish_after_answers(
             verify.output.trim()
         );
     }
-    if decl.post_steps.contains(&"register") {
+    if needs_registration(decl, gray_home, app) {
         let register = run_step(&register_argv(app, gray_home)?);
         anyhow::ensure!(
             register.ok,
