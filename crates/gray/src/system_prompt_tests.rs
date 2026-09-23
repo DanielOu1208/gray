@@ -118,3 +118,15 @@ fn memory_preserves_runtime_directory_and_stored_prompt() {
     assert!(!combined.contains("private note"));
     assert_eq!(with_memory(runtime.clone(), None), runtime);
 }
+
+#[test]
+fn policy_says_injected_entries_are_summaries() {
+    // The policy rides with the memory block, so with_memory is the real
+    // entry point (build_system_prompt alone never carries it).
+    let prompt = with_memory(
+        build_system_prompt(opts("You are gray.")),
+        Some(r#"{"project":"p","user":"","decisions":""}"#),
+    );
+    assert!(prompt.contains("one-sentence summaries"), "{prompt}");
+    assert!(prompt.contains("gray memory show KEY"), "{prompt}");
+}
