@@ -168,8 +168,6 @@ struct OpenAiToolDefRequest {
     #[serde(rename = "type")]
     tool_type: String,
     function: OpenAiFunctionDefRequest,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_control: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -290,11 +288,6 @@ struct OpenAiPromptDetails {
     cache_read_tokens: usize,
 }
 
-fn is_anthropic_model(model: &str) -> bool {
-    let lower = model.to_lowercase();
-    lower.contains("claude") || lower.contains("anthropic")
-}
-
 fn is_muse_model(model: &str) -> bool {
     let lower = model.to_lowercase();
     lower.contains("muse") || lower.contains("spark") || lower.contains("glimmer")
@@ -313,71 +306,6 @@ fn wire_tool_output(content: &str, is_error: bool) -> String {
         format!("Error: {content}")
     } else {
         content.to_string()
-    }
-}
-
-/// Anthropic prompt caching, pi `applyAnthropicCacheControl`: breakpoints on
-/// 1. the system prompt,
-/// 2. the last tool definition,
-/// 3. the last conversation message that carries text.
-///
-/// OpenRouter/Anthropic read `cache_control` only on content blocks, so the
-/// marker goes on a text part (pi `addCacheControlToTextContent`); a
-/// message-level field is not a documented placement and caches nothing.
-fn apply_anthropic_cache_control(
-    messages: &mut [OpenAiMessageRequest],
-    tools: &mut [OpenAiToolDefRequest],
-) {
-    let cache_control = serde_json::json!({"type": "ephemeral"});
-
-    if let Some(system) = messages
-        .iter_mut()
-        .find(|m| m.role == "system" || m.role == "developer")
-    {
-        add_cache_control_to_text_content(system, &cache_control);
-    }
-
-    if let Some(last_tool) = tools.last_mut() {
-        last_tool.cache_control = Some(cache_control.clone());
-    }
-
-    // Walk back past messages without text (tool-call-only assistant turns,
-    // image-only parts) to the newest one that can hold the marker.
-    for m in messages.iter_mut().rev() {
-        if matches!(m.role.as_str(), "user" | "assistant" | "tool")
-            && add_cache_control_to_text_content(m, &cache_control)
-        {
-            break;
-        }
-    }
-}
-
-/// Marks the last text part of `m`, promoting plain string content to a
-/// one-part text array first. `false` when there is no text to mark.
-fn add_cache_control_to_text_content(m: &mut OpenAiMessageRequest, cache_control: &Value) -> bool {
-    if let Some(Value::String(text)) = &mut m.content {
-        if text.is_empty() {
-            return false;
-        }
-        let text = std::mem::take(text);
-        m.content = Some(serde_json::json!([
-            {"type": "text", "text": text, "cache_control": cache_control}
-        ]));
-        return true;
-    }
-    let Some(Value::Array(parts)) = &mut m.content else {
-        return false;
-    };
-    let text_part = parts
-        .iter_mut()
-        .rev()
-        .find(|p| p.get("type").and_then(Value::as_str) == Some("text"));
-    match text_part.and_then(Value::as_object_mut) {
-        Some(part) => {
-            part.insert("cache_control".to_string(), cache_control.clone());
-            true
-        }
-        None => false,
     }
 }
 
@@ -627,7 +555,7 @@ fn map_chat_request(
     let messages = ordered;
 
     // 3. Map tools — drop empty names that would trigger 400 `name` must be non-empty
-    let mut tools: Vec<OpenAiToolDefRequest> = filter_valid_tools(req.tools)
+    let tools: Vec<OpenAiToolDefRequest> = filter_valid_tools(req.tools)
         .into_iter()
         .map(|tool| OpenAiToolDefRequest {
             tool_type: "function".to_string(),
@@ -636,7 +564,6 @@ fn map_chat_request(
                 description: tool.description,
                 parameters: tool.parameters,
             },
-            cache_control: None,
         })
         .collect();
 
@@ -686,13 +613,7 @@ fn map_chat_request(
         log::warn!(target: "gray_provider", "synthesizing missing tool output for orphaned call {id}");
         fixed.push(stub(&id));
     }
-    let mut messages = fixed;
-
-    // Anthropic prompt caching (pi): marked after the orphan guard so the
-    // "last message" breakpoint lands on what is actually sent last.
-    if is_anthropic_model(model) {
-        apply_anthropic_cache_control(&mut messages, &mut tools);
-    }
+    let messages = fixed;
 
     let (reasoning_effort_val, reasoning_val, thinking_val) = match reasoning_effort {
         Some("off") => (None, None, Some(serde_json::json!({ "type": "disabled" }))),
@@ -1400,30 +1321,16 @@ fn retry_floor(
     floor
 }
 
-/// Session-affinity headers for one POST (empty without a session id).
+/// Session-affinity header for one POST (empty without a session id).
 /// `x-opencode-session`: Console Go (opencode.ai/zen) routes on it and 400s
 /// MissingSessionID without it; unknown `x-` headers are ignored elsewhere.
-/// `x-session-id`: OpenRouter's sticky-routing key (pi
-/// `sendSessionAffinityHeaders`), which pins every request of the session to
-/// the upstream that holds its prompt cache instead of a key OpenRouter
-/// derives by hashing the messages.
-fn session_affinity_headers<'a>(
-    url: &Url,
-    session_id: Option<&'a str>,
-) -> Vec<(&'static str, &'a str)> {
+/// Prompt-cache affinity is carried by the request body's `prompt_cache_key`,
+/// so no per-host sticky-routing header is needed.
+fn session_affinity_headers(session_id: Option<&str>) -> Vec<(&'static str, &str)> {
     let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
-    let mut headers = vec![("x-opencode-session", sid)];
-    if url.host_str().is_some_and(|h| {
-        h == "openrouter.ai"
-            || h.ends_with(".openrouter.ai")
-            || h == "commandcode.ai"
-            || h.ends_with(".commandcode.ai")
-    }) {
-        headers.push(("x-session-id", sid));
-    }
-    headers
+    vec![("x-opencode-session", sid)]
 }
 
 /// Single POST attempt (no retry). Retry + `Reconnecting...` notices live in
@@ -1444,7 +1351,7 @@ async fn send_json_once(
             .post(url.clone())
             .header("Authorization", format!("Bearer {api_key}"))
     };
-    let base = session_affinity_headers(url, session_id)
+    let base = session_affinity_headers(session_id)
         .into_iter()
         .fold(base, |b, (name, value)| b.header(name, value));
     let req = base.header("Content-Type", "application/json").json(body);
