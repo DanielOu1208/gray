@@ -109,25 +109,20 @@ fn session_matches(s: &SessionSummary, query: &str, cwd_filter: Option<&Path>) -
             .contains(&q)
 }
 
+/// The session `--last` resumes: the one touched most recently, scoped to
+/// the cwd. Activity, not creation — a session opened last week and used
+/// this morning is the one to continue.
 pub fn latest_summary<'a>(
     summaries: &'a [SessionSummary],
     cwd_filter: Option<&Path>,
 ) -> Option<&'a SessionSummary> {
-    let mut filtered: Vec<&SessionSummary> = summaries
+    summaries
         .iter()
-        .filter(|s| {
-            if let Some(cwd) = cwd_filter {
-                paths_match(&s.cwd, cwd)
-            } else {
-                true
-            }
-        })
-        .collect();
-    filtered.sort_by_key(|s| s.started_at);
-    filtered.into_iter().last()
+        .filter(|s| cwd_filter.is_none_or(|cwd| paths_match(&s.cwd, cwd)))
+        .max_by_key(|s| s.last_message_at)
 }
 
-/// Sorted (oldest first) session summaries for headless list output
+/// Session summaries for headless list output, newest activity first
 /// (`/resume` with piped stdout, `gray resume` without a TTY): the picker
 /// needs a real terminal, so these print as text instead. Same cwd filter
 /// as [`latest_summary`] (`--all` disables it).
@@ -140,7 +135,10 @@ pub async fn recent_summaries(store: &JsonlSessionStore, all: bool) -> Vec<Sessi
         .into_iter()
         .filter(|s| filt.is_none_or(|c| paths_match(&s.cwd, c)))
         .collect();
-    out.sort_by_key(|s| s.started_at);
+    // Newest activity first, like the picker: the printed age then reads
+    // monotonically instead of jumping around.
+    out.sort_by_key(|s| s.last_message_at);
+    out.reverse();
     out
 }
 
@@ -186,7 +184,7 @@ pub async fn resolve_prefix(
         }
         if cwd_matches.len() > 1 {
             // Pick most recent in CWD
-            let latest = cwd_matches.into_iter().max_by_key(|s| s.started_at);
+            let latest = cwd_matches.into_iter().max_by_key(|s| s.last_message_at);
             if let Some(s) = latest {
                 return Some(s.id.clone());
             }
@@ -203,7 +201,7 @@ pub async fn resolve_prefix(
     }
     if all_matches.len() > 1 {
         // Pick the most recent session matching this prefix
-        let latest = all_matches.into_iter().max_by_key(|s| s.started_at);
+        let latest = all_matches.into_iter().max_by_key(|s| s.last_message_at);
         if let Some(s) = latest {
             return Some(s.id.clone());
         }
@@ -324,8 +322,10 @@ pub async fn run_resume_picker(
     let root = crate::session_store::default_root()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve home"))?;
     let store = JsonlSessionStore::new(root);
+    // `list()` already orders by last activity; sort again so the picker's
+    // order does not depend on that internal detail.
     let mut summaries = store.list().await;
-    summaries.sort_by_key(|s| s.started_at);
+    summaries.sort_by_key(|s| s.last_message_at);
     summaries.reverse();
     if summaries.is_empty() {
         anyhow::bail!("no saved sessions");

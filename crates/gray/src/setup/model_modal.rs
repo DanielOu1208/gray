@@ -21,6 +21,30 @@ pub(crate) fn provider_models_for(
     (item_id, item_name, models)
 }
 
+/// Models we already know without touching the network: the saved config's
+/// list for this provider. The picker paints from this immediately and
+/// refreshes in the background — opening a modal should never wait on an
+/// HTTP round-trip.
+pub(super) fn saved_models_for(base_url: &str) -> Vec<(String, String)> {
+    let mut models: Vec<(String, String)> = Vec::new();
+    if let Ok(path) = saved_config_path() {
+        let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
+        load_saved_config_at(&path).sort_models(base_url, &mut models);
+    }
+    models
+}
+
+/// Merge a live list into what the picker already shows, keeping the
+/// saved ordering. Same result as [`picker_models_for`], minus the wait.
+fn merge_models(base_url: &str, live: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut models = live;
+    if let Ok(path) = saved_config_path() {
+        let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
+        load_saved_config_at(&path).sort_models(base_url, &mut models);
+    }
+    models
+}
+
 /// Shared ordering for /model and every connect-modal model list.
 pub(super) fn picker_models_for(base_url: &str, api_key: Option<&str>) -> Vec<(String, String)> {
     let mut models = fetch_live_provider_models(base_url, api_key);
@@ -45,8 +69,27 @@ pub fn run_model_modal(
     use ratatui::widgets::{Block, Clear, Paragraph};
     use std::time::Duration;
 
-    let (item_id, item_name, models) =
-        provider_models_for(&config.base_url, config.api_key.as_deref());
+    // The provider identity is local catalog work; only the model list
+    // needs the network, and that no longer blocks the first frame.
+    let catalog = load_catalog().unwrap_or_default();
+    let (item_id, item_name) =
+        if let Some((pid, p)) = catalog.iter().find(|(_, p)| p.base_url == config.base_url) {
+            (pid.clone(), p.name.clone())
+        } else {
+            ("custom".to_string(), "Custom".to_string())
+        };
+    let mut models = saved_models_for(&config.base_url);
+    let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<Vec<(String, String)>>();
+    // Detached on purpose: a late reply lands in a channel nobody reads.
+    let _refresh = {
+        let base_url = config.base_url.clone();
+        let api_key = config.api_key.clone();
+        let tx = refresh_tx;
+        std::thread::spawn(move || {
+            let live = super::context::fetch_live_provider_models(&base_url, api_key.as_deref());
+            let _ = tx.send(live);
+        })
+    };
 
     let item = ConnectItem {
         id: item_id.clone(),
@@ -54,6 +97,7 @@ pub fn run_model_modal(
         sublabel: String::new(),
         base_url: config.base_url.clone(),
         no_auth: false,
+        auth: crate::setup::ConnectAuth::ApiKey,
     };
 
     let _session = TuiSession::acquire()?;
@@ -82,7 +126,16 @@ pub fn run_model_modal(
         .unwrap_or_else(BackgroundSnapshot::default_initial);
 
     let result = (|| -> anyhow::Result<bool> {
+        let mut refreshing = true;
         loop {
+            // A finished refresh updates the open list in place; the modal
+            // was already usable while it ran.
+            if refreshing && let Ok(live) = refresh_rx.try_recv() {
+                refreshing = false;
+                if !live.is_empty() {
+                    models = merge_models(&config.base_url, live);
+                }
+            }
             let filtered_models: Vec<&(String, String)> = models
                 .iter()
                 .filter(|(m_id, m_name)| {
@@ -127,8 +180,16 @@ pub fn run_model_modal(
                 // Header
                 let title_str = format!("Select model \u{2014} {}", item.name);
                 let esc_str = "esc";
-                let pad_len = (inner.width as usize)
-                    .saturating_sub(title_str.chars().count() + esc_str.chars().count());
+                // Say so while the live list is still loading: a short list
+                // that is still filling in must not read as the whole truth.
+                let hint = if refreshing {
+                    "  refreshing\u{2026}"
+                } else {
+                    ""
+                };
+                let pad_len = (inner.width as usize).saturating_sub(
+                    title_str.chars().count() + esc_str.chars().count() + hint.chars().count(),
+                );
                 let header_line = Line::from(vec![
                     Span::styled(
                         title_str,
@@ -138,6 +199,7 @@ pub fn run_model_modal(
                             .bg(box_bg),
                     ),
                     Span::styled(" ".repeat(pad_len), Style::default().bg(box_bg)),
+                    Span::styled(hint, Style::default().fg(text_dim).bg(box_bg)),
                     Span::styled(esc_str, Style::default().fg(text_dim).bg(box_bg)),
                 ]);
                 frame.render_widget(

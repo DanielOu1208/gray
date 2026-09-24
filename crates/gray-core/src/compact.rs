@@ -27,6 +27,12 @@ pub(crate) fn block_tokens(b: &ContentBlock) -> usize {
         ContentBlock::Text { text } => text.len() / 4,
         ContentBlock::Image { media_type, data } => image_block_tokens(media_type, data.len()),
         ContentBlock::ToolResult { content, .. } => content.len() / 4,
+        ContentBlock::StructuredInput {
+            protocol,
+            version,
+            kind,
+            payload,
+        } => format!("{protocol}{version}{kind}{payload}").len() / 4,
         ContentBlock::ToolUse { name, args, .. } => format!("{name}{args}").len() / 4,
         ContentBlock::Thinking {
             text,

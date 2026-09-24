@@ -40,6 +40,12 @@ pub struct Config {
     pub base_url: String,
     /// API key for authentication. None until set.
     pub api_key: Option<String>,
+    /// Resolved provider id. Empty for the built-in API-key flow.
+    pub provider_id: String,
+    /// Credential mode for the active model/provider ("plugin" for dynamic).
+    pub credential_source: String,
+    /// Namespaced namespaced plugin credential reference.
+    pub auth_ref: String,
     /// Thinking / reasoning effort level ("off", "minimal", "low", "medium", "high", "xhigh", "max").
     pub thinking_effort: Option<String>,
     /// Show reasoning text in the transcript. None (default) = shown.
@@ -177,6 +183,9 @@ impl Config {
             model,
             base_url,
             api_key,
+            provider_id: nonempty(Some(saved.provider_id.as_str())).unwrap_or_default(),
+            credential_source: nonempty(Some(saved.credential_source.as_str())).unwrap_or_default(),
+            auth_ref: nonempty(Some(saved.auth_ref.as_str())).unwrap_or_default(),
             thinking_effort,
             show_reasoning,
             temperature,
@@ -196,5 +205,12 @@ impl Config {
     /// otherwise the show_reasoning setting decides (default shown).
     pub fn reasoning_hidden(&self) -> bool {
         self.thinking_effort.as_deref() == Some("off") || !self.show_reasoning.unwrap_or(true)
+    }
+
+    /// True only for a fully identified plugin-backed provider connection.
+    pub fn uses_plugin_credentials(&self) -> bool {
+        self.credential_source == "plugin"
+            && !self.provider_id.is_empty()
+            && !self.auth_ref.is_empty()
     }
 }

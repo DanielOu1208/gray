@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::session_store::{JsonlSessionStore, SessionId, SessionMeta};
 use gray_core::agent::ToolContext;
 use gray_core::event::AgentEvent;
+use gray_core::input::{InputEnvelope, InputError};
 use gray_core::message::Message;
 use gray_core::redaction::{redact_for_disclosure, redact_message};
 
@@ -169,7 +170,15 @@ pub async fn run_print_mode_with_session(
     session: Option<&str>,
     continue_last: bool,
 ) -> anyhow::Result<()> {
-    run_print_inner(config, prompt, session, continue_last, None).await
+    run_print_inner(
+        config,
+        Some(prompt),
+        Message::user(prompt),
+        session,
+        continue_last,
+        None,
+    )
+    .await
 }
 
 /// Machine-readable print mode. Never forwards reasoning, tool arguments/results,
@@ -183,12 +192,60 @@ pub async fn run_print_mode_json(
     input_price: Option<f64>,
     output_price: Option<f64>,
 ) -> anyhow::Result<()> {
+    run_print_mode_json_message(
+        config,
+        Message::user(prompt),
+        session,
+        continue_last,
+        max_requests,
+        input_price,
+        output_price,
+    )
+    .await
+}
+
+/// Machine-readable one-shot mode for a versioned structured input event.
+/// The event remains a typed user block in the session instead of being
+/// converted into prompt prose.
+pub async fn run_print_mode_json_input(
+    config: &Config,
+    input: &InputEnvelope,
+    session: Option<&str>,
+    continue_last: bool,
+    max_requests: Option<u32>,
+    input_price: Option<f64>,
+    output_price: Option<f64>,
+) -> anyhow::Result<()> {
+    run_print_mode_json_message(
+        config,
+        Message::structured_input(input.clone()),
+        session,
+        continue_last,
+        max_requests,
+        input_price,
+        output_price,
+    )
+    .await
+}
+
+async fn run_print_mode_json_message(
+    config: &Config,
+    user_message: Message,
+    session: Option<&str>,
+    continue_last: bool,
+    max_requests: Option<u32>,
+    input_price: Option<f64>,
+    output_price: Option<f64>,
+) -> anyhow::Result<()> {
     let mut output = JsonOutput {
         turn_id: uuid::Uuid::new_v4().to_string(),
         session_id: None,
         text: String::new(),
         usage: gray_core::event::Usage::default(),
         meter: None,
+        tools: HashMap::new(),
+        thinking: String::new(),
+        show_reasoning: config.show_reasoning.unwrap_or(true),
     };
     let result = match crate::print_meter::Meter::new(
         max_requests.unwrap_or(32),
@@ -198,7 +255,15 @@ pub async fn run_print_mode_json(
     ) {
         Ok(meter) => {
             output.meter = Some(meter);
-            run_print_inner(config, prompt, session, continue_last, Some(&mut output)).await
+            run_print_inner(
+                config,
+                None,
+                user_message,
+                session,
+                continue_last,
+                Some(&mut output),
+            )
+            .await
         }
         Err(error) => Err(error),
     };
@@ -218,12 +283,23 @@ pub async fn run_print_mode_json(
         row["accounting"] = serde_json::to_value(meter.snapshot())?;
     }
     output.write(row)?;
-    // The detailed human-mode error may contain provider context. Keep the JSON
-    // error and process exit consistent without copying that context to stderr.
     match result {
         Ok(()) => Ok(()),
         Err(error) => Err(PrintFailure::of(&error).into()),
     }
+}
+
+/// Emit a bounded protocol-1 error row before a structured input can enter
+/// the agent. The input parser never includes payload contents in this row.
+pub fn write_structured_input_error(error: &InputError) {
+    let row = serde_json::json!({
+        "protocol": 1,
+        "type": "error",
+        "code": "invalid_input",
+        "retryable": false,
+        "message": error.to_string(),
+    });
+    println!("{row}");
 }
 
 /// Process exit codes for `--json` print mode. Harnesses branch on these (and
@@ -323,12 +399,26 @@ impl std::fmt::Display for PrintFailure {
 
 impl std::error::Error for PrintFailure {}
 
+/// Caps on disclosed tool data (chars) and the reasoning buffer flush
+/// threshold. Bounds what a chatty surface (Discord, Telegram, a log tail)
+/// receives per row; the full text stays in the session log.
+const DETAIL_CAP: usize = 240;
+const OUTPUT_CAP: usize = 1200;
+const THINKING_FLUSH: usize = 800;
+
 struct JsonOutput {
     turn_id: String,
     session_id: Option<String>,
     text: String,
     usage: gray_core::event::Usage,
     meter: Option<crate::print_meter::Meter>,
+    /// Tool call id -> name, for rows that carry no name of their own
+    /// (`ToolCallEnd` has args only). Cleared per call by `ToolResult`.
+    tools: HashMap<String, String>,
+    /// Reasoning buffer: flushed as one `thinking` row per THINKING_FLUSH
+    /// chars, never one row per token.
+    thinking: String,
+    show_reasoning: bool,
 }
 
 impl JsonOutput {
@@ -342,25 +432,167 @@ impl JsonOutput {
     }
 
     fn event(&mut self, event: &AgentEvent) -> std::io::Result<()> {
+        for row in self.rows(event) {
+            self.write(row)?;
+        }
+        Ok(())
+    }
+
+    /// Progress rows for one event (thinking flushes first at turn end).
+    /// Pure builder so the narration wire is unit-testable off stdout.
+    fn rows(&mut self, event: &AgentEvent) -> Vec<serde_json::Value> {
+        // Reasoning arrives per token; batch it into capped `thinking` rows.
+        if let AgentEvent::ThinkingDelta { delta } = event {
+            if self.show_reasoning {
+                self.thinking.push_str(delta);
+                if self.thinking.chars().count() >= THINKING_FLUSH {
+                    return self.take_thinking();
+                }
+            }
+            return Vec::new();
+        }
+        let mut row = serde_json::json!({"type": "progress"});
+        let mut rows = Vec::new();
         let phase = match event {
             AgentEvent::Start => "generating",
-            AgentEvent::ToolCallStart { .. } => "tool_started",
-            AgentEvent::ToolResult { .. } => "tool_finished",
-            AgentEvent::StreamError { .. } => "provider_retry",
+            AgentEvent::ToolCallStart { id, name } => {
+                self.tools.insert(id.clone(), name.clone());
+                row["tool"] = name.as_str().into();
+                row["call_id"] = disclose(id, DETAIL_CAP).into();
+                "tool_started"
+            }
+            AgentEvent::ToolCallEnd { id, args } => {
+                if let Some(name) = self.tools.get(id) {
+                    row["tool"] = name.as_str().into();
+                    row["call_id"] = disclose(id, DETAIL_CAP).into();
+                    if let Some(detail) = tool_detail(name, args) {
+                        row["detail"] = detail.into();
+                    }
+                }
+                "tool_ran"
+            }
+            AgentEvent::ToolResult {
+                id,
+                output,
+                is_error,
+            } => {
+                if let Some(name) = self.tools.remove(id) {
+                    row["tool"] = name.into();
+                }
+                if !id.is_empty() {
+                    row["call_id"] = disclose(id, DETAIL_CAP).into();
+                }
+                if *is_error {
+                    row["error"] = true.into();
+                }
+                let output = disclose_output(output, OUTPUT_CAP);
+                if !output.is_empty() {
+                    row["output"] = output.into();
+                }
+                "tool_finished"
+            }
+            AgentEvent::StreamError { message, .. } => {
+                row["detail"] = disclose(message, DETAIL_CAP).into();
+                "provider_retry"
+            }
             AgentEvent::Compacted { .. } => "compacted",
             AgentEvent::TurnEnd { usage, .. } => {
                 self.usage = *usage;
+                rows.append(&mut self.take_thinking());
                 "persisting"
             }
-            _ => return Ok(()),
+            _ => return Vec::new(),
         };
-        self.write(serde_json::json!({"type": "progress", "phase": phase}))
+        row["phase"] = phase.into();
+        rows.push(row);
+        rows
+    }
+
+    /// One `thinking` row for whatever reasoning has accumulated. Redacted
+    /// like every disclosed detail: a model that reads a key file can
+    /// quote it back.
+    fn take_thinking(&mut self) -> Vec<serde_json::Value> {
+        let text = std::mem::take(&mut self.thinking);
+        if text.trim().is_empty() {
+            return Vec::new();
+        }
+        vec![serde_json::json!({
+            "type": "progress", "phase": "thinking", "detail": disclose(&text, DETAIL_CAP)
+        })]
+    }
+}
+
+/// Collapse to one line, cap, and redact. Every `detail` on the wire goes
+/// through here: tool args and model output are untrusted for secrets.
+fn disclose(text: &str, cap: usize) -> String {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let capped: String = flat.chars().take(cap).collect();
+    let capped = if flat.chars().count() > cap {
+        format!("{capped}…")
+    } else {
+        capped
+    };
+    redact_for_disclosure(&capped).into_text()
+}
+
+/// Preserve line breaks for a bounded terminal transcript while applying the
+/// same disclosure rules as one-line details. The full result remains in the
+/// session log; chat surfaces only receive this redacted prefix.
+fn disclose_output(text: &str, cap: usize) -> String {
+    // Redaction is linear in the input. Keep a small look-ahead past the
+    // disclosure cap so a credential split at the boundary is still treated
+    // as a credential, without scanning an unbounded tool result.
+    let look_ahead = cap.saturating_add(256);
+    let mut chars = text.chars();
+    let prefix = chars.by_ref().take(look_ahead).collect::<String>();
+    let source_truncated = chars.next().is_some();
+    let redacted = redact_for_disclosure(&prefix).into_text();
+    if !source_truncated && redacted.chars().count() <= cap {
+        return redacted;
+    }
+    format!("{}…", redacted.chars().take(cap).collect::<String>())
+}
+
+/// The one-line "what did it just do" for known tools. Returns `None` for
+/// anything else rather than dumping raw args: a value we do not
+/// understand is exactly where a token hides.
+fn tool_detail(name: &str, args: &serde_json::Value) -> Option<String> {
+    let arg = |k: &str| args.get(k).and_then(serde_json::Value::as_str);
+    match name {
+        "bash" | "shell" => arg("command").map(|c| disclose(c, DETAIL_CAP)),
+        "read" | "view" | "cat" => {
+            let path = arg("path")?;
+            // Line range when the reader has one: `config.yaml L110-139`.
+            // `offset` is 1-based and negative means tail; either way the
+            // path alone is the honest summary.
+            let (Some(start), Some(limit)) = (
+                args.get("offset").and_then(|v| v.as_u64()),
+                args.get("limit").and_then(|v| v.as_u64()),
+            ) else {
+                return Some(disclose(path, DETAIL_CAP));
+            };
+            if start == 0 || limit == 0 {
+                return Some(disclose(path, DETAIL_CAP));
+            }
+            Some(disclose(
+                &format!("{path} L{start}-{}", start + limit - 1),
+                DETAIL_CAP,
+            ))
+        }
+        "write" | "edit" | "apply_patch" | "create" | "str_replace" => {
+            arg("path").map(|p| disclose(p, DETAIL_CAP))
+        }
+        "skill" | "use_skill" => arg("skill")
+            .or_else(|| arg("name"))
+            .map(|n| disclose(n, DETAIL_CAP)),
+        _ => None,
     }
 }
 
 async fn run_print_inner(
     config: &Config,
-    prompt: &str,
+    prompt: Option<&str>,
+    user_message: Message,
     session: Option<&str>,
     continue_last: bool,
     mut json: Option<&mut JsonOutput>,
@@ -437,8 +669,14 @@ async fn run_print_inner(
 
     let history_revision = agent.history_revision();
     // Headless `-p` has no paste-attach: inline file links still carry vision.
-    let inline = crate::repl::attachments::extract_inline_image_paths(prompt, &cwd);
-    let user_msg = crate::repl::build_user_message_with_attachments(prompt, &inline);
+    // Structured input already owns its typed block and never scans arbitrary
+    // text for attachment paths.
+    let user_msg = if let Some(prompt) = prompt {
+        let inline = crate::repl::attachments::extract_inline_image_paths(prompt, &cwd);
+        crate::repl::build_user_message_with_attachments(prompt, &inline)
+    } else {
+        user_message
+    };
     // SIGINT only signals the shared token — never wrap the run in a
     // select! that would drop it. Aborted once the run returns.
     let sigint_cancel = cancel.clone();

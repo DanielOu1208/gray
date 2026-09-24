@@ -7,8 +7,10 @@
 //!    provider's prompt cache stays warm for a short idle window (both
 //!    Anthropic's `cache_control` and OpenAI's automatic prefix caching
 //!    expire after roughly five idle minutes), so the footer shows
-//!    `◷ 4m` — "prompt cache warm, about 4 min left" — and hides it once
-//!    the cache is cold (or the provider never reports cache activity).
+//!    `◷ 4m` — "prompt cache warm, about 4 min left". It freezes for the
+//!    duration of an active turn, then rearms to five minutes when the turn
+//!    returns to idle, and hides once the cache is cold (or the provider
+//!    never reports cache activity).
 //! 2. A transcript warning when a request re-billed prompt tokens the
 //!    previous request should have served from cache ("Cache miss after
 //!    6m idle: 45.2k tokens re-billed (~$0.12)"), which is what an idle
@@ -56,7 +58,7 @@ pub struct CacheMiss {
     pub missed_tokens: usize,
     /// Extra dollars paid vs. a full cache hit; 0 when pricing is unknown.
     pub missed_cost: f64,
-    /// Time since the previous request (which last refreshed the cache).
+    /// Idle time since the previous request (which last refreshed the cache).
     pub idle: Duration,
     /// True when the model changed relative to the previous request.
     pub model_changed: bool,
@@ -94,7 +96,8 @@ impl CacheMiss {
 /// be cached for the next one.
 #[derive(Debug, Clone)]
 struct LastRequest {
-    /// When the response landed (the request that last warmed the cache).
+    /// Effective idle anchor for the request that last warmed the cache.
+    /// It starts when the response lands and moves past active-turn pauses.
     at: Instant,
     /// Inclusive prompt tokens of that request.
     prompt_tokens: usize,
@@ -116,6 +119,9 @@ struct LastRequest {
 #[derive(Debug, Clone, Default)]
 pub struct CacheTracker {
     last: Option<LastRequest>,
+    /// Start of the current active-turn pause, or the latest in-turn usage
+    /// report. While set, wall-clock time cannot consume the warmth TTL.
+    paused_at: Option<Instant>,
 }
 
 impl CacheTracker {
@@ -134,13 +140,25 @@ impl CacheTracker {
         let read = usage.cache_read_input_tokens.max(usage.cached_tokens);
         let write = usage.cache_write_input_tokens;
         let reported = read + write > 0;
+        // A request reported during an active turn compares against the time
+        // that turn began: generation/tool time is not idle cache time.
+        let miss_at = self.paused_at.unwrap_or(now);
 
         let miss = match &self.last {
             // Same report twice: the agent loop re-emits the last round's
             // usage when a later round reports none, so the tracker would
             // otherwise see one request as two and invent a miss.
             Some(prev) if prev.usage == *usage => None,
-            Some(prev) => detect_miss(prev, usage, prompt_tokens, read, write, rate, now, model),
+            Some(prev) => detect_miss(
+                prev,
+                usage,
+                prompt_tokens,
+                read,
+                write,
+                rate,
+                miss_at,
+                model,
+            ),
             // First request of the session: nothing was cached before it.
             None => None,
         };
@@ -152,6 +170,7 @@ impl CacheTracker {
             .unwrap_or(false)
             || reported;
         if prompt_tokens > 0 {
+            let was_paused = self.paused_at.is_some();
             self.last = Some(LastRequest {
                 at: now,
                 prompt_tokens,
@@ -159,24 +178,64 @@ impl CacheTracker {
                 reported_cache,
                 usage: *usage,
             });
+            // This report starts a fresh full TTL. Freeze that new value for
+            // whatever remains of the active turn instead of aging it.
+            if was_paused {
+                self.paused_at = Some(now);
+            }
         }
         miss
     }
 
-    /// Time left before the warm cache goes cold, or `None` when no cache
-    /// activity has ever been reported (provider without caching) or the
-    /// TTL already elapsed.
+    /// Time left before the warm cache goes cold, frozen while a turn is
+    /// active, or `None` when no cache activity has ever been reported
+    /// (provider without caching) or the TTL already elapsed.
     pub fn remaining(&self, now: Instant) -> Option<Duration> {
         let last = self.last.as_ref()?;
         if !last.reported_cache {
             return None;
         }
-        let age = now.saturating_duration_since(last.at);
+        // `paused_at` is the effective clock: active turns neither consume
+        // warmth nor make the footer repaint a lower value.
+        let observed_at = self.paused_at.unwrap_or(now);
+        let age = observed_at.saturating_duration_since(last.at);
         (age < CACHE_TTL).then(|| CACHE_TTL - age)
     }
 
+    /// Freezes the countdown for an active turn. Idempotent because setup
+    /// and the normal request path can both reassert the Working status.
+    pub(crate) fn pause(&mut self, now: Instant) {
+        if self.paused_at.is_none() {
+            self.paused_at = Some(now);
+        }
+    }
+
+    /// Resumes from the frozen value without refreshing it. This is only for
+    /// setup/build aborts, where no completed provider turn can restart the
+    /// cache window.
+    pub(crate) fn resume(&mut self, now: Instant) {
+        let Some(paused_at) = self.paused_at.take() else {
+            return;
+        };
+        let Some(last) = self.last.as_mut() else {
+            return;
+        };
+        last.at += now.saturating_duration_since(paused_at);
+    }
+
+    /// Ends an active turn and starts a fresh warmth window. The completed
+    /// provider turn is the new idle anchor, so active time is never charged
+    /// against the five-minute TTL.
+    pub(crate) fn rearm(&mut self, now: Instant) {
+        self.paused_at = None;
+        if let Some(last) = self.last.as_mut() {
+            last.at = now;
+        }
+    }
+
     /// Forgets the last request: new conversation, or a compaction (the
-    /// next request's prompt is new content, not re-billed content).
+    /// next request's prompt is new content, not re-billed content). An
+    /// active-turn pause is orthogonal and deliberately survives the reset.
     pub fn reset(&mut self) {
         self.last = None;
     }

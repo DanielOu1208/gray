@@ -278,3 +278,214 @@ fn failure_message_never_carries_provider_detail() {
     assert_eq!(generic.code, "provider_error");
     assert!(generic.hint.is_none());
 }
+
+// ── progress narration rows (tool detail / reasoning on the --json wire) ──
+
+fn json_out(show_reasoning: bool) -> JsonOutput {
+    JsonOutput {
+        turn_id: "t1".to_string(),
+        session_id: None,
+        text: String::new(),
+        usage: Default::default(),
+        meter: None,
+        tools: HashMap::new(),
+        thinking: String::new(),
+        show_reasoning,
+    }
+}
+
+#[test]
+fn progress_narrates_a_bash_call_with_its_command() {
+    let mut out = json_out(true);
+    out.tools.insert("c1".into(), "bash".into());
+    let rows = out.rows(&AgentEvent::ToolCallEnd {
+        id: "c1".into(),
+        args: serde_json::json!({"command": "cargo test -p gray"}),
+    });
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["phase"], "tool_ran");
+    assert_eq!(rows[0]["tool"], "bash");
+    assert_eq!(rows[0]["call_id"], "c1");
+    assert_eq!(rows[0]["detail"], "cargo test -p gray");
+}
+
+#[test]
+fn progress_narrates_start_and_result_with_the_tool_name() {
+    let mut out = json_out(true);
+    let started = out.rows(&AgentEvent::ToolCallStart {
+        id: "c1".into(),
+        name: "bash".into(),
+    });
+    assert_eq!(started[0]["phase"], "tool_started");
+    assert_eq!(started[0]["tool"], "bash");
+    assert_eq!(started[0]["call_id"], "c1");
+    let done = out.rows(&AgentEvent::ToolResult {
+        id: "c1".into(),
+        output: "ok".into(),
+        is_error: false,
+    });
+    assert_eq!(done[0]["phase"], "tool_finished");
+    assert_eq!(done[0]["tool"], "bash");
+    assert_eq!(done[0]["call_id"], "c1");
+    assert_eq!(done[0]["output"], "ok");
+    assert!(done[0].get("error").is_none());
+}
+
+#[test]
+fn progress_output_preserves_lines_redacts_and_caps() {
+    let mut out = json_out(false);
+    out.tools.insert("c1".into(), "bash".into());
+    let rows = out.rows(&AgentEvent::ToolResult {
+        id: "c1".into(),
+        output: format!(
+            "line one\nAuthorization: Bearer sk-abc123SECRET\n{}",
+            "x ".repeat(OUTPUT_CAP * 2)
+        ),
+        is_error: false,
+    });
+    let output = rows[0]["output"].as_str().unwrap();
+    assert!(output.contains("line one\n"), "{output}");
+    assert!(
+        !output.contains("sk-abc123SECRET"),
+        "leaked output: {output}"
+    );
+    assert!(output.contains("<redacted>"), "{output}");
+    assert!(output.chars().count() <= OUTPUT_CAP + 1, "{}", output.len());
+    assert!(output.ends_with('…'));
+}
+
+#[test]
+fn progress_marks_a_failed_tool() {
+    let mut out = json_out(true);
+    out.tools.insert("c1".into(), "bash".into());
+    let rows = out.rows(&AgentEvent::ToolResult {
+        id: "c1".into(),
+        output: "boom".into(),
+        is_error: true,
+    });
+    assert_eq!(rows[0]["error"], true);
+}
+
+#[test]
+fn progress_read_detail_is_a_one_based_line_range() {
+    let detail = tool_detail(
+        "read",
+        &serde_json::json!({"path": "config.yaml", "offset": 110, "limit": 30}),
+    );
+    assert_eq!(detail.as_deref(), Some("config.yaml L110-139"));
+}
+
+#[test]
+fn progress_read_detail_is_just_the_path_for_tail_and_zero() {
+    assert_eq!(
+        tool_detail("read", &serde_json::json!({"path": "f"})).as_deref(),
+        Some("f")
+    );
+    assert_eq!(
+        tool_detail(
+            "read",
+            &serde_json::json!({"path": "f", "offset": -20, "limit": 20})
+        )
+        .as_deref(),
+        Some("f")
+    );
+    assert_eq!(
+        tool_detail(
+            "read",
+            &serde_json::json!({"path": "f", "offset": 5, "limit": 0})
+        )
+        .as_deref(),
+        Some("f")
+    );
+}
+
+#[test]
+fn progress_detail_redacts_secrets_from_commands() {
+    let detail = tool_detail(
+        "bash",
+        &serde_json::json!({"command": "curl -H 'Authorization: Bearer sk-abc123SECRET' https://x"}),
+    )
+    .unwrap();
+    assert!(!detail.contains("sk-abc123SECRET"), "leaked: {detail}");
+    assert!(detail.contains("<redacted>"), "{detail}");
+}
+
+#[test]
+fn progress_detail_for_an_unknown_tool_drops_the_args() {
+    // A value we do not understand is exactly where a token hides.
+    assert!(
+        tool_detail(
+            "some_plugin_tool",
+            &serde_json::json!({"query": "sk-secret"})
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn progress_detail_is_capped() {
+    let long = "x".repeat(DETAIL_CAP * 2);
+    let detail = tool_detail("bash", &serde_json::json!({"command": long})).unwrap();
+    assert!(
+        detail.chars().count() <= DETAIL_CAP + 1,
+        "{}",
+        detail.chars().count()
+    );
+    assert!(detail.ends_with('…'));
+}
+
+#[test]
+fn progress_batches_reasoning_instead_of_one_row_per_token() {
+    let mut out = json_out(true);
+    for _ in 0..10 {
+        assert!(
+            out.rows(&AgentEvent::ThinkingDelta { delta: "a".into() })
+                .is_empty()
+        );
+    }
+    let flushed = out.rows(&AgentEvent::ThinkingDelta {
+        delta: "b".repeat(THINKING_FLUSH),
+    });
+    assert_eq!(flushed.len(), 1);
+    assert_eq!(flushed[0]["phase"], "thinking");
+    // Turn end flushes whatever reasoning is left.
+    let end = out.rows(&AgentEvent::TurnEnd {
+        stop_reason: gray_core::event::StopReason::EndTurn,
+        usage: Default::default(),
+    });
+    assert_eq!(end.last().unwrap()["phase"], "persisting");
+    assert_eq!(end.len(), 1, "empty buffer must not emit a thinking row");
+}
+
+#[test]
+fn progress_flushes_reasoning_before_persisting() {
+    let mut out = json_out(true);
+    out.rows(&AgentEvent::ThinkingDelta {
+        delta: "why".into(),
+    });
+    let end = out.rows(&AgentEvent::TurnEnd {
+        stop_reason: gray_core::event::StopReason::EndTurn,
+        usage: Default::default(),
+    });
+    assert_eq!(end[0]["phase"], "thinking");
+    assert_eq!(end[0]["detail"], "why");
+    assert_eq!(end[1]["phase"], "persisting");
+}
+
+#[test]
+fn progress_reasoning_is_gated_by_show_reasoning() {
+    let mut out = json_out(false);
+    for _ in 0..100 {
+        out.rows(&AgentEvent::ThinkingDelta {
+            delta: "secret thoughts".into(),
+        });
+    }
+    assert!(
+        out.rows(&AgentEvent::TurnEnd {
+            stop_reason: gray_core::event::StopReason::EndTurn,
+            usage: Default::default()
+        })
+        .iter()
+        .all(|r| r["phase"] != "thinking")
+    );
+}

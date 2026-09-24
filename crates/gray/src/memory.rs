@@ -44,6 +44,10 @@ pub enum MemoryCommand {
     Clear,
     /// Review entries against the keep/delete rule (advisory; deletes nothing)
     Audit,
+    /// Daily-ingest add: refuses an existing key (the ingest never overwrites)
+    IngestSet { key: String, text: String },
+    /// Daily-ingest reconcile: the new text must keep the old one verbatim
+    IngestEdit { key: String, text: String },
 }
 
 pub fn disabled() -> bool {
@@ -114,6 +118,32 @@ pub fn run_cli(args: &MemoryArgs) -> anyhow::Result<()> {
         MemoryCommand::Audit => {
             print!("{}", store.audit(args.scope)?);
         }
+        MemoryCommand::IngestSet { key, text } => {
+            ensure!(!disabled(), "memory saving disabled by GRAY_NO_MEMORY");
+            let changed = store.ingest_set(args.scope, key, text)?;
+            println!(
+                "{}",
+                if changed {
+                    "Memory added."
+                } else {
+                    "Memory unchanged."
+                }
+            );
+            warn_on_growth(&store, args.scope, changed);
+        }
+        MemoryCommand::IngestEdit { key, text } => {
+            ensure!(!disabled(), "memory saving disabled by GRAY_NO_MEMORY");
+            let changed = store.ingest_edit(args.scope, key, text)?;
+            println!(
+                "{}",
+                if changed {
+                    "Memory reconciled (both claims kept)."
+                } else {
+                    "Memory unchanged."
+                }
+            );
+            warn_on_growth(&store, args.scope, changed);
+        }
     }
     Ok(())
 }
@@ -123,6 +153,56 @@ fn warn_on_growth(store: &MemoryStore, scope: Scope, changed: bool) {
     if changed && let Some(warning) = store.growth_warning(scope) {
         println!("{warning}");
     }
+}
+
+/// What lands in the system prompt's memory block. `Summary` injects one
+/// sentence per entry (full text via `gray memory show KEY`); `Full`
+/// restores the pre-2026-09-23 bytes. The snapshot is frozen per durable
+/// session either way, so a mode switch only changes new sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryInjection {
+    #[default]
+    Summary,
+    Full,
+}
+
+impl MemoryInjection {
+    /// Parsed from saved config; unknown values fall back to the default
+    /// rather than failing a user's whole config load.
+    pub fn from_saved(raw: &str) -> Self {
+        if raw.trim().eq_ignore_ascii_case("full") {
+            Self::Full
+        } else {
+            Self::default()
+        }
+    }
+}
+
+/// First sentence of an entry: cut at the first ". " whose preceding token
+/// is at least 2 characters, so "e.g. ", "i.e. " and "3.5 " never end a
+/// sentence. No truncation: an unbounded value is served whole.
+fn first_sentence(text: &str) -> &str {
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(". ") {
+        let dot = from + rel;
+        // The token is the alphanumeric run touching the period, so an
+        // abbreviation's own dot ("e.g.", "3.5") is not part of it.
+        let mut start = dot;
+        while start > 0 {
+            let Some(prev) = text[..start].chars().next_back() else {
+                break;
+            };
+            if !prev.is_alphanumeric() {
+                break;
+            }
+            start -= prev.len_utf8();
+        }
+        if dot - start >= 2 {
+            return &text[..dot + 1];
+        }
+        from = dot + 2;
+    }
+    text
 }
 
 pub struct MemoryStore {
@@ -186,11 +266,28 @@ impl MemoryStore {
     /// process rebuilding the same session gets identical bytes. Anonymous
     /// headless runs take a fresh snapshot and leave no snapshot file.
     pub fn snapshot(&self, session: Option<&str>) -> anyhow::Result<String> {
+        self.snapshot_with(session, MemoryInjection::default())
+    }
+
+    /// [`snapshot`](Self::snapshot) with an explicit injection mode. The
+    /// frozen-on-disk path, project check and read-back validation are
+    /// identical in both modes; only the rendered text differs.
+    pub fn snapshot_with(
+        &self,
+        session: Option<&str>,
+        mode: MemoryInjection,
+    ) -> anyhow::Result<String> {
         let capture = || -> anyhow::Result<String> {
+            let render = |scope| -> anyhow::Result<String> {
+                match mode {
+                    MemoryInjection::Summary => self.profile(scope),
+                    MemoryInjection::Full => self.list(scope),
+                }
+            };
             Ok(serde_json::to_string(&serde_json::json!({
                 "project": self.project,
-                "user": self.list(Scope::User)?,
-                "decisions": self.list(Scope::Project)?,
+                "user": render(Scope::User)?,
+                "decisions": render(Scope::Project)?,
             }))?)
         };
         let Some(id) = session else {
@@ -232,6 +329,19 @@ impl MemoryStore {
     /// reaches the snapshot and the model.
     pub fn list(&self, scope: Scope) -> anyhow::Result<String> {
         Ok(render_served(&self.read_store(scope)?.entries))
+    }
+
+    /// Served text reduced to each entry's first sentence. This is what the
+    /// system prompt injects by default; `list` remains the full text behind
+    /// `gray memory list` / `gray memory show KEY`.
+    pub fn profile(&self, scope: Scope) -> anyhow::Result<String> {
+        let entries = self
+            .read_store(scope)?
+            .entries
+            .iter()
+            .map(|(key, text)| (key.clone(), first_sentence(text).to_owned()))
+            .collect();
+        Ok(render_served(&entries))
     }
 
     /// CLI view with provenance, so a human can see how old each entry is and
@@ -289,6 +399,64 @@ impl MemoryStore {
             entries.insert(key.to_owned(), trimmed);
             Ok(true)
         })?;
+        Ok(changed)
+    }
+
+    /// Daily-ingest add. Unlike [`set`](Self::set) this can never replace an
+    /// existing entry, must carry the rationale contract, and spends from a
+    /// hard daily budget: the prompt contract leaked once already (a dry run
+    /// overwrote five entries and invented a quote), so the verbs enforce it.
+    pub fn ingest_set(&self, scope: Scope, key: &str, text: &str) -> anyhow::Result<bool> {
+        validate_key(key)?;
+        validate_text(text)?;
+        ensure!(has_rationale(text), INGEST_RATIONALE_HINT);
+        let trimmed = text.trim().to_owned();
+        let changed = self.change(scope, |entries| {
+            ensure!(
+                !entries.contains_key(key),
+                "memory entry '{key}' exists; the daily ingest never overwrites — skip it, or use ingest-edit to record a contradiction"
+            );
+            ensure!(
+                !entries.values().any(|old| old == &trimmed),
+                "that text is already stored under another key; the ingest never duplicates — skip it"
+            );
+            self.ensure_ingest_budget(scope)?;
+            entries.insert(key.to_owned(), trimmed.clone());
+            Ok(true)
+        })?;
+        if changed {
+            self.record_ingest_write(scope)?;
+        }
+        Ok(changed)
+    }
+
+    /// Daily-ingest reconcile. Append-only by construction: the new text must
+    /// contain the old one verbatim (`as of <date>: <new> (was: <old>)`), so a
+    /// contradiction is recorded, never a silent replacement.
+    pub fn ingest_edit(&self, scope: Scope, key: &str, text: &str) -> anyhow::Result<bool> {
+        validate_key(key)?;
+        validate_text(text)?;
+        ensure!(has_rationale(text), INGEST_RATIONALE_HINT);
+        let trimmed = text.trim().to_owned();
+        let changed = self.change(scope, |entries| {
+            let old = entries
+                .get(key)
+                .with_context(|| format!("no memory entry named '{key}'"))?
+                .clone();
+            ensure!(
+                trimmed.contains(&old),
+                "ingest edits are append-only: keep the previous text verbatim, e.g. `as of <today>: <new> (was: <old>)`"
+            );
+            if old == trimmed {
+                return Ok(false);
+            }
+            self.ensure_ingest_budget(scope)?;
+            entries.insert(key.to_owned(), trimmed.clone());
+            Ok(true)
+        })?;
+        if changed {
+            self.record_ingest_write(scope)?;
+        }
         Ok(changed)
     }
 
@@ -419,6 +587,43 @@ impl MemoryStore {
         })
     }
 
+    fn ingest_counter_path(&self) -> PathBuf {
+        self.root.join(format!(".ingest-{}.json", today()))
+    }
+
+    fn ingest_counters(&self) -> anyhow::Result<IngestCounters> {
+        let text = read_text(&self.ingest_counter_path())?.unwrap_or_default();
+        Ok(serde_json::from_str(&text).unwrap_or_default())
+    }
+
+    fn ensure_ingest_budget(&self, scope: Scope) -> anyhow::Result<()> {
+        let counters = self.ingest_counters()?;
+        let total = counters.project + counters.user;
+        ensure!(
+            total < INGEST_DAILY_WRITE_CAP,
+            "daily ingest cap reached ({INGEST_DAILY_WRITE_CAP} writes for today); skip the rest"
+        );
+        if matches!(scope, Scope::User) {
+            ensure!(
+                counters.user < INGEST_DAILY_USER_WRITE_CAP,
+                "user-scope ingest cap reached ({INGEST_DAILY_USER_WRITE_CAP} writes for today); skip the rest"
+            );
+        }
+        Ok(())
+    }
+
+    fn record_ingest_write(&self, scope: Scope) -> anyhow::Result<()> {
+        let path = self.ingest_counter_path();
+        private_dir(&self.root)?;
+        let _lock = lock(&path.with_extension("lock"))?;
+        let mut counters = self.ingest_counters()?;
+        match scope {
+            Scope::Project => counters.project += 1,
+            Scope::User => counters.user += 1,
+        }
+        atomic_write(&path, &serde_json::to_string(&counters)?)
+    }
+
     fn growth(&self, scope: Scope) -> Option<Growth> {
         let text = std::fs::read_to_string(self.growth_path()).ok()?;
         let all: BTreeMap<String, Growth> = serde_json::from_str(&text).ok()?;
@@ -471,6 +676,25 @@ impl MemoryStore {
 
 /// How many consecutive net-growth saves with no removal trip the warning.
 const GROWTH_STREAK_WARN: usize = 3;
+
+/// Hard daily budget for the unattended ingest, per GRAY_HOME (shared by
+/// every project so a fleet of jobs cannot flood the store in one day).
+pub const INGEST_DAILY_WRITE_CAP: usize = 10;
+pub const INGEST_DAILY_USER_WRITE_CAP: usize = 2;
+
+const INGEST_RATIONALE_HINT: &str = "daily-ingest entries must carry `Why:` (the user's quoted failure or correction) and `falsified:` (`nothing yet` if none)";
+
+fn has_rationale(text: &str) -> bool {
+    text.contains("Why:") && text.contains("falsified:")
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct IngestCounters {
+    #[serde(default)]
+    project: usize,
+    #[serde(default)]
+    user: usize,
+}
 
 /// Per-scope growth record: the peak entry count, how many consecutive
 /// net-growth saves produced it, and how many removals have happened.

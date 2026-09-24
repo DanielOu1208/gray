@@ -49,7 +49,13 @@ pub(crate) fn app_rows_with(
                         extras.push("needs setup".to_string());
                         needs_setup = true;
                     }
-                    AppState::Stopped => extras.push("stopped".to_string()),
+                    // Stopped but fully configured: the daemon is not
+                    // running, so Enter must start it (route to the setup
+                    // flow), not merely toggle enable/disable.
+                    AppState::Stopped => {
+                        extras.push("stopped".to_string());
+                        needs_setup = true;
+                    }
                     AppState::Connected(Some(bot)) => extras.push(format!("connected as {bot}")),
                     AppState::Connected(None) => extras.push("connected".to_string()),
                 }

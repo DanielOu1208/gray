@@ -14,6 +14,7 @@ fn item(id: &str, name: &str, base_url: &str) -> ConnectItem {
         sublabel: "(API key)".to_string(),
         base_url: base_url.to_string(),
         no_auth: false,
+        auth: crate::setup::ConnectAuth::ApiKey,
     }
 }
 
@@ -44,6 +45,9 @@ fn only_rows_holding_a_credential_are_removable() {
         model: Some("openrouter/auto".into()),
         base_url: "https://openrouter.ai/api/v1".into(),
         api_key: None,
+        provider_id: String::new(),
+        credential_source: String::new(),
+        auth_ref: String::new(),
         thinking_effort: None,
         show_reasoning: None,
         temperature: None,
@@ -109,6 +113,9 @@ fn list_footer_advertises_removal_only_for_a_stored_provider() {
         model: Some("openrouter/auto".into()),
         base_url: "https://openrouter.ai/api/v1".into(),
         api_key: Some("sk-live".into()),
+        provider_id: String::new(),
+        credential_source: String::new(),
+        auth_ref: String::new(),
         thinking_effort: None,
         show_reasoning: None,
         temperature: None,
@@ -121,7 +128,7 @@ fn list_footer_advertises_removal_only_for_a_stored_provider() {
         max_wall_secs: None,
     };
     let auth = auth_map(&[("openrouter", "sk-or")]);
-    let mut items = build_connect_items(&load_catalog().unwrap());
+    let mut items = build_connect_items(&load_catalog().unwrap(), &[]);
     catalog::sort_connect_items(&mut items, &config, &auth);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
     let mut scroll = 0usize;
@@ -157,6 +164,9 @@ fn config_for(base_url: &str) -> crate::config::Config {
         model: Some("openrouter/auto".into()),
         base_url: base_url.into(),
         api_key: Some("sk-live".into()),
+        provider_id: String::new(),
+        credential_source: String::new(),
+        auth_ref: String::new(),
         thinking_effort: None,
         show_reasoning: None,
         temperature: None,
@@ -247,7 +257,7 @@ fn removing_another_provider_leaves_the_active_one_alone() {
 fn list_footer_hides_removal_for_a_provider_with_nothing_stored() {
     let config = config_for("https://openrouter.ai/api/v1");
     let auth = BTreeMap::new();
-    let mut items = build_connect_items(&load_catalog().unwrap());
+    let mut items = build_connect_items(&load_catalog().unwrap(), &[]);
     catalog::sort_connect_items(&mut items, &config, &auth);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
     let mut scroll = 0usize;

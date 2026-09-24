@@ -3,8 +3,10 @@ mod agent_compact;
 mod agent_loop;
 mod agent_tools;
 mod compact;
+pub mod credential;
 pub mod error;
 pub mod event;
+pub mod input;
 pub mod message;
 pub mod parallel;
 pub mod paths;
@@ -18,3 +20,11 @@ pub use agent::{
 pub use error::{CoreError, Result};
 pub use event::{AgentEvent, StopReason, StreamEvent, Usage};
 pub use message::{ChatRequest, ContentBlock, Message, Role, ToolDef};
+
+#[cfg(test)]
+#[path = "credential_tests.rs"]
+mod credential_tests;
+
+#[cfg(test)]
+#[path = "input_tests.rs"]
+mod input_tests;

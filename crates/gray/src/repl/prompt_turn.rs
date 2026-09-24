@@ -157,6 +157,9 @@ pub(crate) async fn run_prompt_turn(
                         let mut t = s.lock().unwrap_or_else(|e| e.into_inner());
                         t.set_status(None);
                         t.is_task_running = false;
+                        // begin_turn armed the cache pause before agent setup;
+                        // this path returns without the normal end_turn.
+                        t.resume_cache();
                         let _ = t.draw();
                     }
                 } else {

@@ -47,6 +47,7 @@ static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn lock_entry(argv: Vec<String>, enabled: bool) -> LockEntry {
     LockEntry {
+        runtime_role: None,
         ecosystem: "test".to_string(),
         version: "1.0.0".to_string(),
         hash: "abc123".to_string(),
@@ -56,6 +57,7 @@ fn lock_entry(argv: Vec<String>, enabled: bool) -> LockEntry {
         installed_at: "2026-09-05T00:00:00Z".to_string(),
         scope: "test".to_string(),
         enabled,
+        ..LockEntry::default()
     }
 }
 

@@ -636,6 +636,28 @@ fn scrub_if_secret(s: &str) -> String {
     }
 }
 
+fn redact_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => {
+            let redacted = redact_for_disclosure(text);
+            if redacted.redacted() {
+                *text = redacted.into_text();
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_json_value(value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_json_value(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Clone a conversation message for durable session persistence.
 ///
 /// Each free-text block (`Text`, `Thinking`, `ToolResult`) is scrubbed only
@@ -668,6 +690,9 @@ pub fn redact_message(msg: &crate::message::Message) -> crate::message::Message 
                         *args = value;
                     }
                 }
+            }
+            ContentBlock::StructuredInput { payload, .. } => {
+                redact_json_value(payload);
             }
             ContentBlock::Image { .. } => {}
         }

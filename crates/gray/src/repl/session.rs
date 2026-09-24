@@ -408,6 +408,7 @@ pub(crate) fn dispatch_agent_event(
             AgentEvent::ToolCallStart { id, name } => {
                 t.flush_markdown();
                 t.end_thinking();
+                t.mark_stream_round_boundary();
                 pending_tools.insert(id.clone(), (name.clone(), None));
                 // pi `ToolExecutionComponent` appears immediately (partial):
                 // viewport-anchored live card, same header family as the
@@ -513,6 +514,7 @@ pub(crate) fn dispatch_agent_event(
                     // row glues onto the streamed tail above it.
                     t.flush_markdown();
                     t.end_thinking();
+                    t.mark_stream_round_boundary();
                     t.ensure_gap(1);
                     t.push_warning(&notice);
                 }
@@ -527,6 +529,7 @@ pub(crate) fn dispatch_agent_event(
             } => {
                 t.flush_markdown();
                 t.end_thinking();
+                t.mark_stream_round_boundary();
                 t.push_dim(format!(
                     "↻ compacted {} → {} tok ({} → {} messages)",
                     crate::repl::fmt_usage(*tokens_before),
@@ -541,6 +544,7 @@ pub(crate) fn dispatch_agent_event(
             AgentEvent::StreamError { details, .. } => {
                 t.flush_markdown();
                 t.end_thinking();
+                t.mark_stream_round_boundary();
                 t.set_status(Some("Reconnecting"));
                 if !details.is_empty() {
                     let trunc = crate::repl::format::truncate_chars(details, 200);

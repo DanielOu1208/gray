@@ -60,12 +60,17 @@ impl Tui {
     pub(crate) fn paint_thinking_fragment(&mut self, fragment: String) {
         if fragment.trim().is_empty() && self.transcript.last().is_some_and(transcript_row_is_blank)
         {
+            self.release_dock_seam_for_blank_tail();
             return;
         }
         let line = Line::from(vec![Span::styled(fragment, thinking_style())]);
         let w = self.width().max(10);
         let painted = self.render_and_insert_styled_lines(&[line], &[], w);
+        let ends_blank = painted.last().is_some_and(transcript_row_is_blank);
         self.transcript.extend(painted);
+        if self.is_task_running && ends_blank {
+            self.release_dock_seam();
+        }
         if self.transcript.len() > 1000 {
             self.transcript.drain(0..100);
         }
@@ -159,22 +164,54 @@ impl Tui {
         line_offset: usize,
     ) {
         if lines.is_empty() {
+            self.release_dock_seam_for_blank_tail();
             return;
         }
         let w = self.width().max(10);
         let rebased = rebase_hyperlinks_for_slice(hyperlinks, line_offset, lines.len());
+        let tail_blank = self.transcript.last().is_some_and(transcript_row_is_blank);
+        let (lines, rebased) = if self.is_task_running {
+            normalize_stream_boundaries(lines, rebased, tail_blank)
+        } else {
+            (lines, rebased)
+        };
+        if lines.is_empty() {
+            if tail_blank {
+                self.release_dock_seam_for_blank_tail();
+            }
+            return;
+        }
         let lines_only = self.render_and_insert_styled_lines(&lines, &rebased, w);
         self.history_entries
             .push(crate::composer::TranscriptEntry::StyledLines {
                 lines,
                 hyperlinks: rebased,
             });
+        let ends_blank = lines_only.last().is_some_and(transcript_row_is_blank);
         self.transcript.extend(lines_only);
+        if self.is_task_running && ends_blank {
+            self.release_dock_seam();
+        }
         if self.transcript.len() > 1000 {
             self.transcript.drain(0..100);
         }
         cap_history_entries(&mut self.history_entries);
         let _ = std::io::stdout().flush();
+    }
+
+    /// `/hehe`: paints the graychan mascot into the transcript as big as the
+    /// terminal allows. One `StyledLines` entry, so reflow keeps the art
+    /// with the transcript. Returns false when the terminal can't show it
+    /// (no truecolor / too small) so the caller can say so.
+    pub(crate) fn push_mascot(&mut self) -> bool {
+        let cols = u16::try_from(self.width()).unwrap_or(u16::MAX);
+        let rows = self.last_height.max(1);
+        let Some(lines) = crate::mascot::mascot_lines(cols, rows, None) else {
+            return false;
+        };
+        self.push_styled_lines_with_hyperlinks(lines, &[], 0);
+        self.ensure_gap(1);
+        true
     }
 
     pub fn push_dim(&mut self, line: String) {
@@ -268,6 +305,14 @@ impl Tui {
                                     user_text.push('\n');
                                 }
                                 user_text.push_str(text);
+                            }
+                            gray_core::ContentBlock::StructuredInput { kind, .. } => {
+                                if !user_text.is_empty() {
+                                    user_text.push('\n');
+                                }
+                                user_text.push_str("[component event: ");
+                                user_text.push_str(kind);
+                                user_text.push(']');
                             }
                             gray_core::ContentBlock::ToolResult {
                                 id,

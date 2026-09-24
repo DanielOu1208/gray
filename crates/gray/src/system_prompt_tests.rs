@@ -28,6 +28,21 @@ fn shipped_default_prompt_strips_to_the_agent_line() {
 }
 
 #[test]
+fn default_prompt_explains_bash_job_actions() {
+    let p = build_system_prompt(opts(crate::DEFAULT_SYS_PROMPT));
+    assert!(p.contains("action=run"), "{p}");
+    assert!(p.contains("background=true"), "{p}");
+    assert!(p.contains("returned `job_id`"), "{p}");
+    for action in ["status", "output", "cancel"] {
+        assert!(p.contains(&format!("`{action}`")), "{p}");
+    }
+    assert!(
+        p.contains("never send `command` or `timeout` to those follow-up actions"),
+        "{p}"
+    );
+}
+
+#[test]
 fn prompt_is_verbatim_after_comment_strip() {
     let p = build_system_prompt(opts("You are gray.\n\nFollow the rules."));
     assert_eq!(p, "You are gray.\n\nFollow the rules.");
@@ -117,4 +132,16 @@ fn memory_preserves_runtime_directory_and_stored_prompt() {
     assert!(combined.contains("Working directory: \"/work/project café\""));
     assert!(!combined.contains("private note"));
     assert_eq!(with_memory(runtime.clone(), None), runtime);
+}
+
+#[test]
+fn policy_says_injected_entries_are_summaries() {
+    // The policy rides with the memory block, so with_memory is the real
+    // entry point (build_system_prompt alone never carries it).
+    let prompt = with_memory(
+        build_system_prompt(opts("You are gray.")),
+        Some(r#"{"project":"p","user":"","decisions":""}"#),
+    );
+    assert!(prompt.contains("one-sentence summaries"), "{prompt}");
+    assert!(prompt.contains("gray memory show KEY"), "{prompt}");
 }

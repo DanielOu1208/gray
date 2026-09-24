@@ -172,6 +172,7 @@ pub(super) async fn install(home: &Path) -> Result<()> {
     registry.plugins.insert(
         "background".into(),
         LockEntry {
+            runtime_role: None,
             ecosystem: "gray-native".into(),
             version: VERSION.into(),
             hash: digest,
@@ -181,6 +182,10 @@ pub(super) async fn install(home: &Path) -> Result<()> {
             installed_at: chrono::Utc::now().to_rfc3339(),
             scope: "user".into(),
             enabled: true,
+            // First-party, checksum-verified, and installed before the
+            // consent layer existed: legacy entry, so it keeps whatever
+            // its manifest declares.
+            ..Default::default()
         },
     );
     publish(stage, &dest, || registry.save(&lock_path(home)))?;

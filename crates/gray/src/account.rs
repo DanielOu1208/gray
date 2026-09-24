@@ -137,9 +137,32 @@ pub fn clear_token_at(path: &Path) -> anyhow::Result<bool> {
 
 /// An enrollment code as pasted by the user. `None` when there is nothing to
 /// exchange, so callers can re-prompt instead of firing an empty request.
+///
+/// The paste is sanitized first: see [`strip_terminal_escapes`] for why the
+/// raw line can carry escape bytes that no hand-typed code ever contains.
 pub fn normalize_code(raw: &str) -> Option<String> {
-    let code = raw.trim();
+    let code = strip_terminal_escapes(raw);
+    let code = code.trim();
     (!code.is_empty()).then(|| code.to_string())
+}
+
+/// Strips what only a terminal can produce from a pasted code.
+///
+/// Bracketed paste (mode 2004) is terminal-global, so it outlives the raw
+/// mode the REPL drops for a cooked stdin prompt: the wrapper the terminal
+/// adds to every paste — `ESC [ 200~` ... `ESC [ 201~` — then arrives as
+/// ordinary text. That is the `^[[200~dv3Uq...^[[201~` the user saw echoed at
+/// the `code:` prompt, and what the registry was asked to exchange as a code.
+/// A shell that leaves the mode on for its children (bash does) hands the
+/// same wrapper to `gray login <pasted code>`.
+///
+/// Nothing an escape sequence or control byte can be is part of a code, so
+/// remove them rather than forward bytes the registry will only reject.
+fn strip_terminal_escapes(raw: &str) -> String {
+    crate::composer::input::strip_escape_sequences(raw)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
 }
 
 // ---- Wire types (mirror services/registry/routes/auth.mjs) ----------------
@@ -329,6 +352,12 @@ pub fn logout_message(outcome: LogoutOutcome) -> &'static str {
 /// scripted `gray login` fails loudly instead of hanging.
 pub fn prompt_for_code() -> Option<String> {
     use std::io::Write as _;
+    // Bracketed paste is terminal-global (mode 2004) and the REPL's composer
+    // asserts it, but this prompt runs cooked so the user can see what they
+    // type. Left on, the terminal's paste wrapper is delivered as text (the
+    // `^[[200~...` echo that made /login unusable), so turn it off for the
+    // read. Restored on drop; the composer re-asserts it every prompt turn.
+    let _bracketed_paste_off = crate::composer::input::BracketedPasteOffGuard::push();
     print!("code: ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
@@ -353,8 +382,11 @@ pub fn login_instructions() -> String {
 /// `gray login [CODE]`: prints the walkthrough when no code is given,
 /// exchanges the code, stores the token, and reports the identity.
 pub async fn run_login(code: Option<&str>) -> anyhow::Result<()> {
-    let code = match code.map(|c| c.trim()).filter(|c| !c.is_empty()) {
-        Some(c) => c.to_string(),
+    // The arg goes through the same sanitizer as the prompt: a code pasted
+    // into a shell that leaves bracketed paste on for its children (bash
+    // does) arrives still wrapped in `ESC[200~ ... ESC[201~`.
+    let code = match code.and_then(normalize_code) {
+        Some(c) => c,
         None => {
             println!("Log in to gray.alignment.id from this machine.\n");
             println!("{}\n", login_instructions());
@@ -571,6 +603,43 @@ mod tests {
         assert_eq!(normalize_code(""), None);
         assert_eq!(normalize_code("   \n"), None);
         assert_eq!(normalize_code("  abc123 \n"), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn a_pasted_code_sheds_the_bracketed_paste_wrapper() {
+        // The /login bug: mode 2004 is terminal-global, so it outlives the
+        // raw mode account_cmd drops for the cooked `code:` prompt, and the
+        // terminal's ESC[200~ ... ESC[201~ wrapper arrives as text. The
+        // registry then rejected a code it had never issued, and the line
+        // discipline echoed the markers back as the `^[[200~` garbage.
+        assert_eq!(
+            normalize_code("\u{1b}[200~dv3Uq5VPTFRYqH0G2qx_jzlAjTlnztfX\u{1b}[201~\n"),
+            Some("dv3Uq5VPTFRYqH0G2qx_jzlAjTlnztfX".to_string())
+        );
+        // A shell that leaves bracketed paste on for its children (bash does)
+        // hands the same wrapper to `gray login <pasted code>`.
+        assert_eq!(
+            normalize_code("\u{1b}[200~  abc123  \u{1b}[201~"),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn a_pasted_code_sheds_any_other_terminal_escape_or_control() {
+        // OSC title-set and CSI cursor sequences ride along with a copy from
+        // a rendered page; none of them can be part of a code, so drop them
+        // instead of forwarding bytes the registry will only reject.
+        assert_eq!(
+            normalize_code("\u{1b}]0;gray\u{7}abc\u{1b}[2K123\u{1b}[0m\r\n"),
+            Some("abc123".to_string())
+        );
+        // A truncated paste ends on a bare ESC: the rest of the line survives.
+        assert_eq!(
+            normalize_code("abc\u{1b}[201"),
+            Some("abc".to_string()),
+            "an unterminated CSI run is dropped, not kept"
+        );
+        assert_eq!(normalize_code("\u{1b}[200~\u{1b}[201~"), None);
     }
 
     #[test]

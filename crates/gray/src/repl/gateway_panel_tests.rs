@@ -47,8 +47,11 @@ fn missing_config_marks_the_app_as_needing_setup() {
     )
     .unwrap();
     let items = app_rows_with(&[row("discord", true)], Some(home.path()));
+    // Configured but no live daemon reads as "stopped", which is startable:
+    // Enter routes to the setup flow to bring it back, so the flag is set.
     assert!(!items[0].row.contains("needs setup"), "{}", items[0].row);
-    assert!(!items[0].needs_setup);
+    assert!(items[0].row.contains("stopped"), "{}", items[0].row);
+    assert!(items[0].needs_setup);
 
     // A config missing one required key is still a setup candidate, and the
     // row says nothing about which key or any value.
@@ -184,5 +187,7 @@ fn a_configured_but_unstarted_app_reports_stopped() {
     write_app_files(home.path(), true, None, None);
     let items = app_rows_with(&[row("discord", true)], Some(home.path()));
     assert!(items[0].row.contains("stopped"), "{}", items[0].row);
-    assert!(!items[0].needs_setup);
+    // Stopped is startable: Enter routes to the setup/start flow (not the
+    // bare enable/disable toggle), so the row carries the flag.
+    assert!(items[0].needs_setup);
 }

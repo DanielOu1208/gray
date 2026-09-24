@@ -136,6 +136,34 @@ pub async fn run_pre_script(script: &std::path::Path, workdir: &std::path::Path)
     .await
 }
 
+/// Turn a finished pre-script process into its outcome, keeping the tail
+/// of stderr bounded.
+fn completed(out: std::process::Output) -> ScriptOutcome {
+    let tail: String = String::from_utf8_lossy(&out.stderr)
+        .chars()
+        .rev()
+        .take(2000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    ScriptOutcome {
+        ok: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr_tail: tail,
+    }
+}
+
+/// Name the script in a spawn failure: without it the operator is left
+/// guessing which job's pre-script is broken.
+fn spawn_failure(script: &std::path::Path, e: &std::io::Error) -> ScriptOutcome {
+    ScriptOutcome {
+        ok: false,
+        stdout: String::new(),
+        stderr_tail: format!("pre-script spawn failed for {}: {e:#}", script.display()),
+    }
+}
+
 async fn run_pre_script_with_timeout(
     script: &std::path::Path,
     workdir: &std::path::Path,
@@ -174,26 +202,28 @@ async fn run_pre_script_with_timeout(
             stdout: String::new(),
             stderr_tail: "pre-script timed out".to_string(),
         },
-        Ok(Err(e)) => ScriptOutcome {
-            ok: false,
-            stdout: String::new(),
-            stderr_tail: format!("pre-script spawn failed: {e:#}"),
-        },
-        Ok(Ok(out)) => {
-            let tail: String = String::from_utf8_lossy(&out.stderr)
-                .chars()
-                .rev()
-                .take(2000)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
-            ScriptOutcome {
-                ok: out.status.success(),
-                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-                stderr_tail: tail,
+        Ok(Err(e)) => {
+            // ETXTBSY means the script was open for writing somewhere at
+            // the instant we exec'd it — a pre-script written moments
+            // earlier by another process is enough. It is transient by
+            // definition, so one short retry turns a spurious job failure
+            // into a non-event; anything else is reported as-is.
+            if e.raw_os_error() == Some(26) {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                match tokio::time::timeout(timeout, command.output()).await {
+                    Ok(Ok(out)) => completed(out),
+                    Ok(Err(e)) => spawn_failure(script, &e),
+                    Err(_) => ScriptOutcome {
+                        ok: false,
+                        stdout: String::new(),
+                        stderr_tail: "pre-script timed out".to_string(),
+                    },
+                }
+            } else {
+                spawn_failure(script, &e)
             }
         }
+        Ok(Ok(out)) => completed(out),
     }
 }
 

@@ -176,3 +176,18 @@ fn verify_argv_resolves_the_app_binary_through_the_registry() {
         "{unknown}"
     );
 }
+
+#[test]
+fn register_step_is_skipped_when_already_registered() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("plugins");
+    fs::create_dir_all(&dir).unwrap();
+    assert!(needs_registration(&DECL, home.path(), "test-app"));
+    fs::write(
+        dir.join("commands.json"),
+        r#"{"schema": 1, "plugins": {"test-app": {"ecosystem": "gray-native", "version": "0.0.0", "hash": "", "source": "/bin/echo", "argv": ["/bin/echo", "registered"], "adapter_version": "1.1", "installed_at": "2026-09-22T00:00:00+00:00", "scope": "user", "enabled": true}}}"#,
+    )
+    .unwrap();
+    assert!(!needs_registration(&DECL, home.path(), "test-app"));
+    assert!(needs_registration(&DECL, home.path(), "other"));
+}

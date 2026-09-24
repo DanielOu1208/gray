@@ -197,6 +197,50 @@ fn reasoning_capability_from_models_dev_and_live() {
 }
 
 #[test]
+fn commandcode_mimo_pro_keeps_max_after_models_dev_high_only_cache() {
+    // CommandCode has no models.dev entry; a gateway row for the same id once
+    // leaked `high`-only values and clamped a real `xhigh` request to `high`.
+    set_active_model_provider("https://api.commandcode.ai/provider/v1");
+    let cached_high_only = serde_json::json!({
+        "gateway": {"models": {
+            "xiaomi/mimo-v2.6-pro": {
+                "reasoning": true,
+                "limit": {"context": 1048576},
+                "reasoning_options": [{"type": "effort", "values": ["none", "high"]}],
+            },
+        }},
+    });
+    parse_models_dev_json(&cached_high_only);
+
+    let levels: Vec<&str> = supported_thinking_levels("xiaomi/mimo-v2.6-pro")
+        .iter()
+        .map(|(l, _)| *l)
+        .collect();
+    assert_eq!(levels, vec!["off", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(
+        clamp_thinking_level("xiaomi/mimo-v2.6-pro", "xhigh"),
+        "xhigh"
+    );
+    assert_eq!(clamp_thinking_level("xiaomi/mimo-v2.6-pro", "high"), "high");
+    assert_eq!(clamp_thinking_level("xiaomi/mimo-v2.6-pro", "max"), "max");
+
+    let ultra: Vec<&str> = supported_thinking_levels("xiaomi/mimo-v2.6-pro-ultraspeed")
+        .iter()
+        .map(|(l, _)| *l)
+        .collect();
+    assert_eq!(ultra, vec!["off", "low", "medium", "high", "xhigh", "max"]);
+
+    // Away from CommandCode the same id keeps the gateway's advertised values.
+    set_active_model_provider("https://openrouter.ai/api/v1");
+    let elsewhere: Vec<&str> = supported_thinking_levels("xiaomi/mimo-v2.6-pro")
+        .iter()
+        .map(|(l, _)| *l)
+        .collect();
+    assert_eq!(elsewhere, vec!["off", "high"]);
+    set_active_model_provider("");
+}
+
+#[test]
 fn litellm_parse_fills_gaps_only() {
     let v: serde_json::Value = serde_json::json!({
         "sample_spec": {"max_input_tokens": 1},

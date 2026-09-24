@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod ask;
+pub mod auth;
 pub mod cache;
 pub mod compact;
 pub mod composer;
@@ -14,12 +15,14 @@ pub mod feedback;
 pub mod gateway;
 pub mod host;
 pub mod logging;
+pub(crate) mod mascot;
 pub mod memory;
 pub mod plugin_check;
 pub mod plugin_cli;
 pub mod print;
 mod print_meter;
 pub mod profile;
+pub mod providers;
 pub mod repl;
 pub mod resume;
 mod rotation;
@@ -30,6 +33,7 @@ pub mod skills;
 pub mod skills_tool;
 pub mod sys_editor;
 pub mod system_prompt;
+pub mod term_keys;
 pub(crate) mod text_width;
 pub mod theme;
 pub mod tool_fmt;
@@ -38,7 +42,7 @@ pub mod turn_caps;
 pub mod update;
 pub mod view;
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -74,6 +78,7 @@ Workflow (do every task this way):
 
 Guidelines:
 - Be concise.
+- Bash jobs: start long commands with `action=run`, `command`, and `background=true`; use the returned `job_id` for `status`, `output`, or `cancel`, and never send `command` or `timeout` to those follow-up actions.
 - Work in parallel: when several calls don't depend on each other, send them all in one turn. Read-only and non-interfering calls run concurrently; anything that might clash is serialized for you.
 - When the next step is clear, keep going without asking, until done or truly blocked. A failed tool call means try differently, not give up.
 - If a file changes unexpectedly under you (a parallel agent may be active), don't fight it: re-read before writing, reconcile instead of overwriting, and never get into an edit war.
@@ -195,6 +200,15 @@ pub async fn build_agent(
             }
         }
     };
+    // Plugin-backed connections own their credential through the provider
+    // sidecar; a failure here must stop the build, not silently fall back
+    // to an unrelated API key.
+    let dynamic = if config.uses_plugin_credentials() {
+        let home = setup::gray_home()?;
+        Some(crate::providers::connect_dynamic_provider(config, &home).await?)
+    } else {
+        None
+    };
     let agent = gray_plugin::builder::build_agent(gray_plugin::builder::BuilderOptions {
         model: model.clone(),
         api_key: api_key.to_string(),
@@ -230,6 +244,10 @@ pub async fn build_agent(
         profile_path: "gray.yml".to_string(),
         abort_on_spawn_failure: true,
         wrap_executor: None,
+        dynamic_provider_profile: dynamic.as_ref().map(|provider| provider.profile().clone()),
+        dynamic_credential_source: dynamic
+            .as_ref()
+            .map(|provider| provider.credential_source()),
     })
     .await?;
     for w in gray_plugin::builder::take_builder_warnings() {
@@ -247,7 +265,8 @@ pub async fn build_agent(
     name = "gray",
     version,
     about = "gray — a minimal, modular agent harness in Rust.",
-    after_help = "Run with no arguments for the interactive REPL. Use -p for one-shot print mode."
+    after_help = "Run with no arguments for the interactive REPL. Use -p for one-shot print mode.",
+    group(ArgGroup::new("one_shot_input").args(["print", "input_json"]))
 )]
 pub struct Cli {
     /// Model to use (e.g. provider/model-id)
@@ -262,8 +281,12 @@ pub struct Cli {
     #[arg(short = 'p', long = "print")]
     pub print: Option<String>,
 
+    /// Read a versioned structured-input envelope from a file or stdin
+    #[arg(long, value_name = "PATH", conflicts_with = "print", requires = "json")]
+    pub input_json: Option<PathBuf>,
+
     /// Emit versioned NDJSON progress and a final result instead of terminal output
-    #[arg(long, requires = "print")]
+    #[arg(long, requires = "one_shot_input")]
     pub json: bool,
 
     /// Maximum provider requests in a JSON print invocation (includes compaction)
@@ -410,6 +433,9 @@ pub enum InstallCmd {
         /// Plugin name
         #[arg(value_name = "NAME")]
         name: String,
+        /// Accept a caution scan verdict (never overrides `dangerous`)
+        #[arg(short, long)]
+        force: bool,
     },
 }
 
@@ -458,7 +484,11 @@ pub enum CronCmd {
         script: Option<PathBuf>,
     },
     /// One claim→fire→record pass (also the OS-cron/runit entry point)
-    Tick,
+    Tick {
+        /// Emit one `cron_delivery` JSON line per chat-bound fire (for a host that routes them)
+        #[arg(long)]
+        json: bool,
+    },
     /// Tick every 60s until SIGINT/SIGTERM
     Serve,
     /// Suspend a job (id or name)
@@ -540,6 +570,9 @@ pub enum PluginCmd {
         /// Index name or https URL
         #[arg(value_parser = |s: &str| Ok::<_, std::convert::Infallible>(gray_pkg::ops::parse_spec(s)))]
         spec: gray_pkg::ops::NameOrUrl,
+        /// Accept a caution scan verdict (never overrides `dangerous`)
+        #[arg(short, long)]
+        force: bool,
     },
     /// Remove an installed plugin
     Remove {
@@ -567,8 +600,17 @@ pub enum PluginCmd {
         /// Plugin directory (executable, plugin.sh, or single executable)
         dir: String,
     },
+    /// Show declared vs granted plugin capabilities
+    Capabilities {
+        /// Plugin name (default: every installed plugin)
+        name: Option<String>,
+    },
 }
 
 #[path = "lib_tests.rs"]
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "input_json_tests.rs"]
+mod input_json_tests;

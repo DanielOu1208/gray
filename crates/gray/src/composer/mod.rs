@@ -283,6 +283,15 @@ pub struct Tui {
     /// release it (see `release_dock_seam`) so it never stacks a second
     /// blank above the live status.
     dock_seam: bool,
+    /// A provider round ended before the next text delta.  A punctuation-only
+    /// continuation in that first delta is a live-only orphan, not a new row.
+    stream_round_boundary: bool,
+    /// Whether the current provider round has emitted visible prose.  Keeps
+    /// the orphan guard from hiding a legitimate standalone punctuation-only
+    /// response after a tool-only round.
+    stream_round_had_text: bool,
+    /// Index of the prose history block that owns a pending continuation.
+    stream_round_target: Option<usize>,
     active_compaction: Option<ActiveCompaction>,
     turn_started: Option<Instant>,
     turn_had_thinking: bool,
@@ -406,34 +415,44 @@ pub enum TranscriptEntry {
 }
 
 pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
-    let logo_raw = crate::tui::logo_lines();
-    let l_rows = logo_raw.len().max(1) as f32;
-    let max_logo_w = logo_raw
-        .iter()
-        .map(|l| display_width(l.trim()))
-        .max()
-        .unwrap_or(0);
-    let l_cols = (max_logo_w as f32).max(1.0);
-    let logo_pad = w.saturating_sub(max_logo_w) / 2;
+    // No TTY under test/CI: a sane fallback still sizes the mascot.
+    let (term_cols, term_rows) =
+        crossterm::terminal::size().unwrap_or((u16::try_from(w.max(40)).unwrap_or(u16::MAX), 24));
 
     let base = crate::theme::theme().text_dim;
     let hilite = crate::theme::theme().text_bright;
 
     let mut welcome_lines: Vec<Line<'static>> = Vec::new();
     welcome_lines.push(Line::from(""));
-    for (row, line) in logo_raw.iter().enumerate() {
-        let trimmed = line.trim();
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        if logo_pad > 0 {
-            spans.push(Span::raw(" ".repeat(logo_pad)));
+    match crate::mascot::mascot_lines(term_cols, term_rows, Some(w)) {
+        // The graychan mascot replaces the ASCII logo on any terminal that
+        // can show it; the fallback below keeps plain terminals working.
+        Some(art) => welcome_lines.extend(art),
+        None => {
+            let logo_raw = crate::tui::logo_lines();
+            let l_rows = logo_raw.len().max(1) as f32;
+            let max_logo_w = logo_raw
+                .iter()
+                .map(|l| display_width(l.trim()))
+                .max()
+                .unwrap_or(0);
+            let l_cols = (max_logo_w as f32).max(1.0);
+            let logo_pad = w.saturating_sub(max_logo_w) / 2;
+            for (row, line) in logo_raw.iter().enumerate() {
+                let trimmed = line.trim();
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                if logo_pad > 0 {
+                    spans.push(Span::raw(" ".repeat(logo_pad)));
+                }
+                for (col, ch) in trimmed.chars().enumerate() {
+                    let diag = (col as f32 + (l_rows - 1.0 - row as f32)) / (l_cols + l_rows);
+                    let t = (0.15 + 0.85 * diag).clamp(0.0, 1.0);
+                    let color = crate::tui::blend_color(base, hilite, t);
+                    spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+                }
+                welcome_lines.push(Line::from(spans));
+            }
         }
-        for (col, ch) in trimmed.chars().enumerate() {
-            let diag = (col as f32 + (l_rows - 1.0 - row as f32)) / (l_cols + l_rows);
-            let t = (0.15 + 0.85 * diag).clamp(0.0, 1.0);
-            let color = crate::tui::blend_color(base, hilite, t);
-            spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
-        }
-        welcome_lines.push(Line::from(spans));
     }
     welcome_lines.push(Line::from(""));
     let banner_raw = format!(
@@ -503,6 +522,9 @@ impl Tui {
             sel: 0,
             status: None,
             dock_seam: false,
+            stream_round_boundary: false,
+            stream_round_had_text: false,
+            stream_round_target: None,
             active_compaction: None,
             turn_started: None,
             turn_had_thinking: false,
@@ -566,6 +588,7 @@ impl Tui {
         ) {
             self.terminal = term;
         }
+        self.release_dock_seam_for_blank_tail();
         let _ = self.draw();
     }
 
@@ -730,6 +753,7 @@ impl Tui {
         }
         self.history_entries = entries;
         self.transcript = new_transcript;
+        self.release_dock_seam_for_blank_tail();
 
         let _ = self.draw();
     }
@@ -825,6 +849,17 @@ impl Tui {
     /// next request's prompt is new content, not re-billed content.
     pub fn reset_cache(&mut self) {
         self.cache.reset();
+    }
+
+    /// Ends the active-turn cache pause on paths that abort before the
+    /// normal `end_turn` lifecycle boundary without refreshing the timer.
+    pub(crate) fn resume_cache(&mut self) {
+        self.cache.resume(Instant::now());
+    }
+
+    /// Ends a completed turn and starts a fresh cache warmth window.
+    pub(crate) fn rearm_cache(&mut self) {
+        self.cache.rearm(Instant::now());
     }
 
     /// Mirror of the turn's streaming-only elapsed ms (the tps denominator).
@@ -960,6 +995,11 @@ impl Tui {
     }
 
     pub fn begin_turn(&mut self, label: &str) {
+        let now = Instant::now();
+        self.cache.pause(now);
+        self.stream_round_boundary = false;
+        self.stream_round_had_text = false;
+        self.stream_round_target = None;
         // Codex `status_controls.rs`: follow-up input and background activity
         // must not obscure an active compaction — keep its header/clock.
         if let Some(active) = self.active_compaction.clone() {
@@ -968,7 +1008,6 @@ impl Tui {
             let _ = self.draw();
             return;
         }
-        let now = Instant::now();
         if self.turn_started.is_none() {
             self.turn_started = Some(now);
             self.turn_had_thinking = false;
@@ -1012,6 +1051,49 @@ impl Tui {
     /// holds the viewport steady (no input-box bounce).
     pub(crate) fn release_dock_seam(&mut self) {
         self.dock_seam = false;
+    }
+
+    fn release_dock_seam_for_blank_tail(&mut self) {
+        if self.is_task_running
+            && self
+                .transcript
+                .last()
+                .is_some_and(crate::composer::transcript::transcript_row_is_blank)
+        {
+            self.release_dock_seam();
+        }
+    }
+
+    /// Marks the end of a live provider round.  The next text delta may be a
+    /// punctuation-only continuation of the already-painted assistant block.
+    pub(crate) fn mark_stream_round_boundary(&mut self) {
+        if self.is_task_running {
+            if self.stream_round_had_text {
+                let was_boundary = self.stream_round_boundary;
+                // Keep the exact prose block as the anchor. A later tool,
+                // warning, compaction, or reconnect row must not steal the
+                // punctuation when the continuation finally arrives.
+                let target = self.history_entries.iter().rposition(|entry| {
+                    matches!(
+                        entry,
+                        TranscriptEntry::StyledLines { lines, .. }
+                            if lines.iter().any(|line| {
+                                !crate::composer::transcript::transcript_row_is_blank(line)
+                            })
+                    )
+                });
+                if target.is_some() {
+                    self.stream_round_target = target;
+                    self.stream_round_boundary = true;
+                } else if !was_boundary {
+                    self.stream_round_target = None;
+                    self.stream_round_boundary = false;
+                }
+            }
+            // ToolCallStart can precede the round's StepUsage. Preserve an
+            // already-armed continuation guard across that bookkeeping event.
+            self.stream_round_had_text = false;
+        }
     }
 
     /// Codex `on_context_compaction_started`: flush the live answer stream
@@ -1082,6 +1164,7 @@ impl Tui {
     }
 
     pub fn end_turn(&mut self, stream_ms: u64) {
+        self.rearm_cache();
         // Codex `turn_runtime.rs`: a turn ending without item completion
         // clears a live compaction silently (no `Context compacted` line).
         self.active_compaction = None;
@@ -1093,6 +1176,16 @@ impl Tui {
         let elapsed = self.turn_started.take().map(|s| s.elapsed());
         let had_thinking = self.turn_had_thinking;
         self.turn_had_thinking = false;
+        if self.thinking {
+            self.end_thinking_run(true);
+        }
+        // Finish the final stream while the live boundary rules are still
+        // active; otherwise the final markdown tail can reintroduce a
+        // duplicate blank immediately before the turn footer.
+        self.flush_markdown();
+        self.stream_round_boundary = false;
+        self.stream_round_had_text = false;
+        self.stream_round_target = None;
         self.is_task_running = false;
         self.status = None;
         // Billed output only (exact, reasoning included). `None` prints the
@@ -1102,10 +1195,6 @@ impl Tui {
         self.turn_billed_output = None;
         self.turn_output_accum = 0;
         self.turn_stream_ms = 0;
-        if self.thinking {
-            self.end_thinking_run(true);
-        }
-        self.flush_markdown();
 
         // Profile warnings queued mid-turn (lib code can't print while the
         // viewport is live) surface here as dim transcript lines, once each.

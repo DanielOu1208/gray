@@ -58,26 +58,39 @@ fn transcript_collects_text_and_tool_names() {
     assert!(t.contains("hello world"));
 }
 
+/// Write an executable script fixture, staged and renamed into place so
+/// the path that gets exec'd is never one a writer still holds. ETXTBSY
+/// ("text file busy") means the executable was open for writing at the
+/// instant of the exec; it showed up here roughly 1 run in 5-20 with no
+/// process holding the file by the time it could be checked, so the real
+/// fix is the one retry in `run_pre_script_with_timeout`. This keeps the
+/// fixture out of that window too.
+#[cfg(unix)]
+fn write_script(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let staging = path.with_extension("sh.new");
+    std::fs::write(&staging, body).unwrap();
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&staging, path).unwrap();
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn script_success_captures_stdout() {
     let dir = tempfile::tempdir().unwrap();
     let sh = dir.path().join("ok.sh");
-    std::fs::write(&sh, "#!/bin/sh\necho hello\n").unwrap();
-    #[cfg(unix)]
-    std::fs::set_permissions(&sh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    write_script(&sh, "#!/bin/sh\necho hello\n");
     let out = run_pre_script(&sh, dir.path()).await;
     assert!(out.ok, "stderr: {}", out.stderr_tail);
     assert!(out.stdout.contains("hello"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn script_failure_marks_not_ok() {
     let dir = tempfile::tempdir().unwrap();
     let sh = dir.path().join("bad.sh");
-    std::fs::write(&sh, "#!/bin/sh\necho oops >&2\nexit 3\n").unwrap();
-    #[cfg(unix)]
-    #[cfg(unix)]
-    std::fs::set_permissions(&sh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    write_script(&sh, "#!/bin/sh\necho oops >&2\nexit 3\n");
     let out = run_pre_script(&sh, dir.path()).await;
     assert!(!out.ok);
     assert!(out.stderr_tail.contains("oops"));
@@ -86,8 +99,16 @@ async fn script_failure_marks_not_ok() {
 #[tokio::test]
 async fn script_missing_file_is_not_ok() {
     let dir = tempfile::tempdir().unwrap();
-    let out = run_pre_script(&dir.path().join("gone.sh"), dir.path()).await;
+    let missing = dir.path().join("gone.sh");
+    let out = run_pre_script(&missing, dir.path()).await;
     assert!(!out.ok);
+    // The failure names the script: an operator reading cron output must
+    // not have to guess which pre-script failed.
+    assert!(
+        out.stderr_tail.contains("gone.sh"),
+        "spawn failure must name the script: {}",
+        out.stderr_tail
+    );
 }
 
 #[test]
@@ -133,8 +154,7 @@ fn local_output_writes_atomic_md() {
 async fn script_timeout_covers_execution() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("sleep.sh");
-    std::fs::write(&script, "#!/bin/sh\nexec sleep 1\n").unwrap();
-    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    write_script(&script, "#!/bin/sh\nexec sleep 1\n");
     let out =
         run_pre_script_with_timeout(&script, dir.path(), std::time::Duration::from_millis(50))
             .await;

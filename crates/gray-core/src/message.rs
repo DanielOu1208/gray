@@ -55,6 +55,13 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },
+    /// A host-validated structured input event retained as a typed session block.
+    StructuredInput {
+        protocol: String,
+        version: u32,
+        kind: String,
+        payload: serde_json::Value,
+    },
 }
 
 impl ContentBlock {
@@ -103,6 +110,59 @@ impl ContentBlock {
             is_error,
         }
     }
+
+    /// Returns provider-facing text for blocks that have one.
+    pub fn provider_text(&self) -> Option<String> {
+        match self {
+            ContentBlock::Text { text } => Some(text.clone()),
+            ContentBlock::StructuredInput {
+                protocol,
+                version,
+                kind,
+                payload,
+            } => {
+                let protocol_json =
+                    serde_json::to_string(protocol).unwrap_or_else(|_| "\"unknown\"".into());
+                let kind_json =
+                    serde_json::to_string(kind).unwrap_or_else(|_| "\"unknown\"".into());
+                let payload_json = canonical_json(payload);
+                let body = format!(
+                    "<gray_structured_input protocol={} version={} kind={}>\n{}\n</gray_structured_input>",
+                    protocol_json, version, kind_json, payload_json
+                );
+                Some(body.chars().take(65_536).collect())
+            }
+            _ => None,
+        }
+    }
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(values) => {
+            let mut keys: Vec<&String> = values.keys().collect();
+            keys.sort();
+            let body = keys
+                .into_iter()
+                .map(|key| {
+                    let encoded_key = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into());
+                    let encoded_value = canonical_json(&values[key]);
+                    format!("{encoded_key}:{encoded_value}")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{body}}}")
+        }
+        serde_json::Value::Array(values) => {
+            let body = values
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{body}]")
+        }
+        other => other.to_string(),
+    }
 }
 
 /// A conversation turn message.
@@ -142,6 +202,14 @@ impl Message {
         }
     }
 
+    /// Creates a user message containing a typed structured input event.
+    pub fn structured_input(input: crate::input::InputEnvelope) -> Self {
+        Self {
+            role: Role::User,
+            content: vec![input.into_content_block()],
+        }
+    }
+
     /// Concatenates all text blocks in the message.
     pub fn text_content(&self) -> String {
         self.content
@@ -172,6 +240,9 @@ impl Message {
         for block in &self.content {
             let piece = match block {
                 ContentBlock::Text { text } => text.clone(),
+                ContentBlock::StructuredInput { .. } => block
+                    .provider_text()
+                    .unwrap_or_else(|| "<gray_structured_input unavailable>".to_string()),
                 ContentBlock::ToolResult { content, .. } => content.clone(),
                 ContentBlock::ToolUse { name, args, .. } => {
                     format!("{name}{args}")

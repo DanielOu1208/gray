@@ -9,13 +9,28 @@ use gray_core::event::Usage;
 use gray_core::message::ToolDef;
 
 pub mod builder;
+pub mod capabilities;
 pub mod host;
 pub mod lock;
 pub mod profile;
+mod provider;
+pub mod scan;
 pub mod sidecar;
 
 pub use sidecar::{
     ASK_HANDLER_TTL, ASK_TTL, HOST_ASK, HOST_RUN, HOST_SAY, HOST_TTL, HostHandler, SidecarPlugin,
+};
+
+pub use capabilities::{
+    CapabilitySpec, HOST_ASK as CAP_HOST_ASK, HOST_SAY as CAP_HOST_SAY, HOST_TURN, TOOL_OVERRIDE,
+    WIDGET_OVERRIDE,
+};
+pub use provider::{
+    AuthMethodDecl, PROVIDER_CREDENTIALS, PROVIDER_PROTOCOL, ProviderAuthPoll, ProviderAuthStart,
+    ProviderAuthorizationDecl, ProviderDecl, ProviderHeaderDecl, ProviderHeaderSourceDecl,
+    ProviderModel, ProviderModelCatalog, ProviderModelsRequest, ProviderRefreshRequest,
+    ProviderRequestPolicyDecl, ProviderRevokeRequest, ProviderRevokeResult, ProviderRpcError,
+    ProviderRpcFailure, ProviderTransportDecl, ProviderValidationError,
 };
 
 #[derive(Debug, Clone)]
@@ -47,6 +62,18 @@ pub struct Manifest {
     /// (the adapter merges both into [`PluginHooks::commands`]).
     #[serde(default)]
     pub subcommands: Vec<String>,
+    /// Privileged host surfaces this plugin declares (`host.turn`,
+    /// `host.ask`, `tool.override`, …). Declaring is not consent: the
+    /// operator grants them and the grant is enforced at the call site
+    /// (see [`crate::capabilities`]).
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Validated protocol-1.2 provider declarations. Invalid declarations
+    /// are isolated in `provider_errors` so legacy tool surfaces survive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ProviderDecl>,
+    #[serde(skip)]
+    pub provider_errors: Vec<ProviderValidationError>,
 }
 
 /// Parse one manifest `tools` entry. Pre-v1 sidecars send bare strings
@@ -98,6 +125,39 @@ impl Manifest {
                 })
                 .unwrap_or_default()
         };
+        let mut providers = Vec::new();
+        let mut provider_errors = Vec::new();
+        let protocol = v.get("protocol").and_then(|s| s.as_str()).unwrap_or("1.0");
+        if let Some(raw_providers) = v.get("providers") {
+            if protocol == PROVIDER_PROTOCOL {
+                match raw_providers.as_array() {
+                    Some(raw_providers) => {
+                        let mut ids = std::collections::BTreeSet::new();
+                        for raw in raw_providers {
+                            match ProviderDecl::from_value(raw) {
+                                Ok(provider) if !ids.insert(provider.id.clone()) => {
+                                    provider_errors.push(ProviderValidationError {
+                                        message: "duplicate provider id".into(),
+                                    });
+                                }
+                                Ok(provider) => providers.push(provider),
+                                Err(error) => provider_errors.push(error),
+                            }
+                        }
+                    }
+                    None => provider_errors.push(ProviderValidationError {
+                        message: "providers must be an array".into(),
+                    }),
+                }
+            } else if raw_providers
+                .as_array()
+                .is_some_and(|providers| !providers.is_empty())
+            {
+                provider_errors.push(ProviderValidationError {
+                    message: "providers require protocol 1.2".into(),
+                });
+            }
+        }
         Self {
             name: v
                 .get("name")
@@ -114,6 +174,9 @@ impl Manifest {
             hooks: str_list("hooks"),
             protocol: v.get("protocol").and_then(|s| s.as_str()).map(|s| s.into()),
             subcommands: str_list("subcommands"),
+            capabilities: crate::capabilities::parse_declared(&str_list("capabilities")),
+            providers,
+            provider_errors,
         }
     }
 }
@@ -132,6 +195,12 @@ pub trait Plugin: Send + Sync {
     // NOTE: an earlier `provider()` hook was deleted — every
     // impl returned None and nothing called it. `on_event`/`CoreEvent` stay:
     // SidecarPlugin dispatches them to the subprocess over stdio.
+    /// Capabilities the operator granted this plugin (empty = none).
+    /// Sync on purpose: tool assembly (`builder::from_plugins`) runs
+    /// outside async, and the set is written once at boot.
+    fn capabilities(&self) -> Vec<String> {
+        Vec::new()
+    }
     async fn on_event(&self, _e: CoreEvent) {}
     /// `prompt/context` hook (`params: {"cwd"}` → `result: {"text"}`).
     /// Default `None` = no extra context (pre-v1 behavior).
@@ -247,3 +316,7 @@ impl PluginHooks for PluginHookAdapter {
         self.plugin.shutdown().await;
     }
 }
+
+#[cfg(test)]
+#[path = "provider_tests.rs"]
+mod provider_tests;

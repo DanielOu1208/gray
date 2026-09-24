@@ -33,7 +33,7 @@ pub(crate) fn ctrl_c_should_exit(
 }
 
 pub(crate) fn handle_paste(tui: &mut Tui, pasted: String) -> bool {
-    let pasted = clipboard::normalize_paste(&pasted);
+    let pasted = strip_escape_sequences(&clipboard::normalize_paste(&pasted));
     // opencode parity: some terminals surface an image-only (or otherwise
     // unreadable) clipboard as an EMPTY bracketed paste. Fall back to an
     // explicit OS clipboard read instead of inserting nothing.
@@ -243,27 +243,86 @@ pub(crate) fn handle_key_event_without_popup(
 // read_line — main loop, verbatim from mod.rs 887-1120 with dispatch split
 // ---------------------------------------------------------------------------
 
-/// Pushes Kitty `DISAMBIGUATE_ESCAPE_CODES` while the prompt is live so
-/// Shift+Enter (and Alt+Enter) arrive with their modifiers instead of a
-/// bare Enter (submit) — tmux otherwise collapses Shift+Enter to `\r`.
-/// Popped on drop, covering every `read_line` exit. Terminals without
-/// support ignore the sequence (same precedent as `EnableBracketedPaste`
-/// below, re-asserted every turn because full-screen children clear it).
-pub(crate) struct KeyboardEnhancementGuard;
-impl KeyboardEnhancementGuard {
+/// While the prompt is live, ask the terminal to report modified keys so
+/// Shift+Enter (and Alt+Enter) arrive as themselves instead of a bare Enter
+/// (submit). Popped on drop, covering every `read_line` exit. Terminals
+/// without support ignore the sequence (same precedent as
+/// `EnableBracketedPaste` below, re-asserted every turn because full-screen
+/// children clear it).
+///
+/// The negotiation itself lives in [`crate::term_keys`]: which flags to ask
+/// for, and which terminals must be excluded, is not a prompt concern.
+pub(crate) use crate::term_keys::KeyboardEnhancementGuard;
+
+/// Drops escape sequences from a pasted string: CSI runs (`ESC [ <params>
+/// <final>`, which includes both bracketed-paste markers `ESC [ 200~` and
+/// `ESC [ 201~`), OSC runs, and a lone `ESC`.
+///
+/// A paste can reach us still wrapped in the bracketed-paste markers when
+/// gray is the inner terminal of a nested one (an outer app wrapped the
+/// paste before we saw it), and it can drag along CSI/OSC debris copied out
+/// of a rendered page. Neither can be meant as text, so delete them instead
+/// of inserting `^[[200~` junk into the draft — only escape *sequences* go:
+/// newlines and tabs, which a pasted code block legitimately carries, stay.
+pub(crate) fn strip_escape_sequences(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                while let Some(&c) = chars.peek() {
+                    chars.next();
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            // A lone ESC and the byte after it (ESC =): drop the introducer,
+            // keep the byte - deleting a character the user pasted would lose
+            // text the escape never explained.
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    out
+}
+
+/// Turns bracketed paste OFF for the duration and back ON on drop — the
+/// mirror of the per-turn assertion in [`read_line`]. Mode 2004 is
+/// terminal-global and survives `disable_raw_mode`, so a *cooked* stdin
+/// prompt (`print!` + `read_line`) run under the REPL receives the
+/// `ESC[200~ ... ESC[201~` wrapper the terminal adds to every paste as plain
+/// text, and the line discipline echoes it back as `^[[200~` garbage.
+/// `/login`'s `code:` prompt used to exchange that whole wrapper as an
+/// enrollment code. Re-enabled on drop so the next composer prompt still gets
+/// real `Event::Paste` values (also re-asserted by every prompt turn).
+pub(crate) struct BracketedPasteOffGuard;
+impl BracketedPasteOffGuard {
     pub(crate) fn push() -> Self {
-        use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        );
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
         Self
     }
 }
-impl Drop for KeyboardEnhancementGuard {
+impl Drop for BracketedPasteOffGuard {
     fn drop(&mut self) {
-        use crossterm::event::PopKeyboardEnhancementFlags;
-        let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
     }
 }
 

@@ -20,6 +20,7 @@ shlex = "2"
 gray-core = { workspace = true }
 gray-plugin = { workspace = true }
 gray-pkg = { workspace = true }
+gray-provider = { workspace = true }
 gray-tools = { workspace = true }
 gray-markdown = { workspace = true }
 anyhow = { workspace = true }
@@ -51,3 +52,6 @@ ignore = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[dev-dependencies]
+codex-auth = { path = "../../plugins/codex-auth" }

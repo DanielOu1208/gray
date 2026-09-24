@@ -35,7 +35,9 @@ pub(crate) struct ManagerItem {
     /// Rows the toggle/remove branches skip: separators, pointers at another
     /// command, and every row of a read-only listing.
     pub read_only: bool,
-    /// Enter runs the setup flow (not the toggle) when the panel passed one.
+    /// Enter runs the setup/start flow (not the toggle) when the panel
+    /// passed one — set when the app needs first-time setup OR is set up
+    /// but stopped, so Enter can (re)start the daemon.
     pub needs_setup: bool,
 }
 
@@ -541,7 +543,7 @@ pub(crate) fn run_install_manager(
                     ]
                 }
                 // Tab-specific (key, description) pairs, then the shared tail.
-                // Enter's verb follows the selected row: a needs-setup row
+                // Enter's verb follows the selected row: a setup/start row
                 // announces the flow, everything else toggles as before.
                 let enter = enter_label(items.get(sel), setup.is_some(), spec);
                 let middle: Vec<(&str, &str)> = match tab {

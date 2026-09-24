@@ -13,7 +13,7 @@ fn default_true() -> bool {
 }
 
 /// One locked plugin entry.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LockEntry {
     pub ecosystem: String,
     pub version: String,
@@ -27,6 +27,20 @@ pub struct LockEntry {
     /// load as enabled).
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Capability ids the operator consented to. Empty until an interactive
+    /// install asked; see [`crate::capabilities`].
+    #[serde(default)]
+    pub granted_capabilities: Vec<String>,
+    /// Digest of the declared list at consent time. `None` marks a
+    /// pre-consent entry: it is grandfathered to whatever it declares,
+    /// because it ran with those powers before consent existed.
+    #[serde(default)]
+    pub capabilities_hash: Option<String>,
+    /// [`Some("provider_only")] marks a protocol-1.2 provider sidecar.
+    /// The provider runtime owns its lifecycle, so the normal boot must
+    /// skip it; an ordinary plugin leaves this `None`.
+    #[serde(default)]
+    pub runtime_role: Option<String>,
 }
 
 /// Lockfile body: schema + plugins keyed by manifest name.

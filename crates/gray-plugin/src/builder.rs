@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use gray_core::agent::{Agent, Tool, ToolExecutor};
-use gray_provider::OpenAiProvider;
+use gray_core::credential::CredentialSource;
+use gray_provider::{OpenAiProvider, OpenAiProviderProfile};
 use gray_tools::Registry;
 
 use crate::profile::{PluginEntry, load_entries};
@@ -111,6 +112,12 @@ pub fn from_plugins(plugins: &[Arc<dyn Plugin>]) -> (Registry, Vec<Manifest>) {
         }
     }
     let builtin_names: std::collections::HashSet<String> = builtin_tools.keys().cloned().collect();
+    // Every builtin surface a sidecar could try to sit on top of. The
+    // name-based-trust set above (`tools-basic`/`tools-search`) stays
+    // reserve-only; these add the default `tools-minimal` surface, so a
+    // sidecar cannot quietly become `bash`.
+    let is_builtin_plugin =
+        |name: &str| matches!(name, "tools-minimal" | "tools-basic" | "tools-search");
     // Builtins win manifests: a hostile claim must not displace the owner
     // either (the ledger rebuild below keys off ownership).
     for plugin in plugins {
@@ -121,15 +128,41 @@ pub fn from_plugins(plugins: &[Arc<dyn Plugin>]) -> (Registry, Vec<Manifest>) {
             }
         }
     }
+    // Tool names the builtin surface owns, for the override gate below.
+    let builtin_owned: std::collections::HashSet<String> = plugins
+        .iter()
+        .filter(|p| is_builtin_plugin(&p.manifest().name))
+        .flat_map(|p| p.tools().into_iter().map(|t| t.def().name))
+        .collect();
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     for p in plugins {
         let owner_name = p.manifest().name;
+        let may_override = p
+            .capabilities()
+            .iter()
+            .any(|c| c == crate::capabilities::TOOL_OVERRIDE);
         for t in p.tools() {
             if builtin_names.contains(&t.def().name) && !is_builtin_owner(&owner_name) {
                 push_builder_warning(format!(
                     "plugin `{}` claims reserved builtin tool `{}`; ignoring",
                     owner_name,
                     t.def().name
+                ));
+                continue;
+            }
+            // Replacing a built-in surface tool needs the capability, and
+            // the capability needs consent: a silently winning sidecar
+            // would intercept everything routed through that tool.
+            if builtin_owned.contains(&t.def().name)
+                && !is_builtin_plugin(&owner_name)
+                && !may_override
+            {
+                push_builder_warning(format!(
+                    "plugin `{}` claims built-in tool `{}`; grant `{}` to let it (gray plugin capabilities {})",
+                    owner_name,
+                    t.def().name,
+                    crate::capabilities::TOOL_OVERRIDE,
+                    owner_name
                 ));
                 continue;
             }
@@ -470,6 +503,10 @@ pub async fn active_plugins(
                         if let Some(h) = &handler {
                             p.set_host_handler(h.clone()).await;
                         }
+                        // A profile sidecar is argv the operator wrote into
+                        // gray.yml: placement is the consent, so it keeps
+                        // everything it declares.
+                        p.set_capabilities(p.manifest().capabilities.clone());
                         plugins.push(Arc::new(p) as Arc<dyn Plugin>);
                     }
                     Err(e) if abort_on_spawn_failure => {
@@ -493,6 +530,12 @@ pub async fn active_plugins(
         if !crate::lock::effective_enabled(&user_lock, &project_lock, name) {
             continue;
         }
+        // Provider-only sidecars are lifecycle-owned by the provider runtime.
+        // They stay in the lock for provider discovery, but never boot as a
+        // second sidecar process.
+        if entry.runtime_role.as_deref() == Some("provider_only") {
+            continue;
+        }
         let argv: Vec<String> = if !entry.argv.is_empty() {
             entry.argv.clone()
         } else {
@@ -506,6 +549,28 @@ pub async fn active_plugins(
             Ok(p) => {
                 if let Some(h) = &handler {
                     p.set_host_handler(h.clone()).await;
+                }
+                // Consent decides what this sidecar may ask of the host.
+                // A pre-consent entry keeps what it declares (it ran with
+                // those powers before consent existed); a consented one is
+                // cut down to the intersection.
+                let declared = p.manifest().capabilities.clone();
+                p.set_capabilities(
+                    crate::capabilities::granted_for(entry, &declared)
+                        .into_iter()
+                        .collect(),
+                );
+                let pending = crate::capabilities::pending_consent(entry, &declared);
+                if !pending.is_empty() {
+                    push_builder_warning(format!(
+                        "plugin {name:?} declares ungranted {} ({}); grant with gray plugin capabilities {name}",
+                        if pending.len() == 1 {
+                            "capability".to_string()
+                        } else {
+                            "capabilities".to_string()
+                        },
+                        pending.join(", ")
+                    ));
                 }
                 plugins.push(Arc::new(p) as Arc<dyn Plugin>);
             }
@@ -616,6 +681,11 @@ pub struct BuilderOptions {
     pub profile_path: String,
     pub abort_on_spawn_failure: bool,
     pub wrap_executor: Option<ExecutorWrap>,
+    /// Declared plugin-backed provider profile; `None` preserves the
+    /// built-in static API-key provider.
+    pub dynamic_provider_profile: Option<OpenAiProviderProfile>,
+    /// Agent-lifetime credential lease source for `dynamic_provider_profile`.
+    pub dynamic_credential_source: Option<Arc<dyn CredentialSource>>,
 }
 
 /// Profile-aware [`Agent`] builder used by all surfaces: resolves
@@ -640,6 +710,8 @@ pub async fn build_agent(opts: BuilderOptions) -> anyhow::Result<Agent> {
         profile_path,
         abort_on_spawn_failure,
         wrap_executor,
+        dynamic_provider_profile,
+        dynamic_credential_source,
     } = opts;
     // Catalog: any of these may be named in `gray.yml`. Fallback (no profile)
     // is `tools-minimal` — one persistent shell, gray's default surface.
@@ -673,15 +745,27 @@ pub async fn build_agent(opts: BuilderOptions) -> anyhow::Result<Agent> {
         SystemPrompt::Literal(s) => s,
         SystemPrompt::Build(f) => f(&registry),
     };
-    let provider = OpenAiProvider::new(
-        api_key,
-        model,
-        base_url,
-        reasoning_effort,
-        Some(provider_cache_key(session_id.as_deref())),
-    )
-    .map_err(|e| anyhow::anyhow!("failed to initialize OpenAI provider: {e}"))?
-    .with_sampling(temperature, top_p);
+    let provider = match (dynamic_provider_profile, dynamic_credential_source) {
+        (Some(profile), Some(source)) => OpenAiProvider::new_with_profile(
+            model,
+            reasoning_effort,
+            Some(provider_cache_key(session_id.as_deref())),
+            profile,
+            source,
+        )
+        .map_err(|e| anyhow::anyhow!("failed to initialize plugin provider: {e}"))?
+        .with_sampling(temperature, top_p),
+        (None, None) => OpenAiProvider::new(
+            api_key,
+            model,
+            base_url,
+            reasoning_effort,
+            Some(provider_cache_key(session_id.as_deref())),
+        )
+        .map_err(|e| anyhow::anyhow!("failed to initialize OpenAI provider: {e}"))?
+        .with_sampling(temperature, top_p),
+        _ => anyhow::bail!("a dynamic provider needs both a profile and a credential source"),
+    };
 
     let tool_defs = registry.defs();
     let executor: Arc<dyn ToolExecutor> = match wrap_executor {

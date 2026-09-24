@@ -143,6 +143,16 @@ pub fn model_supports_reasoning(model_id: &str) -> Option<bool> {
 /// `off` covers OpenAI `none` (omit reasoning). `None` = family unknown
 /// (offer the full catalog); empty = no reasoning.
 pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
+    // CommandCode's Settings docs list `reasoningEffort` values as
+    // low/medium/high/xhigh/max (https://api.commandcode.ai/docs/settings).
+    // models.dev has no CommandCode rows, and its qualified
+    // `xiaomi/mimo-v2.6-pro` rows from other gateways only say high; those
+    // cached rows clamped a real xhigh request to high. The provider-specific
+    // MiMo v2.6 Pro tier must win over the shared cache.
+    let active = active_provider_base_url();
+    if active.contains("commandcode.ai") && is_mimo_v26_pro(model_id) {
+        return Some(vec!["off", "low", "medium", "high", "xhigh", "max"]);
+    }
     if let Some(cached) = model_efforts(model_id) {
         let levels = super::super::THINKING_LEVELS;
         let want: Vec<&'static str> = cached
@@ -291,6 +301,12 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
     None
 }
 
+/// CommandCode's MiMo v2.6 Pro family (`-pro` and its UltraSpeed tier).
+fn is_mimo_v26_pro(model_id: &str) -> bool {
+    let id = model_id.to_lowercase();
+    id.contains("mimo") && (id.contains("v2.6-pro") || id.contains("v2.6_pro"))
+}
+
 /// The step family: StepFun's API always reasons. `thinking: {"type":
 /// "disabled"}` is ignored — measured against api.stepfun.ai, 1088
 /// reasoning deltas still streamed at effort=off — and its `/models`
@@ -373,116 +389,123 @@ pub fn clamp_thinking_level(model_id: &str, level: &str) -> &'static str {
 }
 
 /// Dynamically queries the provider's live /models endpoint (e.g. OpenAI, OpenRouter, Ollama, vLLM, LMStudio, etc.).
-pub fn fetch_live_provider_models(base_url: &str, api_key: Option<&str>) -> Vec<(String, String)> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        let base = base_url.to_string();
-        let key = api_key.map(|k| k.to_string());
-        std::thread::scope(|s| {
-            s.spawn(move || {
-                handle.block_on(async move {
-                    let client = match reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_millis(3000))
-                        .user_agent(concat!("gray/", env!("CARGO_PKG_VERSION")))
-                        .build()
-                    {
-                        Ok(c) => c,
-                        Err(_) => return Vec::new(),
-                    };
+/// The live `/models` (or `/tags`) probe. Split out so the blocking entry
+/// point and a background refresher thread can share one implementation.
+async fn fetch_models_async(base: String, key: Option<String>) -> Vec<(String, String)> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(3000))
+        .user_agent(concat!("gray/", env!("CARGO_PKG_VERSION")))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
 
-                    let trimmed_base = base.trim_end_matches('/');
-                    let endpoints = if trimmed_base.contains("openrouter.ai") {
-                        vec!["https://openrouter.ai/api/v1/models".to_string()]
-                    } else if trimmed_base.ends_with("/v1") {
-                        vec![
-                            format!("{trimmed_base}/models"),
-                            format!("{trimmed_base}/tags"),
-                        ]
-                    } else {
-                        vec![
-                            format!("{trimmed_base}/models"),
-                            format!("{trimmed_base}/v1/models"),
-                            format!("{trimmed_base}/api/tags"),
-                            format!("{trimmed_base}/api/v1/models"),
-                        ]
-                    };
+    let trimmed_base = base.trim_end_matches('/');
+    let endpoints = if trimmed_base.contains("openrouter.ai") {
+        vec!["https://openrouter.ai/api/v1/models".to_string()]
+    } else if trimmed_base.ends_with("/v1") {
+        vec![
+            format!("{trimmed_base}/models"),
+            format!("{trimmed_base}/tags"),
+        ]
+    } else {
+        vec![
+            format!("{trimmed_base}/models"),
+            format!("{trimmed_base}/v1/models"),
+            format!("{trimmed_base}/api/tags"),
+            format!("{trimmed_base}/api/v1/models"),
+        ]
+    };
 
-                    for url in endpoints {
-                        let mut req = client.get(&url);
-                        if let Some(k) = &key
-                            && !k.is_empty()
+    for url in endpoints {
+        let mut req = client.get(&url);
+        if let Some(k) = &key
+            && !k.is_empty()
+        {
+            req = req.header("Authorization", format!("Bearer {k}"));
+        }
+        if url.contains("openrouter") {
+            req = req.header("HTTP-Referer", "https://github.com/vstaln/gray");
+            req = req.header("X-Title", "Gray");
+        }
+
+        if let Ok(resp) = req.send().await
+            && resp.status().is_success()
+            && let Ok(json) = resp.json::<serde_json::Value>().await
+        {
+            let mut models = Vec::new();
+            let items_opt = if let Some(arr) = json.as_array() {
+                Some(arr)
+            } else if let Some(arr) = json.get("data").and_then(|d| d.as_array()) {
+                Some(arr)
+            } else {
+                json.get("models").and_then(|m| m.as_array())
+            };
+
+            if let Some(items) = items_opt {
+                for item in items {
+                    let id = item
+                        .get("id")
+                        .or_else(|| item.get("name"))
+                        .or_else(|| item.get("model"))
+                        .and_then(|v| v.as_str());
+                    if let Some(id_str) = id {
+                        let name = item
+                            .get("name")
+                            .or_else(|| item.get("display_name"))
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| friendly_model_name(id_str));
+                        if let Some(len) = extract_context_length_from_json(item) {
+                            cache_model_context(id_str, len);
+                        }
+                        // OpenRouter advertises `supported_parameters:
+                        // [..., "reasoning", ...]`; other OpenAI-style
+                        // endpoints may carry a `reasoning` bool.
+                        if let Some(r) = item
+                            .get("supported_parameters")
+                            .and_then(|v| v.as_array())
+                            .map(|a| a.iter().any(|p| p.as_str() == Some("reasoning")))
+                            .or_else(|| item.get("reasoning").and_then(|v| v.as_bool()))
                         {
-                            req = req.header("Authorization", format!("Bearer {k}"));
+                            cache_model_reasoning(id_str, r);
                         }
-                        if url.contains("openrouter") {
-                            req = req.header("HTTP-Referer", "https://github.com/vstaln/gray");
-                            req = req.header("X-Title", "Gray");
-                        }
-
-                        if let Ok(resp) = req.send().await
-                            && resp.status().is_success()
-                            && let Ok(json) = resp.json::<serde_json::Value>().await
-                        {
-                            let mut models = Vec::new();
-                            let items_opt = if let Some(arr) = json.as_array() {
-                                Some(arr)
-                            } else if let Some(arr) = json.get("data").and_then(|d| d.as_array()) {
-                                Some(arr)
-                            } else {
-                                json.get("models").and_then(|m| m.as_array())
-                            };
-
-                            if let Some(items) = items_opt {
-                                for item in items {
-                                    let id = item
-                                        .get("id")
-                                        .or_else(|| item.get("name"))
-                                        .or_else(|| item.get("model"))
-                                        .and_then(|v| v.as_str());
-                                    if let Some(id_str) = id {
-                                        let name = item
-                                            .get("name")
-                                            .or_else(|| item.get("display_name"))
-                                            .and_then(|n| n.as_str())
-                                            .map(|s| s.to_string())
-                                            .unwrap_or_else(|| friendly_model_name(id_str));
-                                        if let Some(len) = extract_context_length_from_json(item) {
-                                            cache_model_context(id_str, len);
-                                        }
-                                        // OpenRouter advertises `supported_parameters:
-                                        // [..., "reasoning", ...]`; other OpenAI-style
-                                        // endpoints may carry a `reasoning` bool.
-                                        if let Some(r) = item
-                                            .get("supported_parameters")
-                                            .and_then(|v| v.as_array())
-                                            .map(|a| {
-                                                a.iter().any(|p| p.as_str() == Some("reasoning"))
-                                            })
-                                            .or_else(|| {
-                                                item.get("reasoning").and_then(|v| v.as_bool())
-                                            })
-                                        {
-                                            cache_model_reasoning(id_str, r);
-                                        }
-                                        models.push((id_str.to_string(), name));
-                                    }
-                                }
-                            }
-                            if !models.is_empty() {
-                                cache_provider_model_ids(&base, &models);
-                                save_models_cache_to_disk();
-                                return models;
-                            }
-                        }
+                        models.push((id_str.to_string(), name));
                     }
+                }
+            }
+            if !models.is_empty() {
+                cache_provider_model_ids(&base, &models);
+                save_models_cache_to_disk();
+                return models;
+            }
+        }
+    }
 
-                    Vec::new()
-                })
-            })
-            .join()
-            .unwrap_or_default()
+    Vec::new()
+}
+
+/// Live provider model list. Blocking by design: every caller wants an
+/// answer before it draws. With no ambient runtime (a background thread)
+/// run a short-lived one rather than quietly returning an empty list.
+pub fn fetch_live_provider_models(base_url: &str, api_key: Option<&str>) -> Vec<(String, String)> {
+    let base = base_url.to_string();
+    let key = api_key.map(|k| k.to_string());
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        std::thread::scope(|s| {
+            s.spawn(move || handle.block_on(fetch_models_async(base, key)))
+                .join()
+                .unwrap_or_default()
         })
     } else {
-        Vec::new()
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt.block_on(fetch_models_async(base, key)),
+            Err(_) => Vec::new(),
+        }
     }
 }
 
@@ -531,6 +554,15 @@ pub fn set_active_model_provider(base_url: &str) {
     if let Ok(mut cache) = provider_models_cell().write() {
         cache.active = base_url.trim_end_matches('/').to_string();
     }
+}
+
+/// The provider endpoint currently selected for model discovery.
+fn active_provider_base_url() -> String {
+    provider_models_cell()
+        .read()
+        .ok()
+        .map(|cache| cache.active.clone())
+        .unwrap_or_default()
 }
 
 pub(crate) fn cache_provider_model_ids(base_url: &str, models: &[(String, String)]) {

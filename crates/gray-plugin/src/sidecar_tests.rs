@@ -83,3 +83,93 @@ async fn a_child_that_stopped_reading_fails_the_request_not_the_protocol() {
         "got: {text}"
     );
 }
+
+#[tokio::test]
+async fn provider_rpcs_round_trip_without_shutdown() {
+    let p = SidecarPlugin::spawn(vec!["testdata/provider_plugin.sh".into()])
+        .await
+        .unwrap();
+    p.set_capabilities(vec![crate::PROVIDER_CREDENTIALS.into()]);
+
+    let started = p
+        .provider_auth_start("codex", "chatgpt-subscription")
+        .await
+        .unwrap();
+    assert_eq!(started.operation_id, "op-test");
+
+    let completed = p.provider_auth_poll(&started.operation_id).await.unwrap();
+    assert!(matches!(completed, crate::ProviderAuthPoll::Completed(_)));
+    p.provider_auth_cancel(&started.operation_id).await.unwrap();
+
+    let envelope = gray_core::credential::CredentialEnvelope::new(
+        "codex-auth",
+        "codex",
+        "chatgpt-subscription",
+        "sha256:test",
+        gray_core::credential::CredentialMaterial {
+            secrets: gray_core::credential::SecretMap::from_iter([("access_token", "test-access")]),
+            metadata: [("account_id".into(), "acct_test".into())]
+                .into_iter()
+                .collect(),
+            expires_at: None,
+        },
+    )
+    .unwrap();
+    let refreshed = p
+        .provider_auth_refresh(&crate::ProviderRefreshRequest {
+            provider: "codex".into(),
+            auth_method: "chatgpt-subscription".into(),
+            profile_binding: "sha256:test".into(),
+            credential: envelope.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(refreshed.secrets.get("refresh_token"), Some("test-refresh"));
+
+    assert!(matches!(
+        p.provider_auth_revoke(&crate::ProviderRevokeRequest {
+            provider: "codex".into(),
+            auth_method: "chatgpt-subscription".into(),
+            profile_binding: "sha256:test".into(),
+            credential: envelope.clone(),
+        })
+        .await
+        .unwrap(),
+        crate::ProviderRevokeResult::Revoked
+    ));
+
+    let models = p
+        .provider_models(&crate::ProviderModelsRequest {
+            provider: "codex".into(),
+            auth_method: "chatgpt-subscription".into(),
+            profile_binding: "sha256:test".into(),
+            credential: envelope,
+        })
+        .await
+        .unwrap();
+    assert_eq!(models.models[0].id, "gpt-test");
+
+    let error = p.provider_auth_poll("bad").await.unwrap_err();
+    assert!(matches!(
+        error,
+        crate::ProviderRpcError::Protocol(message) if message == "invalid provider auth state"
+    ));
+    p.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn provider_rpc_requires_the_sensitive_capability() {
+    let p = SidecarPlugin::spawn(vec!["testdata/provider_plugin.sh".into()])
+        .await
+        .unwrap();
+    let error = p
+        .provider_auth_start("codex", "chatgpt-subscription")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::ProviderRpcError::CapabilityMissing(capability)
+            if capability == crate::PROVIDER_CREDENTIALS
+    ));
+    p.shutdown(std::time::Duration::from_secs(2)).await;
+}
