@@ -1333,6 +1333,69 @@ async fn responses_twin_ids_require_confirmed_completion() {
 }
 
 #[tokio::test]
+async fn responses_text_only_eof_without_completed_completes() {
+    // A gateway that closes SSE after output text but omits
+    // `response.completed` is still a usable text turn. The old EOF path
+    // failed the whole turn even though the user-visible text was complete.
+    use futures::StreamExt;
+    let server = wiremock::MockServer::start().await;
+    let delta = serde_json::json!({
+        "type": "response.output_text.delta",
+        "response_id": "resp_1",
+        "delta": "hello"
+    });
+    let body = format!(
+        "data: {delta}
+
+"
+    );
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let provider = OpenAiProvider::new(
+        "key",
+        "muse-test",
+        format!("{}/opencode.ai/zen", server.uri()),
+        None,
+        None,
+    )
+    .expect("provider builds");
+    let events: Vec<_> = provider.stream(empty_chat_req()).collect().await;
+
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            Ok(StreamEvent::TextDelta { delta }) => Some(delta.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "hello", "text must be preserved: {events:?}");
+    assert!(
+        events.iter().all(|event| event.is_ok()),
+        "text-only EOF must not error: {events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Ok(StreamEvent::MessageComplete {
+                    stop_reason: Some(StopReason::EndTurn),
+                    ..
+                })
+            ))
+            .count(),
+        1,
+        "text-only EOF must complete once: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn responses_failure_event_is_an_error_not_endturn() {
     // response.failed must not fall through the catch-all into a successful
     // EndTurn: the turn must surface the failure (#71).

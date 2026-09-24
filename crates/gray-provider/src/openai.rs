@@ -2065,6 +2065,10 @@ enum StreamState {
         last_usage: Option<Usage>,
         pending_events: VecDeque<StreamEvent>,
         completed: bool,
+        // True once output text deltas have been yielded. A provider that
+        // closes SSE without `response.completed` after text has still
+        // produced a usable text turn; unconfirmed tool calls stay fatal.
+        saw_output_text: bool,
         // Re-POST context for mid-stream resume (Responses only): a
         // retryable transport failure rebuilds ResponsesInit from these
         // with `previous_response_id = last_response_id`.
@@ -2380,6 +2384,7 @@ fn stream_unfold_step(
                                 body,
                                 stream_attempt,
                                 last_response_id,
+                                saw_output_text: false,
                             };
                         }
                         Err((err, floor, http_status)) => {
@@ -2766,6 +2771,7 @@ fn stream_unfold_step(
                     mut last_usage,
                     mut pending_events,
                     mut completed,
+                    mut saw_output_text,
                     client,
                     url,
                     api_key,
@@ -2789,6 +2795,7 @@ fn stream_unfold_step(
                                 body,
                                 stream_attempt,
                                 last_response_id,
+                                saw_output_text,
                             },
                         ));
                     }
@@ -2813,6 +2820,7 @@ fn stream_unfold_step(
                                     body,
                                     stream_attempt,
                                     last_response_id,
+                                    saw_output_text,
                                 };
                                 continue;
                             }
@@ -2850,6 +2858,7 @@ fn stream_unfold_step(
                                     if let Some(delta) = value.get("delta").and_then(|v| v.as_str())
                                         && !delta.is_empty()
                                     {
+                                        saw_output_text = true;
                                         pending_events.push_back(StreamEvent::TextDelta {
                                             delta: delta.to_string(),
                                         });
@@ -3122,12 +3131,14 @@ fn stream_unfold_step(
                                         }
                                     }
                                 }
+                                "response.output_text.done" => {
+                                    saw_output_text = true;
+                                }
                                 "ping"
                                 | "response.created"
                                 | "response.in_progress"
                                 | "response.content_part.added"
                                 | "response.content_part.done"
-                                | "response.output_text.done"
                                 | "response.reasoning_text.done" => {}
                                 _ => {
                                     if let Some(uval) = value
@@ -3154,6 +3165,7 @@ fn stream_unfold_step(
                                 body,
                                 stream_attempt,
                                 last_response_id,
+                                saw_output_text,
                             };
                         }
                         Some(Err(err)) => {
@@ -3201,6 +3213,39 @@ fn stream_unfold_step(
                             ));
                         }
                         None => {
+                            // Some Responses-compatible gateways close SSE
+                            // after the final text event without ever sending
+                            // `response.completed`. That is still a complete
+                            // text turn. Unconfirmed tool calls remain fatal:
+                            // an argument fragment is not proof the provider
+                            // finished the call.
+                            if tools_by_call_id.is_empty() && saw_output_text {
+                                log::warn!(
+                                    target: "gray_provider",
+                                    "responses stream ended without response.completed; completing text output"
+                                );
+                                completed = true;
+                                pending_events.push_back(StreamEvent::MessageComplete {
+                                    stop_reason: Some(StopReason::EndTurn),
+                                    usage: last_usage,
+                                });
+                                state = StreamState::ResponsesStreaming {
+                                    event_stream,
+                                    tools_by_call_id,
+                                    index_to_call_id,
+                                    last_usage,
+                                    pending_events,
+                                    completed,
+                                    saw_output_text,
+                                    client,
+                                    url,
+                                    api_key,
+                                    body,
+                                    stream_attempt,
+                                    last_response_id,
+                                };
+                                continue;
+                            }
                             return Some((
                                 Err(ProviderError::Stream(
                                     "Responses stream ended before response.completed".into(),
