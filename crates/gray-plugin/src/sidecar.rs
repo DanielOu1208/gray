@@ -498,8 +498,8 @@ impl Transport {
     async fn terminate_child_generation(&self) {
         let mut child = self.child.lock().await;
         #[cfg(windows)]
-        {
-            let pid = child.id().to_string();
+        if let Some(pid) = child.id() {
+            let pid = pid.to_string();
             let mut taskkill = Command::new("taskkill");
             taskkill.kill_on_drop(true).args(["/PID", &pid, "/T", "/F"]);
             let _ = timeout(Duration::from_secs(2), taskkill.status()).await;
