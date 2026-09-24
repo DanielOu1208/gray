@@ -120,6 +120,7 @@ impl CredentialStore {
 
     fn lock(&self) -> anyhow::Result<AuthLock> {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        #[cfg(unix)]
         let existed = parent.symlink_metadata().is_ok();
         std::fs::create_dir_all(parent)?;
         #[cfg(unix)]
