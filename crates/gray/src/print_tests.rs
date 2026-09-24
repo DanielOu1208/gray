@@ -305,6 +305,7 @@ fn progress_narrates_a_bash_call_with_its_command() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["phase"], "tool_ran");
     assert_eq!(rows[0]["tool"], "bash");
+    assert_eq!(rows[0]["call_id"], "c1");
     assert_eq!(rows[0]["detail"], "cargo test -p gray");
 }
 
@@ -317,6 +318,7 @@ fn progress_narrates_start_and_result_with_the_tool_name() {
     });
     assert_eq!(started[0]["phase"], "tool_started");
     assert_eq!(started[0]["tool"], "bash");
+    assert_eq!(started[0]["call_id"], "c1");
     let done = out.rows(&AgentEvent::ToolResult {
         id: "c1".into(),
         output: "ok".into(),
@@ -324,7 +326,32 @@ fn progress_narrates_start_and_result_with_the_tool_name() {
     });
     assert_eq!(done[0]["phase"], "tool_finished");
     assert_eq!(done[0]["tool"], "bash");
+    assert_eq!(done[0]["call_id"], "c1");
+    assert_eq!(done[0]["output"], "ok");
     assert!(done[0].get("error").is_none());
+}
+
+#[test]
+fn progress_output_preserves_lines_redacts_and_caps() {
+    let mut out = json_out(false);
+    out.tools.insert("c1".into(), "bash".into());
+    let rows = out.rows(&AgentEvent::ToolResult {
+        id: "c1".into(),
+        output: format!(
+            "line one\nAuthorization: Bearer sk-abc123SECRET\n{}",
+            "x ".repeat(OUTPUT_CAP * 2)
+        ),
+        is_error: false,
+    });
+    let output = rows[0]["output"].as_str().unwrap();
+    assert!(output.contains("line one\n"), "{output}");
+    assert!(
+        !output.contains("sk-abc123SECRET"),
+        "leaked output: {output}"
+    );
+    assert!(output.contains("<redacted>"), "{output}");
+    assert!(output.chars().count() <= OUTPUT_CAP + 1, "{}", output.len());
+    assert!(output.ends_with('…'));
 }
 
 #[test]

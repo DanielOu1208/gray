@@ -326,10 +326,11 @@ impl std::fmt::Display for PrintFailure {
 
 impl std::error::Error for PrintFailure {}
 
-/// Cap on a disclosed tool detail (chars) and the reasoning buffer flush
+/// Caps on disclosed tool data (chars) and the reasoning buffer flush
 /// threshold. Bounds what a chatty surface (Discord, Telegram, a log tail)
 /// receives per row; the full text stays in the session log.
 const DETAIL_CAP: usize = 240;
+const OUTPUT_CAP: usize = 1200;
 const THINKING_FLUSH: usize = 800;
 
 struct JsonOutput {
@@ -384,23 +385,36 @@ impl JsonOutput {
             AgentEvent::ToolCallStart { id, name } => {
                 self.tools.insert(id.clone(), name.clone());
                 row["tool"] = name.as_str().into();
+                row["call_id"] = disclose(id, DETAIL_CAP).into();
                 "tool_started"
             }
             AgentEvent::ToolCallEnd { id, args } => {
                 if let Some(name) = self.tools.get(id) {
                     row["tool"] = name.as_str().into();
+                    row["call_id"] = disclose(id, DETAIL_CAP).into();
                     if let Some(detail) = tool_detail(name, args) {
                         row["detail"] = detail.into();
                     }
                 }
                 "tool_ran"
             }
-            AgentEvent::ToolResult { id, is_error, .. } => {
+            AgentEvent::ToolResult {
+                id,
+                output,
+                is_error,
+            } => {
                 if let Some(name) = self.tools.remove(id) {
                     row["tool"] = name.into();
                 }
+                if !id.is_empty() {
+                    row["call_id"] = disclose(id, DETAIL_CAP).into();
+                }
                 if *is_error {
                     row["error"] = true.into();
+                }
+                let output = disclose_output(output, OUTPUT_CAP);
+                if !output.is_empty() {
+                    row["output"] = output.into();
                 }
                 "tool_finished"
             }
@@ -446,6 +460,24 @@ fn disclose(text: &str, cap: usize) -> String {
         capped
     };
     redact_for_disclosure(&capped).into_text()
+}
+
+/// Preserve line breaks for a bounded terminal transcript while applying the
+/// same disclosure rules as one-line details. The full result remains in the
+/// session log; chat surfaces only receive this redacted prefix.
+fn disclose_output(text: &str, cap: usize) -> String {
+    // Redaction is linear in the input. Keep a small look-ahead past the
+    // disclosure cap so a credential split at the boundary is still treated
+    // as a credential, without scanning an unbounded tool result.
+    let look_ahead = cap.saturating_add(256);
+    let mut chars = text.chars();
+    let prefix = chars.by_ref().take(look_ahead).collect::<String>();
+    let source_truncated = chars.next().is_some();
+    let redacted = redact_for_disclosure(&prefix).into_text();
+    if !source_truncated && redacted.chars().count() <= cap {
+        return redacted;
+    }
+    format!("{}…", redacted.chars().take(cap).collect::<String>())
 }
 
 /// The one-line "what did it just do" for known tools. Returns `None` for
