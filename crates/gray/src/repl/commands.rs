@@ -102,6 +102,11 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
         aliases: &["plugins"],
     },
     CmdDef {
+        name: "hehe",
+        desc: "the graychan mascot, big",
+        aliases: &[],
+    },
+    CmdDef {
         name: "help",
         desc: "show commands",
         aliases: &[],
@@ -444,6 +449,9 @@ pub enum ReplCommand {
     Copy,
     /// Send feedback (`/feedback <what happened>`): saves locally, opens a prefilled issue.
     Feedback(Option<String>),
+    /// Print the graychan mascot (`/hehe`): the anime welcome art, painted
+    /// into the transcript at full terminal width. Easter egg, zero state.
+    Hehe,
     /// Unknown slash command (`/word`).
     Unknown(String),
     /// Plugin manager: /plugin <list|install|remove|update|enable|disable|check>.
@@ -546,6 +554,7 @@ pub fn parse_command(line: &str) -> ReplCommand {
         Some("copy") => ReplCommand::Copy,
         Some("feedback") => ReplCommand::Feedback(opt(rest)),
         Some("help") => ReplCommand::Help,
+        Some("hehe") => ReplCommand::Hehe,
         // Every connect alias accepts optional args like `/key openrouter`
         // (args are advisory; the provider menu always opens).
         Some("connect") => ReplCommand::Provider,

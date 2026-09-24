@@ -29,6 +29,8 @@ pub const HOST_SAY: &str = "host.say";
 pub const TOOL_OVERRIDE: &str = "tool.override";
 /// Own the above-editor widget slot.
 pub const WIDGET_OVERRIDE: &str = "widget.override";
+/// Contribute `/connect` providers and receive credential material for auth RPCs.
+pub const PROVIDER_CREDENTIALS: &str = "provider.credentials";
 
 /// One declarable capability and the host surface it opens.
 pub struct CapabilitySpec {
@@ -68,6 +70,11 @@ const SPECS: &[CapabilitySpec] = &[
         id: WIDGET_OVERRIDE,
         host_method: None,
         description: "own the one above-editor widget slot",
+    },
+    CapabilitySpec {
+        id: PROVIDER_CREDENTIALS,
+        host_method: None,
+        description: "contribute /connect providers and receive stored credentials for auth RPCs",
     },
 ];
 
@@ -178,6 +185,7 @@ mod tests {
 
     fn entry(granted: Vec<&str>, hash: Option<&str>) -> LockEntry {
         LockEntry {
+            runtime_role: None,
             ecosystem: "gray-native".into(),
             version: "1.0.0".into(),
             hash: String::new(),

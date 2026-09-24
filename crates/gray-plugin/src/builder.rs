@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use gray_core::agent::{Agent, Tool, ToolExecutor};
-use gray_provider::OpenAiProvider;
+use gray_core::credential::CredentialSource;
+use gray_provider::{OpenAiProvider, OpenAiProviderProfile};
 use gray_tools::Registry;
 
 use crate::profile::{PluginEntry, load_entries};
@@ -529,6 +530,12 @@ pub async fn active_plugins(
         if !crate::lock::effective_enabled(&user_lock, &project_lock, name) {
             continue;
         }
+        // Provider-only sidecars are lifecycle-owned by the provider runtime.
+        // They stay in the lock for provider discovery, but never boot as a
+        // second sidecar process.
+        if entry.runtime_role.as_deref() == Some("provider_only") {
+            continue;
+        }
         let argv: Vec<String> = if !entry.argv.is_empty() {
             entry.argv.clone()
         } else {
@@ -674,6 +681,11 @@ pub struct BuilderOptions {
     pub profile_path: String,
     pub abort_on_spawn_failure: bool,
     pub wrap_executor: Option<ExecutorWrap>,
+    /// Declared plugin-backed provider profile; `None` preserves the
+    /// built-in static API-key provider.
+    pub dynamic_provider_profile: Option<OpenAiProviderProfile>,
+    /// Agent-lifetime credential lease source for `dynamic_provider_profile`.
+    pub dynamic_credential_source: Option<Arc<dyn CredentialSource>>,
 }
 
 /// Profile-aware [`Agent`] builder used by all surfaces: resolves
@@ -698,6 +710,8 @@ pub async fn build_agent(opts: BuilderOptions) -> anyhow::Result<Agent> {
         profile_path,
         abort_on_spawn_failure,
         wrap_executor,
+        dynamic_provider_profile,
+        dynamic_credential_source,
     } = opts;
     // Catalog: any of these may be named in `gray.yml`. Fallback (no profile)
     // is `tools-minimal` — one persistent shell, gray's default surface.
@@ -731,15 +745,27 @@ pub async fn build_agent(opts: BuilderOptions) -> anyhow::Result<Agent> {
         SystemPrompt::Literal(s) => s,
         SystemPrompt::Build(f) => f(&registry),
     };
-    let provider = OpenAiProvider::new(
-        api_key,
-        model,
-        base_url,
-        reasoning_effort,
-        Some(provider_cache_key(session_id.as_deref())),
-    )
-    .map_err(|e| anyhow::anyhow!("failed to initialize OpenAI provider: {e}"))?
-    .with_sampling(temperature, top_p);
+    let provider = match (dynamic_provider_profile, dynamic_credential_source) {
+        (Some(profile), Some(source)) => OpenAiProvider::new_with_profile(
+            model,
+            reasoning_effort,
+            Some(provider_cache_key(session_id.as_deref())),
+            profile,
+            source,
+        )
+        .map_err(|e| anyhow::anyhow!("failed to initialize plugin provider: {e}"))?
+        .with_sampling(temperature, top_p),
+        (None, None) => OpenAiProvider::new(
+            api_key,
+            model,
+            base_url,
+            reasoning_effort,
+            Some(provider_cache_key(session_id.as_deref())),
+        )
+        .map_err(|e| anyhow::anyhow!("failed to initialize OpenAI provider: {e}"))?
+        .with_sampling(temperature, top_p),
+        _ => anyhow::bail!("a dynamic provider needs both a profile and a credential source"),
+    };
 
     let tool_defs = registry.defs();
     let executor: Arc<dyn ToolExecutor> = match wrap_executor {

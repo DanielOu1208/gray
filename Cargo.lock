@@ -367,6 +367,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "codex-auth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "gray-core",
+ "gray-plugin",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "color_quant"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -854,6 +873,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "codex-auth",
  "cron",
  "crossterm",
  "futures",
@@ -861,6 +881,7 @@ dependencies = [
  "gray-markdown",
  "gray-pkg",
  "gray-plugin",
+ "gray-provider",
  "gray-tools",
  "ignore",
  "image",
@@ -894,6 +915,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "zeroize",
 ]
 
 [[package]]
@@ -946,12 +968,16 @@ dependencies = [
  "gray-provider",
  "gray-tools",
  "log",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror",
  "tokio",
+ "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2647,6 +2673,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -3081,6 +3108,20 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zerotrie"

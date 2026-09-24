@@ -7,7 +7,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::providers::registry::InstalledProvider;
+
 use serde::{Deserialize, Serialize};
+
+use gray_core::credential::CredentialEnvelope;
 
 /// Provider entry from the vendored catalog.
 #[derive(Debug, Clone, Deserialize)]
@@ -117,6 +121,15 @@ pub struct SavedConfig {
     /// `status`/`stop` still work so a running one stays inspectable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gw_auto: Option<bool>,
+    /// Namespaced provider id for a plugin-backed provider connection.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider_id: String,
+    /// Credential mode for the selected connection ("plugin" for dynamic).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub credential_source: String,
+    /// Namespaced plugin credential reference.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_ref: String,
 }
 
 /// Canonical `SavedConfig.auth_mode` values (kept as strings on disk).
@@ -264,7 +277,14 @@ fn partial_saved_config(obj: &serde_json::Map<String, serde_json::Value>) -> Sav
         memory_auto: opt_field(obj, "memory_auto"),
         cron_auto: opt_field(obj, "cron_auto"),
         gw_auto: opt_field(obj, "gw_auto"),
+        provider_id: string_field(obj, "provider_id"),
+        credential_source: string_field(obj, "credential_source"),
+        auth_ref: string_field(obj, "auth_ref"),
     }
+}
+
+fn string_field(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
+    opt_field::<String>(obj, key).unwrap_or_default()
 }
 
 fn opt_field<T>(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<T>
@@ -394,6 +414,18 @@ pub(crate) fn auth_store_path() -> anyhow::Result<PathBuf> {
     Ok(gray_home()?.join("auth.json"))
 }
 
+/// How one connect row authenticates. Plugin rows carry only references,
+/// never credential material.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConnectAuth {
+    None,
+    ApiKey,
+    Plugin {
+        auth_ref: String,
+        profile_binding: String,
+    },
+}
+
 /// Persisted OAuth credential store. Lives here (not `gray-extras::oauth`)
 /// so API-key helpers can read through the mixed `auth.json` store without
 /// depending on the out-of-default-build OAuth signin flow.
@@ -408,15 +440,16 @@ pub struct StoredAuth {
     pub email: Option<String>,
 }
 
-/// One `auth.json` entry: a plaintext API key or an OAuth credential. The
-/// file is a mixed map `{pid: String | StoredAuth}` (plus a legacy
-/// single-object form); key helpers and OAuth saves share it so neither
-/// writer clobbers the other's shape.
+/// One `auth.json` entry: a plaintext API key, a legacy OAuth credential, or
+/// a host-owned plugin credential. The file is a mixed map `{pid: value}`
+/// (plus a legacy single-object form); key, OAuth, and plugin writers share
+/// it so no writer clobbers another shape.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AuthEntry {
     Key(String),
     OAuth(StoredAuth),
+    Plugin(CredentialEnvelope),
 }
 
 // Hand-redacted Debug: these types carry plaintext keys and tokens, so the
@@ -443,6 +476,7 @@ impl std::fmt::Debug for AuthEntry {
         match self {
             Self::Key(_) => f.write_str("Key(..)"),
             Self::OAuth(a) => f.debug_tuple("OAuth").field(a).finish(),
+            Self::Plugin(plugin) => f.debug_tuple("Plugin").field(plugin).finish(),
         }
     }
 }
@@ -488,7 +522,7 @@ pub fn load_auth_keys() -> BTreeMap<String, String> {
         .into_iter()
         .filter_map(|(k, v)| match v {
             AuthEntry::Key(key) => Some((k, key)),
-            AuthEntry::OAuth(_) => None,
+            AuthEntry::OAuth(_) | AuthEntry::Plugin(_) => None,
         })
         .collect()
 }
@@ -521,6 +555,7 @@ pub struct ConnectItem {
     pub sublabel: String,
     pub base_url: String,
     pub no_auth: bool,
+    pub auth: ConnectAuth,
 }
 
 impl ConnectItem {
@@ -530,12 +565,18 @@ impl ConnectItem {
         auth: &BTreeMap<String, AuthEntry>,
     ) -> bool {
         // Custom is an action for adding an endpoint, not a saved provider.
-        self.id != "custom"
-            && (auth.contains_key(&self.id)
-                || (normalize_custom_base_url(&config.base_url)
-                    == normalize_custom_base_url(&self.base_url)
-                    && (config.api_key.as_ref().is_some_and(|key| !key.is_empty())
-                        || self.no_auth)))
+        (self.id != "custom"
+            && match &self.auth {
+                ConnectAuth::Plugin { auth_ref, .. } => {
+                    auth.contains_key(auth_ref)
+                        || (config.credential_source == "plugin" && config.provider_id == self.id)
+                }
+                ConnectAuth::ApiKey => auth.contains_key(&self.id),
+                ConnectAuth::None => false,
+            })
+            || (normalize_custom_base_url(&config.base_url)
+                == normalize_custom_base_url(&self.base_url)
+                && (config.api_key.as_ref().is_some_and(|key| !key.is_empty()) || self.no_auth))
     }
 }
 
@@ -608,7 +649,26 @@ pub fn normalize_custom_base_url(raw: &str) -> String {
 /// Builds the full list of providers for the connect modal:
 /// Default order: Custom, then popular, followed by all catalog providers.
 /// The modal stably promotes connected providers above Custom.
-pub fn build_connect_items(catalog: &Catalog) -> Vec<ConnectItem> {
+pub fn build_connect_items(catalog: &Catalog, providers: &[InstalledProvider]) -> Vec<ConnectItem> {
+    let mut items = Vec::new();
+    for installed in providers {
+        let sublabel = if installed.auth_method.name.trim().is_empty() {
+            "(plugin provider)".to_string()
+        } else {
+            format!("({})", installed.auth_method.name)
+        };
+        items.push(ConnectItem {
+            id: installed.provider_id(),
+            name: installed.provider.name.clone(),
+            sublabel,
+            base_url: installed.provider.transport.base_url.to_string(),
+            no_auth: false,
+            auth: ConnectAuth::Plugin {
+                auth_ref: installed.auth_ref(),
+                profile_binding: installed.profile_binding.clone(),
+            },
+        });
+    }
     let popular_defs = [
         (
             "openai",
@@ -689,7 +749,6 @@ pub fn build_connect_items(catalog: &Catalog) -> Vec<ConnectItem> {
         ),
     ];
 
-    let mut items = Vec::new();
     let mut popular_ids = std::collections::HashSet::new();
 
     // Custom OpenAI/Anthropic-compatible endpoint (separator drawn under it).
@@ -700,6 +759,7 @@ pub fn build_connect_items(catalog: &Catalog) -> Vec<ConnectItem> {
         sublabel: "(OpenAI/Anthropic compatible)".to_string(),
         base_url: String::new(),
         no_auth: false,
+        auth: ConnectAuth::ApiKey,
     });
 
     for (id, name, sublabel, base_url, no_auth) in popular_defs {
@@ -711,6 +771,11 @@ pub fn build_connect_items(catalog: &Catalog) -> Vec<ConnectItem> {
             sublabel: sublabel.to_string(),
             base_url: url.to_string(),
             no_auth,
+            auth: if no_auth {
+                ConnectAuth::None
+            } else {
+                ConnectAuth::ApiKey
+            },
         });
     }
 
@@ -729,6 +794,11 @@ pub fn build_connect_items(catalog: &Catalog) -> Vec<ConnectItem> {
             sublabel: String::new(),
             base_url: p.base_url.clone(),
             no_auth: p.no_auth,
+            auth: if p.no_auth {
+                ConnectAuth::None
+            } else {
+                ConnectAuth::ApiKey
+            },
         });
     }
 

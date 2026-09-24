@@ -4,6 +4,7 @@ use gray_plugin::lock::{LockEntry, LockFile, disabled_sidecar_argvs, lock_path};
 
 fn entry(argv: Vec<&str>) -> LockEntry {
     LockEntry {
+        runtime_role: None,
         ecosystem: "test".to_string(),
         version: "1.0.0".to_string(),
         hash: "abc123".to_string(),
@@ -125,5 +126,23 @@ fn project_overlay_wins_on_the_flag_only() {
     assert_eq!(
         disabled_sidecar_argvs(&user_lock(), &project),
         vec![vec!["dead-bin".to_string()]]
+    );
+}
+
+#[test]
+fn provider_only_runtime_role_round_trips() {
+    let mut provider = entry(vec!["provider-sidecar"]);
+    provider.runtime_role = Some("provider_only".to_string());
+    let expected = LockFile {
+        schema: 1,
+        plugins: BTreeMap::from([("codex-auth".to_string(), provider)]),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = lock_path(dir.path());
+    expected.save(&path).unwrap();
+    let loaded = LockFile::load(&path).unwrap();
+    assert_eq!(
+        loaded.plugins["codex-auth"].runtime_role.as_deref(),
+        Some("provider_only")
     );
 }

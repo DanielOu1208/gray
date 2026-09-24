@@ -1,4 +1,38 @@
 use super::*;
+use crate::{
+    OpenAiAuthorization, OpenAiHeader, OpenAiHeaderSource, OpenAiProviderProfile,
+    OpenAiRequestPolicy, OpenAiWire,
+};
+use gray_core::message::Message;
+
+#[test]
+fn structured_input_is_mapped_as_marked_user_text_in_both_request_shapes() {
+    let request = ChatRequest {
+        system: None,
+        messages: vec![Message::new(
+            gray_core::Role::User,
+            vec![ContentBlock::StructuredInput {
+                protocol: "gray.discord.input".into(),
+                version: 1,
+                kind: "component_event".into(),
+                payload: serde_json::json!({"action": "refresh", "values": {"id": "7"}}),
+            }],
+        )],
+        tools: Vec::new(),
+    };
+
+    let chat = serde_json::to_value(map_chat_request(request.clone(), "test-model", None).unwrap())
+        .unwrap();
+    let chat_text = chat["messages"][0]["content"].as_str().unwrap();
+    assert!(chat_text.contains("gray_structured_input"));
+    assert!(chat_text.contains("component_event"));
+
+    let responses =
+        serde_json::to_value(map_chat_to_responses(request, "test-model", None, None)).unwrap();
+    let responses_text = responses["input"][0]["content"].as_str().unwrap();
+    assert!(responses_text.contains("gray_structured_input"));
+    assert!(responses_text.contains("component_event"));
+}
 
 #[test]
 fn debug_never_contains_api_key() {
@@ -1738,4 +1772,178 @@ async fn a_truncated_body_retries_when_nothing_was_emitted() {
         "a truncated first body must not end the turn: {events:?}"
     );
     server.abort();
+}
+
+struct StaticProviderSource {
+    secrets: gray_core::credential::SecretMap,
+    metadata: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for StaticProviderSource {
+    fn default() -> Self {
+        Self {
+            secrets: gray_core::credential::SecretMap::from_iter([("access_token", "test-access")]),
+            metadata: std::collections::BTreeMap::from([(
+                "account_id".to_string(),
+                "acct_test".to_string(),
+            )]),
+        }
+    }
+}
+
+#[async_trait]
+impl gray_core::credential::CredentialSource for StaticProviderSource {
+    async fn acquire(
+        &self,
+    ) -> Result<gray_core::credential::CredentialLease, gray_core::credential::CredentialError>
+    {
+        Ok(gray_core::credential::CredentialLease {
+            secrets: self.secrets.clone(),
+            metadata: self.metadata.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn dynamic_codex_profile_sends_declared_transport() {
+    use futures::StreamExt;
+    use gray_core::message::{ChatRequest, ContentBlock, Message, Role};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0u8; 8192];
+        let read = socket.read(&mut buffer).await.unwrap();
+        let received = String::from_utf8_lossy(&buffer[..read]).to_string();
+        let head_end = received.find("\r\n\r\n").expect("request head");
+        let head = &received[..head_end];
+        let body = &received[head_end + 4..];
+        assert!(head.contains("authorization: Bearer test-access"), "{head}");
+        assert!(head.contains("chatgpt-account-id: acct_test"), "{head}");
+        assert!(head.contains("session-id: session-test"), "{head}");
+        assert!(head.contains("originator: gray"), "{head}");
+        assert!(head.contains("application/json"), "{head}");
+        let body: serde_json::Value = serde_json::from_str(body).expect("request body");
+        assert!(body.get("prompt_cache_key").is_none(), "{body}");
+        assert_eq!(body["store"], false, "{body}");
+        assert_eq!(body["tool_choice"], "auto", "{body}");
+        assert_eq!(body["parallel_tool_calls"], true, "{body}");
+        assert_eq!(
+            body["include"],
+            serde_json::json!(["reasoning.encrypted_content"]),
+            "{body}"
+        );
+        assert_eq!(body["text"]["verbosity"], "low", "{body}");
+        assert!(body.get("previous_response_id").is_none(), "{body}");
+
+        let sse = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{}",
+            sse.len(),
+            sse
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+    });
+
+    let profile = OpenAiProviderProfile {
+        base_url: format!("http://{addr}/v1").parse().unwrap(),
+        wire: OpenAiWire::Responses,
+        authorization: OpenAiAuthorization::Bearer {
+            secret_name: "access_token".into(),
+        },
+        headers: vec![
+            OpenAiHeader {
+                name: "chatgpt-account-id".into(),
+                source: OpenAiHeaderSource::Metadata("account_id".into()),
+                required: true,
+            },
+            OpenAiHeader {
+                name: "session-id".into(),
+                source: OpenAiHeaderSource::SessionId,
+                required: true,
+            },
+            OpenAiHeader {
+                name: "originator".into(),
+                source: OpenAiHeaderSource::Static("gray".into()),
+                required: false,
+            },
+        ],
+        request: OpenAiRequestPolicy {
+            prompt_cache_key: false,
+            store: false,
+            include_reasoning_encrypted: true,
+            previous_response_id: false,
+            tool_choice: Some("auto".into()),
+            parallel_tool_calls: Some(true),
+            text_verbosity: Some("low".into()),
+        },
+        follow_redirects: false,
+    };
+    let provider = OpenAiProvider::new_with_profile(
+        "gpt-test",
+        Some("low".into()),
+        Some("session-test".into()),
+        profile,
+        std::sync::Arc::new(StaticProviderSource {
+            secrets: gray_core::credential::SecretMap::from_iter([("access_token", "test-access")]),
+            metadata: [("account_id".into(), "acct_test".into())]
+                .into_iter()
+                .collect(),
+        }),
+    )
+    .unwrap();
+
+    let request = ChatRequest {
+        system: None,
+        messages: vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )],
+        tools: Vec::new(),
+    };
+    let mut stream = provider.stream(request);
+    match stream.next().await.unwrap() {
+        Ok(StreamEvent::TextDelta { delta }) => assert_eq!(delta, "hello"),
+        other => panic!("expected text delta, got {other:?}"),
+    }
+    match stream.next().await.unwrap() {
+        Ok(StreamEvent::MessageComplete { stop_reason, usage }) => {
+            assert_eq!(stop_reason, Some(StopReason::EndTurn));
+            assert_eq!(usage.unwrap().output_tokens, 2);
+        }
+        other => panic!("expected complete event, got {other:?}"),
+    }
+    assert!(stream.next().await.is_none());
+    server.await.unwrap();
+}
+
+#[test]
+fn dynamic_profile_debug_is_redacted() {
+    let profile = OpenAiProviderProfile {
+        base_url: "https://example.test/v1".parse().unwrap(),
+        wire: OpenAiWire::Responses,
+        authorization: OpenAiAuthorization::Bearer {
+            secret_name: "access_token".into(),
+        },
+        headers: Vec::new(),
+        request: OpenAiRequestPolicy::default(),
+        follow_redirects: false,
+    };
+    let provider = OpenAiProvider::new_with_profile(
+        "gpt-test",
+        None,
+        None,
+        profile,
+        std::sync::Arc::new(StaticProviderSource::default()),
+    )
+    .unwrap();
+    assert!(!format!("{provider:?}").contains("test-access"));
+    assert!(!format!("{provider:?}").contains("acct_test"));
 }

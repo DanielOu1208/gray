@@ -5,6 +5,29 @@ use gray::Cli;
 use gray::config::Config;
 use gray::print::run_print_mode_with_session;
 use gray::repl::run_repl_mode;
+use gray_core::input::{InputEnvelope, InputError, MAX_INPUT_BYTES};
+use std::io::Read;
+use std::path::Path;
+
+fn read_structured_input(path: &Path) -> Result<Vec<u8>, InputError> {
+    let mut bytes = Vec::new();
+    if path == Path::new("-") {
+        std::io::stdin()
+            .take((MAX_INPUT_BYTES as u64) + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| InputError::Io)?;
+    } else {
+        std::fs::File::open(path)
+            .map_err(|_| InputError::Io)?
+            .take((MAX_INPUT_BYTES as u64) + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| InputError::Io)?;
+    }
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(InputError::TooLarge);
+    }
+    Ok(bytes)
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -71,6 +94,25 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => {}
     }
+    let structured_input = if let Some(path) = cli.input_json.as_deref() {
+        let bytes = match read_structured_input(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                gray::print::write_structured_input_error(&error);
+                std::process::exit(1);
+            }
+        };
+        match InputEnvelope::from_json(&bytes) {
+            Ok(input) => Some(input),
+            Err(error) => {
+                gray::print::write_structured_input_error(&error);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     let mut config = Config::resolve(&cli)?;
     gray::turn_caps::init_process_start();
     gray::setup::set_user_context_window(config.context_window);
@@ -131,6 +173,17 @@ async fn main() -> anyhow::Result<()> {
             run_print_mode_with_session(&config, prompt, cli.session.as_deref(), cli.continue_last)
                 .await?;
         }
+    } else if let Some(input) = structured_input.as_ref() {
+        gray::print::run_print_mode_json_input(
+            &config,
+            input,
+            cli.session.as_deref(),
+            cli.continue_last,
+            cli.max_requests,
+            cli.input_price,
+            cli.output_price,
+        )
+        .await?;
     } else {
         gray::update::startup_check().await;
         run_repl_mode(&mut config, cli.continue_last, cli.session.as_deref()).await?;

@@ -91,6 +91,22 @@ pub(crate) async fn dispatch_command(
             }
             Flow::Continue
         }
+        ReplCommand::Hehe => {
+            // Local and instant: the TUI paints it as transcript rows; the
+            // piped path writes the same half-blocks straight to stdout.
+            let tui_shared = tui.as_ref().map(|(s, _)| s);
+            let shown = match tui_shared {
+                Some(shared) => shared.lock().expect("tui lock").push_mascot(),
+                None => crate::mascot::print_mascot(),
+            };
+            if !shown {
+                say(
+                    tui_shared,
+                    "graychan needs a truecolor terminal and at least 20x10 cells",
+                );
+            }
+            Flow::Continue
+        }
         ReplCommand::Resume(args) => {
             handle_resume(
                 config,

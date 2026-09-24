@@ -8,6 +8,9 @@ fn config() -> Config {
         model: None,
         base_url: "https://unconfigured".into(),
         api_key: None,
+        provider_id: String::new(),
+        credential_source: String::new(),
+        auth_ref: String::new(),
         thinking_effort: None,
         show_reasoning: None,
         context_window: None,
@@ -29,7 +32,7 @@ fn auth() -> BTreeMap<String, catalog::AuthEntry> {
 
 #[test]
 fn connected_then_custom_then_stable_remainder() {
-    let mut items = build_connect_items(&load_catalog().unwrap());
+    let mut items = build_connect_items(&load_catalog().unwrap(), &[]);
     let default = items.clone();
     catalog::sort_connect_items(&mut items, &config(), &BTreeMap::new());
     assert_eq!(
@@ -63,7 +66,7 @@ fn oauth_and_active_keyless_provider_are_connected() {
             email: None,
         }),
     );
-    let mut items = build_connect_items(&load_catalog().unwrap());
+    let mut items = build_connect_items(&load_catalog().unwrap(), &[]);
     catalog::sort_connect_items(&mut items, &config, &auth);
     assert_eq!(
         items
@@ -79,7 +82,7 @@ fn oauth_and_active_keyless_provider_are_connected() {
 fn provider_selection_stays_visible_through_separator_scroll_and_filter() {
     let config = config();
     let auth = auth();
-    let mut items = build_connect_items(&load_catalog().unwrap());
+    let mut items = build_connect_items(&load_catalog().unwrap(), &[]);
     catalog::sort_connect_items(&mut items, &config, &auth);
     let colors = ConnectColors {
         box_bg: Color::Black,
@@ -145,7 +148,7 @@ fn provider_selection_stays_visible_through_separator_scroll_and_filter() {
 fn separator_is_after_custom_not_after_first_connected_provider() {
     let config = config();
     let auth = auth();
-    let mut items = build_connect_items(&load_catalog().unwrap());
+    let mut items = build_connect_items(&load_catalog().unwrap(), &[]);
     catalog::sort_connect_items(&mut items, &config, &auth);
     let colors = ConnectColors {
         box_bg: Color::Black,

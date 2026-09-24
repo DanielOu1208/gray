@@ -50,9 +50,14 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Duration, timeout};
 
 use gray_core::agent::{CommandOutcome, Tool, ToolContext, ToolOutput};
+use gray_core::credential::CredentialMaterial;
 use gray_core::message::ToolDef;
 
-use crate::{CoreEvent, Manifest, Plugin, ToolBefore, manifest_tools};
+use crate::{
+    CoreEvent, Manifest, PROVIDER_CREDENTIALS, Plugin, ProviderAuthPoll, ProviderAuthStart,
+    ProviderModelCatalog, ProviderModelsRequest, ProviderRefreshRequest, ProviderRevokeRequest,
+    ProviderRevokeResult, ProviderRpcError, ToolBefore, manifest_tools,
+};
 
 /// Plugin→host request handler (`host/run`, `host/say`). Set by the host via
 /// [`SidecarPlugin::set_host_handler`]; without one the transport replies
@@ -118,6 +123,12 @@ enum FrameWrite {
     Ok,
     Failed(String),
     TimedOut,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequestSensitivity {
+    Normal,
+    Sensitive,
 }
 
 async fn try_write_frame(stdin: &std::sync::Arc<Mutex<ChildStdin>>, frame: &str) -> FrameWrite {
@@ -499,10 +510,40 @@ impl Transport {
         params: Option<Value>,
         ttl: Duration,
     ) -> anyhow::Result<Value> {
+        self.request_with_sensitivity(method, params, ttl, RequestSensitivity::Normal)
+            .await
+    }
+
+    async fn request_sensitive(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        ttl: Duration,
+    ) -> anyhow::Result<Value> {
+        self.request_with_sensitivity(method, params, ttl, RequestSensitivity::Sensitive)
+            .await
+    }
+
+    async fn request_with_sensitivity(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        ttl: Duration,
+        sensitivity: RequestSensitivity,
+    ) -> anyhow::Result<Value> {
+        let started = std::time::Instant::now();
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut req = json!({"id": id, "method": method});
         if let Some(p) = params {
             req["params"] = p;
+        }
+        let frame = format!("{req}\n");
+        if frame.len() > MAX_FRAME {
+            let error = anyhow::anyhow!("sidecar request frame too large ({method})");
+            if sensitivity == RequestSensitivity::Sensitive {
+                log::debug!(target: "gray_plugin", "provider rpc method={} frame_bytes={} elapsed_ms={} outcome=error", method, frame.len(), started.elapsed().as_millis());
+            }
+            return Err(error);
         }
         // One deadline for the whole lifecycle (admission + write + reply):
         // a dead child, a stuck stdin lock, or a child that stops reading
@@ -512,8 +553,6 @@ impl Transport {
             if !self.ensure_alive().await {
                 anyhow::bail!("sidecar child dead and respawn failed");
             }
-            // Bound in-flight requests: each entry is TTL-scoped, but a
-            // request flood must not grow the map without limit.
             {
                 let pending = self.pending.lock().await;
                 if pending.map.len() >= MAX_PENDING {
@@ -522,7 +561,7 @@ impl Transport {
             }
             let (tx, rx) = oneshot::channel();
             self.pending.lock().await.map.insert(id, tx);
-            match try_write_frame(&self.stdin, &format!("{req}\n")).await {
+            match try_write_frame(&self.stdin, &frame).await {
                 FrameWrite::Ok => {}
                 FrameWrite::Failed(e) => {
                     self.pending.lock().await.map.remove(&id);
@@ -542,10 +581,14 @@ impl Transport {
         })
         .await;
         self.pending.lock().await.map.remove(&id);
-        match outcome {
+        let result = match outcome {
             Ok(result) => result,
-            Err(_) => anyhow::bail!("sidecar request timed out ({method})"),
+            Err(_) => Err(anyhow::anyhow!("sidecar request timed out ({method})")),
+        };
+        if sensitivity == RequestSensitivity::Sensitive {
+            log::debug!(target: "gray_plugin", "provider rpc method={} frame_bytes={} elapsed_ms={} outcome={}", method, frame.len(), started.elapsed().as_millis(), if result.is_ok() { "ok" } else { "error" });
         }
+        result
     }
 }
 
@@ -629,6 +672,127 @@ impl SidecarPlugin {
             .collect()
     }
 
+    fn require_provider_credentials(&self) -> Result<(), ProviderRpcError> {
+        if self
+            .capabilities()
+            .iter()
+            .any(|capability| capability == PROVIDER_CREDENTIALS)
+        {
+            Ok(())
+        } else {
+            Err(ProviderRpcError::CapabilityMissing(
+                PROVIDER_CREDENTIALS.to_owned(),
+            ))
+        }
+    }
+
+    async fn provider_rpc(
+        &self,
+        method: &str,
+        params: Value,
+        ttl: Duration,
+    ) -> Result<Value, ProviderRpcError> {
+        self.require_provider_credentials()?;
+        let value = self
+            .transport
+            .request_sensitive(method, Some(params), ttl)
+            .await
+            .map_err(|error| ProviderRpcError::Unavailable(error.to_string()))?;
+        if let Some(error) = value.get("error") {
+            let failure = serde_json::from_value(error.clone()).map_err(|_| {
+                ProviderRpcError::Protocol("provider RPC returned an invalid error".into())
+            })?;
+            return Err(ProviderRpcError::Rpc(failure));
+        }
+        Ok(value)
+    }
+
+    pub async fn provider_auth_start(
+        &self,
+        provider: &str,
+        auth_method: &str,
+    ) -> Result<ProviderAuthStart, ProviderRpcError> {
+        let value = self
+            .provider_rpc(
+                "provider/auth/start",
+                json!({"provider": provider, "auth_method": auth_method}),
+                Duration::from_secs(10),
+            )
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|_| ProviderRpcError::Protocol("invalid provider auth start".into()))
+    }
+
+    pub async fn provider_auth_poll(
+        &self,
+        operation_id: &str,
+    ) -> Result<ProviderAuthPoll, ProviderRpcError> {
+        let value = self
+            .provider_rpc(
+                "provider/auth/poll",
+                json!({"operation_id": operation_id}),
+                Duration::from_secs(10),
+            )
+            .await?;
+        parse_auth_poll(value)
+    }
+
+    pub async fn provider_auth_cancel(&self, operation_id: &str) -> Result<(), ProviderRpcError> {
+        self.provider_rpc(
+            "provider/auth/cancel",
+            json!({"operation_id": operation_id}),
+            Duration::from_secs(10),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn provider_auth_refresh(
+        &self,
+        request: &ProviderRefreshRequest,
+    ) -> Result<CredentialMaterial, ProviderRpcError> {
+        let params = serde_json::to_value(request)
+            .map_err(|_| ProviderRpcError::Protocol("invalid provider refresh request".into()))?;
+        let value = self
+            .provider_rpc("provider/auth/refresh", params, Duration::from_secs(30))
+            .await?;
+        parse_credential_material(value)
+    }
+
+    pub async fn provider_auth_revoke(
+        &self,
+        request: &ProviderRevokeRequest,
+    ) -> Result<ProviderRevokeResult, ProviderRpcError> {
+        let params = serde_json::to_value(request)
+            .map_err(|_| ProviderRpcError::Protocol("invalid provider revoke request".into()))?;
+        let value = self
+            .provider_rpc("provider/auth/revoke", params, Duration::from_secs(10))
+            .await?;
+        match value.get("status").and_then(Value::as_str) {
+            Some("revoked") => Ok(ProviderRevokeResult::Revoked),
+            Some("unsupported") => Ok(ProviderRevokeResult::Unsupported),
+            _ => match serde_json::from_value(value) {
+                Ok(result) => Ok(result),
+                Err(_) => Err(ProviderRpcError::Protocol(
+                    "invalid provider revoke result".into(),
+                )),
+            },
+        }
+    }
+
+    pub async fn provider_models(
+        &self,
+        request: &ProviderModelsRequest,
+    ) -> Result<ProviderModelCatalog, ProviderRpcError> {
+        let params = serde_json::to_value(request)
+            .map_err(|_| ProviderRpcError::Protocol("invalid provider models request".into()))?;
+        let value = self
+            .provider_rpc("provider/models", params, Duration::from_secs(30))
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|_| ProviderRpcError::Protocol("invalid provider model catalog".into()))
+    }
+
     pub async fn set_host_handler(&self, handler: HostHandler) {
         *self.transport.host_handler.lock().await = Some(handler);
     }
@@ -638,6 +802,47 @@ impl SidecarPlugin {
     fn claims(&self, hook: &str) -> bool {
         self.manifest.hooks.iter().any(|h| h == hook)
     }
+}
+
+fn parse_auth_poll(value: Value) -> Result<ProviderAuthPoll, ProviderRpcError> {
+    let state = value
+        .get("state")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProviderRpcError::Protocol("invalid provider auth state".into()))?;
+    match state {
+        "pending" => Ok(ProviderAuthPoll::Pending {
+            retry_after_ms: value.get("retry_after_ms").and_then(Value::as_u64),
+        }),
+        "completed" => {
+            let credential = value
+                .get("credential")
+                .cloned()
+                .ok_or_else(|| ProviderRpcError::Protocol("invalid provider auth state".into()))?;
+            Ok(ProviderAuthPoll::Completed(parse_credential_material(
+                credential,
+            )?))
+        }
+        "failed" => {
+            let failure = value
+                .get("error")
+                .cloned()
+                .ok_or_else(|| ProviderRpcError::Protocol("invalid provider auth state".into()))?;
+            serde_json::from_value(failure)
+                .map(ProviderAuthPoll::Failed)
+                .map_err(|_| ProviderRpcError::Protocol("invalid provider auth state".into()))
+        }
+        "cancelled" => Ok(ProviderAuthPoll::Cancelled),
+        "operation_lost" => Ok(ProviderAuthPoll::OperationLost),
+        _ => Err(ProviderRpcError::Protocol(
+            "invalid provider auth state".into(),
+        )),
+    }
+}
+
+fn parse_credential_material(value: Value) -> Result<CredentialMaterial, ProviderRpcError> {
+    let value = value.get("credential").cloned().unwrap_or(value);
+    serde_json::from_value(value)
+        .map_err(|_| ProviderRpcError::Protocol("invalid provider credential".into()))
 }
 
 #[async_trait]

@@ -590,3 +590,47 @@ pub(crate) fn render_entering_key(
 #[cfg(test)]
 #[path = "connect_draw_tests.rs"]
 mod tests;
+
+/// Plugin browser-login dialog: the full verification URI plus a bounded,
+/// secret-free status line. Esc cancels the host-side operation.
+pub(crate) fn render_authorizing_plugin(
+    frame: &mut Frame,
+    area: Rect,
+    item: &ConnectItem,
+    verification_uri: Option<&str>,
+    status_msg: Option<&str>,
+    colors: &ConnectColors,
+) {
+    let inner = centered_dialog(frame, area, 68, 14, 42, 10, colors);
+    let title = format!("Connect \u{2014} {}", item.name);
+    render_header_esc(frame, inner, &title, colors);
+
+    let status = status_msg.unwrap_or("Starting provider login");
+    let uri = verification_uri.unwrap_or("Waiting for provider verification URL");
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            status,
+            Style::default().fg(Color::White).bg(colors.box_bg),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            uri,
+            Style::default().fg(colors.text_dim).bg(colors.box_bg),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "esc",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+                    .bg(colors.box_bg),
+            ),
+            Span::styled(
+                " cancel",
+                Style::default().fg(colors.text_dim).bg(colors.box_bg),
+            ),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}

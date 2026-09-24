@@ -526,3 +526,18 @@ fn model_completion_does_not_offer_global_context_catalog() {
         super::complete_command_args("model", "unique-foreign-model", std::path::Path::new("."));
     assert!(rows.is_empty(), "unconnected models leaked: {rows:?}");
 }
+
+#[test]
+fn hehe_parses_and_is_discoverable() {
+    assert!(matches!(parse_command("/hehe"), ReplCommand::Hehe));
+    assert!(matches!(parse_command("/HEHE"), ReplCommand::Hehe));
+    // Tab completion and /help read the same registry entry.
+    assert!(
+        super::completion_matches("he")
+            .iter()
+            .any(|(n, _)| *n == "hehe")
+    );
+    let hehe = super::resolve("/hehe").expect("registry entry");
+    let help = super::format_help_line(hehe);
+    assert!(help.contains("/hehe"), "help line: {help}");
+}

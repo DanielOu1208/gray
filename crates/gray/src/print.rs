@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::session_store::{JsonlSessionStore, SessionId, SessionMeta};
 use gray_core::agent::ToolContext;
 use gray_core::event::AgentEvent;
+use gray_core::input::{InputEnvelope, InputError};
 use gray_core::message::Message;
 use gray_core::redaction::{redact_for_disclosure, redact_message};
 
@@ -169,7 +170,15 @@ pub async fn run_print_mode_with_session(
     session: Option<&str>,
     continue_last: bool,
 ) -> anyhow::Result<()> {
-    run_print_inner(config, prompt, session, continue_last, None).await
+    run_print_inner(
+        config,
+        Some(prompt),
+        Message::user(prompt),
+        session,
+        continue_last,
+        None,
+    )
+    .await
 }
 
 /// Machine-readable print mode. Never forwards reasoning, tool arguments/results,
@@ -177,6 +186,51 @@ pub async fn run_print_mode_with_session(
 pub async fn run_print_mode_json(
     config: &Config,
     prompt: &str,
+    session: Option<&str>,
+    continue_last: bool,
+    max_requests: Option<u32>,
+    input_price: Option<f64>,
+    output_price: Option<f64>,
+) -> anyhow::Result<()> {
+    run_print_mode_json_message(
+        config,
+        Message::user(prompt),
+        session,
+        continue_last,
+        max_requests,
+        input_price,
+        output_price,
+    )
+    .await
+}
+
+/// Machine-readable one-shot mode for a versioned structured input event.
+/// The event remains a typed user block in the session instead of being
+/// converted into prompt prose.
+pub async fn run_print_mode_json_input(
+    config: &Config,
+    input: &InputEnvelope,
+    session: Option<&str>,
+    continue_last: bool,
+    max_requests: Option<u32>,
+    input_price: Option<f64>,
+    output_price: Option<f64>,
+) -> anyhow::Result<()> {
+    run_print_mode_json_message(
+        config,
+        Message::structured_input(input.clone()),
+        session,
+        continue_last,
+        max_requests,
+        input_price,
+        output_price,
+    )
+    .await
+}
+
+async fn run_print_mode_json_message(
+    config: &Config,
+    user_message: Message,
     session: Option<&str>,
     continue_last: bool,
     max_requests: Option<u32>,
@@ -201,7 +255,15 @@ pub async fn run_print_mode_json(
     ) {
         Ok(meter) => {
             output.meter = Some(meter);
-            run_print_inner(config, prompt, session, continue_last, Some(&mut output)).await
+            run_print_inner(
+                config,
+                None,
+                user_message,
+                session,
+                continue_last,
+                Some(&mut output),
+            )
+            .await
         }
         Err(error) => Err(error),
     };
@@ -221,12 +283,23 @@ pub async fn run_print_mode_json(
         row["accounting"] = serde_json::to_value(meter.snapshot())?;
     }
     output.write(row)?;
-    // The detailed human-mode error may contain provider context. Keep the JSON
-    // error and process exit consistent without copying that context to stderr.
     match result {
         Ok(()) => Ok(()),
         Err(error) => Err(PrintFailure::of(&error).into()),
     }
+}
+
+/// Emit a bounded protocol-1 error row before a structured input can enter
+/// the agent. The input parser never includes payload contents in this row.
+pub fn write_structured_input_error(error: &InputError) {
+    let row = serde_json::json!({
+        "protocol": 1,
+        "type": "error",
+        "code": "invalid_input",
+        "retryable": false,
+        "message": error.to_string(),
+    });
+    println!("{row}");
 }
 
 /// Process exit codes for `--json` print mode. Harnesses branch on these (and
@@ -518,7 +591,8 @@ fn tool_detail(name: &str, args: &serde_json::Value) -> Option<String> {
 
 async fn run_print_inner(
     config: &Config,
-    prompt: &str,
+    prompt: Option<&str>,
+    user_message: Message,
     session: Option<&str>,
     continue_last: bool,
     mut json: Option<&mut JsonOutput>,
@@ -595,8 +669,14 @@ async fn run_print_inner(
 
     let history_revision = agent.history_revision();
     // Headless `-p` has no paste-attach: inline file links still carry vision.
-    let inline = crate::repl::attachments::extract_inline_image_paths(prompt, &cwd);
-    let user_msg = crate::repl::build_user_message_with_attachments(prompt, &inline);
+    // Structured input already owns its typed block and never scans arbitrary
+    // text for attachment paths.
+    let user_msg = if let Some(prompt) = prompt {
+        let inline = crate::repl::attachments::extract_inline_image_paths(prompt, &cwd);
+        crate::repl::build_user_message_with_attachments(prompt, &inline)
+    } else {
+        user_message
+    };
     // SIGINT only signals the shared token — never wrap the run in a
     // select! that would drop it. Aborted once the run returns.
     let sigint_cancel = cancel.clone();

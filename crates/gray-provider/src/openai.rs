@@ -7,11 +7,19 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::{self, BoxStream, StreamExt};
 use gray_core::agent::{Provider, ProviderError};
+use gray_core::credential::{CredentialLease, CredentialSource};
 use gray_core::event::{StopReason, StreamEvent, Usage};
 use gray_core::message::{ChatRequest, ContentBlock, Role};
 use reqwest::Url;
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
+
+use crate::openai_profile::{
+    OpenAiAuthorization, OpenAiHeaderSource, OpenAiProviderProfile, OpenAiRequestPolicy, OpenAiWire,
+};
 
 /// Default API base URL pointing to OpenRouter.
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -44,6 +52,11 @@ pub struct OpenAiProvider {
     /// prompt caching. Also sent as the `x-opencode-session` header (Console Go
     /// routes on it; required).
     session_id: Option<String>,
+    /// Declared dynamic profile; `None` preserves the built-in provider path.
+    profile: Option<OpenAiProviderProfile>,
+    /// Lease source for dynamic profiles. The agent keeps it alive for the
+    /// whole sidecar lifecycle.
+    credential_source: Option<Arc<dyn CredentialSource>>,
 }
 
 impl std::fmt::Debug for OpenAiProvider {
@@ -76,11 +89,7 @@ impl OpenAiProvider {
         // default client with a 120s idle-read timeout so a stalled server
         // (finish_reason then silence, hung proxy) can't freeze a turn
         // forever. Total timeout stays off: long generations are legal.
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .read_timeout(Duration::from_secs(120))
-            .build()
-            .expect("reqwest client with timeouts");
+        let http = Self::http_client(true);
 
         Ok(Self {
             base_url,
@@ -91,6 +100,46 @@ impl OpenAiProvider {
             temperature: None,
             top_p: None,
             session_id,
+            profile: None,
+            credential_source: None,
+        })
+    }
+
+    fn http_client(follow_redirects: bool) -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(120))
+            .redirect(if follow_redirects {
+                Policy::default()
+            } else {
+                Policy::none()
+            })
+            .build()
+            .expect("reqwest client with timeouts")
+    }
+
+    /// Build a profile-driven provider. Gray owns the credential source, so
+    /// this path never stores a static API key.
+    pub fn new_with_profile(
+        model: impl Into<String>,
+        reasoning_effort: Option<String>,
+        session_id: Option<String>,
+        profile: OpenAiProviderProfile,
+        credential_source: Arc<dyn CredentialSource>,
+    ) -> Result<Self, String> {
+        let base_url = profile.base_url.clone();
+        let http = Self::http_client(profile.follow_redirects);
+        Ok(Self {
+            base_url,
+            api_key: String::new(),
+            model: model.into(),
+            http,
+            reasoning_effort,
+            temperature: None,
+            top_p: None,
+            session_id,
+            profile: Some(profile),
+            credential_source: Some(credential_source),
         })
     }
 
@@ -371,6 +420,7 @@ fn map_chat_request(
                             }
                         }
                         ContentBlock::Image { .. } => {}
+                        ContentBlock::StructuredInput { .. } => {}
                         ContentBlock::Thinking { text, .. } => {
                             if !text.is_empty() {
                                 thinking_parts.push(text);
@@ -464,6 +514,11 @@ fn map_chat_request(
                     match block {
                         ContentBlock::Text { text } => {
                             if !text.is_empty() {
+                                text_parts.push(text);
+                            }
+                        }
+                        block @ ContentBlock::StructuredInput { .. } => {
+                            if let Some(text) = block.provider_text() {
                                 text_parts.push(text);
                             }
                         }
@@ -781,6 +836,12 @@ pub(crate) struct ResponsesRequest {
     /// replay from scratch (duplicating already-yielded text).
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_response_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -812,6 +873,11 @@ fn map_chat_to_responses(
                     match block {
                         ContentBlock::Text { text } => {
                             if !text.is_empty() {
+                                text_parts.push(text);
+                            }
+                        }
+                        block @ ContentBlock::StructuredInput { .. } => {
+                            if let Some(text) = block.provider_text() {
                                 text_parts.push(text);
                             }
                         }
@@ -868,6 +934,7 @@ fn map_chat_to_responses(
                             }
                         }
                         ContentBlock::Image { .. } => {}
+                        ContentBlock::StructuredInput { .. } => {}
                         ContentBlock::Thinking {
                             encrypted_content: Some(ec),
                             item_id: Some(id),
@@ -965,7 +1032,42 @@ fn map_chat_to_responses(
         reasoning,
         include,
         previous_response_id: None,
+        tool_choice: None,
+        parallel_tool_calls: None,
+        text: None,
     }
+}
+
+fn apply_dynamic_policy(
+    body: &mut ResponsesRequest,
+    policy: &OpenAiRequestPolicy,
+    session_id: Option<&str>,
+) {
+    body.prompt_cache_key = if policy.prompt_cache_key {
+        session_id.filter(|s| !s.is_empty()).map(str::to_string)
+    } else {
+        None
+    };
+    body.store = policy.store;
+    body.previous_response_id = if policy.previous_response_id {
+        body.previous_response_id.clone()
+    } else {
+        None
+    };
+    if policy.include_reasoning_encrypted {
+        body.include = body
+            .reasoning
+            .as_ref()
+            .map(|_| vec!["reasoning.encrypted_content".to_string()]);
+    } else {
+        body.include = None;
+    }
+    body.tool_choice = policy.tool_choice.clone().map(Value::String);
+    body.parallel_tool_calls = policy.parallel_tool_calls;
+    body.text = policy
+        .text_verbosity
+        .clone()
+        .map(|verbosity| serde_json::json!({"verbosity": verbosity}));
 }
 
 /// `reasoning: {effort, summary: "auto"}` for the Responses API.
@@ -1416,6 +1518,499 @@ type BoxedEventStream = BoxStream<
     'static,
     Result<eventsource_stream::Event, eventsource_stream::EventStreamError<reqwest::Error>>,
 >;
+
+/// One provider stream acquired through a host-owned credential lease.
+#[derive(Default)]
+struct DynamicToolCall {
+    index: usize,
+    name: String,
+    args: String,
+    done: bool,
+}
+
+enum DynamicState {
+    Init {
+        client: reqwest::Client,
+        url: Url,
+        profile: Box<OpenAiProviderProfile>,
+        lease: CredentialLease,
+        body: Box<ResponsesRequest>,
+        session_id: Option<String>,
+    },
+    Streaming {
+        event_stream: BoxedEventStream,
+        tools: BTreeMap<String, DynamicToolCall>,
+        next_index: usize,
+        pending: VecDeque<StreamEvent>,
+        last_usage: Option<Usage>,
+        completed: bool,
+    },
+    Done,
+}
+
+fn redact_lease(mut snippet: String, bearer: Option<&str>) -> String {
+    if let Some(bearer) = bearer.filter(|value| !value.is_empty()) {
+        snippet = snippet.replace(bearer, "[redacted]");
+    }
+    snippet
+}
+
+fn dynamic_headers(
+    profile: &OpenAiProviderProfile,
+    lease: &CredentialLease,
+    session_id: Option<&str>,
+) -> Result<HeaderMap, ProviderError> {
+    let mut headers = HeaderMap::new();
+    for header in &profile.headers {
+        let name = HeaderName::from_bytes(header.name.as_bytes())
+            .map_err(|_| ProviderError::BadRequest("invalid provider header name".into()))?;
+        if header.name.len() > 128 {
+            return Err(ProviderError::BadRequest(
+                "provider header name too long".into(),
+            ));
+        }
+        let value = match &header.source {
+            OpenAiHeaderSource::Static(value) => value.clone(),
+            OpenAiHeaderSource::Metadata(key) => {
+                lease.metadata.get(key).cloned().ok_or_else(|| {
+                    ProviderError::BadRequest(format!("missing provider metadata header {key}"))
+                })?
+            }
+            OpenAiHeaderSource::SessionId => session_id.unwrap_or_default().to_string(),
+        };
+        if value.is_empty() {
+            if header.required {
+                return Err(ProviderError::BadRequest(format!(
+                    "missing provider header {}",
+                    header.name
+                )));
+            }
+            continue;
+        }
+        if value.len() > 4096 || value.contains('\r') || value.contains('\n') {
+            return Err(ProviderError::BadRequest(
+                "invalid provider header value".into(),
+            ));
+        }
+        let value = HeaderValue::from_str(&value)
+            .map_err(|_| ProviderError::BadRequest("invalid provider header value".into()))?;
+        headers.insert(name, value);
+    }
+    if let OpenAiAuthorization::Bearer { secret_name } = &profile.authorization {
+        let bearer = lease
+            .secrets
+            .get(secret_name)
+            .ok_or_else(|| ProviderError::Auth("provider bearer credential missing".into()))?;
+        let value = HeaderValue::from_str(&format!("Bearer {bearer}"))
+            .map_err(|_| ProviderError::Auth("invalid provider bearer credential".into()))?;
+        headers.insert(AUTHORIZATION, value);
+    }
+    Ok(headers)
+}
+
+async fn send_dynamic_json_once(
+    client: &reqwest::Client,
+    url: &Url,
+    profile: &OpenAiProviderProfile,
+    lease: &CredentialLease,
+    body: &ResponsesRequest,
+    session_id: Option<&str>,
+    attempt: usize,
+) -> Result<reqwest::Response, ProviderError> {
+    let headers = dynamic_headers(profile, lease, session_id)?;
+    let bearer = match &profile.authorization {
+        OpenAiAuthorization::Bearer { secret_name } => {
+            lease.secrets.get(secret_name).map(str::to_owned)
+        }
+        OpenAiAuthorization::None => None,
+    };
+    let send = client
+        .post(url.clone())
+        .headers(headers)
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "text/event-stream")
+        .json(body);
+    let response = send.send().await.map_err(map_send_error)?;
+    let status = response.status();
+    if !status.is_success() {
+        let mut snippet = String::new();
+        let mut response = response;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| ProviderError::Stream(e.to_string()))?
+        {
+            snippet.push_str(&String::from_utf8_lossy(&chunk));
+            if snippet.len() > MAX_DYNAMIC_ERROR_BYTES {
+                snippet.truncate(MAX_DYNAMIC_ERROR_BYTES);
+                break;
+            }
+        }
+        let snippet = redact_lease(snippet, bearer.as_deref());
+        return Err(classify_http_error(status, &snippet, None, None));
+    }
+    log::debug!(target: "gray_provider", "dynamic Responses attempt {attempt} returned {status}");
+    Ok(response)
+}
+
+fn map_send_error(error: reqwest::Error) -> ProviderError {
+    if error.is_connect() {
+        ProviderError::Connection(error.to_string())
+    } else if error.is_timeout() {
+        ProviderError::Timeout(error.to_string())
+    } else {
+        ProviderError::Stream(error.to_string())
+    }
+}
+
+fn process_dynamic_event(
+    value: Value,
+    pending: &mut VecDeque<StreamEvent>,
+    tools: &mut BTreeMap<String, DynamicToolCall>,
+    next_index: &mut usize,
+    last_usage: &mut Option<Usage>,
+) -> Result<bool, ProviderError> {
+    let typ = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    match typ {
+        "response.output_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(|v| v.as_str())
+                && !delta.is_empty()
+            {
+                pending.push_back(StreamEvent::text_delta(delta));
+            }
+        }
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(|v| v.as_str())
+                && !delta.is_empty()
+            {
+                pending.push_back(StreamEvent::thinking_delta(delta));
+            }
+        }
+        "response.output_item.added" => {
+            let item = value.get("item");
+            if item.and_then(|i| i.get("type")).and_then(|t| t.as_str()) == Some("function_call") {
+                let id = item
+                    .and_then(|i| i.get("call_id"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.and_then(|i| i.get("id")).and_then(|v| v.as_str()))
+                    .unwrap_or_default()
+                    .to_string();
+                let name = item
+                    .and_then(|i| i.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if !id.is_empty() {
+                    let index = *next_index;
+                    *next_index += 1;
+                    tools.insert(
+                        id.clone(),
+                        DynamicToolCall {
+                            index,
+                            name: name.clone(),
+                            ..Default::default()
+                        },
+                    );
+                    pending.push_back(StreamEvent::tool_call_delta(
+                        index,
+                        Some(id),
+                        Some(name),
+                        "",
+                    ));
+                }
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let id = value
+                .get("item_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| value.get("call_id").and_then(|v| v.as_str()))
+                .unwrap_or_default();
+            if let Some(delta) = value.get("delta").and_then(|v| v.as_str())
+                && let Some(call) = tools.get_mut(id)
+            {
+                call.args.push_str(delta);
+            }
+        }
+        "response.output_item.done" => {
+            let item = value.get("item");
+            let item_type = item.and_then(|i| i.get("type")).and_then(|t| t.as_str());
+            if item_type == Some("reasoning") {
+                let id = item
+                    .and_then(|i| i.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let encrypted = item
+                    .and_then(|i| i.get("encrypted_content"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if !id.is_empty() && !encrypted.is_empty() {
+                    pending.push_back(StreamEvent::reasoning_item(id, encrypted));
+                }
+            } else if item_type == Some("function_call") {
+                let id = item
+                    .and_then(|i| i.get("call_id"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.and_then(|i| i.get("id")).and_then(|v| v.as_str()))
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(arguments) = item
+                    .and_then(|i| i.get("arguments"))
+                    .and_then(|v| v.as_str())
+                    && let Some(call) = tools.get_mut(&id)
+                {
+                    call.args.push_str(arguments);
+                }
+                if let Some(call) = tools.get_mut(&id)
+                    && !call.done
+                {
+                    call.done = true;
+                    let index = call.index;
+                    let name = call.name.clone();
+                    let args = call.args.clone();
+                    pending.push_back(StreamEvent::tool_call_delta(
+                        index,
+                        Some(id),
+                        Some(name),
+                        args,
+                    ));
+                }
+            }
+        }
+        "response.completed" => {
+            if let Some(uval) = value
+                .get("response")
+                .and_then(|r| r.get("usage"))
+                .or_else(|| value.get("usage"))
+                && let Ok(u) = serde_json::from_value::<OpenAiUsageChunk>(uval.clone())
+            {
+                *last_usage = Some(map_usage(&u));
+            }
+            let stop = if tools.is_empty() {
+                StopReason::EndTurn
+            } else {
+                StopReason::ToolUse
+            };
+            pending.push_back(StreamEvent::message_complete(Some(stop), *last_usage));
+            return Ok(true);
+        }
+        "response.incomplete" => {
+            let reason = value
+                .get("response")
+                .and_then(|r| r.get("incomplete_details"))
+                .and_then(|d| d.get("reason"))
+                .and_then(|v| v.as_str());
+            let stop = if reason == Some("max_output_tokens") {
+                StopReason::MaxTokens
+            } else {
+                StopReason::Error
+            };
+            pending.push_back(StreamEvent::message_complete(Some(stop), *last_usage));
+            return Ok(true);
+        }
+        "response.failed" | "error" => {
+            let detail = value
+                .get("response")
+                .and_then(|r| r.get("error"))
+                .and_then(|e| e.get("message"))
+                .and_then(|v| v.as_str())
+                .or_else(|| value.get("message").and_then(|v| v.as_str()))
+                .unwrap_or("provider stream failed");
+            return Err(ProviderError::Stream(detail.to_string()));
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+async fn dynamic_step(
+    initial: DynamicState,
+) -> Option<(Result<StreamEvent, ProviderError>, DynamicState)> {
+    let mut state = initial;
+    loop {
+        match state {
+            DynamicState::Init {
+                client,
+                url,
+                profile,
+                lease,
+                body,
+                session_id,
+            } => {
+                match send_dynamic_json_once(
+                    &client,
+                    &url,
+                    &profile,
+                    &lease,
+                    &body,
+                    session_id.as_deref(),
+                    1,
+                )
+                .await
+                {
+                    Ok(response) => {
+                        let event_stream = response.bytes_stream().eventsource().boxed();
+                        state = DynamicState::Streaming {
+                            event_stream,
+                            tools: BTreeMap::new(),
+                            next_index: 0,
+                            pending: VecDeque::new(),
+                            last_usage: None,
+                            completed: false,
+                        };
+                    }
+                    Err(error) => return Some((Err(error), DynamicState::Done)),
+                }
+            }
+            DynamicState::Streaming {
+                mut event_stream,
+                mut tools,
+                mut next_index,
+                mut pending,
+                mut last_usage,
+                mut completed,
+            } => {
+                if completed && pending.is_empty() {
+                    return None;
+                }
+                let next = event_stream.next().await;
+                match next {
+                    None => {
+                        return Some((
+                            Err(ProviderError::Stream(
+                                "dynamic Responses stream ended before response.completed".into(),
+                            )),
+                            DynamicState::Done,
+                        ));
+                    }
+                    Some(Err(error)) => {
+                        return Some((
+                            Err(ProviderError::Stream(error.to_string())),
+                            DynamicState::Done,
+                        ));
+                    }
+                    Some(Ok(event)) => {
+                        let data = event.data.trim();
+                        if data.is_empty() {
+                            state = DynamicState::Streaming {
+                                event_stream,
+                                tools,
+                                next_index,
+                                pending,
+                                last_usage,
+                                completed,
+                            };
+                            continue;
+                        }
+                        if data == "[DONE]" {
+                            return Some((
+                                Err(ProviderError::Stream(
+                                    "dynamic Responses stream ended before response.completed"
+                                        .into(),
+                                )),
+                                DynamicState::Done,
+                            ));
+                        }
+                        let value: Value = match serde_json::from_str(data) {
+                            Ok(value) => value,
+                            Err(e) => {
+                                return Some((
+                                    Err(ProviderError::Stream(format!(
+                                        "failed to parse Responses SSE chunk: {e}: {data}"
+                                    ))),
+                                    DynamicState::Done,
+                                ));
+                            }
+                        };
+                        match process_dynamic_event(
+                            value,
+                            &mut pending,
+                            &mut tools,
+                            &mut next_index,
+                            &mut last_usage,
+                        ) {
+                            Ok(finished) => completed |= finished,
+                            Err(error) => return Some((Err(error), DynamicState::Done)),
+                        }
+                        if !pending.is_empty() {
+                            let event = pending.pop_front().expect("pending event");
+                            state = DynamicState::Streaming {
+                                event_stream,
+                                tools,
+                                next_index,
+                                pending,
+                                last_usage,
+                                completed,
+                            };
+                            return Some((Ok(event), state));
+                        }
+                        if completed {
+                            return None;
+                        }
+                        state = DynamicState::Streaming {
+                            event_stream,
+                            tools,
+                            next_index,
+                            pending,
+                            last_usage,
+                            completed,
+                        };
+                    }
+                }
+            }
+            DynamicState::Done => return None,
+        }
+    }
+}
+
+const MAX_DYNAMIC_ERROR_BYTES: usize = 4096;
+
+impl OpenAiProvider {
+    fn dynamic_stream(
+        &self,
+        request: ChatRequest,
+        profile: OpenAiProviderProfile,
+        credential_source: Arc<dyn CredentialSource>,
+    ) -> BoxStream<'static, Result<StreamEvent, ProviderError>> {
+        let mut body = map_chat_to_responses(
+            request,
+            &self.model,
+            self.session_id.as_deref(),
+            self.reasoning_effort.as_deref(),
+        );
+        apply_dynamic_policy(&mut body, &profile.request, self.session_id.as_deref());
+        let url = match responses_url(&profile.base_url) {
+            Ok(url) => url,
+            Err(error) => return stream::once(async move { Err(error) }).boxed(),
+        };
+        let client = self.http.clone();
+        let session_id = self.session_id.clone();
+        let started = stream::once(async move {
+            credential_source
+                .acquire()
+                .await
+                .map_err(|_| ProviderError::Auth("provider credential unavailable".into()))
+                .map(|lease| (lease, body))
+        });
+        started
+            .flat_map(move |result| match result {
+                Ok((lease, body)) => stream::unfold(
+                    DynamicState::Init {
+                        client: client.clone(),
+                        url: url.clone(),
+                        profile: Box::new(profile.clone()),
+                        lease,
+                        body: Box::new(body),
+                        session_id: session_id.clone(),
+                    },
+                    dynamic_step,
+                )
+                .boxed(),
+                Err(error) => stream::once(async move { Err(error) }).boxed(),
+            })
+            .boxed()
+    }
+}
 
 enum StreamState {
     Init {
@@ -2630,6 +3225,19 @@ impl Provider for OpenAiProvider {
     }
 
     fn stream(&self, req: ChatRequest) -> BoxStream<'static, Result<StreamEvent, ProviderError>> {
+        if let (Some(profile), Some(credential_source)) =
+            (self.profile.clone(), self.credential_source.clone())
+        {
+            if !matches!(profile.wire, OpenAiWire::Responses | OpenAiWire::Auto) {
+                return stream::once(async move {
+                    Err(ProviderError::BadRequest(
+                        "dynamic OpenAI chat completions profiles are not implemented".into(),
+                    ))
+                })
+                .boxed();
+            }
+            return self.dynamic_stream(req, profile, credential_source);
+        }
         if is_muse_model(&self.model)
             && (self.base_url.as_str().contains("opencode.ai/zen")
                 || self.base_url.as_str().contains("commandcode.ai"))

@@ -172,6 +172,7 @@ pub(super) async fn install(home: &Path) -> Result<()> {
     registry.plugins.insert(
         "background".into(),
         LockEntry {
+            runtime_role: None,
             ecosystem: "gray-native".into(),
             version: VERSION.into(),
             hash: digest,

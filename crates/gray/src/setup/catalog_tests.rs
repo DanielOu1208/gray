@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn custom_is_first_entry() {
     let catalog = load_catalog().expect("catalog");
-    let items = build_connect_items(&catalog);
+    let items = build_connect_items(&catalog, &[]);
     assert_eq!(items[0].id, "custom");
     assert!(items[0].sublabel.contains("OpenAI"));
 }
@@ -11,7 +11,7 @@ fn custom_is_first_entry() {
 #[test]
 fn commandcode_pinned_with_provider_base() {
     let catalog = load_catalog().expect("catalog");
-    let items = build_connect_items(&catalog);
+    let items = build_connect_items(&catalog, &[]);
     let cc = items
         .iter()
         .find(|i| i.id == "commandcode")
@@ -71,7 +71,7 @@ fn saving_key_preserves_oauth_objects() {
         .into_iter()
         .filter_map(|(k, v)| match v {
             AuthEntry::Key(key) => Some((k, key)),
-            AuthEntry::OAuth(_) => None,
+            AuthEntry::OAuth(_) | AuthEntry::Plugin(_) => None,
         })
         .collect();
     assert_eq!(keys.get("openrouter").map(String::as_str), Some("sk-or-1"));

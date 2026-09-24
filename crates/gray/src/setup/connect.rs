@@ -1,6 +1,7 @@
 //! Connect-a-provider modal: shell + event loop (render arms live in `connect_draw`/`connect_models`).
 
 use super::*;
+use anyhow::Context;
 use ratatui::style::Color;
 
 /// Shared palette for the connect-modal render arms.
@@ -33,6 +34,34 @@ fn forget_provider_at(
     auth_path: &std::path::Path,
     saved_path: &std::path::Path,
 ) -> anyhow::Result<String> {
+    // Plugin credentials are namespaced (`plugin:<plugin>:<provider>:<auth>`),
+    // so removing by the display row id would silently leave the token behind.
+    if let ConnectAuth::Plugin { auth_ref, .. } = &item.auth {
+        let store = crate::auth::CredentialStore::new(auth_path.to_path_buf());
+        let removed = store
+            .remove(auth_ref)
+            .with_context(|| "cannot remove provider credential")?;
+        anyhow::ensure!(removed, "not installed: {}", item.id);
+        if config.provider_id == item.id {
+            config.provider_id.clear();
+            config.credential_source.clear();
+            config.auth_ref.clear();
+            config.api_key = None;
+            config.model = None;
+        }
+        let _saved_lock = crate::setup::lock_saved_config_at(saved_path).ok();
+        let mut saved = load_saved_config_at(saved_path);
+        if saved.provider_id == item.id {
+            saved.provider_id.clear();
+            saved.credential_source.clear();
+            saved.auth_ref.clear();
+            saved.api_key = None;
+            saved.auth_mode = None;
+            saved.model = None;
+        }
+        save_saved_config_at(saved_path, &saved)?;
+        return Ok(item.name.clone());
+    }
     catalog::remove_auth_entry_at(auth_path, &item.id)?;
     let name = item.name.clone();
     if normalize_custom_base_url(&config.base_url) == normalize_custom_base_url(&item.base_url) {
@@ -122,6 +151,13 @@ pub fn run_connect_modal(
         ConfirmingRemove {
             item: ConnectItem,
         },
+        AuthorizingPlugin {
+            item: ConnectItem,
+            verification_uri: Option<String>,
+            status_msg: Option<String>,
+            cancel: tokio_util::sync::CancellationToken,
+            progress: tokio::sync::mpsc::UnboundedReceiver<PluginLoginProgress>,
+        },
     }
 
     let mut state = ModalState::Selecting;
@@ -162,7 +198,10 @@ pub fn run_connect_modal(
     let result = (|| -> anyhow::Result<ConnectOutcome> {
         loop {
             let auth = catalog::load_connect_auth();
-            let mut all_items = build_connect_items(&catalog);
+            let providers =
+                crate::providers::ProviderRegistry::load_cached(&crate::setup::gray_home()?)
+                    .installed();
+            let mut all_items = build_connect_items(&catalog, &providers);
             catalog::sort_connect_items(&mut all_items, config, &auth);
 
             terminal.draw(|frame| {
@@ -208,6 +247,19 @@ pub fn run_connect_modal(
                     ModalState::ConfirmingRemove { item } => {
                         super::connect_draw::render_confirm_remove(frame, area, item, &colors)
                     }
+                    ModalState::AuthorizingPlugin {
+                        item,
+                        verification_uri,
+                        status_msg,
+                        ..
+                    } => super::connect_draw::render_authorizing_plugin(
+                        frame,
+                        area,
+                        item,
+                        verification_uri.as_deref(),
+                        status_msg.as_deref(),
+                        &colors,
+                    ),
                     ModalState::SelectingModel {
                         item,
                         models,
@@ -334,6 +386,30 @@ pub fn run_connect_modal(
                                             sel: 0,
                                             scroll_top: 0,
                                         };
+                                    } else if let ConnectAuth::Plugin { .. } = &item.auth {
+                                        let Some(installed) = providers
+                                            .iter()
+                                            .find(|provider| provider.provider_id() == item.id)
+                                            .cloned()
+                                        else {
+                                            state = ModalState::Selecting;
+                                            continue;
+                                        };
+                                        let (progress_sender, progress_receiver) =
+                                            tokio::sync::mpsc::unbounded_channel();
+                                        let cancel = tokio_util::sync::CancellationToken::new();
+                                        tokio::spawn(run_plugin_login(
+                                            installed,
+                                            cancel.clone(),
+                                            progress_sender,
+                                        ));
+                                        state = ModalState::AuthorizingPlugin {
+                                            item: item.clone(),
+                                            verification_uri: None,
+                                            status_msg: None,
+                                            cancel,
+                                            progress: progress_receiver,
+                                        };
                                     } else {
                                         let existing =
                                             load_auth_keys().get(&item.id).cloned().or_else(|| {
@@ -412,6 +488,7 @@ pub fn run_connect_modal(
                                     sublabel: "(OpenAI/Anthropic compatible)".to_string(),
                                     base_url: normalized,
                                     no_auth: false,
+                                    auth: ConnectAuth::ApiKey,
                                 };
                                 state = ModalState::EnteringKey {
                                     item,
@@ -548,6 +625,80 @@ pub fn run_connect_modal(
                     Event::Resize(_, _) => {}
                     _ => {}
                 },
+                ModalState::AuthorizingPlugin {
+                    item,
+                    verification_uri,
+                    status_msg,
+                    cancel,
+                    progress,
+                } => {
+                    // Drain login progress without ever blocking the render loop.
+                    // The transition is buffered because the loop owns the
+                    // receiver until every queued event has been consumed.
+                    let mut next_state: Option<ModalState> = None;
+                    while let Ok(progress) = progress.try_recv() {
+                        match progress {
+                            PluginLoginProgress::Started {
+                                verification_uri: uri,
+                            } => {
+                                *verification_uri = Some(uri);
+                                *status_msg = None;
+                            }
+                            PluginLoginProgress::Pending => {
+                                *status_msg = Some("Waiting for browser approval".into())
+                            }
+                            PluginLoginProgress::CredentialSaved => {
+                                *status_msg = Some("Credential saved".into())
+                            }
+                            PluginLoginProgress::Models(models) => {
+                                next_state = Some(ModalState::SelectingModel {
+                                    item: item.clone(),
+                                    models,
+                                    filter: String::new(),
+                                    sel: 0,
+                                    scroll_top: 0,
+                                });
+                            }
+                            PluginLoginProgress::ModelsUnavailable(_message) => {
+                                next_state = Some(ModalState::SelectingModel {
+                                    item: item.clone(),
+                                    models: Vec::new(),
+                                    filter: String::new(),
+                                    sel: 0,
+                                    scroll_top: 0,
+                                });
+                            }
+                            PluginLoginProgress::Cancelled => {
+                                *status_msg = None;
+                                next_state = Some(ModalState::Selecting);
+                            }
+                            PluginLoginProgress::Failed(message) => *status_msg = Some(message),
+                        }
+                    }
+                    if let Some(next_state) = next_state.take() {
+                        state = next_state;
+                        continue;
+                    }
+                    match read()? {
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Esc,
+                            kind: KeyEventKind::Press,
+                            ..
+                        }) => {
+                            cancel.cancel();
+                            state = ModalState::Selecting;
+                        }
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Char('c'),
+                            modifiers,
+                            kind: KeyEventKind::Press,
+                            ..
+                        }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                            return Ok(ConnectOutcome::Dismissed);
+                        }
+                        _ => {}
+                    }
+                }
                 ModalState::ConfirmingRemove { item } => match read()? {
                     Event::Key(KeyEvent {
                         code: KeyCode::Char('c'),
@@ -657,6 +808,19 @@ pub fn run_connect_modal(
                                     };
 
                                 config.model = Some(chosen_model.clone());
+                                if let ConnectAuth::Plugin { .. } = &item.auth {
+                                    let Some(installed) = providers
+                                        .iter()
+                                        .find(|provider| provider.provider_id() == item.id)
+                                        .cloned()
+                                    else {
+                                        anyhow::bail!("selected provider is no longer installed")
+                                    };
+                                    activate_plugin_connection(config, &installed, &chosen_model)?;
+                                    connected_name = Some((item.name.clone(), chosen_model));
+                                    return Ok(ConnectOutcome::Connected);
+                                }
+                                select_api_key_connection(config)?;
 
                                 let path = saved_config_path()?;
                                 let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();

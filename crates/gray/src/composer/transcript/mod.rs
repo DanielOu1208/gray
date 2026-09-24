@@ -53,8 +53,157 @@ pub(crate) fn gap_need(transcript: &[Line<'static>], n: usize) -> usize {
     n.saturating_sub(trailing)
 }
 
+/// Keep streamed block boundaries to one transparent blank row.
+///
+/// A renderer can emit a leading/trailing blank at the same time a caller
+/// requests a gap (or several chunks can accumulate them).  Collapse only
+/// those outer rows: internal paragraph spacing, code-block padding, and
+/// all non-streaming/replay formatting stay untouched.
+pub(crate) fn normalize_stream_boundaries(
+    lines: Vec<Line<'static>>,
+    hyperlinks: Vec<HyperlinkTarget>,
+    tail_blank: bool,
+) -> (Vec<Line<'static>>, Vec<HyperlinkTarget>) {
+    if lines.is_empty() {
+        return (lines, hyperlinks);
+    }
+    if tail_blank && lines.iter().all(transcript_row_is_blank) {
+        return (Vec::new(), Vec::new());
+    }
+
+    let leading = lines
+        .iter()
+        .take_while(|line| transcript_row_is_blank(line))
+        .count();
+    let mut start = leading;
+    if !tail_blank && leading > 0 {
+        // Keep one paragraph separator when the previous row was content;
+        // an existing tail gap already supplies that separator.
+        start = leading.saturating_sub(1);
+    }
+
+    let mut end = lines.len();
+    while end > start && transcript_row_is_blank(&lines[end - 1]) {
+        end -= 1;
+    }
+    // Retain one trailing gap when the block had one, but never a run of
+    // blank rows. If the transcript already supplied a gap, `start` skips
+    // all leading blank rows and this block needs no extra separator.
+    if end < lines.len() {
+        end += 1;
+    }
+
+    let lines = lines[start..end].to_vec();
+    let hyperlinks = hyperlinks
+        .into_iter()
+        .filter_map(|mut hyperlink| {
+            if hyperlink.line_index < start || hyperlink.line_index >= end {
+                return None;
+            }
+            hyperlink.line_index -= start;
+            Some(hyperlink)
+        })
+        .collect();
+    (lines, hyperlinks)
+}
+
+/// Attach a punctuation suffix to the anchored prose block. The live
+/// terminal intentionally does not repaint that old scrollback row; history
+/// remains the source of truth for a later reflow/replay.
+pub(crate) fn attach_stream_punctuation(
+    entries: &mut Vec<super::TranscriptEntry>,
+    target: Option<usize>,
+    suffix: &str,
+) -> Option<usize> {
+    if suffix.is_empty() {
+        return target;
+    }
+
+    let append_to_lines = |lines: &mut Vec<Line<'static>>| {
+        let Some(line) = lines
+            .iter_mut()
+            .rev()
+            .find(|line| !transcript_row_is_blank(line))
+        else {
+            return false;
+        };
+        if let Some(span) = line.spans.last_mut() {
+            let mut content = span.content.to_string();
+            content.push_str(suffix);
+            span.content = content.into();
+        } else {
+            line.spans.push(Span::raw(suffix.to_string()));
+        }
+        true
+    };
+
+    if let Some(index) = target {
+        if let Some(super::TranscriptEntry::StyledLines { lines, .. }) = entries.get_mut(index)
+            && append_to_lines(lines)
+        {
+            return Some(index);
+        }
+        // The anchor was evicted or changed shape. Preserve the suffix as its
+        // own history row rather than attaching it to an unrelated warning.
+        entries.push(super::TranscriptEntry::StyledLines {
+            lines: vec![Line::from(suffix.to_string())],
+            hyperlinks: Vec::new(),
+        });
+        cap_history_entries(entries);
+        return None;
+    }
+
+    // No anchor means the original prose was not available; never attach to
+    // whichever unrelated styled row happens to be newest.
+    entries.push(super::TranscriptEntry::StyledLines {
+        lines: vec![Line::from(suffix.to_string())],
+        hyperlinks: Vec::new(),
+    });
+    cap_history_entries(entries);
+    None
+}
+
+/// A punctuation-only first text delta after a completed provider round is
+/// a continuation of text already painted before the round boundary.  It is
+/// not useful as a fresh paragraph in the live transcript (and commonly
+/// appears as a lone `.` row).  Keep the state predicate pure so the live
+/// gate is explicit and testable.
+pub(crate) fn is_orphan_stream_punctuation(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text.chars().all(|c| {
+            matches!(
+                c,
+                '.' | ','
+                    | ';'
+                    | ':'
+                    | '!'
+                    | '?'
+                    | '…'
+                    | '—'
+                    | '–'
+                    | '"'
+                    | '\''
+                    | '“'
+                    | '”'
+                    | '‘'
+                    | '’'
+            )
+        })
+}
+
+pub(crate) fn should_drop_stream_punctuation(round_boundary: bool, text: &str) -> bool {
+    round_boundary && is_orphan_stream_punctuation(text)
+}
+
 impl Tui {
     pub(crate) fn ensure_gap(&mut self, n: usize) {
+        // An explicit stream boundary owns the separation.  Do not let a
+        // previously latched dock seam sit on top of the blank row we are
+        // about to reuse; this is deliberately limited to live turns.
+        if self.is_task_running {
+            self.release_dock_seam();
+        }
         let need = gap_need(&self.transcript, n);
         if need == 0 {
             return;
@@ -109,6 +258,9 @@ impl Tui {
 
     pub fn stream_thinking(&mut self, chunk: &str) {
         self.turn_had_thinking = true;
+        // Thinking is not markdown prose. Leave the continuation guard
+        // untouched: a provider may emit reasoning between a tool result and
+        // the text delta that continues the pre-tool sentence.
         // Count before the hidden early-return: hidden reasoning still
         // bills output, so the live pill must keep ticking either way.
         let clean = strip_ansi(chunk);
@@ -163,6 +315,36 @@ impl Tui {
             self.set_status(Some("Working"));
         }
         let clean = strip_ansi(chunk);
+        if should_drop_stream_punctuation(self.stream_round_boundary, &clean) {
+            // A provider round boundary resets the markdown renderer.  If the
+            // next delta is only sentence punctuation, it continues text that
+            // was already painted before the boundary; do not commit a lone
+            // punctuation row to the live transcript. Keep it in history so
+            // reflow/replay can carry the character forward.
+            self.stream_round_target = attach_stream_punctuation(
+                &mut self.history_entries,
+                self.stream_round_target,
+                clean.trim(),
+            );
+            // Keep the guard armed for another punctuation-only chunk; it is
+            // cleared only when a meaningful text delta arrives.
+            self.stream_round_boundary = true;
+            self.streamed_bytes = self.streamed_bytes.saturating_add(clean.len() as u64);
+            let _ = self.draw();
+            return;
+        }
+        if self.stream_round_boundary && clean.trim().is_empty() {
+            // Whitespace is a separator, not a new text block. Keep the
+            // continuation armed until the next meaningful delta.
+            self.streamed_bytes = self.streamed_bytes.saturating_add(clean.len() as u64);
+            let _ = self.draw();
+            return;
+        }
+        self.stream_round_boundary = false;
+        self.stream_round_target = None;
+        if !clean.trim().is_empty() {
+            self.stream_round_had_text = true;
+        }
         // Live pill estimate ticks per chunk; exact usage reports (set_usage)
         // and TurnEnd bills overwrite it. Bytes/4, the repo estimate heuristic.
         self.streamed_bytes = self.streamed_bytes.saturating_add(clean.len() as u64);

@@ -8,6 +8,7 @@ members = [
     "crates/gray-tools",
     "crates/gray-plugin",
     "crates/gray-pkg",
+    "plugins/codex-auth",
 ]
 # Minimal core: no gateway member. Chat returns as a plugin, not a crate.
 default-members = [
@@ -38,6 +39,7 @@ gray-pkg = { path = "crates/gray-pkg" }
 # External dependencies
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "process", "signal", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+url = { version = "2", features = ["serde"] }
 eventsource-stream = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -66,4 +68,5 @@ ignore = "0.4"
 globset = "0.4"
 regex = "1"
 libc = "0.2"
+zeroize = { version = "1.8", features = ["derive"] }
 

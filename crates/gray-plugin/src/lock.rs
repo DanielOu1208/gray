@@ -36,6 +36,11 @@ pub struct LockEntry {
     /// because it ran with those powers before consent existed.
     #[serde(default)]
     pub capabilities_hash: Option<String>,
+    /// [`Some("provider_only")] marks a protocol-1.2 provider sidecar.
+    /// The provider runtime owns its lifecycle, so the normal boot must
+    /// skip it; an ordinary plugin leaves this `None`.
+    #[serde(default)]
+    pub runtime_role: Option<String>,
 }
 
 /// Lockfile body: schema + plugins keyed by manifest name.

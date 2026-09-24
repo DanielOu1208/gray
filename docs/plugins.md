@@ -130,3 +130,35 @@ Declarations live in gray's catalog for first-party apps
 sidecar `plugin/manifest` wire. Budgets are not part of setup — an app's
 own accounting command (`gray discord budget set`) turns that on if you
 want it.
+
+## codex-auth (ChatGPT subscription provider)
+
+`codex-auth` is a protocol-1.2 provider plugin. It owns the ChatGPT
+subscription OAuth flow and returns credential references, never tokens, to
+gray. After it is installed, `/connect` shows a **Codex — ChatGPT
+subscription** row.
+
+Install from a source checkout:
+
+```sh
+cargo build -p codex-auth
+GRAY_PLUGIN_PATH="$PWD/target/debug/codex-auth" gray plugin install codex-auth
+```
+
+The install probes the plugin over the sidecar wire and asks for the
+`provider.credentials` capability. Declined consent means the provider row is
+hidden; grant it later with:
+
+```sh
+gray plugin capabilities codex-auth --all
+```
+
+`/connect` opens the ChatGPT login page and waits for the loopback callback on
+`127.0.0.1:1455` or `127.0.0.1:1457`. The plugin validates PKCE and exact
+state, redirects are disabled, and the account id travels only as a non-secret
+metadata header.
+
+Upgrade = rebuild the plugin and re-run the install command. Removal:
+`gray plugin uninstall codex-auth`, which removes the plugin lock entry and
+provider cache row; `/connect` removes the namespaced credential from
+`~/.gray/auth.json` on request.

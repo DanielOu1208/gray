@@ -97,6 +97,7 @@ pub fn run_model_modal(
         sublabel: String::new(),
         base_url: config.base_url.clone(),
         no_auth: false,
+        auth: crate::setup::ConnectAuth::ApiKey,
     };
 
     let _session = TuiSession::acquire()?;

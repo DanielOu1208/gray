@@ -13,6 +13,7 @@ pub mod capabilities;
 pub mod host;
 pub mod lock;
 pub mod profile;
+mod provider;
 pub mod scan;
 pub mod sidecar;
 
@@ -23,6 +24,13 @@ pub use sidecar::{
 pub use capabilities::{
     CapabilitySpec, HOST_ASK as CAP_HOST_ASK, HOST_SAY as CAP_HOST_SAY, HOST_TURN, TOOL_OVERRIDE,
     WIDGET_OVERRIDE,
+};
+pub use provider::{
+    AuthMethodDecl, PROVIDER_CREDENTIALS, PROVIDER_PROTOCOL, ProviderAuthPoll, ProviderAuthStart,
+    ProviderAuthorizationDecl, ProviderDecl, ProviderHeaderDecl, ProviderHeaderSourceDecl,
+    ProviderModel, ProviderModelCatalog, ProviderModelsRequest, ProviderRefreshRequest,
+    ProviderRequestPolicyDecl, ProviderRevokeRequest, ProviderRevokeResult, ProviderRpcError,
+    ProviderRpcFailure, ProviderTransportDecl, ProviderValidationError,
 };
 
 #[derive(Debug, Clone)]
@@ -60,6 +68,12 @@ pub struct Manifest {
     /// (see [`crate::capabilities`]).
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Validated protocol-1.2 provider declarations. Invalid declarations
+    /// are isolated in `provider_errors` so legacy tool surfaces survive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ProviderDecl>,
+    #[serde(skip)]
+    pub provider_errors: Vec<ProviderValidationError>,
 }
 
 /// Parse one manifest `tools` entry. Pre-v1 sidecars send bare strings
@@ -111,6 +125,39 @@ impl Manifest {
                 })
                 .unwrap_or_default()
         };
+        let mut providers = Vec::new();
+        let mut provider_errors = Vec::new();
+        let protocol = v.get("protocol").and_then(|s| s.as_str()).unwrap_or("1.0");
+        if let Some(raw_providers) = v.get("providers") {
+            if protocol == PROVIDER_PROTOCOL {
+                match raw_providers.as_array() {
+                    Some(raw_providers) => {
+                        let mut ids = std::collections::BTreeSet::new();
+                        for raw in raw_providers {
+                            match ProviderDecl::from_value(raw) {
+                                Ok(provider) if !ids.insert(provider.id.clone()) => {
+                                    provider_errors.push(ProviderValidationError {
+                                        message: "duplicate provider id".into(),
+                                    });
+                                }
+                                Ok(provider) => providers.push(provider),
+                                Err(error) => provider_errors.push(error),
+                            }
+                        }
+                    }
+                    None => provider_errors.push(ProviderValidationError {
+                        message: "providers must be an array".into(),
+                    }),
+                }
+            } else if raw_providers
+                .as_array()
+                .is_some_and(|providers| !providers.is_empty())
+            {
+                provider_errors.push(ProviderValidationError {
+                    message: "providers require protocol 1.2".into(),
+                });
+            }
+        }
         Self {
             name: v
                 .get("name")
@@ -128,6 +175,8 @@ impl Manifest {
             protocol: v.get("protocol").and_then(|s| s.as_str()).map(|s| s.into()),
             subcommands: str_list("subcommands"),
             capabilities: crate::capabilities::parse_declared(&str_list("capabilities")),
+            providers,
+            provider_errors,
         }
     }
 }
@@ -267,3 +316,7 @@ impl PluginHooks for PluginHookAdapter {
         self.plugin.shutdown().await;
     }
 }
+
+#[cfg(test)]
+#[path = "provider_tests.rs"]
+mod provider_tests;

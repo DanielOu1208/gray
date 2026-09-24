@@ -1,4 +1,5 @@
 use super::*;
+use crate::composer::TranscriptEntry;
 
 #[test]
 fn word_flush_cut_breaks_at_spaces() {
@@ -70,6 +71,139 @@ fn gap_need_sees_left_padded_rows_as_blank() {
 #[test]
 fn gap_need_empty_transcript_still_gaps() {
     assert_eq!(gap_need(&[], 1), 1);
+}
+
+#[test]
+fn streaming_boundaries_collapse_only_outer_blank_rows() {
+    let lines = vec![
+        Line::from(""),
+        Line::from(""),
+        Line::from("first"),
+        Line::from(""),
+        Line::from("second"),
+        Line::from(""),
+        Line::from(""),
+    ];
+    let (normalized, _) = normalize_stream_boundaries(lines.clone(), vec![], true);
+    let text: Vec<String> = normalized
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+    assert_eq!(text, vec!["first", "", "second", ""]);
+
+    let (normalized, _) = normalize_stream_boundaries(lines, vec![], false);
+    let text: Vec<String> = normalized
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+    assert_eq!(text, vec!["", "first", "", "second", ""]);
+}
+
+#[test]
+fn streaming_boundaries_rebase_links_after_dropping_outer_rows() {
+    let lines = vec![
+        Line::from(""),
+        Line::from("body"),
+        Line::from(""),
+        Line::from(""),
+    ];
+    let links = vec![HyperlinkTarget {
+        line_index: 1,
+        column_range: 0..4,
+        url: "file:///repo/body".to_string(),
+        id: 1,
+    }];
+    let (normalized, links) = normalize_stream_boundaries(lines, links, true);
+    assert_eq!(normalized.len(), 2);
+    assert_eq!(links[0].line_index, 0);
+    assert_eq!(links[0].url, "file:///repo/body");
+}
+
+#[test]
+fn streaming_boundaries_keep_one_gap_for_a_blank_only_block() {
+    let (normalized, _) =
+        normalize_stream_boundaries(vec![Line::from(""), Line::from("")], vec![], false);
+    assert_eq!(normalized.len(), 1);
+    assert!(transcript_row_is_blank(&normalized[0]));
+
+    let (normalized, links) =
+        normalize_stream_boundaries(vec![Line::from(""), Line::from("")], vec![], true);
+    assert!(normalized.is_empty());
+    assert!(links.is_empty());
+}
+
+#[test]
+fn deferred_stream_punctuation_stays_with_the_previous_prose_block() {
+    let mut entries = vec![TranscriptEntry::StyledLines {
+        lines: vec![Line::from("Let's patch")],
+        hyperlinks: vec![],
+    }];
+    attach_stream_punctuation(&mut entries, Some(0), ".");
+    let TranscriptEntry::StyledLines { lines, .. } = &entries[0] else {
+        panic!("expected styled lines");
+    };
+    assert_eq!(lines[0].spans[0].content, "Let's patch.");
+}
+
+#[test]
+fn deferred_stream_punctuation_is_preserved_without_prior_prose() {
+    let mut entries = Vec::new();
+    attach_stream_punctuation(&mut entries, None, ".");
+    assert!(matches!(
+        entries.as_slice(),
+        [TranscriptEntry::StyledLines { .. }]
+    ));
+}
+
+#[test]
+fn deferred_punctuation_does_not_attach_to_a_later_status_row() {
+    let mut entries = vec![
+        TranscriptEntry::StyledLines {
+            lines: vec![Line::from("Let's patch")],
+            hyperlinks: vec![],
+        },
+        TranscriptEntry::ToolBox {
+            header: Line::from("tool"),
+            body: vec![],
+        },
+        TranscriptEntry::StyledLines {
+            lines: vec![Line::from("reconnecting")],
+            hyperlinks: vec![],
+        },
+    ];
+    attach_stream_punctuation(&mut entries, Some(0), ".");
+    let TranscriptEntry::StyledLines { lines, .. } = &entries[0] else {
+        panic!("expected anchored styled lines");
+    };
+    assert_eq!(lines[0].spans[0].content, "Let's patch.");
+    let TranscriptEntry::StyledLines { lines, .. } = &entries[2] else {
+        panic!("expected later styled row");
+    };
+    assert_eq!(lines[0].spans[0].content, "reconnecting");
+}
+
+#[test]
+fn streaming_punctuation_guard_only_matches_a_standalone_continuation() {
+    assert!(is_orphan_stream_punctuation("."));
+    assert!(is_orphan_stream_punctuation(" .\n"));
+    assert!(is_orphan_stream_punctuation("…"));
+    assert!(is_orphan_stream_punctuation("—"));
+    assert!(should_drop_stream_punctuation(true, "."));
+    assert!(!should_drop_stream_punctuation(false, "."));
+    assert!(!is_orphan_stream_punctuation(". next"));
+    assert!(!is_orphan_stream_punctuation(":)"));
+    assert!(!is_orphan_stream_punctuation("Let's patch"));
+    assert!(!is_orphan_stream_punctuation(""));
 }
 
 #[test]

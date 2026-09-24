@@ -44,8 +44,8 @@ pub mod supervise;
 pub mod write_config;
 pub(crate) use catalog::save_auth_key;
 pub use catalog::{
-    AUTH_MODE_API_KEY, AUTH_MODE_NONE, Catalog, CatalogProvider, ConnectItem, PROVIDERS_JSON,
-    SavedConfig, build_connect_items, cron_auto_enabled, cron_auto_enabled_at,
+    AUTH_MODE_API_KEY, AUTH_MODE_NONE, Catalog, CatalogProvider, ConnectAuth, ConnectItem,
+    PROVIDERS_JSON, SavedConfig, build_connect_items, cron_auto_enabled, cron_auto_enabled_at,
     disabled_skill_names, gray_home, gw_auto_enabled, gw_auto_enabled_at, load_auth_keys,
     load_catalog, load_saved_config_at, lock_saved_config_at, mask_key_pretty, memory_auto_enabled,
     memory_auto_enabled_at, normalize_custom_base_url, save_saved_config_at, saved_config_path,
@@ -91,6 +91,7 @@ pub use context_modal::run_context_modal;
 mod connect;
 mod connect_draw;
 mod connect_models;
+mod provider_auth;
 
 pub use connect::{ConnectOutcome, run_connect_modal};
 pub use effort::run_effort_modal;
@@ -99,6 +100,10 @@ pub(crate) use install_manager::{
 };
 pub use install_manager::{run_plugins_modal, run_skills_modal};
 pub(crate) use model_modal::{provider_models_for, run_model_modal, validate_direct_model_id};
+pub use provider_auth::{
+    PluginLoginProgress, activate_plugin_connection, forget_plugin_connection, run_plugin_login,
+    select_api_key_connection,
+};
 
 use crate::{config::Config, tui::print_wrapped};
 
@@ -131,7 +136,10 @@ pub async fn run_onboarding(config: &mut Config) -> anyhow::Result<bool> {
     let _ = crossterm::terminal::disable_raw_mode();
     crate::tui::clear_screen();
     print!("\r\n");
-    crate::tui::print_logo();
+    // Same art as the TUI welcome; NO_COLOR/tiny terminals keep the logo.
+    if !crate::mascot::print_mascot() {
+        crate::tui::print_logo();
+    }
     print!("\r\n");
     print_wrapped("\x1b[2mWelcome to gray by alignment\x1b[0m", 2);
     print_wrapped(

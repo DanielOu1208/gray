@@ -6,6 +6,7 @@ use crate::setup::registry::{FieldKind, SetupDecl, SetupField};
 use anyhow::Context;
 use gray_plugin::Plugin;
 use gray_plugin::lock::{LockEntry, LockFile};
+use serde_json::Value;
 
 /// One first-party plugin. `source` is a `git+<url>@<commit>` pin; the crate
 /// is built with `cargo build --release --locked` and the resulting binary is
@@ -329,10 +330,12 @@ async fn install_cargo(home: &Path, entry: &Catalog, force: bool) -> anyhow::Res
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
     }
     let argv = sidecar_argv(&executable, entry.sidecar_args);
+    let runtime_role = provider_only_role(&manifest);
     let mut sidecars = LockFile::load(&gray_plugin::lock::lock_path(home))?;
     sidecars.plugins.insert(
         name.into(),
         LockEntry {
+            runtime_role,
             ecosystem: "gray-native".into(),
             version: manifest.version.clone(),
             hash: String::new(),
@@ -347,6 +350,9 @@ async fn install_cargo(home: &Path, entry: &Catalog, force: bool) -> anyhow::Res
         },
     );
     sidecars.save(&gray_plugin::lock::lock_path(home))?;
+    // Same cache refresh as native registration: a catalog plugin that
+    // declares providers is usable in `/connect` without a manual edit.
+    crate::providers::ProviderRegistry::refresh(home)?;
     // Cache the manifest beside the install: same file `register_native`
     // writes, so `plugin capabilities` and command lookup work for
     // catalog plugins too.
@@ -471,6 +477,38 @@ fn scan_or_block(root: &Path, force: bool) -> anyhow::Result<()> {
             );
         }
     }
+}
+
+/// Runtime role for a protocol-1.2 sidecar that owns no other surface.
+/// It stays in `lock.json` for provider discovery but `active_plugins`
+/// skips it, so the provider runtime is the only process it spawns.
+fn provider_only_role(manifest: &gray_plugin::Manifest) -> Option<String> {
+    let provider_only = manifest.protocol.as_deref() == Some("1.2")
+        && !manifest.providers.is_empty()
+        && manifest.tools.is_empty()
+        && manifest.commands.is_empty()
+        && manifest.hooks.is_empty();
+    provider_only.then(|| "provider_only".to_string())
+}
+
+/// Same rule for a JSON manifest (native registration reads JSON before
+/// a typed sidecar manifest is available).
+fn provider_only_role_json(manifest: &serde_json::Value) -> Option<String> {
+    let empty = |key: &str| {
+        manifest
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|items| items.is_empty())
+    };
+    let provider_only = manifest.get("protocol").and_then(Value::as_str) == Some("1.2")
+        && manifest
+            .get("providers")
+            .and_then(Value::as_array)
+            .is_some_and(|providers| !providers.is_empty())
+        && empty("tools")
+        && empty("commands")
+        && empty("hooks");
+    provider_only.then(|| "provider_only".to_string())
 }
 
 /// Whether this process can ask the operator a question.
@@ -880,6 +918,7 @@ pub async fn register_native(
         })
         .unwrap_or_default();
     let (granted, capabilities_hash) = consent_capabilities(name, &declared);
+    let runtime_role = provider_only_role_json(&manifest);
     std::fs::create_dir_all(home.join("plugins"))?;
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -903,6 +942,7 @@ pub async fn register_native(
     registry.plugins.insert(
         name.into(),
         LockEntry {
+            runtime_role: runtime_role.clone(),
             ecosystem: "gray-native".into(),
             version: manifest["version"].as_str().unwrap_or("unknown").into(),
             hash: String::new(),
@@ -923,6 +963,9 @@ pub async fn register_native(
         .plugins
         .insert(name.into(), registry.plugins[name].clone());
     sidecars.save(&gray_plugin::lock::lock_path(home))?;
+    // Refresh the provider cache from the plugin lock so provider rows are
+    // discoverable by `/connect` immediately after this registration.
+    crate::providers::ProviderRegistry::refresh(home)?;
     let mut metadata = tempfile::NamedTempFile::new_in(home.join("plugins"))?;
     use std::io::Write;
     writeln!(metadata, "{}", manifest)?;
@@ -1059,6 +1102,7 @@ mod tests {
 
     fn command_entry(enabled: bool) -> LockEntry {
         LockEntry {
+            runtime_role: None,
             ecosystem: "gray-cli".into(),
             version: "catalog".into(),
             hash: String::new(),
@@ -1094,6 +1138,7 @@ mod tests {
         sidecars.plugins.insert(
             "both".into(),
             gray_plugin::lock::LockEntry {
+                runtime_role: None,
                 ecosystem: "gray-native".into(),
                 version: "9.9.9".into(),
                 hash: String::new(),
@@ -1111,6 +1156,7 @@ mod tests {
         sidecars.plugins.insert(
             "sidecar-only".into(),
             gray_plugin::lock::LockEntry {
+                runtime_role: None,
                 ecosystem: "gray-native".into(),
                 version: "1.0.0".into(),
                 hash: String::new(),
@@ -1178,6 +1224,7 @@ mod tests {
         sidecars.plugins.insert(
             "demo".into(),
             gray_plugin::lock::LockEntry {
+                runtime_role: None,
                 ecosystem: "gray-native".into(),
                 version: "catalog".into(),
                 hash: String::new(),
@@ -1207,6 +1254,7 @@ mod tests {
         sidecars.plugins.insert(
             "demo".into(),
             gray_plugin::lock::LockEntry {
+                runtime_role: None,
                 ecosystem: "gray-native".into(),
                 version: "2.0.0".into(),
                 hash: String::new(),
