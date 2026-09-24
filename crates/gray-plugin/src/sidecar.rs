@@ -565,12 +565,17 @@ impl Transport {
                 FrameWrite::Ok => {}
                 FrameWrite::Failed(e) => {
                     self.pending.lock().await.map.remove(&id);
-                    self.child.lock().await.kill().await.ok();
+                    // Do not await child exit here: on Windows a shell-wrapped
+                    // child may leave a grandchild alive, so `kill().await`
+                    // can outlive the write timeout and wedge the caller.
+                    self.child.lock().await.start_kill().ok();
                     anyhow::bail!("sidecar write failed ({e}); killed this child generation");
                 }
                 FrameWrite::TimedOut => {
                     self.pending.lock().await.map.remove(&id);
-                    self.child.lock().await.kill().await.ok();
+                    // Signal termination without waiting for the process tree;
+                    // the next `ensure_alive`/drop reaps this generation.
+                    self.child.lock().await.start_kill().ok();
                     anyhow::bail!(
                         "sidecar stopped reading stdin; killed this child generation ({method})"
                     );
