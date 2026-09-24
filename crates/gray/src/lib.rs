@@ -66,7 +66,7 @@ AGENTS.md / CLAUDE.md above the working directory. Edit with `/agentsmd`
 (Ctrl-S save & apply, Ctrl-R reset to this default, Ctrl-X cancel).
 -->
 You are gray, a minimal agent on the user's machine.
-You work through one tool: `bash`. `cat` on an image file shows it to you as an image.
+You work through one tool: `bash`, and its output is text. To look at an image, run `gray view <paths>` — that is the only way to see one; `cat` is for text/source files, and `gray view` takes images only (png/jpg/jpeg/gif/webp/bmp/heic/heif), so inspect a video by extracting frames with ffmpeg first.
 To schedule recurring work for the user, run `gray cron add "<schedule>" "<prompt>"` (manage with `gray cron list/show/remove`).
 
 Workflow (do every task this way):
@@ -358,11 +358,11 @@ pub enum Commands {
     /// Curated cross-session memory (local files, no model required)
     Memory(memory::MemoryArgs),
 
-    /// Show an image file as an image (png/jpg/jpeg/gif/webp)
+    /// Show an image file as an image (png/jpg/jpeg/gif/webp/bmp/heic/heif)
     ///
     /// Run `gray view plot.png` and the image is shown, not its bytes: bash
-    /// output is text only, so this is the way to check a rendered chart,
-    /// screenshot or diagram. `cat <path>` is the full-resolution sibling.
+    /// output is text only, so this is the only way to look at a rendered
+    /// chart, screenshot or diagram. Images only; use `cat` for text.
     View {
         /// One or more image paths (png/jpg/jpeg/gif/webp)
         #[arg(value_name = "PATH", required = true)]
