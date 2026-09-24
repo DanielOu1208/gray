@@ -94,12 +94,13 @@ impl Tool for BashTool {
              timeout is an optional total runtime limit (no default: commands run until they exit; \
              capped at 3600s), NOT the yield window. \
              Non-zero exits are data, not tool errors. Full output is logged; inline output is bounded. \
-             Imaging: to show an image to yourself run\
-             `cat <path>` (full resolution) or `gray view <path>... ` (downscaled,\
-             several at once) as the whole command — bare paths only, so pipes,\
-             globs, `$`, quotes and flags fall through to a normal run. That returns the\
-             image as an image; bash output is otherwise text only, so never\
-             pixel-dump or ASCII-art an image to inspect it.",
+             Imaging: to look at an image run `gray view <path>...` (several at once,\
+             downscaled) as the whole command — bare paths only, so pipes, globs, `$`,\
+             quotes and flags fall through to a normal run. It takes images only\
+             (png/jpg/jpeg/gif/webp/bmp/heic/heif); for a video, extract frames with\
+             ffmpeg and view those. `cat` is for text/source files, not images.\
+             That returns the image as an image; bash output is otherwise text only,\
+             so never pixel-dump or ASCII-art an image to inspect it.",
             json!({
                 "type": "object",
                 "properties": {
