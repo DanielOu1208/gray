@@ -143,6 +143,16 @@ pub fn model_supports_reasoning(model_id: &str) -> Option<bool> {
 /// `off` covers OpenAI `none` (omit reasoning). `None` = family unknown
 /// (offer the full catalog); empty = no reasoning.
 pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
+    // CommandCode's Settings docs list `reasoningEffort` values as
+    // low/medium/high/xhigh/max (https://api.commandcode.ai/docs/settings).
+    // models.dev has no CommandCode rows, and its qualified
+    // `xiaomi/mimo-v2.6-pro` rows from other gateways only say high; those
+    // cached rows clamped a real xhigh request to high. The provider-specific
+    // MiMo v2.6 Pro tier must win over the shared cache.
+    let active = active_provider_base_url();
+    if active.contains("commandcode.ai") && is_mimo_v26_pro(model_id) {
+        return Some(vec!["off", "low", "medium", "high", "xhigh", "max"]);
+    }
     if let Some(cached) = model_efforts(model_id) {
         let levels = super::super::THINKING_LEVELS;
         let want: Vec<&'static str> = cached
@@ -289,6 +299,12 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
         return Some(vec!["minimal", "low", "medium", "high", "xhigh"]);
     }
     None
+}
+
+/// CommandCode's MiMo v2.6 Pro family (`-pro` and its UltraSpeed tier).
+fn is_mimo_v26_pro(model_id: &str) -> bool {
+    let id = model_id.to_lowercase();
+    id.contains("mimo") && (id.contains("v2.6-pro") || id.contains("v2.6_pro"))
 }
 
 /// The step family: StepFun's API always reasons. `thinking: {"type":
@@ -538,6 +554,15 @@ pub fn set_active_model_provider(base_url: &str) {
     if let Ok(mut cache) = provider_models_cell().write() {
         cache.active = base_url.trim_end_matches('/').to_string();
     }
+}
+
+/// The provider endpoint currently selected for model discovery.
+fn active_provider_base_url() -> String {
+    provider_models_cell()
+        .read()
+        .ok()
+        .map(|cache| cache.active.clone())
+        .unwrap_or_default()
 }
 
 pub(crate) fn cache_provider_model_ids(base_url: &str, models: &[(String, String)]) {
