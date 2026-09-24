@@ -488,6 +488,25 @@ impl Transport {
         }
     }
 
+    /// Terminate the current child generation without waiting forever.
+    ///
+    /// Tokio's Windows child stdin uses a blocking pipe writer. If a shell
+    /// script has spawned a grandchild, killing only the direct child leaves
+    /// the pipe held open and the writer permanently blocked. `taskkill /T`
+    /// closes that whole tree; the timeout keeps this best-effort cleanup
+    /// from becoming a new lifecycle wait.
+    async fn terminate_child_generation(&self) {
+        let mut child = self.child.lock().await;
+        #[cfg(windows)]
+        {
+            let pid = child.id().to_string();
+            let mut taskkill = Command::new("taskkill");
+            taskkill.kill_on_drop(true).args(["/PID", &pid, "/T", "/F"]);
+            let _ = timeout(Duration::from_secs(2), taskkill.status()).await;
+        }
+        let _ = child.start_kill();
+    }
+
     /// Fire-and-forget notification: write one `{"method","params"}` line
     /// (no `id`, no reply) with a 5s timeout. Shared by `event/notify` and
     /// `plugin/shutdown` — pre-v1 sidecars already ignore unknown lines.
@@ -568,14 +587,14 @@ impl Transport {
                     // Do not await child exit here: on Windows a shell-wrapped
                     // child may leave a grandchild alive, so `kill().await`
                     // can outlive the write timeout and wedge the caller.
-                    self.child.lock().await.start_kill().ok();
+                    self.terminate_child_generation().await;
                     anyhow::bail!("sidecar write failed ({e}); killed this child generation");
                 }
                 FrameWrite::TimedOut => {
                     self.pending.lock().await.map.remove(&id);
-                    // Signal termination without waiting for the process tree;
-                    // the next `ensure_alive`/drop reaps this generation.
-                    self.child.lock().await.start_kill().ok();
+                    // Kill the complete Windows process tree without
+                    // waiting for the direct child to exit.
+                    self.terminate_child_generation().await;
                     anyhow::bail!(
                         "sidecar stopped reading stdin; killed this child generation ({method})"
                     );
