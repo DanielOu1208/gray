@@ -207,7 +207,7 @@ pub(crate) fn render_selecting(
     let mut rows = Vec::new();
     for (idx, item) in filtered.iter().enumerate() {
         rows.push(Some(idx));
-        if item.id == "custom" && idx + 1 < filtered.len() && list_h > 1 {
+        if super::catalog::is_custom_id(&item.id) && idx + 1 < filtered.len() && list_h > 1 {
             rows.push(None);
         }
     }
@@ -439,19 +439,27 @@ pub(crate) fn render_confirm_remove(
     );
 }
 
+/// The custom-endpoint screen: URL input plus a pick list of local
+/// servers probed when the screen opened (`(running)` = the model list
+/// answered). `suggestions` arrives filtered+selected by the caller; the
+/// box grows a row per suggestion, capped so short terminals keep the
+/// footer on screen.
 pub(crate) fn render_entering_url(
     frame: &mut Frame,
     area: Rect,
     url_buf: &str,
+    suggestions: &[&super::context::LocalEndpointSuggestion],
+    sel: usize,
     status_msg: &Option<String>,
     colors: &ConnectColors,
 ) {
-    let inner = centered_dialog(frame, area, 64, 10, 40, 8, colors);
+    let shown = suggestions.len().min(8) as u16;
+    let inner = centered_dialog(frame, area, 64, 13 + shown, 40, 8, colors);
 
     render_header_esc(frame, inner, "Custom Provider", colors);
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "Provider: Custom (OpenAI/Anthropic compatible)",
+            "Provider: Custom (OpenAI-compatible)",
             Style::default().fg(colors.text_dim).bg(colors.box_bg),
         )])),
         Rect::new(inner.x, inner.y + 1, inner.width, 1),
@@ -488,11 +496,74 @@ pub(crate) fn render_entering_url(
         " (Route suffixes like /chat/completions are trimmed)",
         colors,
     );
-    render_footer(
-        frame,
-        inner,
-        footer_key_spans(&[("enter ", "continue")], colors),
-    );
+
+    // Suggestion rows at y+7: name, URL, running badge; the selected row
+    // takes the accent fill like the provider list.
+    for (i, suggestion) in suggestions.iter().take(8).enumerate() {
+        let is_selected = i == sel && !suggestions.is_empty();
+        let y = inner.y + 7 + i as u16;
+        if y >= inner.y + inner.height.saturating_sub(1) {
+            break;
+        }
+        let badge = if suggestion.running { " ●" } else { "  " };
+        let name = format!(" {:<10}", suggestion.name);
+        let url = format!(" {}", suggestion.url);
+        let row_line = if is_selected {
+            let raw = format!("{badge}{name}{url}");
+            let fill = (inner.width as usize).saturating_sub(raw.chars().count());
+            Line::from(Span::styled(
+                format!("{raw}{}", " ".repeat(fill)),
+                Style::default()
+                    .fg(crate::theme::theme().on_selection)
+                    .bg(colors.accent_peach)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            let badge_span = if suggestion.running {
+                Span::styled(
+                    badge,
+                    Style::default()
+                        .fg(crate::theme::theme().success)
+                        .bg(colors.box_bg),
+                )
+            } else {
+                Span::styled(badge, Style::default().bg(colors.box_bg))
+            };
+            Line::from(vec![
+                badge_span,
+                Span::styled(
+                    name,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(colors.box_bg),
+                ),
+                Span::styled(
+                    url,
+                    Style::default()
+                        .fg(crate::theme::theme().text_dim)
+                        .bg(colors.box_bg),
+                ),
+            ])
+        };
+        frame.render_widget(
+            Paragraph::new(row_line),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+    }
+
+    let mut footer = footer_key_spans(&[("enter ", "continue")], colors);
+    if !suggestions.is_empty() {
+        footer = footer_key_spans(
+            &[
+                ("↑↓ ", "pick    "),
+                ("tab ", "fill    "),
+                ("enter ", "continue"),
+            ],
+            colors,
+        );
+    }
+    render_footer(frame, inner, footer);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -522,7 +593,7 @@ pub(crate) fn render_entering_key(
         .unwrap_or_else(|| note.to_string());
     let input_width = if key_buf.is_empty() {
         existing_key.as_ref().map_or(
-            if item.id == "custom" {
+            if super::catalog::is_custom_id(&item.id) {
                 " Paste or type API key (Enter to skip)...".chars().count()
             } else {
                 " Paste or type API key...".chars().count()
@@ -589,7 +660,7 @@ pub(crate) fn render_entering_key(
                         .bg(colors.input_bg),
                 ),
             ])
-        } else if item.id == "custom" {
+        } else if super::catalog::is_custom_id(&item.id) {
             Line::from(vec![Span::styled(
                 " Paste or type API key (Enter to skip)...",
                 Style::default()

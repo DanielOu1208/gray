@@ -281,3 +281,32 @@ fn key_check_status_only_an_auth_refusal_rejects() {
         );
     }
 }
+
+#[test]
+fn model_list_candidates_cover_v1_and_bare_bases() {
+    let v1 = model_list_candidates("http://localhost:1234/v1");
+    assert_eq!(v1[0], "http://localhost:1234/v1/models");
+    assert!(v1.iter().any(|u| u.ends_with("/tags")));
+    let bare = model_list_candidates("http://localhost:8080");
+    assert!(bare.iter().any(|u| u == "http://localhost:8080/v1/models"));
+    // OpenRouter is pinned to its real route: its /models is public and
+    // validates nothing.
+    assert_eq!(
+        model_list_candidates("https://openrouter.ai/api/v1"),
+        vec!["https://openrouter.ai/api/v1/models".to_string()]
+    );
+}
+
+#[test]
+fn count_models_json_reads_every_list_shape() {
+    assert_eq!(count_models_json(&serde_json::json!([{"id": "a"}])), 1);
+    assert_eq!(
+        count_models_json(&serde_json::json!({"data": [{"id": "a"}, {"id": "b"}]})),
+        2
+    );
+    assert_eq!(
+        count_models_json(&serde_json::json!({"models": [{"name": "m"}]})),
+        1
+    );
+    assert_eq!(count_models_json(&serde_json::json!({"nope": 1})), 0);
+}

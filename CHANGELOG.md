@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+- **Custom endpoints are first-class connections.** `/connect` → Custom
+  now offers a pick list of local OpenAI-compatible servers (Ollama, LM
+  Studio, llama.cpp, vLLM, Jan, LiteLLM — live-probed, running ones
+  badged), probes the typed URL before asking for a key, and saves each
+  endpoint as its own row in the provider list — several customs can
+  stay connected at once, each with its own key (`custom:<host[:port]>`
+  in `auth.json`), model picker, and Shift+Enter removal. The legacy
+  single `custom` key migrates on the next `/connect` open. Endpoints
+  persist in `~/.gray/custom_endpoints.json`.
+
 ## [0.2.0] - 2026-10-10
 
 ### Added

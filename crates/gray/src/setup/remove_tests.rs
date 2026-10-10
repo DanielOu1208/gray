@@ -138,7 +138,7 @@ fn list_footer_advertises_removal_only_for_a_stored_provider() {
         lean: false,
     };
     let auth = auth_map(&[("openrouter", "sk-or")]);
-    let mut items = build_connect_items(&load_catalog().unwrap(), &[]);
+    let mut items = build_connect_items(&load_catalog().unwrap(), &[], &[]);
     catalog::sort_connect_items(&mut items, &config, &auth, &BTreeMap::new());
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
     let mut scroll = 0usize;
@@ -272,7 +272,7 @@ fn removing_another_provider_leaves_the_active_one_alone() {
 fn list_footer_hides_removal_for_a_provider_with_nothing_stored() {
     let config = config_for("https://openrouter.ai/api/v1");
     let auth = BTreeMap::new();
-    let mut items = build_connect_items(&load_catalog().unwrap(), &[]);
+    let mut items = build_connect_items(&load_catalog().unwrap(), &[], &[]);
     catalog::sort_connect_items(&mut items, &config, &auth, &BTreeMap::new());
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
     let mut scroll = 0usize;
@@ -303,4 +303,34 @@ fn list_footer_hides_removal_for_a_provider_with_nothing_stored() {
         !text.contains("shift+enter"),
         "a provider with no stored key offers no removal: {text}"
     );
+}
+
+#[test]
+fn saved_custom_rows_are_always_removable() {
+    // A saved custom endpoint is removable even with no credential filed —
+    // the row only exists because its endpoint entry does, and removal is
+    // how a dead endpoint leaves the list.
+    let config = config_for("https://openrouter.ai/api/v1");
+    let auth = BTreeMap::new();
+    let item = crate::setup::ConnectItem {
+        id: "custom:localhost:1234".into(),
+        name: "LM Studio".into(),
+        sublabel: "(http://localhost:1234/v1)".into(),
+        base_url: "http://localhost:1234/v1".into(),
+        no_auth: true,
+        auth: crate::setup::ConnectAuth::None,
+    };
+    assert!(crate::setup::connect::is_removable(&item, &config, &auth));
+    // The bare "custom" add-row stays unremovable — nothing to forget.
+    let add_row = crate::setup::ConnectItem {
+        id: "custom".into(),
+        name: "Custom".into(),
+        sublabel: String::new(),
+        base_url: String::new(),
+        no_auth: false,
+        auth: crate::setup::ConnectAuth::ApiKey,
+    };
+    assert!(!crate::setup::connect::is_removable(
+        &add_row, &config, &auth
+    ));
 }

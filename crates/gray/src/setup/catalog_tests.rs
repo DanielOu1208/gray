@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn custom_is_first_entry() {
     let catalog = load_catalog().expect("catalog");
-    let items = build_connect_items(&catalog, &[]);
+    let items = build_connect_items(&catalog, &[], &[]);
     assert_eq!(items[0].id, "custom");
     assert!(items[0].sublabel.contains("OpenAI"));
 }
@@ -11,7 +11,7 @@ fn custom_is_first_entry() {
 #[test]
 fn commandcode_pinned_with_provider_base() {
     let catalog = load_catalog().expect("catalog");
-    let items = build_connect_items(&catalog, &[]);
+    let items = build_connect_items(&catalog, &[], &[]);
     let cc = items
         .iter()
         .find(|i| i.id == "commandcode")
@@ -586,7 +586,7 @@ fn connect_sort_with_nothing_known_lands_on_openai() {
         lean: true,
     };
     let catalog = load_catalog().expect("catalog");
-    let mut items = build_connect_items(&catalog, &[]);
+    let mut items = build_connect_items(&catalog, &[], &[]);
     let auth = BTreeMap::new();
     let detected = detect_connect_candidates(false, |_| None);
     sort_connect_items(&mut items, &config, &auth, &detected);
@@ -602,4 +602,153 @@ fn connect_sort_with_nothing_known_lands_on_openai() {
             .map(|i| i.id.as_str())
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn custom_slug_scopes_by_host_port_and_path() {
+    assert_eq!(
+        custom_key_id("http://localhost:1234/v1"),
+        "custom:localhost:1234"
+    );
+    assert_eq!(
+        custom_key_id("https://api.example.com/v1"),
+        "custom:api.example.com"
+    );
+    // Two endpoints on one host with different API roots must not share
+    // a key slot.
+    assert_eq!(
+        custom_key_id("https://api.example.com/openai/v1"),
+        "custom:api.example.com/openai-v1"
+    );
+}
+
+#[test]
+fn custom_display_name_knows_local_servers() {
+    assert_eq!(custom_display_name("http://localhost:1234/v1"), "LM Studio");
+    assert_eq!(
+        custom_display_name("http://localhost:11434/v1/models"),
+        "Ollama"
+    );
+    assert_eq!(
+        custom_display_name("https://api.acme.dev/v1"),
+        "api.acme.dev"
+    );
+    assert_eq!(
+        custom_display_name("http://192.168.1.20:9999/v1"),
+        "192.168.1.20:9999"
+    );
+}
+
+#[test]
+fn is_custom_id_covers_add_row_and_saved_rows() {
+    assert!(is_custom_id("custom"));
+    assert!(is_custom_id("custom:localhost:1234"));
+    assert!(!is_custom_id("openrouter"));
+    assert!(!is_custom_id("customx"));
+}
+
+#[test]
+fn custom_endpoint_store_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("custom_endpoints.json");
+
+    let ep = upsert_custom_endpoint_at(&path, " http://localhost:1234/v1/ ", true).unwrap();
+    assert_eq!(ep.name, "LM Studio");
+    assert_eq!(ep.base_url, "http://localhost:1234/v1");
+    assert!(ep.keyless);
+
+    upsert_custom_endpoint_at(&path, "https://api.acme.dev/v1", false).unwrap();
+    let eps = load_custom_endpoints_at(&path);
+    assert_eq!(eps.len(), 2);
+
+    // Upsert refreshes flags instead of duplicating.
+    upsert_custom_endpoint_at(&path, "http://localhost:1234/v1", false).unwrap();
+    let eps = load_custom_endpoints_at(&path);
+    assert_eq!(eps.len(), 2);
+    assert!(!eps.iter().find(|e| e.name == "LM Studio").unwrap().keyless);
+
+    assert!(remove_custom_endpoint_at(&path, "http://localhost:1234/v1").unwrap());
+    assert!(!remove_custom_endpoint_at(&path, "http://localhost:1234/v1").unwrap());
+    assert_eq!(load_custom_endpoints_at(&path).len(), 1);
+
+    // A corrupt file reads as empty, never kills the connect list.
+    std::fs::write(&path, "{ not json").unwrap();
+    assert!(load_custom_endpoints_at(&path).is_empty());
+}
+
+#[test]
+fn saved_customs_become_connect_rows() {
+    let catalog = load_catalog().expect("catalog");
+    let customs = vec![
+        CustomEndpoint {
+            name: "LM Studio".into(),
+            base_url: "http://localhost:1234/v1".into(),
+            keyless: true,
+        },
+        CustomEndpoint {
+            name: "api.acme.dev".into(),
+            base_url: "https://api.acme.dev/v1".into(),
+            keyless: false,
+        },
+    ];
+    let items = build_connect_items(&catalog, &[], &customs);
+    let lm = items
+        .iter()
+        .find(|i| i.id == "custom:localhost:1234")
+        .expect("LM Studio row");
+    assert_eq!(lm.name, "LM Studio");
+    assert!(lm.no_auth);
+    assert!(matches!(lm.auth, ConnectAuth::None));
+    let acme = items
+        .iter()
+        .find(|i| i.id == "custom:api.acme.dev")
+        .expect("acme row");
+    assert!(!acme.no_auth);
+    assert!(matches!(acme.auth, ConnectAuth::ApiKey));
+    // The add-row itself is untouched.
+    assert!(items.iter().any(|i| i.id == "custom"));
+}
+
+#[test]
+fn saved_customs_sort_with_the_popular_block() {
+    let catalog = load_catalog().expect("catalog");
+    let customs = vec![CustomEndpoint {
+        name: "api.acme.dev".into(),
+        base_url: "https://api.acme.dev/v1".into(),
+        keyless: false,
+    }];
+    let mut items = build_connect_items(&catalog, &[], &customs);
+    let config = crate::config::Config {
+        fast_mode: None,
+        model_parts: Default::default(),
+        model: Some("m".into()),
+        base_url: "https://openrouter.ai/api/v1".into(),
+        api_key: Some("k".into()),
+        provider_id: String::new(),
+        credential_source: String::new(),
+        auth_ref: String::new(),
+        thinking_effort: None,
+        show_reasoning: None,
+        temperature: None,
+        top_p: None,
+        context_window: None,
+        context_reserve: None,
+        context_keep: None,
+        exec_prefix: None,
+        max_turns: None,
+        max_cost_micros: None,
+        max_wall_secs: None,
+        bare: false,
+        lean: false,
+    };
+    let auth = BTreeMap::new();
+    let detected = BTreeMap::new();
+    sort_connect_items(&mut items, &config, &auth, &detected);
+    let custom_pos = items.iter().position(|i| i.id == "custom").unwrap();
+    let saved_pos = items
+        .iter()
+        .position(|i| i.id == "custom:api.acme.dev")
+        .unwrap();
+    // Saved rows sit above the add-row separator anchor.
+    assert!(saved_pos < custom_pos);
 }
