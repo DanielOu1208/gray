@@ -40,8 +40,10 @@ pub(crate) fn format_tool_box_lines(
         box_lines.push(l);
     }
 
-    // One breathing-room row between the command header and its output.
-    if !body.is_empty() {
+    // One breathing-room row between the command header and its output,
+    // but only for substantive bodies — a single detail row (notices,
+    // job cards, compaction) sits flush under the header instead.
+    if body.len() > 1 {
         box_lines.push(Line::from("").style(bg_style));
     }
 
