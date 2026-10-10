@@ -1,5 +1,10 @@
 mod providers;
 
+pub(crate) use providers::{
+    EndpointProbe, LocalEndpointSuggestion, cache_model_efforts, ensure_disk_loaded,
+    fetch_plugin_provider_models, load_provider_model_list, ollama_running, probe_custom_endpoint,
+    probe_local_endpoints, save_provider_model_list, warm_rates_from_disk_cache,
+};
 pub use providers::{
     KeyCheck, ModelMeta, ModelRate, cache_model_context, cache_model_context_if_absent,
     cache_model_meta, cache_model_reasoning, cache_models_dev_if_absent, cached_model_ids,
@@ -10,10 +15,6 @@ pub use providers::{
     parse_litellm_context_json, parse_models_dev_json, parse_openrouter_models_json,
     save_models_cache_to_disk, set_active_model_provider, supported_efforts,
     supported_thinking_levels, turn_cost, uncached_cost, verify_api_key,
-};
-pub(crate) use providers::{
-    cache_model_efforts, ensure_disk_loaded, fetch_plugin_provider_models,
-    load_provider_model_list, ollama_running, save_provider_model_list, warm_rates_from_disk_cache,
 };
 
 static USER_CONTEXT_WINDOW: std::sync::OnceLock<std::sync::RwLock<Option<usize>>> =

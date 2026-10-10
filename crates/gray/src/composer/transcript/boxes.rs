@@ -302,6 +302,7 @@ impl Tui {
             match entry.message.role {
                 gray_core::Role::User => {
                     let mut user_text = String::new();
+                    let mut attached: Vec<std::path::PathBuf> = Vec::new();
                     for block in &entry.message.content {
                         match block {
                             gray_core::ContentBlock::Text { text } => {
@@ -317,6 +318,19 @@ impl Tui {
                                 user_text.push_str("[component event: ");
                                 user_text.push_str(kind);
                                 user_text.push(']');
+                            }
+                            gray_core::ContentBlock::Image { media_type, data }
+                            | gray_core::ContentBlock::Media {
+                                media_type, data, ..
+                            } => {
+                                // Replay materializes the stored bytes so the
+                                // chip survives reopen — and `read` can pull
+                                // the file back in as vision on demand.
+                                if let Some(p) =
+                                    gray_core::paths::materialize_media(media_type, data)
+                                {
+                                    attached.push(p);
+                                }
                             }
                             gray_core::ContentBlock::ToolResult {
                                 id,
@@ -339,8 +353,8 @@ impl Tui {
                             .content
                             .iter()
                             .any(|b| matches!(b, gray_core::ContentBlock::Text { .. }));
-                    if !user_text.is_empty() {
-                        self.push_user_prompt(&user_text, &[], true);
+                    if !user_text.is_empty() || !attached.is_empty() {
+                        self.push_user_prompt(&user_text, &attached, true);
                         // Feed composer input history so Up/Down recall works
                         // for prompts from the resumed session. Injected notes
                         // (job notices, nudges) and component events stay out —

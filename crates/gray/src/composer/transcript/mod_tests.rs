@@ -271,8 +271,8 @@ fn full_width_numbered_row_is_not_rewrapped() {
     let row = format!("    1 | {content}"); // 2 lead + "  1 | " + 70 = 78
     assert_eq!(row.len(), width - 2);
     let lines = format_tool_box_lines(Line::from("Ran x"), &[Line::from(row)], width);
-    // margin, header, breathing row, ONE body row, margin
-    assert_eq!(lines.len(), 5, "{lines:?}");
+    // margin, header, ONE body row, margin (no breathing row for a 1-line body)
+    assert_eq!(lines.len(), 4, "{lines:?}");
 }
 
 #[test]

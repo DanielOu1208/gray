@@ -22,6 +22,11 @@ pub(crate) fn is_removable(
     config: &Config,
     auth: &std::collections::BTreeMap<String, catalog::AuthEntry>,
 ) -> bool {
+    // A `custom:<slug>` row exists only because its endpoint entry does —
+    // always removable, keyed or keyless, active or not.
+    if item.id.starts_with("custom:") {
+        return true;
+    }
     item.is_connected(config, auth) || auth.contains_key(&item.id)
 }
 
@@ -64,6 +69,11 @@ fn forget_provider_at(
         return Ok(item.name.clone());
     }
     catalog::remove_auth_entry_at(auth_path, &item.id)?;
+    if item.id.starts_with("custom:")
+        && let Ok(ep_path) = catalog::custom_endpoints_path()
+    {
+        let _ = catalog::remove_custom_endpoint_at(&ep_path, &item.base_url);
+    }
     let name = item.name.clone();
     if normalize_custom_base_url(&config.base_url) == normalize_custom_base_url(&item.base_url) {
         config.api_key = None;
@@ -169,6 +179,74 @@ pub fn active_connect_id(config: &Config) -> Option<String> {
         .map(|(id, _)| id)
 }
 
+/// Suggestion rows matching the typed buffer (name or URL substring); an
+/// empty buffer shows every server the entry probe found.
+fn filter_local_suggestions<'a>(
+    suggestions: &'a [context::LocalEndpointSuggestion],
+    typed: &str,
+) -> Vec<&'a context::LocalEndpointSuggestion> {
+    let typed = typed.trim().to_lowercase();
+    suggestions
+        .iter()
+        .filter(|s| {
+            typed.is_empty()
+                || s.name.to_lowercase().contains(&typed)
+                || s.url.to_lowercase().contains(&typed)
+        })
+        .collect()
+}
+
+/// One-time bridge from the single legacy `custom` auth slot to named
+/// endpoints. It fires only when the *active* connection is a custom
+/// endpoint (no plugin identity, no catalog/popular base) — that is the
+/// one URL the old slot can belong to. The endpoint is registered
+/// keyless or keyed, and a filed key is moved under the slug id.
+fn migrate_legacy_custom(config: &Config, cat: &catalog::Catalog) {
+    if !config.provider_id.is_empty() {
+        return;
+    }
+    let base = normalize_custom_base_url(&config.base_url);
+    if base.is_empty() {
+        return;
+    }
+    let known = catalog::POPULAR_DEFS
+        .iter()
+        .any(|(.., url, _)| normalize_custom_base_url(url) == base)
+        || cat
+            .values()
+            .any(|p| normalize_custom_base_url(&p.base_url) == base);
+    if known {
+        return;
+    }
+    let (Ok(auth_path), Ok(ep_path)) =
+        (catalog::auth_store_path(), catalog::custom_endpoints_path())
+    else {
+        return;
+    };
+    let key = match catalog::load_mixed_store(&auth_path).get("custom") {
+        Some(catalog::AuthEntry::Key(key)) => Some(key.clone()),
+        _ => None,
+    };
+    // Nothing to migrate when the endpoint is already registered and no
+    // legacy key waits — upserting again would rewrite `keyless` and flip
+    // a keyed endpoint keyless.
+    let registered = catalog::load_custom_endpoints_at(&ep_path)
+        .iter()
+        .any(|e| normalize_custom_base_url(&e.base_url) == base);
+    if registered && key.is_none() {
+        return;
+    }
+    if catalog::upsert_custom_endpoint_at(&ep_path, &base, key.is_none()).is_err() {
+        return;
+    }
+    if let Some(key) = key {
+        let slug = catalog::custom_key_id(&base);
+        if catalog::save_auth_key_at(&auth_path, &slug, &key).is_ok() {
+            let _ = catalog::remove_auth_entry_at(&auth_path, "custom");
+        }
+    }
+}
+
 fn connect_modal(
     config: &mut Config,
     bg: Option<&BackgroundSnapshot>,
@@ -187,6 +265,14 @@ fn connect_modal(
         EnteringBaseUrl {
             url_buf: String,
             status_msg: Option<String>,
+            /// Local servers offered one probe per screen-open (the
+            /// `EnteringBaseUrl` screen's pick list).
+            suggestions: Vec<context::LocalEndpointSuggestion>,
+            sel: usize,
+            /// A failed reachability probe arms this: the next Enter
+            /// connects without re-probing (offline dev boxes, odd
+            /// servers).
+            probe_failed: bool,
         },
         EnteringKey {
             item: ConnectItem,
@@ -244,13 +330,20 @@ fn connect_modal(
     let detected =
         catalog::detect_connect_candidates(context::ollama_running(), |k| std::env::var(k).ok());
 
+    // The legacy `custom` auth slot held one key for one URL — the active
+    // connection's endpoint when that connection is no catalog or plugin
+    // provider. Refile it under the endpoint's slug so the endpoint shows
+    // up as its own saved row.
+    migrate_legacy_custom(config, &catalog);
+
     let result = (|| -> anyhow::Result<ConnectOutcome> {
         loop {
             let auth = catalog::load_connect_auth();
             let providers =
                 crate::providers::ProviderRegistry::load_cached(&crate::setup::gray_home()?)
                     .installed();
-            let mut all_items = build_connect_items(&catalog, &providers);
+            let customs = catalog::load_custom_endpoints();
+            let mut all_items = build_connect_items(&catalog, &providers, &customs);
             catalog::sort_connect_items(&mut all_items, config, &auth, &detected);
             // Detected rows say where the credential/runtime was found;
             // connected rows keep their own label.
@@ -342,13 +435,22 @@ fn connect_modal(
                         }
                         None => {
                             select_api_key_connection(config)?;
+                            if catalog::is_custom_id(&item.id)
+                                && let Ok(ep_path) = catalog::custom_endpoints_path()
+                            {
+                                let _ = catalog::upsert_custom_endpoint_at(
+                                    &ep_path,
+                                    &config.base_url,
+                                    config.api_key.is_none(),
+                                );
+                            }
                             let path = saved_config_path()?;
                             let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
                             let mut saved = load_saved_config_at(&path);
                             saved.base_url = Some(config.base_url.clone());
                             saved.api_key = config.api_key.clone();
                             saved.model = config.model.clone();
-                            saved.auth_mode = Some(if item.no_auth {
+                            saved.auth_mode = Some(if config.api_key.is_none() {
                                 AUTH_MODE_NONE.into()
                             } else {
                                 AUTH_MODE_API_KEY.into()
@@ -386,8 +488,17 @@ fn connect_modal(
                     ModalState::EnteringBaseUrl {
                         url_buf,
                         status_msg,
+                        suggestions,
+                        sel,
+                        ..
                     } => super::connect_draw::render_entering_url(
-                        frame, area, url_buf, status_msg, &colors,
+                        frame,
+                        area,
+                        url_buf,
+                        &filter_local_suggestions(suggestions, url_buf),
+                        *sel,
+                        status_msg,
+                        &colors,
                     ),
                     ModalState::EnteringKey {
                         item,
@@ -521,6 +632,9 @@ fn connect_modal(
                                         state = ModalState::EnteringBaseUrl {
                                             url_buf: String::new(),
                                             status_msg: None,
+                                            suggestions: context::probe_local_endpoints(),
+                                            sel: 0,
+                                            probe_failed: false,
                                         };
                                     } else if item.no_auth {
                                         config.base_url = item.base_url.clone();
@@ -588,73 +702,150 @@ fn connect_modal(
                 ModalState::EnteringBaseUrl {
                     url_buf,
                     status_msg,
-                } => match read()? {
-                    Event::Key(KeyEvent {
-                        code: KeyCode::Char('c'),
-                        modifiers,
-                        kind: KeyEventKind::Press,
-                        ..
-                    }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                        state = ModalState::Selecting;
+                    suggestions,
+                    sel,
+                    probe_failed,
+                } => {
+                    // Typed text filters the suggestion list (name or URL);
+                    // an empty buffer shows every local server we probed.
+                    let filtered = filter_local_suggestions(suggestions, url_buf);
+                    if filtered.is_empty() {
+                        *sel = 0;
+                    } else if *sel >= filtered.len() {
+                        *sel = filtered.len() - 1;
                     }
-                    Event::Key(KeyEvent {
-                        code,
-                        kind: KeyEventKind::Press,
-                        ..
-                    }) => match code {
-                        KeyCode::Esc => {
+                    match read()? {
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Char('c'),
+                            modifiers,
+                            kind: KeyEventKind::Press,
+                            ..
+                        }) if modifiers.contains(KeyModifiers::CONTROL) => {
                             state = ModalState::Selecting;
                         }
-                        KeyCode::Char(ch) => {
-                            url_buf.push(ch);
-                            *status_msg = None;
-                        }
-                        KeyCode::Backspace => {
-                            url_buf.pop();
-                            *status_msg = None;
-                        }
-                        KeyCode::Enter => {
-                            let normalized = normalize_custom_base_url(url_buf);
-                            let valid = normalized.starts_with("http://")
-                                || normalized.starts_with("https://");
-                            if normalized.is_empty() || !valid {
-                                *status_msg =
-                                    Some("Enter a valid base URL (e.g. https://…/v1)".into());
-                            } else {
-                                let existing =
-                                    load_auth_keys().get("custom").cloned().or_else(|| {
-                                        if config.base_url == normalized {
-                                            config.api_key.clone()
-                                        } else {
-                                            None
-                                        }
-                                    });
-                                let item = ConnectItem {
-                                    id: "custom".to_string(),
-                                    name: "Custom".to_string(),
-                                    sublabel: "(OpenAI/Anthropic compatible)".to_string(),
-                                    base_url: normalized,
-                                    no_auth: false,
-                                    auth: ConnectAuth::ApiKey,
-                                };
-                                state = ModalState::EnteringKey {
-                                    item,
-                                    key_buf: String::new(),
-                                    existing_key: existing,
-                                    env_var: None,
-                                    status_msg: None,
-                                };
+                        Event::Key(KeyEvent {
+                            code,
+                            kind: KeyEventKind::Press,
+                            ..
+                        }) => match code {
+                            KeyCode::Esc => {
+                                state = ModalState::Selecting;
                             }
+                            KeyCode::Up => *sel = sel.saturating_sub(1),
+                            KeyCode::Down => {
+                                if !filtered.is_empty() {
+                                    *sel = (*sel + 1).min(filtered.len() - 1);
+                                }
+                            }
+                            KeyCode::Char(ch) => {
+                                url_buf.push(ch);
+                                *status_msg = None;
+                                *sel = 0;
+                                *probe_failed = false;
+                            }
+                            KeyCode::Backspace => {
+                                url_buf.pop();
+                                *status_msg = None;
+                                *sel = 0;
+                                *probe_failed = false;
+                            }
+                            KeyCode::Tab => {
+                                // Fill from the highlighted suggestion —
+                                // the user can still edit before Enter.
+                                if let Some(s) = filtered.get(*sel) {
+                                    *url_buf = s.url.to_string();
+                                    *status_msg = None;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                let chosen = if url_buf.trim().is_empty() {
+                                    filtered.get(*sel).map(|s| s.url.to_string())
+                                } else {
+                                    Some(url_buf.trim().to_string())
+                                };
+                                let normalized = chosen
+                                    .as_deref()
+                                    .map(normalize_custom_base_url)
+                                    .unwrap_or_default();
+                                let valid = normalized.starts_with("http://")
+                                    || normalized.starts_with("https://");
+                                if normalized.is_empty() || !valid {
+                                    *status_msg =
+                                        Some("Enter a valid base URL (e.g. https://…/v1)".into());
+                                    continue;
+                                }
+                                // Probe before the key screen: a reachable
+                                // endpoint (or one that answers 401 — it is
+                                // there, it just wants the key) proceeds; a
+                                // silent one warns once, and the next Enter
+                                // forces through anyway (offline boxes,
+                                // servers with no list route).
+                                let proceed = if *probe_failed {
+                                    *probe_failed = false;
+                                    true
+                                } else {
+                                    *status_msg = Some("Checking endpoint…".into());
+                                    terminal.draw(|frame| {
+                                        let area = frame.area();
+                                        if area.width >= 20 && area.height >= 6 {
+                                            render_dimmed_background(frame, &bg_snapshot);
+                                            super::connect_draw::render_entering_url(
+                                                frame, area, url_buf, &filtered, *sel, status_msg,
+                                                &colors,
+                                            );
+                                        }
+                                    })?;
+                                    match context::probe_custom_endpoint(&normalized) {
+                                        context::EndpointProbe::Up { .. }
+                                        | context::EndpointProbe::Auth => true,
+                                        context::EndpointProbe::Down => {
+                                            *status_msg = Some(
+                                                "No answer — Enter again to connect anyway".into(),
+                                            );
+                                            *probe_failed = true;
+                                            false
+                                        }
+                                    }
+                                };
+                                if proceed {
+                                    let key_id = catalog::custom_key_id(&normalized);
+                                    let existing =
+                                        load_auth_keys().get(&key_id).cloned().or_else(|| {
+                                            if config.base_url == normalized {
+                                                config.api_key.clone()
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                    let item = ConnectItem {
+                                        id: "custom".to_string(),
+                                        name: "Custom".to_string(),
+                                        sublabel: "(OpenAI-compatible)".to_string(),
+                                        base_url: normalized,
+                                        no_auth: false,
+                                        auth: ConnectAuth::ApiKey,
+                                    };
+                                    state = ModalState::EnteringKey {
+                                        item,
+                                        key_buf: String::new(),
+                                        existing_key: existing,
+                                        env_var: None,
+                                        status_msg: None,
+                                    };
+                                }
+                            }
+                            _ => {}
+                        },
+                        Event::Paste(pasted) => {
+                            insert_paste(url_buf, &pasted);
+                            *status_msg = None;
+                            *sel = 0;
+                            *probe_failed = false;
                         }
+                        Event::Resize(_, _) => {}
                         _ => {}
-                    },
-                    Event::Paste(pasted) => {
-                        insert_paste(url_buf, &pasted);
-                        *status_msg = None;
                     }
-                    Event::Resize(_, _) => {}
-                    _ => {}
-                },
+                }
                 ModalState::EnteringKey {
                     item,
                     key_buf,
@@ -694,7 +885,7 @@ fn connect_modal(
                             };
 
                             if final_key.is_empty() {
-                                if item.id == "custom" && existing_key.is_none() {
+                                if catalog::is_custom_id(&item.id) && existing_key.is_none() {
                                     // Keyless custom endpoint (local models): skip
                                     // auth save and go straight to model picking.
                                     config.base_url = item.base_url.clone();
@@ -745,7 +936,15 @@ fn connect_modal(
                                         connect_saved_key(config, &item.base_url, &final_key)?;
                                         return Ok(ConnectOutcome::Connected);
                                     }
-                                    save_auth_key(&item.id, &final_key)?;
+                                    // Fresh adds carry the add-row id: the
+                                    // key belongs under the endpoint's
+                                    // slug so several customs coexist.
+                                    let pid = if item.id == "custom" {
+                                        catalog::custom_key_id(&item.base_url)
+                                    } else {
+                                        item.id.clone()
+                                    };
+                                    save_auth_key(&pid, &final_key)?;
                                     config.base_url = item.base_url.clone();
                                     config.api_key = Some(final_key);
                                     state = ModalState::SelectingModel { item: item.clone() };

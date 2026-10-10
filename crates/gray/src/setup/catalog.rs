@@ -739,7 +739,8 @@ pub(crate) fn sort_connect_items(
             1
         } else if item.id == "custom" {
             3
-        } else if matches!(item.auth, ConnectAuth::Plugin { .. })
+        } else if item.id.starts_with("custom:")
+            || matches!(item.auth, ConnectAuth::Plugin { .. })
             || POPULAR_DEFS.iter().any(|(id, ..)| *id == item.id)
         {
             2
@@ -824,6 +825,168 @@ pub fn normalize_custom_base_url(raw: &str) -> String {
 /// no-write rule in `save_provider_model_list_at`.
 pub fn plugin_models_key(provider_id: &str) -> String {
     format!("plugin:{provider_id}")
+}
+
+/// A user-added OpenAI-compatible endpoint, persisted in
+/// `~/.gray/custom_endpoints.json`. Its auth key (if any) lives in
+/// `auth.json` under [`custom_key_id`]; its model list caches under
+/// `url:<normalized base>` like every other provider — each saved
+/// endpoint is a full connection, replacing the old single `custom`
+/// auth slot that could only hold one key for one URL.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomEndpoint {
+    /// Display name: the known local server it matched at save time,
+    /// else `host[:port]`.
+    pub name: String,
+    /// Normalized base URL (`https://host[:port]/v1`-shaped).
+    pub base_url: String,
+    /// Connected without a key (local server, open relay): the row then
+    /// behaves like Ollama — Enter goes straight to the model picker.
+    #[serde(default)]
+    pub keyless: bool,
+}
+
+/// `custom_endpoints.json` next to `auth.json` (which only carries the
+/// credential half).
+pub(crate) fn custom_endpoints_path() -> anyhow::Result<PathBuf> {
+    Ok(gray_home()?.join("custom_endpoints.json"))
+}
+
+/// The connect row / auth key id for a custom endpoint: `custom:` plus a
+/// slug of its normalized URL (`custom:localhost:1234`,
+/// `custom:api.example.com/v1beta`). Stable per endpoint, never equal to
+/// the bare `custom` add-row id.
+pub fn custom_key_id(base_url: &str) -> String {
+    format!("custom:{}", custom_slug(base_url))
+}
+
+/// `id` is any custom-endpoint connect id: the bare `custom` add-row or a
+/// saved `custom:<slug>` row.
+pub fn is_custom_id(id: &str) -> bool {
+    id == "custom" || id.starts_with("custom:")
+}
+
+/// Slug of a normalized base URL: `host[:port]` plus the path when it is
+/// more specific than the usual `/v1`-family roots — two endpoints on one
+/// host (`/v1` vs `/openai/v1`) must not share a key slot.
+fn custom_slug(base_url: &str) -> String {
+    let normalized = normalize_custom_base_url(base_url);
+    let Ok(url) = reqwest::Url::parse(&normalized) else {
+        return normalized
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+    };
+    let mut slug = url.host_str().unwrap_or_default().to_string();
+    if let Some(port) = url.port() {
+        slug.push(':');
+        slug.push_str(&port.to_string());
+    }
+    let path = url.path().trim_matches('/');
+    if !path.is_empty() && !matches!(path, "v1" | "v1beta" | "api/v1") {
+        slug.push('/');
+        slug.push_str(&path.replace('/', "-"));
+    }
+    slug
+}
+
+/// Display name for a custom endpoint: the product name when the URL is a
+/// known local server ([`KNOWN_LOCAL_ENDPOINTS`]), else `host[:port]`.
+pub fn custom_display_name(base_url: &str) -> String {
+    let normalized = normalize_custom_base_url(base_url);
+    for &(name, url) in KNOWN_LOCAL_ENDPOINTS {
+        if normalize_custom_base_url(url) == normalized {
+            return name.to_string();
+        }
+    }
+    reqwest::Url::parse(&normalized)
+        .ok()
+        .map(|u| match (u.host_str(), u.port()) {
+            (Some(h), Some(p)) => format!("{h}:{p}"),
+            (Some(h), None) => h.to_string(),
+            _ => "Custom".to_string(),
+        })
+        .unwrap_or_else(|| "Custom".to_string())
+}
+
+/// Local OpenAI-compatible servers offered as suggestions on the custom
+/// endpoint screen, in display order: `(name, base_url)`. URLs all carry
+/// the `/v1` root so `/models` hangs directly off them.
+pub const KNOWN_LOCAL_ENDPOINTS: &[(&str, &str)] = &[
+    ("Ollama", "http://localhost:11434/v1"),
+    ("LM Studio", "http://localhost:1234/v1"),
+    ("llama.cpp", "http://localhost:8080/v1"),
+    ("vLLM", "http://localhost:8000/v1"),
+    ("Jan", "http://localhost:1337/v1"),
+    ("LiteLLM", "http://localhost:4000/v1"),
+];
+
+/// All saved custom endpoints (missing file = none). Explicit-path twin
+/// for tests; corrupt files read as empty rather than erroring — the
+/// connect list must never die on a hand-edited file.
+pub fn load_custom_endpoints() -> Vec<CustomEndpoint> {
+    let path = custom_endpoints_path().unwrap_or_else(|_| PathBuf::from("/dev/null"));
+    load_custom_endpoints_at(&path)
+}
+
+pub(crate) fn load_custom_endpoints_at(path: &Path) -> Vec<CustomEndpoint> {
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<CustomEndpoint>>(&body).unwrap_or_default()
+}
+
+fn save_custom_endpoints_at(path: &Path, eps: &[CustomEndpoint]) -> anyhow::Result<()> {
+    save_private_json(path, &serde_json::to_value(eps)?)
+}
+
+/// Upserts the endpoint for `base_url` (normalized first) with its derived
+/// display name and `keyless` flag, and returns it. Idempotent — a
+/// reconnect refreshes the flags in place.
+pub(crate) fn upsert_custom_endpoint_at(
+    path: &Path,
+    base_url: &str,
+    keyless: bool,
+) -> anyhow::Result<CustomEndpoint> {
+    let base = normalize_custom_base_url(base_url);
+    let mut eps = load_custom_endpoints_at(path);
+    let ep = if let Some(existing) = eps
+        .iter_mut()
+        .find(|e| normalize_custom_base_url(&e.base_url) == base)
+    {
+        existing.name = custom_display_name(&base);
+        existing.keyless = keyless;
+        existing.clone()
+    } else {
+        let ep = CustomEndpoint {
+            name: custom_display_name(&base),
+            base_url: base.clone(),
+            keyless,
+        };
+        eps.push(ep.clone());
+        ep
+    };
+    save_custom_endpoints_at(path, &eps)?;
+    Ok(ep)
+}
+
+/// Drops the endpoint for `base_url`; returns whether one was there.
+pub(crate) fn remove_custom_endpoint_at(path: &Path, base_url: &str) -> anyhow::Result<bool> {
+    let base = normalize_custom_base_url(base_url);
+    let mut eps = load_custom_endpoints_at(path);
+    let before = eps.len();
+    eps.retain(|e| normalize_custom_base_url(&e.base_url) != base);
+    if eps.len() == before {
+        return Ok(false);
+    }
+    save_custom_endpoints_at(path, &eps)?;
+    Ok(true)
 }
 
 /// Which connection an effort or other per-provider value belongs to:
@@ -939,7 +1102,11 @@ pub(crate) const POPULAR_DEFS: &[(&str, &str, &str, &str, bool)] = &[
 /// providers. The modal's sort promotes connected and env-detected rows
 /// above that order and moves Custom under the popular block — the row the
 /// separator is drawn under.
-pub fn build_connect_items(catalog: &Catalog, providers: &[InstalledProvider]) -> Vec<ConnectItem> {
+pub fn build_connect_items(
+    catalog: &Catalog,
+    providers: &[InstalledProvider],
+    customs: &[CustomEndpoint],
+) -> Vec<ConnectItem> {
     let mut items = Vec::new();
     for installed in providers {
         let sublabel = if installed.auth_method.name.trim().is_empty() {
@@ -960,14 +1127,29 @@ pub fn build_connect_items(catalog: &Catalog, providers: &[InstalledProvider]) -
         });
     }
 
+    for ep in customs {
+        items.push(ConnectItem {
+            id: custom_key_id(&ep.base_url),
+            name: ep.name.clone(),
+            sublabel: format!("({})", ep.base_url),
+            base_url: ep.base_url.clone(),
+            no_auth: ep.keyless,
+            auth: if ep.keyless {
+                ConnectAuth::None
+            } else {
+                ConnectAuth::ApiKey
+            },
+        });
+    }
+
     let mut popular_ids = std::collections::HashSet::new();
 
-    // Custom OpenAI/Anthropic-compatible endpoint (separator drawn under it).
+    // Custom OpenAI-compatible endpoint (separator drawn under it).
     popular_ids.insert("custom".to_string());
     items.push(ConnectItem {
         id: "custom".to_string(),
         name: "Custom".to_string(),
-        sublabel: "(OpenAI/Anthropic compatible)".to_string(),
+        sublabel: "(any OpenAI-compatible base URL)".to_string(),
         base_url: String::new(),
         no_auth: false,
         auth: ConnectAuth::ApiKey,

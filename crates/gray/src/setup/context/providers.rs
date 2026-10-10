@@ -495,20 +495,12 @@ pub fn clamp_thinking_level(model_id: &str, level: &str) -> &'static str {
 }
 
 /// Dynamically queries the provider's live /models endpoint (e.g. OpenAI, OpenRouter, Ollama, vLLM, LMStudio, etc.).
-/// The live `/models` (or `/tags`) probe. Split out so the blocking entry
-/// point and a background refresher thread can share one implementation.
-async fn fetch_models_async(base: String, key: Option<String>) -> Vec<(String, String)> {
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(3000))
-        .user_agent(concat!("gray/", env!("CARGO_PKG_VERSION")))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let trimmed_base = base.trim_end_matches('/');
-    let endpoints = if trimmed_base.contains("openrouter.ai") {
+/// The model-list URLs worth trying for a base, most likely first:
+/// `/models` (`/tags` for Ollama), with root prefixes for bases that
+/// aren't already `/v1`-shaped. Shared by [`fetch_models_async`] and the
+/// custom-endpoint reachability probe.
+fn model_list_candidates(trimmed_base: &str) -> Vec<String> {
+    if trimmed_base.contains("openrouter.ai") {
         vec!["https://openrouter.ai/api/v1/models".to_string()]
     } else if trimmed_base.ends_with("/v1") {
         vec![
@@ -522,9 +514,145 @@ async fn fetch_models_async(base: String, key: Option<String>) -> Vec<(String, S
             format!("{trimmed_base}/api/tags"),
             format!("{trimmed_base}/api/v1/models"),
         ]
+    }
+}
+
+/// What the custom-endpoint screen learns from probing a base URL.
+/// `Up` carries the model count when the list route answered and parsed;
+/// `Auth` means the endpoint is alive but wants a credential (401/403) —
+/// the key screen is the right next step, not an error; `Down` is every
+/// other outcome — nothing listening, wrong port, or no OpenAI-shaped
+/// list route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndpointProbe {
+    Up { models: usize },
+    Auth,
+    Down,
+}
+
+/// One probe GET on each candidate until something answers. Auth-free:
+/// the point is "is there an OpenAI-shaped server here", not "does the
+/// key work" — [`verify_api_key`] answers that on the next screen.
+async fn probe_endpoint_async(base: String) -> EndpointProbe {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .user_agent(concat!("gray/", env!("CARGO_PKG_VERSION")))
+        .build()
+    else {
+        return EndpointProbe::Down;
+    };
+    for url in model_list_candidates(base.trim_end_matches('/')) {
+        let Ok(resp) = client.get(&url).send().await else {
+            continue;
+        };
+        let status = resp.status();
+        if status.is_success() {
+            let models = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .map(|json| count_models_json(&json))
+                .unwrap_or(0);
+            return EndpointProbe::Up { models };
+        }
+        if matches!(status.as_u16(), 401 | 403) {
+            return EndpointProbe::Auth;
+        }
+    }
+    EndpointProbe::Down
+}
+
+/// Count of rows in a parsed model-list body — `data`, `models`, or a
+/// bare array; unknown shapes count as 0 (still "up", just unnamed).
+fn count_models_json(json: &serde_json::Value) -> usize {
+    if let Some(arr) = json.as_array() {
+        arr.len()
+    } else if let Some(arr) = json.get("data").and_then(|d| d.as_array()) {
+        arr.len()
+    } else {
+        json.get("models")
+            .and_then(|m| m.as_array())
+            .map_or(0, |a| a.len())
+    }
+}
+
+/// Reachability probe for the custom-endpoint screen. Same own-runtime
+/// discipline as [`fetch_live_provider_models`].
+pub fn probe_custom_endpoint(base_url: &str) -> EndpointProbe {
+    let base = base_url.to_string();
+    std::thread::scope(|s| {
+        s.spawn(move || {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt.block_on(probe_endpoint_async(base)),
+                Err(_) => EndpointProbe::Down,
+            }
+        })
+        .join()
+        .unwrap_or(EndpointProbe::Down)
+    })
+}
+
+/// One local-server suggestion on the custom endpoint screen.
+pub struct LocalEndpointSuggestion {
+    pub name: &'static str,
+    pub url: &'static str,
+    /// `GET {url}/models` answered inside the probe window.
+    pub running: bool,
+}
+
+/// Probe every [`KNOWN_LOCAL_ENDPOINTS`](crate::setup::catalog::KNOWN_LOCAL_ENDPOINTS)
+/// entry at once — one short-lived runtime per port, ~200ms wall — so the
+/// suggestion list can badge what is actually running instead of listing
+/// dead guesses. Same thread+runtime pattern as [`ollama_running`].
+pub fn probe_local_endpoints() -> Vec<LocalEndpointSuggestion> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = crate::setup::catalog::KNOWN_LOCAL_ENDPOINTS
+            .iter()
+            .map(|&(name, url)| {
+                scope.spawn(move || {
+                    let running = (|| {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .ok()?;
+                        rt.block_on(async {
+                            let client = reqwest::Client::builder()
+                                .timeout(std::time::Duration::from_millis(250))
+                                .build()
+                                .ok()?;
+                            client
+                                .get(format!("{url}/models"))
+                                .send()
+                                .await
+                                .ok()
+                                .map(|r| r.status().is_success())
+                        })
+                    })()
+                    .unwrap_or(false);
+                    LocalEndpointSuggestion { name, url, running }
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    })
+}
+
+/// The live `/models` (or `/tags`) probe. Split out so the blocking entry
+/// point and a background refresher thread can share one implementation.
+async fn fetch_models_async(base: String, key: Option<String>) -> Vec<(String, String)> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(3000))
+        .user_agent(concat!("gray/", env!("CARGO_PKG_VERSION")))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
     };
 
-    for url in endpoints {
+    for url in model_list_candidates(base.trim_end_matches('/')) {
         let mut req = client.get(&url);
         if let Some(k) = &key
             && !k.is_empty()

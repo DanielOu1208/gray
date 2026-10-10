@@ -1099,6 +1099,7 @@ name = "gray-core"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "base64",
  "futures",
  "log",
  "serde",

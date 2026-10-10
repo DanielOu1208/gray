@@ -56,7 +56,7 @@ fn installed_provider() -> InstalledProvider {
 fn connect_rows_include_each_plugin_auth_method() {
     let catalog = crate::setup::catalog::Catalog::default();
     let providers = vec![installed_provider()];
-    let rows = build_connect_items(&catalog, &providers);
+    let rows = build_connect_items(&catalog, &providers, &[]);
     assert!(
         rows.iter().any(|row| row.id == "example-sub:example"
             && matches!(&row.auth, ConnectAuth::Plugin { .. }))
