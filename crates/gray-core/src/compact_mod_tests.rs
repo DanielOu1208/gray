@@ -6,6 +6,22 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use std::sync::{Arc, Mutex};
 
+/// `$GRAY_HOME` is process-global: media stubbing materializes real files,
+/// so the stub tests pin it to a tempdir under the shared lock (same one
+/// `spill_tests` and `paths` use — one env, one lock).
+fn with_home<T>(body: impl FnOnce() -> T) -> T {
+    let _guard = crate::paths::HOME_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    // SAFETY: the lock makes this the only thread touching the var while it
+    // is set, and every test reads back only its own directory.
+    unsafe { std::env::set_var("GRAY_HOME", dir.path()) };
+    let out = body();
+    unsafe { std::env::remove_var("GRAY_HOME") };
+    out
+}
+
 // --- Task 2 (RED): retention grouping + budget walk --------------------
 
 fn assistant_tool_use(id: &str) -> Message {
@@ -567,24 +583,31 @@ fn tool_only_round_with_large_output_survives_as_citation() {
 
 #[test]
 fn anchor_stubs_large_media_but_keeps_the_words() {
-    let mut m = Message::user("what does this diagram show?");
-    m.content.push(ContentBlock::Image {
-        media_type: "image/png".to_string(),
-        data: "A".repeat(IMAGE_STUB_MIN_BYTES + 1),
-    });
-    let anchor = anchor_message(&[m]).expect("user turn anchors");
-    assert_eq!(anchor.content.len(), 2);
-    match &anchor.content[0] {
-        ContentBlock::Text { text } => assert_eq!(text, "what does this diagram show?"),
-        b => panic!("text block must survive, got {b:?}"),
-    }
-    match &anchor.content[1] {
-        ContentBlock::Text { text } => {
-            assert!(text.contains("elided from context"), "{text}");
-            assert!(text.contains("image/png"), "{text}");
+    with_home(|| {
+        let mut m = Message::user("what does this diagram show?");
+        m.content.push(ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "QUJD".repeat(IMAGE_STUB_MIN_BYTES),
+        });
+        let anchor = anchor_message(&[m]).expect("user turn anchors");
+        assert_eq!(anchor.content.len(), 2);
+        match &anchor.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "what does this diagram show?"),
+            b => panic!("text block must survive, got {b:?}"),
         }
-        b => panic!("media must become a citation stub, got {b:?}"),
-    }
+        match &anchor.content[1] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("elided from context"), "{text}");
+                assert!(text.contains("image/png"), "{text}");
+                assert!(text.contains("Saved to"), "{text}");
+                let saved = std::fs::read_dir(crate::paths::attachments_dir().unwrap())
+                    .unwrap()
+                    .count();
+                assert_eq!(saved, 1, "elided bytes must land on disk");
+            }
+            b => panic!("media must become a citation stub, got {b:?}"),
+        }
+    });
 }
 
 #[test]
@@ -603,45 +626,47 @@ fn anchor_leaves_small_media_alone() {
 
 #[test]
 fn media_older_than_two_kept_groups_becomes_a_stub() {
-    let big = || "B".repeat(IMAGE_STUB_MIN_BYTES + 1);
-    let mut old_pic = Message::user("old picture");
-    old_pic.content.push(ContentBlock::Image {
-        media_type: "image/png".to_string(),
-        data: big(),
+    with_home(|| {
+        let big = || "QUJD".repeat(IMAGE_STUB_MIN_BYTES);
+        let mut old_pic = Message::user("old picture");
+        old_pic.content.push(ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: big(),
+        });
+        let mut recent_pic = Message::user("recent picture");
+        recent_pic.content.push(ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: big(),
+        });
+        // Four retained groups, oldest first: old_pic | big round | big round |
+        // recent_pic. The middle rounds must be large enough to survive the
+        // retention filter (small tool results are droppable and would leave
+        // only two groups, defeating the point of the test).
+        let mut msgs = vec![old_pic];
+        msgs.extend(big_tool_group("c1", ARC_STUB_MIN_BYTES + 100));
+        msgs.extend(big_tool_group("c2", ARC_STUB_MIN_BYTES + 100));
+        msgs.push(recent_pic);
+        let out = build_retained_with_session(&msgs, RETAINED_MESSAGE_TOKEN_BUDGET, Some("sess1"));
+        let has_raw_image = |m: &Message| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Image { .. }))
+        };
+        let stubbed = |m: &Message| {
+            m.content.iter().any(|b| match b {
+                ContentBlock::Text { text } => text.contains("elided from context"),
+                _ => false,
+            })
+        };
+        // Oldest picture: stubbed. Newest picture group: pixels kept.
+        assert!(stubbed(&out[0]), "old media must be stubbed: {:?}", out[0]);
+        assert!(!has_raw_image(&out[0]));
+        let last = out.last().unwrap();
+        assert!(
+            has_raw_image(last),
+            "newest media keeps its pixels: {last:?}"
+        );
     });
-    let mut recent_pic = Message::user("recent picture");
-    recent_pic.content.push(ContentBlock::Image {
-        media_type: "image/png".to_string(),
-        data: big(),
-    });
-    // Four retained groups, oldest first: old_pic | big round | big round |
-    // recent_pic. The middle rounds must be large enough to survive the
-    // retention filter (small tool results are droppable and would leave
-    // only two groups, defeating the point of the test).
-    let mut msgs = vec![old_pic];
-    msgs.extend(big_tool_group("c1", ARC_STUB_MIN_BYTES + 100));
-    msgs.extend(big_tool_group("c2", ARC_STUB_MIN_BYTES + 100));
-    msgs.push(recent_pic);
-    let out = build_retained_with_session(&msgs, RETAINED_MESSAGE_TOKEN_BUDGET, Some("sess1"));
-    let has_raw_image = |m: &Message| {
-        m.content
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Image { .. }))
-    };
-    let stubbed = |m: &Message| {
-        m.content.iter().any(|b| match b {
-            ContentBlock::Text { text } => text.contains("elided from context"),
-            _ => false,
-        })
-    };
-    // Oldest picture: stubbed. Newest picture group: pixels kept.
-    assert!(stubbed(&out[0]), "old media must be stubbed: {:?}", out[0]);
-    assert!(!has_raw_image(&out[0]));
-    let last = out.last().unwrap();
-    assert!(
-        has_raw_image(last),
-        "newest media keeps its pixels: {last:?}"
-    );
 }
 
 #[test]

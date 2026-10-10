@@ -177,16 +177,23 @@ const IMAGE_STUB_MIN_BYTES: usize = 8 * 1024;
 fn stub_large_media(group: &mut [Message]) {
     for m in group.iter_mut() {
         for b in m.content.iter_mut() {
-            let (media_type, bytes) = match b {
+            let (media_type, data) = match b {
                 ContentBlock::Image { media_type, data }
                 | ContentBlock::Media {
                     media_type, data, ..
-                } if data.len() >= IMAGE_STUB_MIN_BYTES => (media_type.clone(), data.len()),
+                } if data.len() >= IMAGE_STUB_MIN_BYTES => (media_type.clone(), data.clone()),
                 _ => continue,
             };
-            *b = ContentBlock::text(format!(
-                "[{media_type} elided from context ({bytes} bytes). The original survives in the session transcript and source file]"
-            ));
+            let bytes = data.len();
+            *b = match crate::paths::materialize_media(&media_type, &data) {
+                Some(path) => ContentBlock::text(format!(
+                    "[{media_type} elided from context ({bytes} bytes). Saved to {}; read it to re-view]",
+                    path.display()
+                )),
+                None => ContentBlock::text(format!(
+                    "[{media_type} elided from context ({bytes} bytes). The original survives in the session transcript and source file]"
+                )),
+            };
         }
     }
 }
