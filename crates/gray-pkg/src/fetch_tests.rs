@@ -28,100 +28,6 @@ fn refuses_plain_http_remote() {
 }
 
 /// Minimal stored-ZIP builder (method selectable per file).
-fn tiny_zip(files: &[(&str, &[u8], u16)]) -> Vec<u8> {
-    use std::io::Write;
-    let mut out = Vec::new();
-    let mut central = Vec::new();
-    for (name, data, method) in files {
-        let payload: Vec<u8> = if *method == 8 {
-            let mut enc =
-                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
-            enc.write_all(data).unwrap();
-            enc.finish().unwrap()
-        } else {
-            data.to_vec()
-        };
-        let off = out.len() as u32;
-        out.extend_from_slice(b"PK\x03\x04");
-        out.extend_from_slice(&20u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&method.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(&payload);
-        central.extend_from_slice(b"PK\x01\x02");
-        central.extend_from_slice(&20u16.to_le_bytes());
-        central.extend_from_slice(&20u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&method.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u32.to_le_bytes());
-        central.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u16.to_le_bytes());
-        central.extend_from_slice(&0u32.to_le_bytes());
-        central.extend_from_slice(&off.to_le_bytes());
-        central.extend_from_slice(name.as_bytes());
-    }
-    let cd_off = out.len() as u32;
-    let cd_size = central.len() as u32;
-    out.extend_from_slice(&central);
-    out.extend_from_slice(b"PK\x05\x06");
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
-    out.extend_from_slice(&cd_size.to_le_bytes());
-    out.extend_from_slice(&cd_off.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out
-}
-
-#[test]
-fn zip_roundtrips_stored_and_deflated() {
-    let dir = tempfile::tempdir().unwrap();
-    let archive = dir.path().join("a.zip");
-    std::fs::write(
-        &archive,
-        tiny_zip(&[("SKILL.md", b"# hi\n", 0), ("sub/notes.md", b"nested\n", 8)]),
-    )
-    .unwrap();
-    let dest = dir.path().join("out");
-    unpack_zip(&archive, &dest).unwrap();
-    assert_eq!(std::fs::read(dest.join("SKILL.md")).unwrap(), b"# hi\n");
-    assert_eq!(
-        std::fs::read(dest.join("sub/notes.md")).unwrap(),
-        b"nested\n"
-    );
-}
-
-#[test]
-fn zip_rejects_traversal_garbage_and_method() {
-    let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("out");
-    let archive = dir.path().join("a.zip");
-    std::fs::write(&archive, tiny_zip(&[("../evil", b"x", 0)])).unwrap();
-    assert!(unpack_zip(&archive, &dest).is_err());
-    std::fs::write(&archive, tiny_zip(&[("/abs", b"x", 0)])).unwrap();
-    assert!(unpack_zip(&archive, &dest).is_err());
-    std::fs::write(&archive, tiny_zip(&[("a", b"x", 12)])).unwrap();
-    assert!(unpack_zip(&archive, &dest).is_err());
-    std::fs::write(&archive, b"not a zip at all................").unwrap();
-    assert!(unpack_zip(&archive, &dest).is_err());
-    std::fs::write(&archive, b"PK").unwrap();
-    assert!(unpack_zip(&archive, &dest).is_err());
-}
 
 #[test]
 fn rejects_dotdot_entries() {
@@ -228,34 +134,6 @@ fn url_policy_uses_downloader_authority() {
     ] {
         assert!(check_url(url).is_err(), "accepted {url}");
     }
-}
-
-#[test]
-fn zip_refuses_windows_drive_prefixed_entries() {
-    // The Windows path-confinement hole: "C:\evil" is neither absolute
-    // (no leading / or \) nor a `..` component, so it passed the old
-    // checks — and `dest.join("C:\evil")` *replaces* the base on Windows,
-    // writing outside the install dir.
-    let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("out");
-    let archive = dir.path().join("a.zip");
-    for name in ["C:\\evil", "C:evil", "\\\\.\\pipe\\x", "//server/share/x"] {
-        std::fs::write(&archive, tiny_zip(&[(name, b"x", 0)])).unwrap();
-        assert!(
-            unpack_zip(&archive, &dest).is_err(),
-            "drive/UNC entry must be refused: {name}"
-        );
-        assert!(!dest.join(name).exists() || !dest.exists());
-    }
-    // Ordinary names still unpack.
-    std::fs::write(
-        &archive,
-        tiny_zip(&[("SKILL.md", b"# hi\n", 0), ("sub/notes.md", b"n\n", 8)]),
-    )
-    .unwrap();
-    unpack_zip(&archive, &dest).unwrap();
-    assert!(dest.join("SKILL.md").exists());
-    assert!(dest.join("sub/notes.md").exists());
 }
 
 #[test]

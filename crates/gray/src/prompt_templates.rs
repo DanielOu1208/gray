@@ -17,8 +17,8 @@
 //! `argument-hint:` show in the completion popup.
 //!
 //! Search order, first name wins: the project (cwd up to the git root,
-//! nearest first; `.gray/prompts`, `.pi/prompts`, `.claude/commands`), then
-//! the user (`~/.gray/prompts`, `~/.pi/agent/prompts`, `~/.claude/commands`).
+//! nearest first; `.gray/prompts`), then
+//! the user (`~/.gray/prompts`).
 //! Built-in slash commands always win over a template of the same name.
 
 use std::path::{Path, PathBuf};
@@ -211,19 +211,13 @@ fn load_dir(dir: &Path, source: &'static str, out: &mut Vec<PromptTemplate>) {
 pub fn search_dirs(
     cwd: &Path,
     gray_home: Option<&Path>,
-    home: Option<&Path>,
+    _home: Option<&Path>,
 ) -> Vec<(PathBuf, &'static str)> {
     let mut dirs = Vec::new();
     let git_root = crate::skills::find_git_root(cwd);
     let mut cur = Some(cwd.to_path_buf());
     while let Some(dir) = cur {
-        for sub in [
-            [".gray", "prompts"],
-            [".pi", "prompts"],
-            [".claude", "commands"],
-        ] {
-            dirs.push((dir.join(sub[0]).join(sub[1]), "project"));
-        }
+        dirs.push((dir.join(".gray").join("prompts"), "project"));
         // Without a repo, only the cwd itself counts as the project.
         if git_root.as_ref().is_none_or(|r| *r == dir) {
             break;
@@ -232,10 +226,6 @@ pub fn search_dirs(
     }
     if let Some(gh) = gray_home {
         dirs.push((gh.join("prompts"), "user"));
-    }
-    if let Some(h) = home {
-        dirs.push((h.join(".pi").join("agent").join("prompts"), "user"));
-        dirs.push((h.join(".claude").join("commands"), "user"));
     }
     // A project dir that is also a user dir (cwd = $HOME) loads once.
     let mut seen = std::collections::HashSet::new();

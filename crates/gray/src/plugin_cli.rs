@@ -176,7 +176,7 @@ async fn index_entry(name: &str) -> Option<gray_pkg::index::Entry> {
 
 /// `gray plugin install <name|url|path>` — one entry point for every
 /// plugin source, tried in order:
-///   0. a skill spec (`clawhub:`/`github:`/`url:`) → `skills_ops` (skill
+///   0. a skill spec (`github:`/`url:`) → `skills_ops` (skill
 ///      installs write `~/.gray/skills`, never a plugin lock row);
 ///   a. `GRAY_PLUGIN_PATH` set → register that executable under `spec`.
 ///   b. `spec` is an existing path → register it (the manifest names it).

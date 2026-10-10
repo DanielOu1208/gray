@@ -110,11 +110,9 @@ fn search_dirs_walk_to_the_git_root_then_user_dirs() {
     let dirs = search_dirs(&sub, Some(&gh), Some(&home));
     let paths: Vec<_> = dirs.iter().map(|(d, _)| d.clone()).collect();
     assert_eq!(paths[0], sub.join(".gray").join("prompts"));
-    assert!(paths.contains(&repo.join(".claude").join("commands")));
     assert!(!paths.contains(&root.path().join(".gray").join("prompts")));
     let user_start = dirs.iter().position(|(_, s)| *s == "user").unwrap();
     assert_eq!(paths[user_start], gh.join("prompts"));
-    assert!(paths.contains(&home.join(".pi").join("agent").join("prompts")));
 }
 
 #[test]
@@ -123,7 +121,7 @@ fn no_repo_means_only_the_cwd_is_project() {
     let sub = root.path().join("a");
     std::fs::create_dir_all(&sub).unwrap();
     let dirs = search_dirs(&sub, None, None);
-    assert_eq!(dirs.len(), 3);
+    assert_eq!(dirs.len(), 1);
     assert!(
         dirs.iter()
             .all(|(d, s)| d.starts_with(&sub) && *s == "project")

@@ -5,8 +5,8 @@
 //! - otherwise, load direct `.md` children in the root
 //! - recurse into subdirectories to find `SKILL.md`
 //! - respect `.gitignore` / `.ignore` / `.fdignore` via prefix-aware `ignore`-crate semantics
-//! - global: `~/.gray/skills`, `~/.config/opencode/skills`, `~/.config/opencode/*/skills`, `~/.agents/skills`, `~/.claude/skills`, `~/.pi/agent/skills`
-//! - project: `.gray/skills`, `.opencode/skills`, `.agents/skills`, `.claude/skills`, `.pi/skills`, walking up to git root
+//! - global: `~/.gray/skills`, `~/.config/opencode/skills`, `~/.config/opencode/*/skills`, `~/.agents/skills`
+//! - project: `.gray/skills`, `.opencode/skills`, `.agents/skills`, walking up to git root
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -73,10 +73,6 @@ pub(crate) fn gray_agent_dir() -> PathBuf {
         let gray = home.join(".gray");
         if gray.exists() {
             return gray;
-        }
-        let pi = home.join(".pi").join("agent");
-        if pi.exists() {
-            return pi;
         }
         return gray;
     }
@@ -442,9 +438,6 @@ fn skill_search_roots(cwd: &Path, agent_dir: &Path) -> Vec<(PathBuf, &'static st
     if std::env::var("GRAY_SKILLS_ONLY").as_deref() == Ok("1") {
         return roots;
     }
-    // P2-2: pi installs land in `<agent_dir>/plugins/pi/<pkg>/`.
-    let pi_plugins = resolved_agent_dir.join("plugins").join("pi");
-    push_root(&mut roots, pi_plugins, "user", &global_skills);
     if let Some(home) = resolve_home() {
         // OpenCode global skills & plugins (e.g. superpowers)
         let config_base = std::env::var("XDG_CONFIG_HOME")
@@ -469,22 +462,10 @@ fn skill_search_roots(cwd: &Path, agent_dir: &Path) -> Vec<(PathBuf, &'static st
             }
         }
 
-        // Agents and Claude global skills
+        // Agents global skills
         push_root(
             &mut roots,
             home.join(".agents").join("skills"),
-            "user",
-            &global_skills,
-        );
-        push_root(
-            &mut roots,
-            home.join(".claude").join("skills"),
-            "user",
-            &global_skills,
-        );
-        push_root(
-            &mut roots,
-            home.join(".pi").join("agent").join("skills"),
             "user",
             &global_skills,
         );
@@ -516,7 +497,7 @@ fn skill_search_roots(cwd: &Path, agent_dir: &Path) -> Vec<(PathBuf, &'static st
         }
     }
     for ancestor in project_roots.iter().rev() {
-        for cfg in [".gray", ".opencode", ".agents", ".claude", ".pi"] {
+        for cfg in [".gray", ".opencode", ".agents"] {
             let d = ancestor.join(cfg).join("skills");
             if d.is_dir() {
                 roots.push((d, "project"));
