@@ -300,13 +300,29 @@ impl Config {
             saved.lean.unwrap_or(true)
         };
 
+        // Provider identity envs let one process run a connection the
+        // saved file doesn't name — an empty value clears the field. The
+        // fusion sidekick's `gray -p` child targets its own provider
+        // through exactly this.
+        let provider_id = env("GRAY_PROVIDER_ID")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| nonempty(Some(saved.provider_id.as_str())).unwrap_or_default());
+        let credential_source = env("GRAY_CREDENTIAL_SOURCE")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| {
+                nonempty(Some(saved.credential_source.as_str())).unwrap_or_default()
+            });
+        let auth_ref = env("GRAY_AUTH_REF")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| nonempty(Some(saved.auth_ref.as_str())).unwrap_or_default());
+
         let config = Self {
             model,
             base_url,
             api_key,
-            provider_id: nonempty(Some(saved.provider_id.as_str())).unwrap_or_default(),
-            credential_source: nonempty(Some(saved.credential_source.as_str())).unwrap_or_default(),
-            auth_ref: nonempty(Some(saved.auth_ref.as_str())).unwrap_or_default(),
+            provider_id,
+            credential_source,
+            auth_ref,
             thinking_effort,
             show_reasoning,
             fast_mode,

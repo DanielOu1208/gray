@@ -237,8 +237,17 @@ pub(crate) fn selected_model_label(config: &Config) -> Option<String> {
 }
 
 /// Footer / status label for the live selection when it is a composite
-/// row (`Fusion · Opus 5.5 High + SWE-2 High`); `None` otherwise.
+/// row (`Fusion · Opus 5.5 High × SWE-2 High`); `None` otherwise.
 pub(crate) fn composite_label_for(config: &Config) -> Option<String> {
+    composite_label_parts_for(config).map(|segs| segs.into_iter().map(|(t, _)| t).collect())
+}
+
+/// The same label as paintable `(text, slot)` segments — the footer's cue
+/// for which half of a fusion is producing output. `None` for a
+/// non-composite selection.
+pub(crate) fn composite_label_parts_for(
+    config: &Config,
+) -> Option<Vec<(String, Option<usize>)>> {
     let model = config.model.as_deref()?;
     let shape = super::variants::row_shape(model)?;
     let name = load_provider_names(config)
@@ -247,7 +256,12 @@ pub(crate) fn composite_label_for(config: &Config) -> Option<String> {
         .map(|(_, n)| n)
         .unwrap_or_else(|| super::context::friendly_model_name(model));
     let parts = selection_parts(&shape, &config.model_parts);
-    super::variants::composite_label(&shape, &name, &parts, config.thinking_effort.as_deref())
+    super::variants::composite_label_parts(
+        &shape,
+        &name,
+        &parts,
+        config.thinking_effort.as_deref(),
+    )
 }
 
 /// The cached `(id, name)` list for the live provider (no network).
@@ -1096,20 +1110,7 @@ fn option_parts(
     option: &str,
 ) -> Option<super::variants::Parts> {
     let key = &shape.slots.get(slot)?.key;
-    let mut want = cur.clone();
-    want.insert(key.clone(), option.to_string());
-    if shape.serves(&want) {
-        return Some(want);
-    }
-    let earlier: Vec<&String> = shape.slots[..slot].iter().map(|s| &s.key).collect();
-    shape
-        .variants
-        .iter()
-        .find(|v| {
-            v.parts.get(key).map(String::as_str) == Some(option)
-                && earlier.iter().all(|k| v.parts.get(*k) == cur.get(*k))
-        })
-        .map(|v| v.parts.clone())
+    shape.option_parts(cur, key, option)
 }
 
 /// The next selectable option from `from` stepping by `dir` (±1), skipping
@@ -1302,7 +1303,7 @@ fn picker_row_line(
         let room = w.saturating_sub(used + 2);
         if room >= 8 && !summary.is_empty() {
             spans.push(Span::styled(
-                format!("  {}", fit_chars(&summary.join(" + "), room)),
+                format!("  {}", fit_chars(&summary.join(" × "), room)),
                 suffix,
             ));
         }

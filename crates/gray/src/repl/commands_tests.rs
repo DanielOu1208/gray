@@ -377,7 +377,8 @@ fn model_completes_cached_ids() {
     crate::setup::set_active_model_provider(&base);
     runtime.block_on(async {
         let models = crate::setup::fetch_live_provider_models(&base, None);
-        assert_eq!(models.len(), 1);
+        // The fetched row plus the synthesized local-fusion composite.
+        assert_eq!(models.len(), 2);
     });
     response.join().unwrap();
     let rows = complete_command_args("model", "", cwd);

@@ -713,7 +713,35 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                     .map(|(text, color)| Seg::new(text.clone(), *color))
                     .unwrap_or_else(|| Seg::new("", muted)),
                 "work" => Seg::new(tui.background_work.clone().unwrap_or_default(), t.accent),
-                "model" => Seg::new(model_display.clone(), muted),
+                "model" => {
+                    let mut seg = Seg::new(model_display.clone(), muted);
+                    if let Some(parts) = &tui.model_label_parts {
+                        // The working model's half of a fusion label burns
+                        // accent: the sidekick's while its `handoff` call
+                        // executes, otherwise the lead's during a live turn.
+                        let sk_lit = tui
+                            .live_tools
+                            .iter()
+                            .any(|tl| tl.running && tl.name.contains("handoff"));
+                        let lit = if sk_lit {
+                            Some(1)
+                        } else if tui.turn_started.is_some() {
+                            Some(0)
+                        } else {
+                            None
+                        };
+                        seg.parts = Some(
+                            parts
+                                .iter()
+                                .map(|(txt, slot)| {
+                                    let c = if *slot == lit { t.accent } else { muted };
+                                    (txt.clone(), c)
+                                })
+                                .collect(),
+                        );
+                    }
+                    seg
+                }
                 "effort" => Seg::new(effort_display.clone(), t.tool_dim),
                 "cwd" => Seg::new(crate::statusline::short_cwd(&tui.cwd), muted),
                 "dir" => Seg::new(
@@ -760,12 +788,19 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let left_len = 1 + seg_width(&left_segs);
         let right_len = seg_width(&right_segs);
         let pad_len = w.saturating_sub(left_len + right_len);
-        let to_span =
-            |s: crate::statusline::Seg| Span::styled(s.text, Style::default().fg(s.color));
+        let to_spans = |s: crate::statusline::Seg| -> Vec<Span<'static>> {
+            match s.parts {
+                Some(parts) => parts
+                    .into_iter()
+                    .map(|(text, color)| Span::styled(text, Style::default().fg(color)))
+                    .collect(),
+                None => vec![Span::styled(s.text, Style::default().fg(s.color))],
+            }
+        };
         let mut footer_spans = vec![Span::raw(" ")];
-        footer_spans.extend(left_segs.into_iter().map(to_span));
+        footer_spans.extend(left_segs.into_iter().flat_map(to_spans));
         footer_spans.push(Span::raw(" ".repeat(pad_len)));
-        footer_spans.extend(right_segs.into_iter().map(to_span));
+        footer_spans.extend(right_segs.into_iter().flat_map(to_spans));
         // Transparent footer: text only, no full-bleed band. Painted on the
         // row `footer_paint_row` clamps into the frame — never skipped.
         if let Some(footer_y) = footer_paint_row(footer_y, area) {

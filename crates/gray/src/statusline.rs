@@ -82,6 +82,10 @@ impl StatusLineConfig {
 pub struct Seg {
     pub text: String,
     pub color: Color,
+    /// Per-piece coloring within the segment (`text` stays the full string
+    /// for width math): `Some` renders each `(text, color)` piece as its
+    /// own span instead of one `color` span.
+    pub parts: Option<Vec<(String, Color)>>,
 }
 
 impl Seg {
@@ -89,6 +93,7 @@ impl Seg {
         Self {
             text: text.into(),
             color,
+            parts: None,
         }
     }
 }

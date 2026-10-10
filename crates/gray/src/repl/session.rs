@@ -324,6 +324,7 @@ pub(crate) async fn handle_resume(
                         if !model.is_empty() {
                             t.set_model(model.to_string());
                             t.set_model_label(crate::setup::composite_label_for(config));
+        t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
                         }
                         // The resumed model keeps its own effort: paint it so
                         // the footer follows the switch instead of the stale
@@ -627,7 +628,7 @@ pub(crate) fn dispatch_agent_event(
                 // `ToolResult`, so this never duplicates.
                 let header = crate::tool_fmt::format_live_tool_header(name, "", None);
                 t.atomic(|t| {
-                    t.upsert_live_tool(id, header, false);
+                    t.upsert_live_tool(id, name, header, false);
                     t.set_status(Some(&format!("Preparing tool: {name}")));
                 });
             }
@@ -646,7 +647,7 @@ pub(crate) fn dispatch_agent_event(
                 let preview = crate::repl::format::truncate_chars(&preview, 60);
                 // Card + status label repaint as one frame per delta (was two).
                 t.atomic(|t| {
-                    t.upsert_live_tool(id, header, false);
+                    t.upsert_live_tool(id, name, header, false);
                     if preview.is_empty() {
                         t.set_status(Some(&format!("Preparing tool: {name}")));
                     } else {
@@ -675,7 +676,7 @@ pub(crate) fn dispatch_agent_event(
                 // scrollback render, so a duplicate never lands.
                 let header = tool_header(tool_labels, tool_previews, &name, args, Some(cwd));
                 t.atomic(|t| {
-                    t.upsert_live_tool(id, header, true);
+                    t.upsert_live_tool(id, &name, header, true);
                     t.set_status(Some("Working"));
                 });
             }

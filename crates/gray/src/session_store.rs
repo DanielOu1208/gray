@@ -720,6 +720,12 @@ impl JsonlSessionStore {
         }
     }
 
+    /// Best-effort delete of the remembered-session pointer for `cwd`
+    /// (`/new` over `gray cmd` clears the pointer, never the session).
+    pub async fn forget(&self, cwd: &Path) {
+        let _ = tokio::fs::remove_file(self.remember_path_for_cwd(cwd)).await;
+    }
+
     /// Whether `<root>/<id>.jsonl` exists (invalid id or IO error → false).
     pub(crate) async fn exists_on_disk(&self, id: &SessionId) -> bool {
         let Ok(path) = self.session_path(id) else {

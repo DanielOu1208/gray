@@ -753,7 +753,7 @@ pub fn fetch_live_provider_models(base_url: &str, api_key: Option<&str>) -> Vec<
     // ponytail: isolated short-lived runtime, never the ambient Handle — block_on
     // on a borrowed handle panics with "Tokio 1.x context ... being shutdown"
     // when a background fetch outlives REPL shutdown. Own runtime = no coupling.
-    std::thread::scope(|s| {
+    let live = std::thread::scope(|s| {
         s.spawn(move || {
             match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -765,7 +765,22 @@ pub fn fetch_live_provider_models(base_url: &str, api_key: Option<&str>) -> Vec<
         })
         .join()
         .unwrap_or_default()
-    })
+    });
+    // The synthesized fusion row rides every list the picker refreshes
+    // with — derived at read time, never persisted.
+    let Ok(home) = crate::setup::catalog::gray_home() else {
+        return live;
+    };
+    let list_key = crate::setup::catalog::normalize_custom_base_url(base_url);
+    let mut rows: Vec<crate::setup::variants::CachedRow> = live
+        .into_iter()
+        .map(|(id, name)| crate::setup::variants::CachedRow::Pair(id, name))
+        .collect();
+    crate::fusion::extend_with_fusion(&home, &list_key, &mut rows);
+    for row in &rows {
+        row.register();
+    }
+    rows.iter().map(|r| r.pair()).collect()
 }
 
 /// Live model list for a plugin-backed provider: the sidecar's
@@ -871,14 +886,20 @@ async fn plugin_models_rpc(
     for row in &rows {
         row.register();
     }
-    let models: Vec<(String, String)> = rows.iter().map(|r| r.pair()).collect();
+    let list_key = crate::setup::catalog::plugin_models_key(&installed.provider_id());
     if !rows.is_empty() {
-        save_provider_model_rows(
-            &crate::setup::catalog::plugin_models_key(&installed.provider_id()),
-            rows,
-        );
+        save_provider_model_rows(&list_key, rows.clone());
     }
-    models
+    // The synthesized fusion row appends after the save — it is never
+    // persisted, so its sidekick options always derive from live caches.
+    let mut rows = rows;
+    if let Ok(home) = crate::setup::catalog::gray_home() {
+        crate::fusion::extend_with_fusion(&home, &list_key, &mut rows);
+    }
+    if let Some(last) = rows.last() {
+        last.register();
+    }
+    rows.iter().map(|r| r.pair()).collect()
 }
 
 /// Verdict of the connect-modal key check. `Rejected` is the provider's own
@@ -1264,6 +1285,15 @@ fn read_model_list_map(
         .collect()
 }
 
+/// Every cached provider row list — the whole `provider_models.json`
+/// map. Local fusion enumerates it for sidekick candidates and to
+/// resolve qualified ids back to their connections.
+pub(crate) fn provider_model_lists(
+    home: &std::path::Path,
+) -> std::collections::BTreeMap<String, Vec<crate::setup::variants::CachedRow>> {
+    read_model_list_map(&home.join("provider_models.json"))
+}
+
 /// Best-effort load of one provider's cached rows (pairs and objects).
 pub(crate) fn load_provider_model_rows_at(
     home: &std::path::Path,
@@ -1312,7 +1342,9 @@ pub(crate) fn load_provider_model_list(base_url: &str) -> Vec<(String, String)> 
     let Ok(home) = crate::setup::catalog::gray_home() else {
         return Vec::new();
     };
-    let rows = load_provider_model_rows_at(&home, base_url);
+    let mut rows = load_provider_model_rows_at(&home, base_url);
+    let base = crate::setup::catalog::normalize_custom_base_url(base_url);
+    crate::fusion::extend_with_fusion(&home, &base, &mut rows);
     for row in &rows {
         row.register();
     }

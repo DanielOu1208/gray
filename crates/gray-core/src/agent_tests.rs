@@ -851,9 +851,12 @@ async fn unknown_tool_name_skips_executor_with_error_result() {
         .expect("expected tool result for unknown tool");
     assert!(is_error, "unknown tool must be is_error, got {output}");
     assert!(
-        output.contains("does not exist") && output.contains("nope") && output.contains(TOOL_NAME),
-        "got {output}"
+        output.contains("does not exist") && output.contains("nope") && !output.contains(TOOL_NAME),
+        "a far miss stays terse — no inventory dump: {output}"
     );
+    // A near-miss name earns a `did you mean` pointing at the real tool.
+    let hint = crate::tool_out::unknown_tool("lookpu", &[TOOL_NAME.to_string()]);
+    assert!(hint.contains("'lookup'"), "got {hint}");
     assert_eq!(agent.messages()[1].role, Role::Assistant);
     assert!(matches!(
         &agent.messages()[2].content[0],

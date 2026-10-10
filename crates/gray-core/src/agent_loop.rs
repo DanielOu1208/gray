@@ -175,17 +175,9 @@ impl Agent {
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, ToolOutput> {
         if !self.tools.iter().any(|t| t.name == name) {
-            let list = if self.tools.is_empty() {
-                "(none)".to_string()
-            } else {
-                self.tools
-                    .iter()
-                    .map(|t| t.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            return Err(ToolOutput::error(format!(
-                "Tool '{name}' does not exist. Available: {list}"
+            let names: Vec<String> = self.tools.iter().map(|t| t.name.clone()).collect();
+            return Err(ToolOutput::error(crate::tool_out::unknown_tool(
+                name, &names,
             )));
         }
         if !args.is_object() {

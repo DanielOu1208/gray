@@ -181,6 +181,9 @@ async fn run() -> anyhow::Result<()> {
             gray::Commands::Sessions { cmd } => {
                 return run_sessions(cmd).await;
             }
+            gray::Commands::Cmd { cmd } => {
+                return gray::cmd::run_cli(cmd, &mut config).await;
+            }
             // Handled before Config::resolve so plugin commands work with no
             // provider configured (fresh machine, venv-only install).
             gray::Commands::External(_) => {

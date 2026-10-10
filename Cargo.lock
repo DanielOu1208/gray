@@ -869,6 +869,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fsearch"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "memchr",
+ "memmap2",
+ "rayon",
+ "regex",
+ "regex-syntax",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1105,6 +1119,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "strsim",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -1195,6 +1210,7 @@ dependencies = [
  "async-trait",
  "base64",
  "fff-search",
+ "fsearch",
  "futures",
  "globset",
  "gray-core",

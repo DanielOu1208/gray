@@ -197,7 +197,7 @@ use crate::{DEFAULT_SYS_PROMPT, build_agent, load_or_create_system_prompt_at};
 pub mod agents_panel;
 pub mod attachments;
 pub mod commands;
-mod cron;
+pub(crate) mod cron;
 mod customize;
 mod dispatch;
 pub mod format;
@@ -210,7 +210,7 @@ mod plugin_cmds;
 mod prompt_turn;
 mod session;
 mod status;
-mod usage_panel;
+pub(crate) mod usage_panel;
 mod user_cmds;
 
 pub(crate) use commands::{REGISTRY, completion_fill, completion_matches_dyn, is_builtin_command};
@@ -335,6 +335,7 @@ pub(crate) fn push_provider_connected(
     if let Some(m) = &config.model {
         t.set_model(m.clone());
         t.set_model_label(crate::setup::composite_label_for(config));
+        t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
     }
     // Paint the effort unconditionally: a provider/model switch adopts the
     // target's own remembered level even when no clamp fires.
@@ -825,6 +826,7 @@ pub async fn run_repl_mode(
             if let Some(m) = &config.model {
                 t.set_model(m.clone());
                 t.set_model_label(crate::setup::composite_label_for(config));
+        t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
             }
             // A level this model no longer offers (a step-family `off` saved
             // before family truth won) must not ride into the footer.

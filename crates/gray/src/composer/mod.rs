@@ -313,7 +313,7 @@ pub struct Tui {
     /// wasn't an orphan continuation.
     stream_punct_hold: String,
     active_compaction: Option<ActiveCompaction>,
-    turn_started: Option<Instant>,
+    pub(crate) turn_started: Option<Instant>,
     turn_had_thinking: bool,
     /// Last retry cause shown this turn: an identical one is not repeated.
     pub(crate) last_retry_detail: Option<String>,
@@ -341,6 +341,7 @@ pub struct Tui {
     /// Footer label overriding the friendly model name (a composite
     /// selection: `Fusion · Opus 5.5 High + SWE-2 High`).
     model_label: Option<String>,
+    model_label_parts: Option<Vec<(String, Option<usize>)>>,
     cwd: String,
     thinking_effort: String,
     /// Effort-badge visibility snapshotted for the turn in flight.
@@ -432,6 +433,9 @@ pub(crate) struct AskModal {
 #[derive(Clone, Debug)]
 pub(crate) struct LiveTool {
     pub(crate) id: String,
+    /// Tool name — the fusion footer lights the sidekick while its
+    /// `handoff` call is the one executing.
+    pub(crate) name: String,
     pub(crate) header: Line<'static>,
     pub(crate) running: bool,
 }
@@ -585,6 +589,7 @@ impl Tui {
             pending_pastes: Vec::new(),
             model_name: String::new(),
             model_label: None,
+            model_label_parts: None,
             cwd,
             thinking_effort: String::new(),
             turn_show_effort: None,
@@ -872,6 +877,13 @@ impl Tui {
     pub fn set_model_label(&mut self, label: Option<String>) {
         self.model_label = label;
     }
+
+    /// Set alongside [`set_model_label`] for composite selections: each
+    /// `(text, slot)` segment is one footer span, so the part of a fusion
+    /// label that is producing output can burn brighter.
+    pub fn set_model_label_parts(&mut self, parts: Option<Vec<(String, Option<usize>)>>) {
+        self.model_label_parts = parts;
+    }
     pub fn set_cwd(&mut self, cwd: String) {
         self.cwd = cwd;
     }
@@ -1005,13 +1017,20 @@ impl Tui {
     /// `header` replaces the previous one for the same `id`, first-seen
     /// order preserved; cap mirrors the queued-preview cap so the
     /// 14-row viewport never pushes the input box off.
-    pub(crate) fn upsert_live_tool(&mut self, id: &str, header: Line<'static>, running: bool) {
+    pub(crate) fn upsert_live_tool(
+        &mut self,
+        id: &str,
+        name: &str,
+        header: Line<'static>,
+        running: bool,
+    ) {
         if let Some(slot) = self.live_tools.iter_mut().find(|t| t.id == id) {
             slot.header = header;
             slot.running = running;
         } else {
             self.live_tools.push(LiveTool {
                 id: id.to_string(),
+                name: name.to_string(),
                 header,
                 running,
             });
