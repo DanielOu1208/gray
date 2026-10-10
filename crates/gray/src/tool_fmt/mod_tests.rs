@@ -793,6 +793,7 @@ fn every_verb_has_a_live_form() {
         ("Viewed ", "Viewing "),
         ("Read ", "Reading "),
         ("Searched ", "Searching "),
+        ("Skipped ", "Skipping "),
     ] {
         assert_eq!(live_bash_verb(done), Some(live));
     }
@@ -969,4 +970,19 @@ fn a_view_drops_the_shown_echo_but_keeps_its_notes() {
     // The same line from a non-view command is real output.
     let echo = body(serde_json::json!({"command": "make"}), "Shown: x");
     assert!(echo.contains("Shown: x"), "{echo:?}");
+}
+
+#[test]
+fn noop_commands_read_as_skipped_not_ran() {
+    for cmd in ["true", ":", "echo switching tools"] {
+        let text = header(serde_json::json!({"command": cmd}));
+        assert!(text.contains(&format!("Skipped {cmd}")), "{text:?}");
+        assert!(text.ends_with("no-op, nothing ran"), "{text:?}");
+        assert!(!text.contains("Ran"), "{text:?}");
+    }
+    // Real work that merely starts with echo still reads as Ran.
+    for cmd in ["echo x > f", "true && make"] {
+        let text = header(serde_json::json!({"command": cmd}));
+        assert!(text.contains("Ran "), "{text:?}");
+    }
 }

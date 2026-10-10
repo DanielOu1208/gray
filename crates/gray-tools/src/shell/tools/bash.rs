@@ -630,7 +630,7 @@ async fn search_command(
 /// search reads them as its own glob. None when the shell would do more than
 /// split — pipes, redirects, separators, substitution, an unclosed quote — so
 /// the command falls through to a real shell instead of being half-claimed.
-fn search_words(command: &str) -> Option<Vec<String>> {
+pub(crate) fn search_words(command: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut in_word = false;
@@ -701,10 +701,7 @@ impl BashTool {
     /// nothing.
     fn noop_steer(&self, ctx: &ToolContext, command: &str) -> Option<ToolOutput> {
         let trimmed = command.trim();
-        let noop = matches!(trimmed, "true" | ":")
-            || search_words(trimmed)
-                .is_some_and(|w| matches!(w.first().map(String::as_str), Some("echo" | "printf")));
-        if !noop {
+        if !crate::shell::label::is_noop(trimmed) {
             return None;
         }
         let live = self.jobs.live_ids(ctx);
