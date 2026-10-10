@@ -2,7 +2,6 @@
 /AGENTS.md
 
 /target/
-plugins/*/target/
 # local reference clones (never commit)
 /reference/
 /port/
@@ -44,7 +43,6 @@ __pycache__/
 
 # local website build + strays (never commit)
 /site/
-/fishing.html
 
 # arxiv research corpus (never commit)
 /papers/
@@ -57,11 +55,12 @@ __pycache__/
 /SIMPLIFY_*.md
 /typesafe_*
 /skills-lock.json
-/. agents/
+/.agents/
+/.claude/
 
 # sibling scratch (never stage, per
 # docs/superpowers/plans/2026-09-18-questions-permissions-plugins.md)
-/calculator.html
+/*.html
 /graydemos/
 /text_*.json
 /readthisagent.md
@@ -87,6 +86,13 @@ __pycache__/
 # agent memory strays (never commit)
 /CLAUDE.md
 /GEMINI.md
+/TODO.md
 
 # cloned research/reference repos (never commit)
 /research/
+
+# local plugin checkouts / agent tool state
+/plugins/
+/.freebuff
+/.orcspace-workspaces/
+
