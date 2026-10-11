@@ -279,6 +279,15 @@ pub trait Plugin: Send + Sync {
     /// sent on the wire by the sidecar transport). Default no-op so existing
     /// impls keep compiling.
     async fn shutdown(&self) {}
+    /// True for a plugin booted from a `global` lock entry: under the lean
+    /// prompt its `prompt/context` is the only hook that still runs.
+    /// Default false — the flag is set by the builder, not declared.
+    fn is_global(&self) -> bool {
+        false
+    }
+    /// The builder's marker for a `global`-lock spawn. Default no-op:
+    /// in-process impls are never global.
+    fn set_global(&self, _global: bool) {}
 }
 
 /// Later manifests win on tool-name conflict. Returns owner per tool name.
@@ -323,6 +332,9 @@ impl PluginHookAdapter {
 
 #[async_trait]
 impl PluginHooks for PluginHookAdapter {
+    fn is_global(&self) -> bool {
+        self.plugin.is_global()
+    }
     async fn prompt_context(&self) -> Option<String> {
         self.plugin.prompt_context(&self.cwd).await
     }

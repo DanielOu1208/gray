@@ -61,6 +61,9 @@ pub struct LazySidecarPlugin {
     capabilities: Mutex<Vec<String>>,
     host_handler: Mutex<Option<HostHandler>>,
     session_id: Mutex<String>,
+    /// A `global`-lock spawn (set by the builder): its `prompt/context`
+    /// survives the lean prompt.
+    global: std::sync::atomic::AtomicBool,
     self_ref: Mutex<Weak<LazySidecarPlugin>>,
 }
 
@@ -76,6 +79,7 @@ impl LazySidecarPlugin {
             capabilities: Mutex::new(Vec::new()),
             host_handler: Mutex::new(None),
             session_id: Mutex::new(String::new()),
+            global: std::sync::atomic::AtomicBool::new(false),
             self_ref: Mutex::new(Weak::new()),
         }
     }
@@ -182,6 +186,15 @@ impl Plugin for LazySidecarPlugin {
         if let Some(p) = self.live.get() {
             p.set_session_id(id);
         }
+    }
+
+    fn is_global(&self) -> bool {
+        self.global.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_global(&self, global: bool) {
+        self.global
+            .store(global, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn prompt_context(&self, cwd: &str) -> Option<String> {

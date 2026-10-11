@@ -219,6 +219,7 @@ fn lock_roundtrips_exact_shape() {
             scope: "user".into(),
             enabled: true,
             cli_argv: None,
+            global: false,
             extra: Default::default(),
         },
     );
@@ -522,6 +523,7 @@ fn remove_keeps_files_when_the_registry_write_fails() {
             scope: "user".to_string(),
             enabled: true,
             cli_argv: None,
+            global: false,
             extra: Default::default(),
         },
     );

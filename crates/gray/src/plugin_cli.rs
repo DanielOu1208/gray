@@ -599,6 +599,7 @@ pub struct ManagedRow {
     pub ecosystem: String,
     pub on: bool,
     pub cli: bool,
+    pub global: bool,
 }
 
 /// Display rows (sorted by name) for `plugin list`, `/plugin list`, and the
@@ -615,6 +616,7 @@ pub fn list_rows() -> anyhow::Result<Vec<ManagedRow>> {
                 scope: e.scope,
                 ecosystem: e.ecosystem,
                 on: e.enabled,
+                global: e.global,
             })
             .collect());
     };
@@ -627,6 +629,7 @@ pub fn list_rows() -> anyhow::Result<Vec<ManagedRow>> {
             scope: p.entry.scope.clone(),
             ecosystem: p.entry.ecosystem.clone(),
             cli: p.cli,
+            global: p.entry.global,
         })
         .collect())
 }
@@ -657,6 +660,13 @@ pub fn set_managed_enabled(name: &str, on: bool) -> anyhow::Result<()> {
     let home = home()?;
     migrate_commands_json(&home);
     gray_pkg::ops::set_enabled(name, on)
+}
+
+/// `gray plugin enable <name> --global` / the disable half of it.
+pub fn set_managed_global(name: &str, on: bool) -> anyhow::Result<()> {
+    let home = home()?;
+    migrate_commands_json(&home);
+    gray_pkg::ops::set_global(name, on)
 }
 
 pub async fn update_managed(target: &str) -> anyhow::Result<Vec<gray_pkg::ops::UpdateRow>> {
@@ -870,6 +880,7 @@ pub async fn register_native(
             installed_at: chrono::Utc::now().to_rfc3339(),
             scope: "user".into(),
             enabled: true,
+            global: lock.plugins.get(&name).is_some_and(|e| e.global),
             granted_capabilities: granted.clone(),
             capabilities_hash,
         },

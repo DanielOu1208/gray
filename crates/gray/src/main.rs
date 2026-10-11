@@ -374,7 +374,11 @@ async fn run_plugin_inner(cmd: gray::PluginCmd) -> anyhow::Result<()> {
             for r in &rows {
                 let state = if r.on { "" } else { " [disabled]" };
                 let kind = if r.cli { " [command]" } else { "" };
-                println!("{} {} ({}){state}{kind}", r.name, r.version, r.scope);
+                let global = if r.global { " [global]" } else { "" };
+                println!(
+                    "{} {} ({}){state}{kind}{global}",
+                    r.name, r.version, r.scope
+                );
             }
             Ok(())
         }
@@ -405,9 +409,14 @@ async fn run_plugin_inner(cmd: gray::PluginCmd) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        PluginCmd::Enable { name } => {
+        PluginCmd::Enable { name, global } => {
             gray::plugin_cli::set_managed_enabled(&name, true)?;
-            println!("enabled {name}");
+            if global {
+                gray::plugin_cli::set_managed_global(&name, true)?;
+                println!("enabled {name} [global]");
+            } else {
+                println!("enabled {name}");
+            }
             Ok(())
         }
         PluginCmd::Disable { name } => {

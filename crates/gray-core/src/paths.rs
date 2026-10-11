@@ -25,6 +25,16 @@ pub fn gray_home() -> Option<PathBuf> {
         .or_else(|| user_home().map(|p| p.join(".gray")))
 }
 
+/// The operator's real gray home, unaffected by a session's `GRAY_HOME`:
+/// `GRAY_USER_HOME` else `$HOME/.gray`. Global plugins resolve their lock
+/// and install dirs here so gateway/subagent homes still boot them.
+pub fn gray_user_home() -> Option<PathBuf> {
+    std::env::var_os("GRAY_USER_HOME")
+        .filter(|v| !v.to_string_lossy().trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| user_home().map(|p| p.join(".gray")))
+}
+
 /// `~/.gray/attachments` — where media bytes are materialized so a pasted or
 /// replayed attachment outlives both the context copy and a /tmp file.
 pub fn attachments_dir() -> Option<PathBuf> {

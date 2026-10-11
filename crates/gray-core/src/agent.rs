@@ -501,6 +501,11 @@ pub trait PluginHooks: Send + Sync {
     async fn turn_end(&self, _usage: &Usage) {}
     /// Graceful teardown (`plugin/shutdown` on sidecars). Default no-op.
     async fn shutdown(&self) {}
+    /// A `global`-lock plugin: its `prompt/context` still runs under the
+    /// lean prompt. Default false.
+    fn is_global(&self) -> bool {
+        false
+    }
 }
 
 impl From<ProviderError> for CoreError {

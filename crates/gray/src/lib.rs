@@ -953,6 +953,9 @@ pub enum PluginCmd {
     Enable {
         /// Installed plugin name
         name: String,
+        /// Also boot it in every GRAY_HOME (gateways, subagents)
+        #[arg(long)]
+        global: bool,
     },
     /// Disable an installed plugin
     Disable {

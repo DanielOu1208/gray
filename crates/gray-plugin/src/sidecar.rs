@@ -239,6 +239,9 @@ pub struct SidecarPlugin {
     /// snapshot). A respawn keeps it — the field lives on the plugin, not
     /// the child process. Empty = anonymous.
     session_id: std::sync::Mutex<String>,
+    /// A `global`-lock spawn (set by the builder): its `prompt/context`
+    /// survives the lean prompt.
+    global: std::sync::atomic::AtomicBool,
 }
 
 /// ETXTBSY (os error 26) means the executable was open for writing at the
@@ -803,6 +806,7 @@ impl SidecarPlugin {
             cwd,
             asks,
             session_id: std::sync::Mutex::new(String::new()),
+            global: std::sync::atomic::AtomicBool::new(false),
         };
         if dynamic {
             // Install the handler first: a `host/tools_changed` arriving
@@ -1177,6 +1181,13 @@ impl Plugin for SidecarPlugin {
     }
     fn set_session_id(&self, id: &str) {
         *self.session_id.lock().expect("session_id") = id.to_string();
+    }
+    fn is_global(&self) -> bool {
+        self.global.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn set_global(&self, global: bool) {
+        self.global
+            .store(global, std::sync::atomic::Ordering::Relaxed);
     }
     async fn prompt_context(&self, cwd: &str) -> Option<String> {
         if !self.claims("prompt/context") {
