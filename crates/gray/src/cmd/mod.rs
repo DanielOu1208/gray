@@ -146,6 +146,7 @@ async fn run_command(
             "retry" => undo_result(home, true).await,
             "jobs" => jobs_result(home, &rest),
             "plugin" => plugin_result(&rest).await,
+            "plugins" => Ok(CommandResult::text(crate::plugin_status::table().await)),
             "update" => update_result(&rest).await,
             "feedback" => feedback_result(config, home, &rest),
             "agentsmd" => agentsmd_result(&rest),

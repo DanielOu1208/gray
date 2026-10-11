@@ -173,9 +173,16 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
     CmdDef {
         name: "plugin",
         desc: "manage plugins",
-        aliases: &["plugins"],
+        aliases: &[],
         scope: CmdScope::Global,
         surface: CmdSurface::Text,
+    },
+    CmdDef {
+        name: "plugins",
+        desc: "plugin manager (list, enable, update)",
+        aliases: &[],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Interactive,
     },
     CmdDef {
         name: "hehe",
@@ -652,8 +659,10 @@ pub enum ReplCommand {
     /// Unknown slash command (`/word`).
     Unknown(String),
     /// Plugin manager: /plugin <list|install|remove|update|enable|disable|check>.
-    /// `/plugins` is an alias.
     Plugin(String),
+    /// Interactive plugin manager (`/plugins`): the modal; headless runs
+    /// answer the same list as text.
+    Plugins,
     /// Skills: bare /skills lists discovered; /skills <name> [args] (alias /skill <name>) runs one
     Skill(Option<String>),
     /// Regular user prompt to feed to the agent.
@@ -774,6 +783,12 @@ pub fn parse_command(line: &str) -> ReplCommand {
             None => ReplCommand::ModelPanes,
         },
         Some("plugin") => ReplCommand::Plugin(t.to_string()),
+        // `/plugins` bare is the manager modal; with args it stays the
+        // `/plugin <sub>` text command it aliased before.
+        Some("plugins") => match opt(rest) {
+            None => ReplCommand::Plugins,
+            Some(_) => ReplCommand::Plugin(t.to_string()),
+        },
         Some("skills") => {
             if rest.is_empty() {
                 ReplCommand::Skill(None)

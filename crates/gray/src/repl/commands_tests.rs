@@ -99,7 +99,7 @@ fn empty_prompt_hides_slash_popup_like_codex() {
 fn registry_resolve_canonical_and_aliases() {
     for name in [
         "models", "context", "sessions", "new", "compact", "usage", "feedback", "agentsmd",
-        "skills", "plugin", "help", "quit",
+        "skills", "plugin", "plugins", "help", "quit",
     ] {
         let d = super::resolve(name).unwrap_or_else(|| panic!("resolve {name}"));
         assert_eq!(d.name, name);
@@ -113,7 +113,6 @@ fn registry_resolve_canonical_and_aliases() {
         ("compress", "compact"),
         ("sys", "agentsmd"),
         ("cost", "usage"),
-        ("plugins", "plugin"),
     ] {
         assert_eq!(super::resolve(alias).unwrap().name, target, "alias {alias}");
         assert_eq!(super::resolve(&format!("/{alias}")).unwrap().name, target);
@@ -135,7 +134,6 @@ fn registry_completion_covers_aliases() {
         ("compress", "compact"),
         ("sys", "agentsmd"),
         ("cost", "usage"),
-        ("plugins", "plugin"),
     ] {
         assert!(
             super::completion_matches(alias)
@@ -165,6 +163,7 @@ fn registry_parse_uses_canonical() {
         parse_command("/plugin list"),
         ReplCommand::Plugin(_)
     ));
+    assert!(matches!(parse_command("/plugins"), ReplCommand::Plugins));
     assert!(matches!(
         parse_command("/plugins list"),
         ReplCommand::Plugin(_)

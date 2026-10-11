@@ -511,6 +511,23 @@ pub(crate) async fn dispatch_command(
             handle_plugin_command(&raw, tui.as_ref().map(|(s, _)| s)).await;
             Flow::Continue
         }
+        ReplCommand::Plugins => {
+            let tui_shared = tui.as_ref().map(|(s, _)| s);
+            if tui_shared.is_none() {
+                say(tui_shared, &crate::plugin_status::table().await);
+            } else {
+                let bg = tui_shared.map(|s| s.lock().expect("tui lock").snapshot());
+                let changed = with_modal_sync(tui_shared, || {
+                    crate::setup::run_plugins_manager(bg.as_ref())
+                });
+                match changed {
+                    Ok(true) => say(tui_shared, "plugins updated"),
+                    Ok(false) => {}
+                    Err(e) => say(tui_shared, &format!("plugins manager failed: {e}")),
+                }
+            }
+            Flow::Continue
+        }
         ReplCommand::Unknown(cmd) => {
             // Protocol v1 `command/run`: a claimed `/cmd` runs on its
             // owning plugin; anything else keeps the unknown message.

@@ -33,7 +33,7 @@ fn args_hint(name: &str) -> Option<&'static str> {
     }
 }
 
-const SLOW: &[&str] = &["compact", "update", "plugin"];
+const SLOW: &[&str] = &["compact", "update", "plugin", "plugins"];
 
 fn hint_arg(hint: impl Into<String>) -> Vec<Value> {
     vec![json!({"name": "args", "required": false, "hint": hint.into()})]

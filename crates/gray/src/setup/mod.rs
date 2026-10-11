@@ -106,6 +106,7 @@ mod context_modal;
 mod install_manager;
 mod model_modal;
 mod model_panes;
+mod plugins_modal;
 pub(crate) mod variants;
 
 pub use context_modal::run_context_modal;
@@ -126,6 +127,7 @@ pub(crate) use model_modal::{
     selected_model_label, selection_parts, validate_direct_model_id, wire_model_for,
 };
 pub(crate) use model_panes::{PanesOutcome, run_model_panes};
+pub(crate) use plugins_modal::run_plugins_manager;
 pub use provider_auth::{
     PluginLoginProgress, activate_plugin_connection, adopt_saved_key, connect_saved_key,
     forget_plugin_connection, run_plugin_login, select_api_key_connection,
