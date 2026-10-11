@@ -264,7 +264,7 @@ fn model_result(config: &mut Config, home: &Path, rest: &str) -> Result<CommandR
     if !raw.is_empty() {
         return model_direct(config, home, raw);
     }
-    let mut models = model_list_for(config);
+    let models = model_list_for(config);
     if models.is_empty() {
         return Ok(CommandResult::text(
             "no provider configured — run /models to set up provider & key",
@@ -284,7 +284,12 @@ fn model_result(config: &mut Config, home: &Path, rest: &str) -> Result<CommandR
         fast: config.fast_mode.unwrap_or(false),
         parts: Default::default(),
     };
-    cap_options(&mut models, draft.model.as_deref());
+    let page = draft
+        .model
+        .as_deref()
+        .and_then(|m| models.iter().position(|(id, _)| id == m))
+        .map(|i| i / MAX_SELECT_OPTIONS)
+        .unwrap_or(0);
     // Composite rows carry their declared shapes into the pending doc —
     // `interact` re-renders the slot selects and validates parts from the
     // record, never the wire.
@@ -310,12 +315,13 @@ fn model_result(config: &mut Config, home: &Path, rest: &str) -> Result<CommandR
         draft: draft.clone(),
         models: models.clone(),
         shapes,
+        page,
     };
     let token = store::put(home, &pending)
         .map_err(|e| CmdError::unavailable(format!("cannot store pending doc: {e}")))?;
     Ok(CommandResult::Ui {
         token,
-        document: model_picker_doc(&draft, &models, &pending.shapes),
+        document: model_picker_doc(&draft, &models, &pending.shapes, page),
         fallback_text: model_picker_fallback(&draft, &models, &pending.shapes),
     })
 }
@@ -603,15 +609,41 @@ fn cron_result(home: &Path, rest: &str) -> Result<CommandResult, CmdError> {
     Ok(CommandResult::text(text))
 }
 
+fn unknown_skill_text(name: &str) -> String {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let discovered = crate::skills::discover_skills(&cwd);
+    let needle = name.to_lowercase();
+    let mut ranked: Vec<(&str, usize)> = discovered
+        .skills
+        .iter()
+        .map(|s| {
+            let n = s.name.to_lowercase();
+            let score = if n.contains(&needle) || needle.contains(&n) {
+                0
+            } else if n.starts_with(&needle[..needle.len().min(3)]) {
+                1
+            } else {
+                usize::MAX
+            };
+            (s.name.as_str(), score)
+        })
+        .collect();
+    ranked.retain(|(_, score)| *score != usize::MAX);
+    ranked.sort_by_key(|(n, score)| (*score, n.to_string()));
+    let close: Vec<&str> = ranked.iter().take(5).map(|(n, _)| *n).collect();
+    if close.is_empty() {
+        format!("no skill '{name}' — `gray cmd run skills` lists the discovered names")
+    } else {
+        format!("no skill '{name}' — closest matches: {}", close.join(", "))
+    }
+}
+
 fn skills_result(rest: &str) -> Result<CommandResult, CmdError> {
     let rest = rest.trim();
     if !rest.is_empty() {
         let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-        return skill_command_result(name.trim(), args).unwrap_or_else(|| {
-            Err(CmdError::args(format!(
-                "no skill '{name}' — `gray cmd run skills` lists the discovered names"
-            )))
-        });
+        return skill_command_result(name.trim(), args)
+            .unwrap_or_else(|| Err(CmdError::args(unknown_skill_text(name))));
     }
     let cwd = std::env::current_dir()
         .map_err(|e| CmdError::unavailable(format!("cannot resolve cwd: {e}")))?;
@@ -626,7 +658,7 @@ fn skills_result(rest: &str) -> Result<CommandResult, CmdError> {
         out.push_str("skills auto-load is off (/skills on to re-enable)\n");
     }
     for s in &discovered.skills {
-        let mut row = crate::skills::format_discovered_skill_row(s);
+        let mut row = crate::skills::format_discovered_skill_row_full(s);
         if !auto {
             row.push_str(" [auto-off]");
         } else if disabled.contains(&s.name) {
@@ -1295,6 +1327,16 @@ fn interact(
                     }),
                 }
             }
+            "page:prev" | "page:next" | "page:info" => {
+                let total = rec.models.len().div_ceil(MAX_SELECT_OPTIONS).max(1);
+                match submit.as_str() {
+                    "page:prev" => rec.page = rec.page.saturating_sub(1),
+                    "page:next" => rec.page = (rec.page + 1).min(total - 1),
+                    _ => {}
+                }
+                store::save(home, token, &rec).map_err(save_err)?;
+                Ok(revised_doc(token, &rec))
+            }
             "cancel" => {
                 store::remove(home, token);
                 Ok(CommandResult::text("Cancelled."))
@@ -1315,7 +1357,7 @@ fn save_err(e: std::io::Error) -> CmdError {
 fn revised_doc(token: &str, rec: &store::PendingDoc) -> CommandResult {
     CommandResult::Ui {
         token: token.to_string(),
-        document: model_picker_doc(&rec.draft, &rec.models, &rec.shapes),
+        document: model_picker_doc(&rec.draft, &rec.models, &rec.shapes, rec.page),
         fallback_text: model_picker_fallback(&rec.draft, &rec.models, &rec.shapes),
     }
 }
@@ -1354,8 +1396,23 @@ fn model_picker_doc(
     draft: &store::ModelDraft,
     models: &[(String, String)],
     shapes: &BTreeMap<String, RowShape>,
+    page: usize,
 ) -> ui::UiDoc {
-    let model_options = models
+    let total_pages = models.len().div_ceil(MAX_SELECT_OPTIONS).max(1);
+    let page = page.min(total_pages - 1);
+    let start = page * MAX_SELECT_OPTIONS;
+    let mut window: Vec<(String, String)> =
+        models[start..(start + MAX_SELECT_OPTIONS).min(models.len())].to_vec();
+    if let Some(sel) = draft.model.as_deref()
+        && !window.iter().any(|(id, _)| id == sel)
+        && let Some(row) = models.iter().find(|(id, _)| id == sel)
+    {
+        if window.len() >= MAX_SELECT_OPTIONS {
+            window.pop();
+        }
+        window.insert(0, row.clone());
+    }
+    let model_options = window
         .iter()
         .map(|(id, name)| ui::SelectOption {
             label: clip(if name.is_empty() { id } else { name }, 100),
@@ -1406,6 +1463,33 @@ fn model_picker_doc(
             max_values: None,
         }],
     });
+    if total_pages > 1 {
+        components.push(ui::MessageNode::ActionRow {
+            children: vec![
+                ui::MessageNode::Button {
+                    logical_id: "page:prev".to_string(),
+                    label: "◀ Prev".to_string(),
+                    style: ui::ButtonStyle::Secondary,
+                    url: None,
+                    disabled: page == 0,
+                },
+                ui::MessageNode::Button {
+                    logical_id: "page:info".to_string(),
+                    label: format!("Page {}/{}", page + 1, total_pages),
+                    style: ui::ButtonStyle::Secondary,
+                    url: None,
+                    disabled: true,
+                },
+                ui::MessageNode::Button {
+                    logical_id: "page:next".to_string(),
+                    label: "Next ▶".to_string(),
+                    style: ui::ButtonStyle::Secondary,
+                    url: None,
+                    disabled: page + 1 >= total_pages,
+                },
+            ],
+        });
+    }
     components.push(ui::MessageNode::ActionRow {
         children: vec![
             ui::MessageNode::Button {
@@ -1413,18 +1497,21 @@ fn model_picker_doc(
                 label: "Apply".to_string(),
                 style: ui::ButtonStyle::Primary,
                 url: None,
+                disabled: false,
             },
             ui::MessageNode::Button {
                 logical_id: "fast".to_string(),
                 label: format!("⚡ fast: {}", if draft.fast { "on" } else { "off" }),
                 style: ui::ButtonStyle::Secondary,
                 url: None,
+                disabled: false,
             },
             ui::MessageNode::Button {
                 logical_id: "cancel".to_string(),
                 label: "Cancel".to_string(),
                 style: ui::ButtonStyle::Secondary,
                 url: None,
+                disabled: false,
             },
         ],
     });
