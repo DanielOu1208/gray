@@ -151,6 +151,8 @@ fn friendly_model_name_restores_version_dots() {
     );
     assert_eq!(friendly_model_name("deepseek-v3-1"), "Deepseek v3.1");
     assert_eq!(friendly_model_name("gpt-5-2"), "GPT 5.2");
+    assert_eq!(friendly_model_name("swe-2"), "SWE 2");
+    assert_eq!(friendly_model_name("swe-1-6"), "SWE 1.6");
     // Not digit runs: dates, build stamps, and size suffixes stay apart.
     assert_eq!(friendly_model_name("gpt-5-2025-08-07"), "GPT 5 2025 08 07");
     assert_eq!(friendly_model_name("deepseek-v3-0324"), "Deepseek v3 0324");
