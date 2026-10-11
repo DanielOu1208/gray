@@ -64,6 +64,7 @@ fn savings_follow_pi_and_clear_the_floor_only_for_big_prompts() {
 /// Serves scripted rounds; a `warm_cap`-capped request is a cache refresh.
 struct Fake {
     scripts: Mutex<VecDeque<Vec<StreamEvent>>>,
+    #[allow(clippy::type_complexity)]
     seen: Arc<Mutex<Vec<(Option<u32>, usize)>>>,
     warm_cap: u32,
 }

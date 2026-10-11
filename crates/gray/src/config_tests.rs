@@ -186,8 +186,10 @@ fn desktop_bus_replaces_only_a_dead_bus() {
 /// with its own `effort_memory` entry gets that level, not the stranger's.
 #[test]
 fn remembered_effort_prefers_the_target_memory_over_the_flat_level() {
-    let mut saved = crate::setup::SavedConfig::default();
-    saved.thinking_effort = Some("high".to_string());
+    let mut saved = crate::setup::SavedConfig {
+        thinking_effort: Some("high".to_string()),
+        ..Default::default()
+    };
     saved.effort_memory.insert(
         crate::setup::effort_memory_key("devin-sub", "https://127.0.0.1:1/", "swe-2"),
         "max".to_string(),

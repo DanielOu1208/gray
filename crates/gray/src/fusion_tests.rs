@@ -358,6 +358,7 @@ fn provider_file(home: &Path) {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn first_call_pools_the_session_and_later_calls_resume_it() {
     let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
@@ -400,6 +401,7 @@ printf '%s\n' '{"type":"result","text":"ok","session_id":"sid-9"}'
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn a_dead_pooled_session_retries_fresh_once() {
     let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
@@ -428,6 +430,7 @@ esac
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn a_timeout_is_an_error_and_kills_the_group() {
     let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
@@ -446,6 +449,7 @@ async fn a_timeout_is_an_error_and_kills_the_group() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn a_child_error_row_is_a_tool_error() {
     let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
@@ -466,6 +470,7 @@ async fn a_child_error_row_is_a_tool_error() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn an_empty_task_is_rejected() {
     let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();

@@ -1071,6 +1071,7 @@ fn fake_cargo(bin: &std::path::Path) {
 /// with `:`, neither of which the Windows runner honors.
 #[cfg(unix)]
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn a_noisy_command_is_squeezed_and_its_log_keeps_everything() {
     // The whole contract in one run: what enters the context shrinks and says
     // so, and the raw log the shell already writes is untouched, so the

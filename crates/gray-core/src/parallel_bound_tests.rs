@@ -39,6 +39,7 @@ fn cap_parsing_is_a_pure_table() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn no_cap_starts_every_call_at_once() {
     let _g = LOCK.lock().unwrap();
     unsafe { std::env::remove_var("GRAY_PARALLEL_MAX") };
@@ -78,6 +79,7 @@ async fn no_cap_starts_every_call_at_once() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn concurrency_never_exceeds_cap() {
     let _g = LOCK.lock().unwrap();
     unsafe { std::env::set_var("GRAY_PARALLEL_MAX", "4") };

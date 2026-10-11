@@ -61,8 +61,7 @@ async fn a_child_that_stopped_reading_fails_the_request_not_the_protocol() {
             std::time::Duration::from_secs(30),
         )
         .await
-        .err()
-        .expect("a wedged child must fail the request");
+        .expect_err("a wedged child must fail the request");
     assert!(t.elapsed() < std::time::Duration::from_secs(15), "{err:#}");
     let text = err.to_string();
     assert!(
