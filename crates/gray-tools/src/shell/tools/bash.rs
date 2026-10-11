@@ -1360,6 +1360,9 @@ async fn run_command(
 ) -> ToolOutput {
     let mut spawned = spawned;
     let last = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(now_grindmill()));
+    // Task-locals do not cross the pump's `tokio::spawn`, so the sink is
+    // captured here, on the task executing this tool call.
+    let output_sink = gray_core::agent::current_tool_output();
     let pump = {
         let child = &mut spawned.child;
         Pump::start(
@@ -1367,6 +1370,7 @@ async fn run_command(
             child.stderr.take(),
             log_path.clone(),
             last,
+            output_sink,
         )
     };
     match settle_command(
