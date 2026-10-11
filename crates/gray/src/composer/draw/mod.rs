@@ -937,12 +937,12 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 sep_color,
                 muted,
             );
-            if seg_width(&left_segs) + seg_width(&right_segs) + 7 <= w {
+            if seg_width(&left_segs) + seg_width(&right_segs) + 5 <= w {
                 break;
             }
         }
         let left_segs =
-            crate::statusline::clip(left_segs, w.saturating_sub(seg_width(&right_segs) + 7));
+            crate::statusline::clip(left_segs, w.saturating_sub(seg_width(&right_segs) + 5));
         if line_cfg.command.is_some() {
             crate::statusline::publish_facts(serde_json::json!({
                 "cwd": tui.cwd,
@@ -955,8 +955,8 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 "version": env!("CARGO_PKG_VERSION"),
             }));
         }
-        let left_len = 2 + seg_width(&left_segs);
-        let right_len = seg_width(&right_segs) + 2;
+        let left_len = 1 + seg_width(&left_segs);
+        let right_len = seg_width(&right_segs) + 1;
         let pad_len = w.saturating_sub(left_len + right_len);
         let to_spans = |s: crate::statusline::Seg| -> Vec<Span<'static>> {
             match s.parts {
@@ -967,7 +967,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 None => vec![Span::styled(s.text, Style::default().fg(s.color))],
             }
         };
-        let mut footer_spans = vec![Span::raw("  ")];
+        let mut footer_spans = vec![Span::raw(" ")];
         footer_spans.extend(left_segs.into_iter().flat_map(to_spans));
         footer_spans.push(Span::raw(" ".repeat(pad_len)));
         footer_spans.extend(right_segs.into_iter().flat_map(to_spans));
