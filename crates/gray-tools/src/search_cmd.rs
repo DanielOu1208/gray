@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 
 use gray_core::agent::{Tool, ToolContext};
 use serde_json::{Value, json};
+#[cfg(unix)]
 use tokio_util::sync::CancellationToken;
 
 /// What one search call needs. Mirrors the `find`/`grep` tool arguments so a
@@ -64,7 +65,6 @@ pub async fn find(args: &SearchArgs, ctx: &ToolContext) -> String {
 /// `find` on a chosen backend — tests drive every lane through this.
 pub(crate) async fn find_on(args: &SearchArgs, ctx: &ToolContext, b: &IndexBackend) -> String {
     match b {
-        IndexBackend::Fff(p) => find_with_pool(args, ctx, p.clone()).await,
         #[cfg(unix)]
         IndexBackend::Fs(p) => find_with_fsearch(args, ctx, p.clone()).await,
         IndexBackend::Off => find_call(args, ctx).await,
@@ -85,10 +85,10 @@ async fn find_call(args: &SearchArgs, ctx: &ToolContext) -> String {
     .await
 }
 
-/// Which resident index serves `find`/`grep`: `GRAY_SEARCH_INDEX` picks
-/// `fsearch` (default), `fff`, or `off` — the fallback lanes always answer.
+/// Which resident index serves `find`/`grep`: `GRAY_SEARCH_INDEX=off`/`none`
+/// disables it, anything else is the default — the fallback lanes always
+/// answer. fsearch is unix-only; elsewhere there is no index at all.
 pub enum IndexBackend {
-    Fff(std::sync::Arc<crate::search_index::SearchPool>),
     #[cfg(unix)]
     Fs(std::sync::Arc<crate::search_index_fs::FsearchPool>),
     Off,
@@ -99,7 +99,6 @@ fn global_index() -> IndexBackend {
     BACKEND
         .get_or_init(
             || match backend_kind(std::env::var("GRAY_SEARCH_INDEX").ok().as_deref()) {
-                BackendKind::Fff => IndexBackend::Fff(crate::search_index::global_pool().clone()),
                 BackendKind::Off => IndexBackend::Off,
                 #[cfg(unix)]
                 BackendKind::Fs => {
@@ -112,12 +111,10 @@ fn global_index() -> IndexBackend {
 
 /// Which resident index `GRAY_SEARCH_INDEX` selects. Anything unrecognized
 /// is the default — fsearch — so a typo never silently disables indexing.
-/// fsearch is a unix daemon crate; elsewhere the default falls back to the
-/// in-process `fff` pool.
+/// fsearch is a unix daemon crate; elsewhere the default is no index.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum BackendKind {
-    Fff,
     #[cfg(unix)]
     Fs,
     Off,
@@ -125,19 +122,17 @@ pub(crate) enum BackendKind {
 
 pub(crate) fn backend_kind(v: Option<&str>) -> BackendKind {
     match v {
-        Some("fff") => BackendKind::Fff,
         Some("off") | Some("none") => BackendKind::Off,
         #[cfg(unix)]
         _ => BackendKind::Fs,
         #[cfg(not(unix))]
-        _ => BackendKind::Fff,
+        _ => BackendKind::Off,
     }
 }
 
 impl Clone for IndexBackend {
     fn clone(&self) -> Self {
         match self {
-            Self::Fff(p) => Self::Fff(p.clone()),
             #[cfg(unix)]
             Self::Fs(p) => Self::Fs(p.clone()),
             Self::Off => Self::Off,
@@ -145,8 +140,7 @@ impl Clone for IndexBackend {
     }
 }
 
-/// [`find`] against the fsearch whole-disk index. Same warm/fallback shape
-/// as `find_with_pool` — the lanes only differ in which index answers.
+/// [`find`] against the fsearch whole-disk index — the only index lane.
 #[cfg(unix)]
 pub async fn find_with_fsearch(
     args: &SearchArgs,
@@ -181,44 +175,6 @@ pub async fn find_with_fsearch(
     .await
 }
 
-/// [`find`] against a caller-chosen pool. The global pool roots its frecency
-/// databases under `gray_home()`; a test (or a future embedder) passes its own.
-pub async fn find_with_pool(
-    args: &SearchArgs,
-    ctx: &ToolContext,
-    pool: std::sync::Arc<crate::search_index::SearchPool>,
-) -> String {
-    let root = args.root(&ctx.cwd);
-    let limit = args.limit.unwrap_or(100);
-    if !ctx.cancel.is_cancelled() && pool.warm_picker(&root).is_some() {
-        let (dir, pat) = (root.clone(), args.pattern.clone());
-        let lane = pool.clone();
-        let hits = tokio::select! {
-            out = spawn_index(move || lane.indexed_glob(&dir, &pat, limit)) => out,
-            _ = ctx.cancel.cancelled() => None,
-        };
-        if let Some(hits) = hits {
-            return render_find(&hits, limit);
-        }
-    }
-    // Nothing warm: answer from the tool, and let the next search in this
-    // process find an index waiting for it — unless the caller cancelled, in
-    // which case it asked for no work at all.
-    if !ctx.cancel.is_cancelled() {
-        pool.warm_in_background(&root);
-    }
-    tool_text(
-        &crate::FindTool,
-        ctx,
-        json!({
-            "pattern": args.pattern,
-            "path": root.to_string_lossy(),
-            "limit": limit,
-        }),
-    )
-    .await
-}
-
 /// `gray grep PATTERN [PATH]` — file contents matching a pattern, off the
 /// process-wide pool.
 pub async fn grep(args: &SearchArgs, ctx: &ToolContext) -> String {
@@ -228,7 +184,6 @@ pub async fn grep(args: &SearchArgs, ctx: &ToolContext) -> String {
 /// `grep` on a chosen backend — tests drive every lane through this.
 pub(crate) async fn grep_on(args: &SearchArgs, ctx: &ToolContext, b: &IndexBackend) -> String {
     match b {
-        IndexBackend::Fff(p) => grep_with_pool(args, ctx, p.clone()).await,
         #[cfg(unix)]
         IndexBackend::Fs(p) => grep_with_fsearch(args, ctx, p.clone()).await,
         IndexBackend::Off => grep_call(args, ctx).await,
@@ -292,41 +247,10 @@ async fn grep_call(args: &SearchArgs, ctx: &ToolContext) -> String {
     tool_text(&crate::GrepTool, ctx, call).await
 }
 
-/// [`grep`] against a caller-chosen pool.
-pub async fn grep_with_pool(
-    args: &SearchArgs,
-    ctx: &ToolContext,
-    pool: std::sync::Arc<crate::search_index::SearchPool>,
-) -> String {
-    let root = args.root(&ctx.cwd);
-    let limit = args.limit.unwrap_or(100);
-    let context = args.context.unwrap_or(0);
-    if !ctx.cancel.is_cancelled() && pool.warm_picker(&root).is_some() {
-        let (dir, pat, g) = (root.clone(), args.pattern.clone(), args.glob.clone());
-        let (ic, lit, lim, ctxn) = (args.ignore_case, args.literal, limit, context);
-        let lane = pool.clone();
-        let found = tokio::select! {
-            out = spawn_index(move || {
-                // The query is already bounded by `limit`; the token only
-                // exists because `indexed_grep` takes one.
-                let cancel = CancellationToken::new();
-                lane.indexed_grep(&dir, &pat, g.as_deref(), ic, lit, lim, ctxn, &cancel)
-            }) => out,
-            _ = ctx.cancel.cancelled() => None,
-        };
-        if let Some(found) = found {
-            return crate::grep::render_matches(&root, &found.hits, limit, found.limit_reached);
-        }
-    }
-    if !ctx.cancel.is_cancelled() {
-        pool.warm_in_background(&root);
-    }
-    grep_call(args, ctx).await
-}
-
 /// The index is synchronous CPU work, so it belongs off the async runtime.
 /// The spawned task keeps indexing in the background after a cancel, which is
 /// exactly what the next call wants.
+#[cfg(unix)]
 async fn spawn_index<F, T>(f: F) -> Option<T>
 where
     F: FnOnce() -> Option<T> + Send + 'static,
@@ -337,6 +261,7 @@ where
 
 /// Index hits as the `find` tool would print them: newline-joined relative
 /// paths plus the same notices, so the two lanes are indistinguishable.
+#[cfg(unix)]
 fn render_find(hits: &[String], limit: usize) -> String {
     use crate::MAX_BYTES;
     use crate::truncate::{append_notices, format_size, truncate_head};
