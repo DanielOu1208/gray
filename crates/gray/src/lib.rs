@@ -24,6 +24,7 @@ pub mod logging;
 pub(crate) mod mascot;
 pub mod plugin_check;
 pub mod plugin_cli;
+pub(crate) mod plugin_status;
 pub mod print;
 mod print_meter;
 pub mod profile;

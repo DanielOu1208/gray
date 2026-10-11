@@ -52,8 +52,6 @@ pub(crate) struct InputBox {
     /// width in chat; on the home screen the welcome's centered column.
     pub(crate) x: usize,
     pub(crate) width: usize,
-    /// Home screen: the box carries the accent bar on its left edge.
-    pub(crate) home: bool,
     pub(crate) cur_row: usize,
     pub(crate) cur_col: usize,
 }
@@ -215,7 +213,6 @@ pub(crate) fn build_input_box(
         band_h,
         x,
         width: w,
-        home: home.is_some(),
         // Content rows were counted from the `❯` row; the top pad shifts
         // every one of them down a row.
         cur_row: cur_row + 1,
@@ -227,11 +224,15 @@ pub(crate) fn build_input_box(
 #[derive(Default, Clone, Copy)]
 pub(crate) struct HomeRows<'a> {
     pub(crate) notice: Option<&'a str>,
+    /// The plugin counts line from the startup probe (`N plugins · M
+    /// loaded · …`); the row stays blank until it lands.
+    pub(crate) stats: Option<&'a str>,
 }
 
 /// devin's home rows under the box, on the screen bg and relative to the
-/// box's column: the hints flush with its right edge, the tip under the
-/// box text, then the startup notice as a block: its headline, then one
+/// box's column: the hints flush with its right edge, the plugin stats
+/// and the tip under the box text, then the startup notice as a block:
+/// its headline, then one
 /// `command  what it does` row per ` · `-separated `<command> to <action>`
 /// part.
 fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
@@ -239,6 +240,10 @@ fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
         Line::default(),
         crate::composer::welcome_hints_line(0, w),
         Line::default(),
+        match home.stats {
+            Some(stats) => crate::composer::plugin_stats_line(3, stats),
+            None => Line::default(),
+        },
         Line::default(),
         crate::composer::welcome_tip_line(3),
     ];

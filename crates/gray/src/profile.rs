@@ -21,7 +21,7 @@ use crate::skills_tool::SkillsPlugin;
 /// Builtin plugin catalog: what a `gray.yml` may name. The no-profile
 /// fallback is `tools-minimal` (see [`active_plugins`]); `tools-basic` and
 /// `tools-search` are opt-in.
-fn gray_defaults() -> Vec<Arc<dyn Plugin>> {
+pub(crate) fn gray_defaults() -> Vec<Arc<dyn Plugin>> {
     vec![
         Arc::new(ToolsMinimalPlugin) as Arc<dyn Plugin>,
         Arc::new(ToolsBasicPlugin) as Arc<dyn Plugin>,
