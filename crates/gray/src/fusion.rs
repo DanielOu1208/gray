@@ -410,11 +410,12 @@ impl Tool for HandoffTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: serde_json::Value) -> ToolOutput {
-        let task = args
-            .get("task")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+        let task = ["task", "message"].into_iter().find_map(|key| {
+            args.get(key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        });
         let Some(task) = task else {
             return ToolOutput::error("handoff: 'task' is required and must not be empty");
         };
