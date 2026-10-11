@@ -265,12 +265,10 @@ async fn interact_values_and_fast_revise_the_doc() {
     };
     let v = serde_json::to_value(&document).unwrap();
     assert_eq!(v["components"][3]["children"][1]["label"], "⚡ fast: on");
-    assert!(
-        v["components"][0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("fast `on`")
-    );
+    assert!(v["components"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("fast `on`"));
     let saved = store::get(home.path(), &token, crate::cron::now_secs()).unwrap();
     assert!(saved.draft.fast);
 }
@@ -341,13 +339,11 @@ async fn interact_expired_and_bad_actions() {
     let token = store::put(home.path(), &rec).unwrap();
     let err = interact(&mut config, home.path(), &token, None).unwrap_err();
     assert_eq!(err.0, "expired");
-    assert!(
-        !home
-            .path()
-            .join("cmd_ui")
-            .join(format!("{token}.json"))
-            .exists()
-    );
+    assert!(!home
+        .path()
+        .join("cmd_ui")
+        .join(format!("{token}.json"))
+        .exists());
     // Malformed action json.
     let token = store::put(home.path(), &picker_rec(&fake_models())).unwrap();
     let err = interact(&mut config, home.path(), &token, Some("{")).unwrap_err();
@@ -385,7 +381,7 @@ async fn run_rejects_local_and_unknown() {
         .await
         .unwrap_err();
     assert_eq!(err.0, "unknown_command");
-    for name in ["theme", "quit", "context", "undo", "gateway"] {
+    for name in ["theme", "quit", "copy", "hotkeys", "restart", "hehe"] {
         let err = run_command(&mut config, home.path(), name, &[])
             .await
             .unwrap_err();
@@ -393,7 +389,7 @@ async fn run_rejects_local_and_unknown() {
         assert!(err.1.contains(name));
     }
     // Aliases resolve to the same local rejection.
-    let err = run_command(&mut config, home.path(), "compress", &[])
+    let err = run_command(&mut config, home.path(), "reboot", &[])
         .await
         .unwrap_err();
     assert_eq!(err.0, "local_only");
