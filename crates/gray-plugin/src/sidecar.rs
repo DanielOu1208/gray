@@ -560,9 +560,12 @@ impl Transport {
     /// requests fail fast). Lock order is always child → stdin → pending.
     async fn ensure_alive(&self) -> bool {
         let mut child = self.child.lock().await;
-        if matches!(child.try_wait(), Ok(None)) {
-            return true;
-        }
+        let status = match child.try_wait() {
+            Ok(None) => return true,
+            Ok(Some(s)) => s.to_string(),
+            Err(e) => e.to_string(),
+        };
+        let name = Self::name_of(&self.argv);
         log::warn!(target: "gray_plugin", "sidecar child exited, respawning");
         match spawn_child(&self.argv) {
             Ok((new_child, stdin, stdout)) => {
@@ -582,12 +585,26 @@ impl Transport {
                     Self::name_of(&self.argv),
                     p.epoch,
                 );
+                self.say(format!(
+                    "plugin {name} exited ({status}) — restarted; see ~/.gray/logs/sidecar-stderr.log"
+                ))
+                .await;
                 true
             }
             Err(e) => {
                 log::warn!(target: "gray_plugin", "sidecar respawn failed: {e}");
+                self.say(format!(
+                    "plugin {name} exited ({status}) and could not be restarted: {e}; see ~/.gray/logs/sidecar-stderr.log"
+                ))
+                .await;
                 false
             }
+        }
+    }
+
+    async fn say(&self, text: String) {
+        if let Some(h) = self.host_handler.lock().await.clone() {
+            let _ = h(HOST_SAY.to_string(), json!({"text": text})).await;
         }
     }
 

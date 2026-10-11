@@ -449,7 +449,9 @@ impl Agent {
             // become citation stubs in place — no provider call, pairing and
             // order intact. Most pressure is handled here, so the summary
             // pass below fires far less often.
-            if needs_soft_elide(self.estimate_tokens(), self.context_window) {
+            if self.prefix_rewrite_ok
+                && needs_soft_elide(self.estimate_tokens(), self.context_window)
+            {
                 let before = self.estimate_tokens();
                 let elided = self.soft_elide();
                 if elided > 0 {

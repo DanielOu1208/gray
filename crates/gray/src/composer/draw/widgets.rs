@@ -343,7 +343,8 @@ pub(crate) fn queued_preview_lines(
             preview.push('…');
         }
         if !attached.is_empty() {
-            preview.push_str(&format!(" [+{} image]", attached.len()));
+            let n = attached.len();
+            preview.push_str(&format!(" +{n} image{}", if n == 1 { "" } else { "s" }));
         }
         lines.push(Line::from(vec![
             Span::styled("  ↳ ", dim),

@@ -41,8 +41,31 @@ impl Report {
 
 /// Run every check; `Err` (with per-check lines already printed) when any fail.
 pub async fn check_plugin_dir(dir: &str) -> anyhow::Result<()> {
-    let argv = resolve_argv(Path::new(dir))?;
+    let mut argv = resolve_argv(Path::new(dir))?;
     let argv0 = argv.first().cloned().unwrap_or_default();
+    // argv `manifest` probe — the install/check convention: prints the same
+    // manifest the wire answers with.
+    let probe = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(&argv0)
+            .arg("manifest")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await;
+    if let Ok(Ok(o)) = &probe
+        && o.status.success()
+        && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&o.stdout)
+    {
+        argv.extend(
+            v["sidecar_args"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_string)),
+        );
+    }
     let plugin =
         match tokio::time::timeout(Duration::from_secs(35), SidecarPlugin::spawn(argv)).await {
             Ok(Ok(p)) => p,
@@ -69,17 +92,6 @@ pub async fn check_plugin_dir(dir: &str) -> anyhow::Result<()> {
         ),
     }];
 
-    // argv `manifest` probe — the install/check convention: prints the same
-    // manifest the wire answers with.
-    let probe = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::process::Command::new(&argv0)
-            .arg("manifest")
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output(),
-    )
-    .await;
     reports.push(match probe {
         Ok(Ok(o)) if o.status.success() => {
             match serde_json::from_slice::<serde_json::Value>(&o.stdout) {

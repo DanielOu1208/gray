@@ -215,6 +215,7 @@ impl Config {
             &crate::setup::saved_config_path().unwrap_or_else(|_| PathBuf::from("/dev/null")),
         );
 
+        let saved_model = saved.model.clone();
         let model = nonempty(cli.model.as_deref())
             .or_else(|| nonempty(env("GRAY_MODEL").as_deref()))
             .or(saved.model); // optional: REPL starts without a model; validated on first use
@@ -348,6 +349,20 @@ impl Config {
             .map(|v| v.trim().to_string())
             .unwrap_or_else(|| nonempty(Some(saved.auth_ref.as_str())).unwrap_or_default());
 
+        let model_parts = if model == saved_model && !saved.model_parts.is_empty() {
+            saved.model_parts.clone()
+        } else {
+            model
+                .as_deref()
+                .and_then(|m| {
+                    saved
+                        .parts_memory
+                        .get(&crate::setup::effort_memory_key(&provider_id, &base_url, m))
+                        .cloned()
+                })
+                .unwrap_or_default()
+        };
+
         let config = Self {
             model,
             base_url,
@@ -358,7 +373,7 @@ impl Config {
             thinking_effort,
             show_reasoning,
             fast_mode,
-            model_parts: saved.model_parts.clone(),
+            model_parts,
             temperature,
             top_p,
             context_window,

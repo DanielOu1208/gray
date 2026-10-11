@@ -904,6 +904,9 @@ fn install_panic_hook() {
         } else {
             "non-string panic payload".into()
         };
+        if payload.starts_with("failed printing to stdout") && payload.contains("Broken pipe") {
+            std::process::exit(141);
+        }
         log::error!("panic at {location}: {payload}");
         default(info);
     }));

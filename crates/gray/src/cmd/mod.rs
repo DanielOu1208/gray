@@ -1043,9 +1043,7 @@ async fn plugin_command_result(
         })),
         Some(gray_plugin::CommandOutcome::ModelPicker(_))
         | Some(gray_plugin::CommandOutcome::AgentPicker(_)) => Err(CmdError::local(name)),
-        None => Err(CmdError::unavailable(format!(
-            "plugin '{owner}' did not answer '/{name}'"
-        ))),
+        None => Err(CmdError::local(name)),
     }
 }
 

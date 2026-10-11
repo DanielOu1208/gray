@@ -354,6 +354,7 @@ pub struct Tui {
     pub(crate) history_idx: Option<usize>,
     pub(crate) draft: String,
     pub(crate) attachments: Vec<(String, PathBuf)>,
+    pub(crate) chip_sel: Option<usize>,
     pub(crate) pending_pastes: Vec<(String, String)>,
     model_name: String,
     /// Footer label overriding the friendly model name (a composite
@@ -892,6 +893,7 @@ impl Tui {
             history_idx: None,
             draft: String::new(),
             attachments: Vec::new(),
+            chip_sel: None,
             pending_pastes: Vec::new(),
             model_name: String::new(),
             model_label: None,
@@ -1227,6 +1229,7 @@ impl Tui {
         self.history_idx = None;
         self.draft.clear();
         self.attachments.clear();
+        input::keys::set_chip_sel(self, None);
         self.pending_pastes.clear();
     }
     pub fn set_usage(&mut self, usage: gray_core::event::Usage) {

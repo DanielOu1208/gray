@@ -60,32 +60,54 @@ pub(crate) fn latched_viewport_floor(
 /// (`Image`/`File`) plus the file's real name — repeating the `[Image #n]`
 /// placeholder would just say what the draft already says. Clipboard
 /// pastes land in `clipboard-XXXXXX.png`, which is a name too.
-fn attachment_chips(attachments: &[(String, std::path::PathBuf)]) -> Line<'static> {
+fn attachment_chips(
+    attachments: &[(String, std::path::PathBuf)],
+    selected: Option<usize>,
+) -> Line<'static> {
     let t = crate::theme::theme();
     let mut spans = vec![Span::styled("   ", Style::default().bg(t.surface_bg))];
     for (i, (ph, path)) in attachments.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled("  ", Style::default().bg(t.surface_bg)));
+            spans.push(Span::styled(" ", Style::default().bg(t.surface_bg)));
         }
         let kind = ph
             .trim_start_matches('[')
             .split(' ')
             .next()
             .unwrap_or("File");
-        spans.push(Span::styled(
-            format!(" {kind} "),
-            Style::default().fg(t.text_bright).bg(t.input_bg),
-        ));
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("clipboard");
-        spans.push(Span::styled(
-            format!(" {name}"),
-            Style::default().fg(t.text_muted).bg(t.surface_bg),
-        ));
+        let (pill, label) = if selected == Some(i) {
+            let on = Style::default()
+                .fg(t.input_bg)
+                .bg(t.text_bright)
+                .add_modifier(Modifier::BOLD);
+            (on, on)
+        } else {
+            (
+                Style::default().fg(t.text_bright).bg(t.input_bg),
+                Style::default().fg(t.text_muted).bg(t.surface_bg),
+            )
+        };
+        spans.push(Span::styled(format!(" {kind} "), pill));
+        spans.push(Span::styled(format!(" {name} "), label));
     }
     Line::from(spans)
+}
+
+fn attachment_hint(selecting: bool) -> Line<'static> {
+    let t = crate::theme::theme();
+    let hint = if selecting {
+        "←→ select · backspace delete · ↓ close"
+    } else {
+        "↑ select"
+    };
+    Line::from(vec![
+        Span::styled("   ", Style::default().bg(t.surface_bg)),
+        Span::styled(hint, Style::default().fg(t.text_dim).bg(t.surface_bg)),
+    ])
 }
 
 /// Upper bound for the inline viewport.
@@ -213,11 +235,14 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     });
     let mut ibox = build_input_box(&text, cursor, w, ghost, home);
     if !tui.attachments.is_empty() {
-        // Chips ride inside the box, under the text and above its bottom
-        // pad, so they read as part of the draft they belong to.
+        // Chips ride inside the box, above the text and under its top pad,
+        // so they read as part of the draft they belong to.
+        let chip_sel = tui.chip_sel.map(|s| s.min(tui.attachments.len() - 1));
         ibox.lines
-            .insert(ibox.band_h - 1, attachment_chips(&tui.attachments));
-        ibox.band_h += 1;
+            .insert(1, attachment_chips(&tui.attachments, chip_sel));
+        ibox.lines.insert(2, attachment_hint(chip_sel.is_some()));
+        ibox.band_h += 2;
+        ibox.cur_row += 2;
     }
     if home.is_some() {
         // Fill the screen: spacer rows under the home rows center the

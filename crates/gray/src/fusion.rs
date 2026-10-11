@@ -282,12 +282,25 @@ fn local_sidekick() -> Option<String> {
     if !shape.is_composite() {
         return None;
     }
-    let sidekick = saved.model_parts.get("sidekick")?;
+    let parts = if saved.model_parts.is_empty() {
+        saved
+            .parts_memory
+            .get(&crate::setup::effort_memory_key(
+                &saved.provider_id,
+                saved.base_url.as_deref().unwrap_or_default(),
+                model,
+            ))
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        saved.model_parts.clone()
+    };
+    let sidekick = parts.get("sidekick")?;
     // A qualified id already names its provider (synthesized options);
     // a bare id — the only form native rows offer — names one of the
     // lead provider's own models, so qualify it with that provider's
     // token for `resolve_sidekick` to map back.
-    Some(if is_local_parts(&saved.model_parts) {
+    Some(if is_local_parts(&parts) {
         sidekick.clone()
     } else {
         format!("{}:{sidekick}", provider_token(&list_key))
