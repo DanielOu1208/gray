@@ -618,7 +618,13 @@ async fn take_over_without_a_pid_refuses() {
 async fn take_over_sigterm_frees_a_foreign_lock() {
     let dir = tempfile::tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path().to_path_buf());
-    let id = seed(&store, "takeover-foreign", dir.path().to_path_buf(), &["hi"]).await;
+    let id = seed(
+        &store,
+        "takeover-foreign",
+        dir.path().to_path_buf(),
+        &["hi"],
+    )
+    .await;
     let open_path = dir.path().join(format!("{}.open", id.as_str()));
     // One bash holds the lock on inherited fd 9 and execs `sleep` under
     // the argv0 "gray", so the pid is both holder and a /proc gray.
