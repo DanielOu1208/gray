@@ -433,6 +433,7 @@ impl Agent {
             if let Some(steer) = self.steer.clone()
                 && let Some(text) = steer()
             {
+                emit!(AgentEvent::Steered { text: text.clone() });
                 self.messages.push(Message::user(text));
             }
 
@@ -1031,6 +1032,7 @@ impl Agent {
                 if leaked_markup && leak_nudges < MAX_LEAK_NUDGES {
                     leak_nudges += 1;
                     log::info!(target: "gray_agent", "end turn leaked tool-call markup; nudging {leak_nudges}/{MAX_LEAK_NUDGES}");
+                    emit!(AgentEvent::Retract);
                     self.messages.push(Message::user_injected(
                         "your last message contained raw tool-call markup instead of a real tool call, so nothing ran — send the call again, or reply without it",
                     ));

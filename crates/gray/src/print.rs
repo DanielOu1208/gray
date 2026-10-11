@@ -187,6 +187,7 @@ pub fn render_event_with_context<W: Write>(
             write!(w, "\n\n")?;
             w.flush()
         }
+        AgentEvent::Steered { .. } | AgentEvent::Retract => Ok(()),
         AgentEvent::TurnEnd { usage, .. } => {
             if usage.total() > 0 {
                 writeln!(
@@ -564,6 +565,17 @@ fn stream_text_enabled() -> bool {
     })
 }
 
+/// `GRAY_STDIN_STEER` truthy check: the caller owns stdin for the whole
+/// process and writes `{"type":"steer","text":…}` / ask-answer lines on it.
+fn steer_enabled() -> bool {
+    std::env::var("GRAY_STDIN_STEER").is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 impl JsonOutput {
     /// What a surface should call `name`: the plugin's own label, else the
     /// wire name humanized (`discord_send` → `Discord Send`; a single token
@@ -618,6 +630,17 @@ impl JsonOutput {
             } else {
                 Vec::new()
             };
+        }
+        // The withdrawn segment's prose is dropped, not flushed: the
+        // surface removes what it already showed, then later `text` rows
+        // carry fresh indices.
+        if let AgentEvent::Retract = event {
+            let seg = self.segment.index;
+            self.segment = TextSegment {
+                index: seg + 1,
+                ..TextSegment::default()
+            };
+            return vec![serde_json::json!({"type": "retract", "segment": seg})];
         }
         // A tool call, the end of a provider step, or the end of the turn
         // closes the prose before it: the closing row carries everything.
@@ -688,9 +711,13 @@ impl JsonOutput {
                 row["detail"] = disclose(message, DETAIL_CAP).into();
                 "provider_retry"
             }
+            AgentEvent::Steered { text } => {
+                row["detail"] = disclose(text, DETAIL_CAP).into();
+                "steered"
+            }
             AgentEvent::Compacted { .. } => "compacted",
             AgentEvent::TurnEnd { usage, .. } => {
-                self.usage = *usage;
+                self.usage.accumulate(usage);
                 rows.append(&mut self.take_thinking());
                 "persisting"
             }
@@ -932,12 +959,48 @@ async fn run_print_inner(
     crate::setup::set_user_keep_recent_tokens(config.context_keep);
     // Sidecar `host/ask` without a TUI: the `--json` wire when the caller
     // asked for it (a chat bridge answers on stdin), else piped-stdin/empty.
+    // GRAY_STDIN_STEER implies the json ask wire: its caller always pipes
+    // stdin, and a per-ask reader would race the demux.
+    let steering = json.is_some() && steer_enabled();
     match json.as_deref() {
-        Some(output) if crate::ask::json_enabled() => {
+        Some(output) if crate::ask::json_enabled() || steering => {
             crate::ask::install_json(output.turn_id.clone())
         }
         _ => crate::ask::install(None, false),
     }
+    let steer_rx = if steering {
+        crate::ask::set_demux();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            let stdin = std::io::stdin();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match stdin.lock().read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                if v.get("type").and_then(|t| t.as_str()) == Some("steer") {
+                    if let Some(text) = v
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .filter(|t| !t.trim().is_empty())
+                    {
+                        let _ = tx.send(text.to_string());
+                    }
+                } else if let Some(ask_id) = v.get("ask_id").and_then(|a| a.as_u64()) {
+                    crate::ask::deliver_json_answer(ask_id, &line);
+                }
+            }
+        });
+        Some(std::sync::Arc::new(std::sync::Mutex::new(rx)))
+    } else {
+        None
+    };
     let cwd = std::env::current_dir()?;
     let store = JsonlSessionStore::default();
     // Explicit `--session` wins over `-c` (same precedence as the REPL).
@@ -1092,6 +1155,12 @@ async fn run_print_inner(
         checkpoint_failed.clone(),
         history_revision,
     )));
+    if let Some(rx) = &steer_rx {
+        let rx = rx.clone();
+        agent.set_steer(std::sync::Arc::new(move || {
+            rx.lock().ok().and_then(|mut r| r.try_recv().ok())
+        }));
+    }
     // Headless `-p` has no paste-attach: inline file links still carry vision.
     // Structured input already owns its typed block and never scans arbitrary
     // text for attachment paths.
@@ -1117,39 +1186,58 @@ async fn run_print_inner(
     let mut render_err: Option<std::io::Error> = None;
     let mut turn_usage: Option<gray_core::event::Usage> = None;
     let turn_start = std::time::Instant::now();
-    let run_result = {
-        let render_cancel = cancel.clone();
-        let mut on_event = |ev: &AgentEvent| {
-            if let AgentEvent::TurnEnd { usage, .. } = ev {
-                turn_usage = Some(*usage);
+    let render_cancel = cancel.clone();
+    let mut on_event = |ev: &AgentEvent| {
+        if let AgentEvent::TurnEnd { usage, .. } = ev {
+            match turn_usage.as_mut() {
+                Some(u) => u.accumulate(usage),
+                None => turn_usage = Some(*usage),
             }
-            if render_err.is_some() {
-                return;
-            }
-            let rendered = match json.as_deref_mut() {
-                Some(output) => output.event(ev),
-                None => render_event_with_context(
-                    &mut stdout.lock(),
-                    ev,
-                    Some(&cwd),
-                    &mut in_flight,
-                    &tool_labels,
-                    &tool_previews,
-                ),
-            };
-            if let Err(e) = rendered {
-                render_cancel.cancel();
-                render_err = Some(e);
-            }
+        }
+        if render_err.is_some() {
+            return;
+        }
+        let rendered = match json.as_deref_mut() {
+            Some(output) => output.event(ev),
+            None => render_event_with_context(
+                &mut stdout.lock(),
+                ev,
+                Some(&cwd),
+                &mut in_flight,
+                &tool_labels,
+                &tool_previews,
+            ),
         };
-        agent
-            .run_streaming(user_msg, ctx, &mut on_event)
-            .await
-            .map_err(|e| {
-                let msg = crate::repl::format_core_error(&e, &config.base_url);
-                anyhow::anyhow!(scrub_error_text(&msg))
-            })
+        if let Err(e) = rendered {
+            render_cancel.cancel();
+            render_err = Some(e);
+        }
     };
+    let map_err = |e: gray_core::error::CoreError| {
+        let msg = crate::repl::format_core_error(&e, &config.base_url);
+        anyhow::anyhow!(scrub_error_text(&msg))
+    };
+    let mut run_result = agent
+        .run_streaming(user_msg, ctx.clone(), &mut on_event)
+        .await
+        .map_err(map_err);
+    // Steer lines that land after the last model request never met an
+    // injection point — each becomes a follow-up turn in this session,
+    // inside the one `result` row.
+    while run_result.is_ok()
+        && let Some(rx) = &steer_rx
+        && let Some(text) = rx.lock().ok().and_then(|mut r| r.try_recv().ok())
+    {
+        on_event(&AgentEvent::Steered { text: text.clone() });
+        run_result = agent
+            .run_streaming(
+                gray_core::message::Message::user(text),
+                ctx.clone(),
+                &mut on_event,
+            )
+            .await
+            .map_err(map_err);
+    }
     sigint_task.abort();
     agent.set_checkpoint(None);
     let turn_duration_ms = turn_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;

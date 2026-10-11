@@ -262,6 +262,13 @@ pub enum AgentEvent {
     /// this boundary belong to a NEW message and render in their own block.
     /// Truncation continuations resume mid-sentence and never emit it.
     MessageBoundary,
+    /// Mid-turn steer: user text queued while the turn was running was
+    /// appended as a user message at a model-request boundary.
+    Steered { text: String },
+    /// The assistant reply that just streamed is withdrawn (it carried raw
+    /// tool-call markup and is being regenerated). Surfaces delete the
+    /// prose shown for it; the next deltas form a new segment.
+    Retract,
     /// Turn finished with a stop reason and token usage.
     TurnEnd {
         stop_reason: StopReason,
