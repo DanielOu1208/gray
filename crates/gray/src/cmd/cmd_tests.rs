@@ -41,6 +41,7 @@ fn picker_rec(models: &[(String, String)]) -> store::PendingDoc {
         },
         models: models.to_vec(),
         shapes: Default::default(),
+        page: 0,
     }
 }
 
@@ -154,6 +155,7 @@ fn ui_doc_serde_wire_shape() {
                         label: "Apply".to_string(),
                         style: ui::ButtonStyle::Primary,
                         url: None,
+                        disabled: false,
                     },
                 ],
             },
@@ -190,7 +192,8 @@ fn model_picker_doc_from_draft() {
         fast: false,
         parts: Default::default(),
     };
-    let v = serde_json::to_value(model_picker_doc(&draft, &models, &BTreeMap::new())).unwrap();
+    let v =
+        serde_json::to_value(model_picker_doc(&draft, &models, &BTreeMap::new(), 0)).unwrap();
     assert_eq!(v["document_id"], "model-picker");
     assert_eq!(v["lifecycle"], "editable");
     assert_eq!(
@@ -265,10 +268,12 @@ async fn interact_values_and_fast_revise_the_doc() {
     };
     let v = serde_json::to_value(&document).unwrap();
     assert_eq!(v["components"][3]["children"][1]["label"], "⚡ fast: on");
-    assert!(v["components"][0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("fast `on`"));
+    assert!(
+        v["components"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("fast `on`")
+    );
     let saved = store::get(home.path(), &token, crate::cron::now_secs()).unwrap();
     assert!(saved.draft.fast);
 }
@@ -339,11 +344,13 @@ async fn interact_expired_and_bad_actions() {
     let token = store::put(home.path(), &rec).unwrap();
     let err = interact(&mut config, home.path(), &token, None).unwrap_err();
     assert_eq!(err.0, "expired");
-    assert!(!home
-        .path()
-        .join("cmd_ui")
-        .join(format!("{token}.json"))
-        .exists());
+    assert!(
+        !home
+            .path()
+            .join("cmd_ui")
+            .join(format!("{token}.json"))
+            .exists()
+    );
     // Malformed action json.
     let token = store::put(home.path(), &picker_rec(&fake_models())).unwrap();
     let err = interact(&mut config, home.path(), &token, Some("{")).unwrap_err();
@@ -492,7 +499,7 @@ fn model_picker_doc_composite_row_gets_slot_selects() {
             ("sidekick".to_string(), "a".to_string()),
         ]),
     };
-    let v = serde_json::to_value(model_picker_doc(&draft, &models, &shapes)).unwrap();
+    let v = serde_json::to_value(model_picker_doc(&draft, &models, &shapes, 0)).unwrap();
     let comps = v["components"].as_array().unwrap();
     // text · model · slot:lead · slot:sidekick · effort · buttons
     assert_eq!(comps.len(), 6);
