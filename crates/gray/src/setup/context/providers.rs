@@ -13,7 +13,12 @@ pub fn friendly_model_name(model_id: &str) -> String {
         .filter(|w| !w.is_empty())
         .map(|w| {
             let lower = w.to_lowercase();
-            if lower == "gpt" || lower == "glm" || lower == "ai" || lower == "api" {
+            if lower == "gpt"
+                || lower == "glm"
+                || lower == "ai"
+                || lower == "api"
+                || lower == "swe"
+            {
                 w.to_uppercase()
             } else if lower.starts_with('v')
                 && lower.len() > 1

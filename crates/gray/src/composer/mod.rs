@@ -429,8 +429,11 @@ pub struct Tui {
     plugin_widget: plugin_widget::Widget,
     pub(crate) ask_modal: Option<AskModal>,
     /// The startup notice (interrupted sessions) shown under the home
-    /// tip, until the first transcript item ends the home screen.
+    /// hints, until the first real turn ends the home screen.
     pub(crate) home_notice: Option<String>,
+    /// Slash commands and their modals keep the welcome up; the first real
+    /// turn (`begin_turn`) or a replayed session ends it.
+    pub(crate) left_home: bool,
     /// Last `statusline::version()` painted; a change (plugin status,
     /// status command output, `/reload`) repaints the footer.
     status_line_seen: u64,
@@ -546,31 +549,6 @@ pub enum TranscriptEntry {
 /// onto gray's default keymap — right-aligned under the input panel.
 const WELCOME_HINTS: &[(&str, &str)] = &[("/", "commands")];
 
-/// devin-tui's rotating `● Tip` row, gray's verbs. The scrollback banner
-/// can't tick, so one tip is picked per process and every re-emit
-/// (resize reflow, `/hehe` revert) keeps it.
-const WELCOME_TIPS: &[(&str, &str)] = &[
-    ("/", "shows every command and skill"),
-    ("/models", "picks a model"),
-    ("/help", "lists every command and key"),
-    ("/resume", "reopens an earlier session"),
-    ("alt+enter", "inserts a newline"),
-    ("ctrl+v", "pastes an image from the clipboard"),
-    ("esc", "cancels the running turn"),
-    ("ctrl+c", "clears the draft — exits when it's empty"),
-];
-
-fn welcome_tip_index() -> usize {
-    static PICK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *PICK.get_or_init(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as usize)
-            .unwrap_or(0)
-            % WELCOME_TIPS.len()
-    })
-}
-
 /// devin's home hints row, right-aligned to the `x..x + col_w` column:
 /// keys bright, labels muted; the rightmost pairs drop first when narrow.
 pub(crate) fn welcome_hints_line(x: usize, col_w: usize) -> Line<'static> {
@@ -607,18 +585,6 @@ pub(crate) fn welcome_hints_line(x: usize, col_w: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The tip row at column `x`: `● Tip  key` bright, the rest muted.
-pub(crate) fn welcome_tip_line(x: usize) -> Line<'static> {
-    let theme = crate::theme::theme();
-    let (key, text) = WELCOME_TIPS[welcome_tip_index()];
-    Line::from(vec![
-        Span::raw(" ".repeat(x)),
-        Span::styled("● Tip  ", Style::default().fg(theme.text_bright)),
-        Span::styled(key, Style::default().fg(theme.text_bright)),
-        Span::styled(format!(" {text}"), Style::default().fg(theme.text_muted)),
-    ])
-}
-
 /// The column devin centers its home block on: `(x, width)`, `min(78, w-8)`
 /// wide. The welcome logo and the home input box share it.
 pub(crate) fn home_column(w: usize) -> (usize, usize) {
@@ -631,7 +597,7 @@ pub(crate) fn home_column(w: usize) -> (usize, usize) {
 /// shimmer) and `gray` + version, centered horizontally on the
 /// `min(78, w-8)` column devin uses and vertically together with the
 /// composer's home band ([`draw::home_band_h`]). The composer is the rest
-/// of devin's home: the framed panel with the hints, tip and startup
+/// of devin's home: the framed panel with the hints and startup
 /// notice under it, and the status bar where the corner row was. Deliberately not the graychan art —
 /// that is `/hehe` only, so the startup screen is the logo and `/hehe`
 /// again puts the logo back.
@@ -926,6 +892,7 @@ impl Tui {
             status_line_seen: crate::statusline::version(),
             ask_modal: None,
             home_notice: None,
+            left_home: false,
         })
     }
 
@@ -1194,12 +1161,20 @@ impl Tui {
         self.home_notice = notice;
     }
 
-    /// devin's home screen: until the first transcript item, scrollback
-    /// holds only the welcome banner.
+    /// devin's home screen: it stays up through slash commands — their
+    /// `❯` echo card, `say()` lines and `/hehe` art hang in scrollback —
+    /// and ends only when a real turn starts (`begin_turn` flips
+    /// `left_home`) or a resumed session replays real messages.
     pub(crate) fn is_home(&self) -> bool {
-        self.history_entries
-            .iter()
-            .all(|e| matches!(e, TranscriptEntry::Welcome | TranscriptEntry::Gap(_)))
+        !self.left_home
+            && self.history_entries.iter().all(|e| match e {
+                TranscriptEntry::Welcome
+                | TranscriptEntry::Gap(_)
+                | TranscriptEntry::Mascot
+                | TranscriptEntry::StyledLines { .. } => true,
+                TranscriptEntry::UserPrompt(text, _) => text.starts_with('/'),
+                TranscriptEntry::ToolBox { .. } | TranscriptEntry::ThinkingRun(_) => false,
+            })
     }
 
     pub fn set_model_label(&mut self, label: Option<String>) {
@@ -1489,6 +1464,9 @@ impl Tui {
     }
 
     pub fn begin_turn(&mut self, label: &str) {
+        // The first real turn ends the home screen — slash commands and
+        // their modals never reach here.
+        self.left_home = true;
         let now = Instant::now();
         // The pending resume is now in flight: drop the flag so neither the
         // ghost nor a bare (empty) Enter mid-turn re-submits it.
