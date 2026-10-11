@@ -5,6 +5,9 @@
 ### Removed
 - **fff-search index removed; fsearch is the only resident file index
   (unix).** `GRAY_SEARCH_INDEX=fff` now means the default.
+- **pi-extension leftovers removed.** `gray plugin remove` no longer
+  looks under `plugins/pi/` and `pi` is no longer a reserved install
+  name.
 
 ### Fixed
 - **Attaching a PDF, audio or video file no longer makes the context

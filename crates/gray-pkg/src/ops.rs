@@ -355,7 +355,7 @@ fn replace_archive(
     anyhow::ensure!(
         !matches!(
             name,
-            "tmp" | "pi" | "lock.json" | "index-cache.json" | "hub-index-cache.json"
+            "tmp" | "lock.json" | "index-cache.json" | "hub-index-cache.json"
         ),
         "reserved plugin name"
     );
@@ -511,15 +511,9 @@ fn remove_inner(name: &str) -> anyhow::Result<()> {
     // (a stale entry the user can re-remove), never the reverse, where the
     // registry would claim a plugin whose files are gone.
     write_lock(&lock)?;
-    // Gray-native/URL installs live at `<plugins_dir>/<name>`; pi installs
-    // at `<plugins_dir>/pi/<name>` (R13: sanitized keys hold no `/`).
-    for dir in [
-        crate::plugins_dir().join(name),
-        crate::plugins_dir().join("pi").join(name),
-    ] {
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-        }
+    let dir = crate::plugins_dir().join(name);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
     }
     Ok(())
 }
