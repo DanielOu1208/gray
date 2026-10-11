@@ -48,7 +48,7 @@ fn input_box_ghost_hint_shows_only_when_empty() {
 }
 
 #[test]
-fn home_box_is_the_flat_band_with_hints_tip_and_notice_under_it() {
+fn home_box_is_the_flat_band_with_hints_and_notice_under_it() {
     let home = HomeRows {
         notice: Some(
             "⚠ 3 interrupted sessions in ~/gray · /sessions to pick up · /sessions dismiss to clear",
@@ -60,29 +60,25 @@ fn home_box_is_the_flat_band_with_hints_tip_and_notice_under_it() {
     // The box itself is the old 3-row band (pad, `❯`, pad), no frame, on
     // the welcome's centered `min(78, w-8)` column.
     assert_eq!(ibox.band_h, 3, "{rows:?}");
-    assert_eq!((ibox.x, ibox.width, ibox.home), (11, 78, true));
+    assert_eq!((ibox.x, ibox.width), (11, 78));
     assert_eq!(rows[1], " ❯ hi");
     assert_eq!((ibox.cur_row, ibox.cur_col), (1, 2));
-    // blank, hints, 2 blanks, tip, blank, notice headline + one row per command
-    assert_eq!(rows.len(), 12, "{rows:?}");
+    // blank, hints, blank, notice headline + one row per command
+    assert_eq!(rows.len(), 10, "{rows:?}");
     assert!(rows[4].contains("commands"), "{rows:?}");
     assert_eq!(
         display_width(&rows[4]),
         78,
         "hints flush with the box's right edge"
     );
-    assert!(rows[7].starts_with("   ● Tip"), "{rows:?}");
-    assert_eq!(rows[9], "   ⚠ 3 interrupted sessions in ~/gray");
-    assert_eq!(rows[10], "     /sessions           pick up");
-    assert_eq!(rows[11], "     /sessions dismiss   clear");
+    assert_eq!(rows[7], "   ⚠ 3 interrupted sessions in ~/gray");
+    assert_eq!(rows[8], "     /sessions           pick up");
+    assert_eq!(rows[9], "     /sessions dismiss   clear");
     // Off the home screen the box is the full-width band alone.
     let chat = build_input_box("hi", 2, w, None, None);
-    assert_eq!(
-        (chat.lines.len(), chat.x, chat.width, chat.home),
-        (3, 0, w, false)
-    );
+    assert_eq!((chat.lines.len(), chat.x, chat.width), (3, 0, w));
     // The band the welcome centers over: box, home rows, status bar.
-    assert_eq!(home_band_h(w), 3 + 5 + 1);
+    assert_eq!(home_band_h(w), 3 + 3 + 1);
 }
 
 #[test]

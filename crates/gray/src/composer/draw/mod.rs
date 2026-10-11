@@ -565,19 +565,11 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 Rect::new(box_x, box_y, box_w, band_h),
             );
             // The home rows under the box may run past its right edge (a
-            // long tip on a narrow column); only the box text is wrapped.
+            // long notice on a narrow column); only the box text is wrapped.
             frame.render_widget(
                 Paragraph::new(ibox.lines.clone()),
                 Rect::new(box_x, box_y, area.right() - box_x, rendered_box_h),
             );
-            if ibox.home && box_w > 0 {
-                let t = crate::theme::theme();
-                let bar = Style::default().fg(t.accent).bg(t.surface_bg);
-                frame.render_widget(
-                    Paragraph::new(vec![Line::styled("▎", bar); band_h as usize]),
-                    Rect::new(box_x, box_y, 1, band_h),
-                );
-            }
         }
 
         if visible_count > 0 {
