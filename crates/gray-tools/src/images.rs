@@ -1,6 +1,6 @@
-//! Image normalization before send, opencode `Image.normalize` shape minus
-//! its resolution cap: images pass at native size. Only the provider byte
-//! limit still shrinks them.
+//! Image handling before send: [`normalize_image_bytes`] validates and
+//! tags the original bytes — no re-encode, no shrink. Provider hard caps
+//! are enforced at serialization in gray-provider's `image_fit`.
 //!
 //! Moved here from `gray::repl::attachments` so the `read` tool can attach
 //! vision blocks for image files (opencode `read` parity: "Image read
@@ -11,10 +11,11 @@
 use std::io::Cursor;
 use std::path::Path;
 
-/// Provider hard cap: Anthropic rejects images past 5MB, so the retry loop
-/// below halves only when the ENCODED bytes would exceed it — never on
-/// resolution alone.
-pub const MAX_BASE64_BYTES: usize = 5 * 1024 * 1024;
+/// Sanity ceiling on the raw file: past ~20MB no vision provider takes a
+/// single image, so refuse loudly instead of handing a guaranteed-400
+/// payload to the wire. Provider-specific caps (Anthropic's 5MB/8000px)
+/// live in gray-provider's `image_fit`, applied at serialization.
+const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum MediaError {
@@ -28,7 +29,7 @@ impl std::fmt::Display for MediaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Decode(e) => write!(f, "could not decode image: {e}"),
-            Self::TooBig(e) => write!(f, "image still over 5MB after shrinking: {e}"),
+            Self::TooBig(e) => write!(f, "image over 20MB: {e}"),
             Self::Extract(e) => write!(f, "extract failed: {e}"),
             Self::Unsupported(e) => write!(f, "{e}"),
         }
@@ -163,17 +164,24 @@ pub fn video_media_type(path: &Path) -> &'static str {
     }
 }
 
-/// Normalize-before-send (opencode `Image.normalize` minus its 2000px cap):
-/// decode, apply EXIF orientation, re-encode (JPEG stays JPEG, everything
-/// else becomes PNG), and only when the encoded bytes would pass the
-/// provider's 5MB image cap, halve and retry up to 3 times — then fail
-/// loudly like SizeError. Returns `(media_type, bytes)`.
+/// Validate-and-tag before send: sniff the format, decode the header, and
+/// return the ORIGINAL bytes with their real MIME — no re-encode, no
+/// resize, no rotation bake (animated GIFs stay animated, EXIF stays on
+/// the file for the provider to honor). Only a raw file past the 20MB
+/// sanity ceiling or an undecodable header fails loudly. Provider hard
+/// caps are enforced at serialization (`gray-provider::image_fit`).
+/// Returns `(media_type, bytes)`.
 pub fn normalize_image_bytes(bytes: &[u8]) -> Result<(String, Vec<u8>), MediaError> {
-    use image::{ImageDecoder, ImageFormat};
+    use image::ImageFormat;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(MediaError::TooBig(format!("{} bytes", bytes.len())));
+    }
     let format = image::guess_format(bytes).map_err(|e| MediaError::Decode(e.to_string()))?;
-    let out_format = match format {
-        ImageFormat::Jpeg => ImageFormat::Jpeg,
-        ImageFormat::Png | ImageFormat::Gif | ImageFormat::WebP => ImageFormat::Png,
+    let mime = match format {
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Png => "image/png",
+        ImageFormat::Gif => "image/gif",
+        ImageFormat::WebP => "image/webp",
         // bmp/heic/etc: not in our decoder set — loud, like opencode DecodeError.
         other => {
             return Err(MediaError::Decode(format!(
@@ -181,40 +189,8 @@ pub fn normalize_image_bytes(bytes: &[u8]) -> Result<(String, Vec<u8>), MediaErr
             )));
         }
     };
-    let mut decoder = image::ImageReader::with_format(Cursor::new(bytes), format)
+    image::ImageReader::with_format(Cursor::new(bytes), format)
         .into_decoder()
         .map_err(|e| MediaError::Decode(e.to_string()))?;
-    let orientation = decoder
-        .orientation()
-        .map_err(|e| MediaError::Decode(e.to_string()))?;
-    let mut img = image::DynamicImage::from_decoder(decoder)
-        .map_err(|e| MediaError::Decode(e.to_string()))?;
-    img.apply_orientation(orientation);
-    let mut last_size = 0;
-    for attempt in 0..4 {
-        let mut buf = Vec::new();
-        img.write_to(&mut Cursor::new(&mut buf), out_format)
-            .map_err(|e| MediaError::Decode(e.to_string()))?;
-        last_size = base64_len(&buf);
-        if last_size <= MAX_BASE64_BYTES {
-            let mime = if out_format == ImageFormat::Jpeg {
-                "image/jpeg"
-            } else {
-                "image/png"
-            };
-            return Ok((mime.to_string(), buf));
-        }
-        if attempt == 3 {
-            break;
-        }
-        // Still past the provider byte cap: halve and retry (animated GIFs
-        // arrive as frame 0).
-        let (w, h) = (img.width().max(1) / 2, img.height().max(1) / 2);
-        img = img.resize(w.max(1), h.max(1), image::imageops::FilterType::Triangle);
-    }
-    Err(MediaError::TooBig(format!("{} bytes", last_size)))
-}
-
-fn base64_len(raw: &[u8]) -> usize {
-    raw.len().div_ceil(3) * 4
+    Ok((mime.to_string(), bytes.to_vec()))
 }

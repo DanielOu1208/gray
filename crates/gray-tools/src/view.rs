@@ -50,9 +50,9 @@ impl std::fmt::Display for ViewError {
     }
 }
 
-/// Normalize one image file for the model: native resolution, base64 under
-/// 5MB — [`crate::images::normalize_image_bytes`], the same normalization
-/// pasted attachments and the `read` tool take.
+/// Attach one image file for the model at original bytes —
+/// [`crate::images::normalize_image_bytes`], the same path pasted
+/// attachments and the `read` tool take.
 pub fn load(path: &Path) -> Result<Shown, ViewError> {
     // Extension gate first: cheap, and it turns `view notes.md` into a clear
     // refusal naming bash's role instead of a decode failure.

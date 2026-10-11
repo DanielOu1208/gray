@@ -171,10 +171,14 @@ pub(crate) fn map_request(
                         blocks.push(json!({"type": "text", "text": text}));
                     }
                 }
-                ContentBlock::Image { media_type, data } => blocks.push(json!({
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": media_type, "data": data},
-                })),
+                ContentBlock::Image { media_type, data } => {
+                    let (media_type, data) = crate::image_fit::fit_anthropic(&media_type, &data)
+                        .unwrap_or((media_type, data));
+                    blocks.push(json!({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": data},
+                    }));
+                }
                 ContentBlock::Media {
                     media_type, data, ..
                 } => blocks.push(json!({

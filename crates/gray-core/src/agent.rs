@@ -104,7 +104,7 @@ pub struct ToolOutput {
     pub media: Vec<AttachedMedia>,
 }
 
-/// One downscaled image riding with a tool result.
+/// One image riding with a tool result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachedImage {
     pub media_type: String,

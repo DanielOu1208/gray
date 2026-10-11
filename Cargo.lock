@@ -982,9 +982,11 @@ name = "gray-provider"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "base64",
  "eventsource-stream",
  "futures",
  "gray-core",
+ "image",
  "log",
  "reqwest",
  "serde",

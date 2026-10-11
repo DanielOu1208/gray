@@ -763,6 +763,12 @@ fn map_chat_request(
                             }
                         }
                         ContentBlock::Image { media_type, data } => {
+                            let (media_type, data) = if caps.anthropic_cache {
+                                crate::image_fit::fit_anthropic(&media_type, &data)
+                                    .unwrap_or((media_type, data))
+                            } else {
+                                (media_type, data)
+                            };
                             let url = image_data_url(&media_type, &data);
                             media_parts.push(
                                 serde_json::json!({"type":"image_url","image_url":{"url": url}}),

@@ -52,7 +52,7 @@ fn pdf_missing_file_errors() {
 }
 
 #[test]
-fn jpeg_exif_orientation_is_applied_before_encoding() {
+fn jpeg_exif_passes_through_byte_identical() {
     let image =
         image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 4, image::Rgb([90, 50, 20])));
     let mut encoded = Cursor::new(Vec::new());
@@ -67,9 +67,9 @@ fn jpeg_exif_orientation_is_applied_before_encoding() {
     oriented.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
     oriented.extend_from_slice(exif);
     oriented.extend_from_slice(&jpeg[2..]);
-    let (_, bytes) = normalize_image_bytes(&oriented).unwrap();
-    let decoded = image::load_from_memory(&bytes).unwrap();
-    assert_eq!((decoded.width(), decoded.height()), (4, 8));
+    let (mime, bytes) = normalize_image_bytes(&oriented).unwrap();
+    assert_eq!(mime, "image/jpeg");
+    assert_eq!(bytes, oriented);
 }
 
 #[test]

@@ -464,7 +464,7 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
 }
 
 /// Builds the user message with MIME-driven attachments (opencode parity):
-/// images normalized (downscaled, capped); video, PDF and audio as native
+/// images passed through at original bytes; video, PDF and audio as native
 /// media carrying a fallback (contact sheet, PDF text, a note) that the
 /// provider sends instead on a model without that input — the same parts a
 /// `cat` of the file produces. Anything else is reported loudly.

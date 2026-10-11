@@ -1,6 +1,7 @@
 //! Streaming LLM provider implementations for the Gray agent framework.
 
 pub mod anthropic;
+pub(crate) mod image_fit;
 pub mod openai;
 pub mod openai_profile;
 
