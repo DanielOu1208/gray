@@ -492,3 +492,56 @@ async fn compaction_never_summarizes_a_contaminated_partial() {
         "the summary must not carry the partial forward:\n{after}"
     );
 }
+
+#[test]
+fn inline_media_attachment_is_priced_per_block_not_per_base64_byte() {
+    // An 8 MB raw PDF/voice note is ~10.7 MB of base64: bytes/4 read as
+    // ~2.7M tokens, which tripped pre-turn compaction and pinned the gauge
+    // at millions right after the user attached a file. Media must take the
+    // same capped per-block path images already do, on every estimator.
+    let payload = "A".repeat(10_700_000);
+    let msg = Message {
+        role: Role::User,
+        injected: false,
+        content: vec![
+            ContentBlock::text("summarize this"),
+            ContentBlock::media("application/pdf", payload, vec![]),
+        ],
+    };
+    let core = crate::agent_compact::estimate_message_tokens(&msg);
+    let cap = crate::compact::image_block_tokens("application/pdf", 10_700_000);
+    assert!(
+        core <= cap + 16,
+        "core estimate {core} must be the per-block price, got base64/4"
+    );
+    assert!(
+        core < 10_000,
+        "a single attachment must not look like a full window: {core}"
+    );
+    // The compaction trigger agrees: a 200k window is not "full" because of
+    // one attachment.
+    assert!(!needs_pre_turn_compact(core, Some(200_000), None));
+    // Image + Media in one message price both, still bounded.
+    let both = Message {
+        role: Role::User,
+        injected: false,
+        content: vec![
+            ContentBlock::image("image/png", "B".repeat(6_000_000)),
+            ContentBlock::media("audio/mpeg", "C".repeat(6_000_000), vec![]),
+        ],
+    };
+    assert!(crate::agent_compact::estimate_message_tokens(&both) < 10_000);
+}
+
+#[test]
+fn soft_elide_fires_at_six_tenths_of_a_known_window_only() {
+    use crate::agent_compact::needs_soft_elide;
+    assert!(
+        !needs_soft_elide(usize::MAX, None),
+        "unknown window never fires"
+    );
+    assert!(!needs_soft_elide(59_999, Some(100_000)));
+    assert!(needs_soft_elide(60_000, Some(100_000)));
+    // Soft sits strictly below the hard pre-turn threshold (window - 16k).
+    assert!(crate::compact::soft_elide_threshold(128_000) < 128_000 - 16_000);
+}

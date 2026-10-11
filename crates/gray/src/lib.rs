@@ -4,6 +4,7 @@ pub mod ask;
 pub mod auth;
 pub mod auto_title;
 pub mod cache;
+pub mod cmd;
 pub mod compact;
 pub mod composer;
 pub mod config;
@@ -11,7 +12,9 @@ pub mod cron;
 pub mod cron_fire;
 pub mod cron_serve;
 pub mod cron_status;
+pub(crate) mod cron_tool;
 pub mod feedback;
+pub(crate) mod fusion;
 pub mod gateway;
 pub mod host;
 pub mod keymap;
@@ -151,8 +154,8 @@ pub use gray_plugin::builder::{
 /// (A single function: earlier split variants had an unused `None` leg.)
 ///
 /// Skills are `SKILL.md` files discovered via [`skills::discover_skills`]
-/// (global `~/.gray/skills`, OpenCode plugins, `~/.agents/skills`,
-/// `~/.claude/skills` + project skills walked up to git root) respecting
+/// (global `~/.gray/skills`, OpenCode plugins, `~/.agents/skills`, and
+/// project skills walked up to git root) respecting
 /// `.gitignore`/`.ignore`/`.fdignore`.
 /// The context-only [`skills_tool::SkillsPlugin`] (always active, every
 /// profile) serves the per-turn `<available_skills>` block through the
@@ -244,7 +247,7 @@ async fn build_agent_with(
 ) -> anyhow::Result<gray_core::agent::Agent> {
     let Some(model) = &config.model else {
         anyhow::bail!(
-            "no model configured yet — run /connect to set up your provider & key (or /model provider/id; /help for all commands)"
+            "no model configured yet — run /models to set up your provider & key (or /models provider/id; /help for all commands)"
         );
     };
     // Keyless upstreams (free tiers, local servers) run with an empty key.
@@ -349,6 +352,14 @@ async fn build_agent_with(
                         std::time::Duration::from_secs(cache_ttl_secs),
                     )));
                 }
+                // Fusion lead framing rides the system prompt, not a
+                // `prompt_context` hook: hooks are skipped under the
+                // default lean prompt. Re-reads the saved selection each
+                // build, so `/models` picks it up or drops it with the row.
+                if let Some(framing) = crate::fusion::lead_framing() {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(framing);
+                }
                 prompt
             },
         )),
@@ -357,14 +368,20 @@ async fn build_agent_with(
         // Bash-only tools; the context-only skills + project-context
         // plugins are always on (every profile, including the default
         // `tools-minimal`). `--lean` skips them: their whole job is
-        // injecting prompt context.
-        extra_plugins: if config.bare || config.lean || !spawn_plugins {
-            Vec::new()
-        } else {
-            vec![
-                Arc::new(crate::skills_tool::SkillsPlugin::default()),
-                Arc::new(crate::skills_tool::ProjectContextPlugin),
-            ]
+        // injecting prompt context. The fusion plugin is live (protocol
+        // 1.3): it injects `handoff` per turn while a local-fusion
+        // selection is active — a real tool, so `--lean` keeps it.
+        extra_plugins: {
+            let mut extra: Vec<Arc<dyn gray_plugin::Plugin>> = Vec::new();
+            if !(config.bare || config.lean || !spawn_plugins) {
+                extra.push(Arc::new(crate::skills_tool::SkillsPlugin::default()));
+                extra.push(Arc::new(crate::skills_tool::ProjectContextPlugin));
+            }
+            if !config.bare && spawn_plugins {
+                extra.push(Arc::new(crate::fusion::FusionPlugin::default()));
+                extra.push(Arc::new(crate::cron_tool::CronPlugin));
+            }
+            extra
         },
         // No plugins means the builder's bare set: one in-process shell
         // tool the caller discards along with the rest of the tool surface.
@@ -410,7 +427,7 @@ async fn build_agent_with(
     group(ArgGroup::new("one_shot_input").args(["print", "input_json"]))
 )]
 pub struct Cli {
-    /// Model to use (e.g. provider/model-id)
+    /// Model to use (e.g. provider/models-id)
     #[arg(long)]
     pub model: Option<String>,
 
@@ -620,6 +637,12 @@ pub enum Commands {
     Sessions {
         #[command(subcommand)]
         cmd: SessionsCmd,
+    },
+    /// Headless slash commands for channel adapters — one JSON answer on
+    /// stdout (see GRAY-CMD-CONTRACT.md)
+    Cmd {
+        #[command(subcommand)]
+        cmd: CmdVerb,
     },
     /// Read back a tool result that was too large for context
     ///
@@ -847,6 +870,28 @@ pub enum LifecycleCmd {
         /// The adapter's state dir
         #[arg(long)]
         dir: std::path::PathBuf,
+    },
+}
+
+/// `gray cmd ...` — headless slash commands, one JSON object per answer.
+#[derive(Parser, Debug, Clone)]
+pub enum CmdVerb {
+    /// List commands (name, description, aliases, args, scope, surface)
+    List,
+    /// Run a command non-interactively
+    Run {
+        /// Command name — aliases resolve to canonical names
+        name: String,
+        /// Args passed through to the command, verbatim
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Continue a pending ui document (from a `run` that answered `kind:"ui"`)
+    Interact {
+        /// Opaque token from the ui result
+        token: String,
+        /// Adapter-normalized action JSON: {user?, values?{id:[..]}, submit?id}
+        action: Option<String>,
     },
 }
 

@@ -176,7 +176,7 @@ async fn index_entry(name: &str) -> Option<gray_pkg::index::Entry> {
 
 /// `gray plugin install <name|url|path>` — one entry point for every
 /// plugin source, tried in order:
-///   0. a skill spec (`clawhub:`/`github:`/`url:`) → `skills_ops` (skill
+///   0. a skill spec (`github:`/`url:`) → `skills_ops` (skill
 ///      installs write `~/.gray/skills`, never a plugin lock row);
 ///   a. `GRAY_PLUGIN_PATH` set → register that executable under `spec`.
 ///   b. `spec` is an existing path → register it (the manifest names it).
@@ -877,6 +877,14 @@ pub async fn register_native(
             capabilities_hash,
         },
     );
+    // The manifest lands before the lock entry that references it: a
+    // concurrent provider-cache read then sees the pre-install state or
+    // the complete post-install state, never a lock entry pointing at a
+    // manifest that is not there yet.
+    let mut metadata = tempfile::NamedTempFile::new_in(home.join("plugins"))?;
+    use std::io::Write;
+    writeln!(metadata, "{}", manifest)?;
+    metadata.persist(home.join("plugins").join(format!("{name}-manifest.json")))?;
     lock.save(&gray_plugin::lock::lock_path(home))?;
     if !(manifest["widget"].as_bool() == Some(true) && !wire_only) {
         // Reinstalling a plugin that dropped its widget (or became wire-only,
@@ -891,10 +899,6 @@ pub async fn register_native(
             let _ = std::fs::remove_file(&widgets);
         }
     }
-    let mut metadata = tempfile::NamedTempFile::new_in(home.join("plugins"))?;
-    use std::io::Write;
-    writeln!(metadata, "{}", manifest)?;
-    metadata.persist(home.join("plugins").join(format!("{name}-manifest.json")))?;
     // Refresh the provider cache from the plugin lock so provider rows are
     // discoverable by `/connect` immediately after this registration.
     crate::providers::ProviderRegistry::refresh(home)?;
@@ -961,13 +965,15 @@ pub(crate) async fn adopt_cli(home: &Path, name: &str, dir: &Path) -> anyhow::Re
                 )
                 .collect();
             entry.cli_argv = Some(vec![exe]);
-            lock.save(&lock_path)?;
             // Same manifest sidecar register_native writes: completion and
-            // slash capture read `plugins/<name>-manifest.json`.
+            // slash capture read `plugins/<name>-manifest.json`. It lands
+            // before the lock entry that adopts it so a concurrent read
+            // sees pre-install state or complete post-install state.
             let mut metadata = tempfile::NamedTempFile::new_in(&plugins)?;
             use std::io::Write;
             writeln!(metadata, "{manifest}")?;
             metadata.persist(plugins.join(format!("{name}-manifest.json")))?;
+            lock.save(&lock_path)?;
             // And the same provider-cache rebuild, so a provider the
             // manifest declares is discoverable immediately.
             crate::providers::ProviderRegistry::refresh(home)?;

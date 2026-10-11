@@ -202,8 +202,10 @@ fn the_composite_label_names_each_pick_and_the_lead_effort() {
         ],
     };
     assert_eq!(
-        composite_label(&shape, "Fusion", &parts("opus", "swe"), Some("high")).as_deref(),
-        Some("Fusion · Opus 5.5 High + SWE-2 High")
+        composite_label_parts(&shape, "Fusion", &parts("opus", "swe"), Some("high"))
+            .map(|segs| { segs.into_iter().map(|(t, _)| t).collect::<String>() })
+            .as_deref(),
+        Some("Fusion · Opus 5.5 High × SWE-2 High")
     );
     assert_eq!(
         shape.settle_parts(Some(&parts("nope", "swe"))),
@@ -215,7 +217,7 @@ fn the_composite_label_names_each_pick_and_the_lead_effort() {
         slots: vec![],
     };
     assert_eq!(
-        composite_label(&plain, "GPT-6 Sol", &Parts::new(), None),
+        composite_label_parts(&plain, "GPT-6 Sol", &Parts::new(), None),
         None
     );
 }

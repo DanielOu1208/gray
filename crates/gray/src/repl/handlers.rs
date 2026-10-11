@@ -626,7 +626,7 @@ pub(crate) async fn switch_agent_model(
     }
 }
 
-/// What `/model` was asked for: the picker (optionally focused on a row —
+/// What `/models` was asked for: the picker (optionally focused on a row —
 /// a plugin `model_picker` outcome like `/fusion`), or a direct id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelArg {
@@ -643,8 +643,272 @@ impl From<Option<String>> for ModelArg {
     }
 }
 
-/// Handles `/model`: interactive picker (no arg) or direct set (`/model provider/id`).
+/// What [`apply_model_selection`] committed: the canonical model id, any
+/// effort clamp it caused, and the effort that preceded the switch (the
+/// caller compares to decide the thinking-footer refresh).
+pub(crate) struct ModelApply {
+    pub(crate) model: String,
+    pub(crate) clamped: Option<(String, String)>,
+    pub(crate) prev_effort: Option<String>,
+}
+
+/// The persisted half of `/models <id>` — shared with `gray cmd`, where it
+/// is also the model picker's apply. Validates against the cached list
+/// (falling back to the live fetch), decomposes a variant id, then writes
+/// model + effort + fast through to saved config. `effort`/`fast` are a
+/// picker's explicit commits; `None` keeps the typed-id semantics (a
+/// `<base>-<tier>` id's own tier wins, else the remembered level).
+/// Returns the applied selection or the user-facing error message.
+pub(crate) fn apply_model_selection(
+    config: &mut Config,
+    raw: &str,
+    effort: Option<&str>,
+    fast: Option<bool>,
+) -> Result<ModelApply, String> {
+    let path = crate::setup::saved_config_path().ok();
+    apply_model_selection_at(config, raw, effort, fast, path.as_deref())
+}
+
+/// [`apply_model_selection`] with the saved-config path injected, so tests
+/// persist into a tempdir instead of the real home.
+pub(crate) fn apply_model_selection_at(
+    config: &mut Config,
+    raw: &str,
+    effort: Option<&str>,
+    fast: Option<bool>,
+    saved_path: Option<&Path>,
+) -> Result<ModelApply, String> {
+    // Validate against the cached list first; only an id it doesn't
+    // know waits on the live fetch (a brand-new model). Plugin
+    // connections list via `provider/models`, not the placeholder base.
+    let (_, list_key, _) = crate::setup::picker_scope(config);
+    let cached = crate::setup::saved_models_for(&list_key, &config.base_url);
+    let mut checked = crate::setup::validate_direct_model_id(raw, &cached);
+    let mut live_rows: Vec<(String, String)> = Vec::new();
+    if checked.is_err() {
+        let (_, known) = crate::setup::provider_models_for_config(config);
+        checked = crate::setup::validate_direct_model_id(raw, &known);
+        live_rows = known;
+    }
+    // Decompose the target once against the merged known list: a
+    // declared `-fast`/`-priority` row and a stale `<base>-<tier>` id
+    // alike split into base + tier + fast.
+    let mut ids = cached.clone();
+    for row in live_rows {
+        if !ids.iter().any(|(id, _)| *id == row.0) {
+            ids.push(row);
+        }
+    }
+    let (m, variant_tier, id_fast) = match checked {
+        Ok(canonical) => crate::setup::decompose_model_variant(&canonical, &ids)
+            .unwrap_or((canonical, None, false)),
+        Err(msg) => {
+            // A `<base>-<tier>` id names a level on its family row: the
+            // picker collapsed the variants into `base`, so a stale or
+            // hand-typed `swe-2-max` resolves to `swe-2` at `max`.
+            match crate::setup::decompose_model_variant(raw, &ids) {
+                Some(v) => v,
+                None => return Err(msg),
+            }
+        }
+    };
+    // A `-fast` id enables fast on its own; an explicit picker commit
+    // decides otherwise. `GRAY_FAST` stays a user override either way.
+    let fast = if std::env::var_os("GRAY_FAST").is_some() {
+        None
+    } else {
+        fast.or(id_fast.then_some(true))
+    };
+    if let Some(f) = fast {
+        config.fast_mode = Some(f);
+        if let Some(path) = saved_path {
+            let mut saved = crate::setup::load_saved_config_at(path);
+            saved.fast_mode = Some(f);
+            let _ = crate::setup::save_saved_config_at(path, &saved);
+        }
+    }
+    config.model = Some(m.clone());
+    // Effort follows the model: adopt this target's remembered level
+    // (or the default) before clamping, so a stale level never lands on
+    // the new model or gets remembered under its key. A tier the id
+    // itself named wins — `swe-2-max` means max — then the picker's
+    // explicit commit, then memory.
+    let prev_effort = config.thinking_effort.clone();
+    match variant_tier.or_else(|| effort.map(str::to_string)) {
+        Some(e) if std::env::var_os("GRAY_THINKING_EFFORT").is_none() => {
+            config.thinking_effort = Some(e.clone());
+            if let Some(path) = saved_path {
+                let mut saved = crate::setup::load_saved_config_at(path);
+                saved.remember_effort(
+                    &crate::setup::effort_memory_key(&config.provider_id, &config.base_url, &m),
+                    &e,
+                );
+                saved.thinking_effort = config.thinking_effort.clone();
+                let _ = crate::setup::save_saved_config_at(path, &saved);
+            }
+        }
+        Some(_) => {}
+        None => {
+            // Same load/save discipline as `adopt_connection_effort` —
+            // the lock keeps a concurrent writer from clobbering memory.
+            let _cfg_lock = saved_path.and_then(|p| crate::setup::lock_saved_config_at(p).ok());
+            let mut saved = saved_path.map(crate::setup::load_saved_config_at);
+            crate::setup::apply_connection_effort(
+                config,
+                saved.get_or_insert_with(Default::default),
+            );
+            if let (Some(path), Some(saved)) = (saved_path, saved) {
+                let _ = crate::setup::save_saved_config_at(path, &saved);
+            }
+        }
+    }
+    let clamped = super::clamp_thinking_to_model(config);
+    if let Some(path) = saved_path {
+        let mut saved = crate::setup::load_saved_config_at(path);
+        saved.model = Some(m.clone());
+        let _ = crate::setup::save_saved_config_at(path, &saved);
+    }
+    Ok(ModelApply {
+        model: m,
+        clamped,
+        prev_effort,
+    })
+}
+
+/// Handles `/models`: interactive picker (no arg) or direct set (`/models provider/id`).
 /// Switching updates the live agent and persists to ~/.gray/config.json.
+/// After a picker commit: clamp the effort, paint the footer and receipt
+/// for what changed against `prev` (effort, reasoning display, fast mode),
+/// then rebuild the agent on the new model.
+async fn finish_model_pick(
+    config: &mut Config,
+    cwd: &Path,
+    agent: &mut Option<Agent>,
+    tui: Option<&crate::composer::SharedTui>,
+    session_id: Option<&str>,
+    hide_thinking: &mut bool,
+    (prev_effort, prev_show, prev_fast): (Option<String>, Option<bool>, Option<bool>),
+) {
+    // The picker already committed the row's effort (and any Tab /
+    // ctrl+r toggle); clamp whatever came out so the footer never
+    // shows an unsupported level, and paint the committed state.
+    let clamped = super::clamp_thinking_to_model(config);
+    let show_changed = config.show_reasoning != prev_show;
+    let fast_changed = config.fast_mode != prev_fast;
+    if clamped.is_some() || config.thinking_effort != prev_effort || show_changed {
+        *hide_thinking = config.reasoning_hidden();
+    }
+    if let Some(shared) = tui {
+        let mut t = shared.lock().expect("tui lock");
+        if let Some(m) = &config.model {
+            t.set_model(m.clone());
+            t.set_model_label(crate::setup::composite_label_for(config));
+            t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
+            // Name the effort alongside the model when it has a
+            // level to choose: the picker set both at once.
+            let label = super::model_receipt_label(config).unwrap_or_else(|| m.clone());
+            t.push_action("Model set to", Some(&label));
+        }
+        if (config.thinking_effort != prev_effort || fast_changed)
+            && let Some(eff) = &config.thinking_effort
+        {
+            t.set_thinking_effort(crate::setup::effort_chip(eff, config));
+        }
+        if config.thinking_effort != prev_effort || show_changed {
+            t.set_hide_thinking(*hide_thinking);
+        }
+        if let Some((old, new)) = clamped {
+            super::cron::push_notice(
+                &mut t,
+                "Thinking effort clamped",
+                &format!("from {old} to {new} (not supported by this model)"),
+                false,
+            );
+        }
+        t.ensure_gap();
+        let _ = t.draw();
+    } else if let Some((old, new)) = clamped {
+        println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
+    }
+    if let Some(m) = config.model.clone()
+        && crate::setup::get_user_context_window().is_none()
+        && crate::setup::get_cached_model_context(&m).is_none()
+    {
+        let base = config.base_url.clone();
+        let key = config.api_key.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::setup::fetch_live_provider_models(&base, key.as_deref());
+        });
+    }
+    switch_agent_model(agent, config, cwd, session_id, tui).await;
+}
+
+/// Bare `/models`: the two-pane provider×model picker. The modal commits
+/// provider + model itself; what remains is the shared receipt (effort
+/// clamp, footer, action line, live fetch, agent swap).
+pub(crate) async fn handle_model_panes(
+    config: &mut Config,
+    cwd: &Path,
+    agent: &mut Option<Agent>,
+    tui: Option<&crate::composer::SharedTui>,
+    session_id: Option<&str>,
+    hide_thinking: &mut bool,
+) -> Option<String> {
+    if tui.is_none() {
+        match config.model.as_deref() {
+            Some(m) => println!("model {m} — /models provider/id to switch"),
+            None => println!(
+                "no model configured — run /models to set up provider & key (or /models provider/id; /help)"
+            ),
+        }
+        return None;
+    }
+    let prev_effort = config.thinking_effort.clone();
+    let prev_show = config.show_reasoning;
+    let prev_fast = config.fast_mode;
+    let bg = tui.map(|shared| shared.lock().expect("tui lock").snapshot());
+    let result = super::with_modal_sync(tui, || crate::setup::run_model_panes(config, bg.as_ref()));
+    match result {
+        Ok(crate::setup::PanesOutcome::Picked) => {
+            finish_model_pick(
+                config,
+                cwd,
+                agent,
+                tui,
+                session_id,
+                hide_thinking,
+                (prev_effort, prev_show, prev_fast),
+            )
+            .await;
+        }
+        Ok(crate::setup::PanesOutcome::Removed(name)) => {
+            reload_agent(agent, config, cwd, session_id, tui).await;
+            super::say(tui, &format!("removed {name}"));
+        }
+        Ok(outcome) => {
+            if let Some(shared) = tui {
+                let mut t = shared.lock().expect("tui lock");
+                t.clear_draft();
+                t.ensure_gap();
+                let _ = t.draw();
+            }
+            if let crate::setup::PanesOutcome::Connect(id) = outcome {
+                return Some(id);
+            }
+        }
+        Err(e) => {
+            if let Some(shared) = tui {
+                let mut t = shared.lock().expect("tui lock");
+                super::cron::push_notice(&mut t, "Model error", &e.to_string(), true);
+                t.ensure_gap();
+            } else {
+                println!("model error: {e}");
+            }
+        }
+    }
+    None
+}
+
 pub(crate) async fn handle_model(
     config: &mut Config,
     cwd: &Path,
@@ -659,93 +923,32 @@ pub(crate) async fn handle_model(
         ModelArg::Picker { focus } => (None, focus),
     };
     if let Some(m) = direct {
-        // Validate against the cached list first; only an id it doesn't
-        // know waits on the live fetch (a brand-new model). Plugin
-        // connections list via `provider/models`, not the placeholder base.
-        let (_, list_key, _) = crate::setup::picker_scope(config);
-        let cached = crate::setup::saved_models_for(&list_key, &config.base_url);
-        let mut checked = crate::setup::validate_direct_model_id(&m, &cached);
-        let mut live_rows: Vec<(String, String)> = Vec::new();
-        if checked.is_err() {
-            let (_, known) = crate::setup::provider_models_for_config(config);
-            checked = crate::setup::validate_direct_model_id(&m, &known);
-            live_rows = known;
-        }
-        // Decompose the target once against the merged known list: a
-        // declared `-fast`/`-priority` row and a stale `<base>-<tier>` id
-        // alike split into base + tier + fast.
-        let mut ids = cached.clone();
-        for row in live_rows {
-            if !ids.iter().any(|(id, _)| *id == row.0) {
-                ids.push(row);
-            }
-        }
-        let (m, variant_tier, fast) = match checked {
-            Ok(canonical) => crate::setup::decompose_model_variant(&canonical, &ids)
-                .unwrap_or((canonical, None, false)),
+        // Validate → decompose → persist shares one path with `gray cmd`;
+        // what stays here are the receipts (footer, action line, agent).
+        let applied = match apply_model_selection(config, &m, None, None) {
+            Ok(a) => a,
             Err(msg) => {
-                // A `<base>-<tier>` id names a level on its family row: the
-                // picker collapsed the variants into `base`, so a stale or
-                // hand-typed `swe-2-max` resolves to `swe-2` at `max`.
-                match crate::setup::decompose_model_variant(&m, &ids) {
-                    Some(v) => v,
-                    None => {
-                        say(tui, &msg);
-                        return;
-                    }
-                }
+                say(tui, &msg);
+                return;
             }
         };
-        if fast && std::env::var_os("GRAY_FAST").is_none() {
-            config.fast_mode = Some(true);
-            if let Ok(path) = crate::setup::saved_config_path() {
-                let mut saved = crate::setup::load_saved_config_at(&path);
-                saved.fast_mode = Some(true);
-                let _ = crate::setup::save_saved_config_at(&path, &saved);
-            }
-        }
-        config.model = Some(m.clone());
-        // Effort follows the model: adopt this target's remembered level
-        // (or the default) before clamping, so a stale level never lands on
-        // the new model or gets remembered under its key. A tier the id
-        // itself named wins over memory — `swe-2-max` means max.
-        let prev_effort = config.thinking_effort.clone();
-        match &variant_tier {
-            Some(tier) if std::env::var_os("GRAY_THINKING_EFFORT").is_none() => {
-                config.thinking_effort = Some(tier.clone());
-                if let Ok(path) = crate::setup::saved_config_path() {
-                    let mut saved = crate::setup::load_saved_config_at(&path);
-                    saved.remember_effort(
-                        &crate::setup::effort_memory_key(&config.provider_id, &config.base_url, &m),
-                        tier,
-                    );
-                    saved.thinking_effort = config.thinking_effort.clone();
-                    let _ = crate::setup::save_saved_config_at(&path, &saved);
-                }
-            }
-            _ => crate::setup::adopt_connection_effort(config),
-        }
-        let clamped = super::clamp_thinking_to_model(config);
-        if clamped.is_some() || config.thinking_effort != prev_effort {
+        let m = applied.model;
+        if applied.clamped.is_some() || config.thinking_effort != applied.prev_effort {
             *hide_thinking = config.reasoning_hidden();
-        }
-        if let Ok(path) = crate::setup::saved_config_path() {
-            let mut saved = crate::setup::load_saved_config_at(&path);
-            saved.model = Some(m.clone());
-            let _ = crate::setup::save_saved_config_at(&path, &saved);
         }
         if let Some(shared) = tui {
             let mut t = shared.lock().expect("tui lock");
             t.set_model(m.clone());
             t.set_model_label(crate::setup::composite_label_for(config));
-            if config.thinking_effort != prev_effort
+            t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
+            if config.thinking_effort != applied.prev_effort
                 && let Some(eff) = &config.thinking_effort
             {
                 t.set_thinking_effort(crate::setup::effort_chip(eff, config));
                 t.set_hide_thinking(*hide_thinking);
             }
             t.push_action("Model set to", Some(&m));
-            if let Some((old, new)) = clamped {
+            if let Some((old, new)) = &applied.clamped {
                 super::cron::push_notice(
                     &mut t,
                     "Thinking effort clamped",
@@ -757,7 +960,7 @@ pub(crate) async fn handle_model(
             let _ = t.draw();
         } else {
             println!("✓ Model set to {m}");
-            if let Some((old, new)) = clamped {
+            if let Some((old, new)) = &applied.clamped {
                 println!(
                     "Thinking effort clamped from {old} to {new} (not supported by this model)"
                 );
@@ -779,10 +982,10 @@ pub(crate) async fn handle_model(
     if tui.is_none() {
         // Headless (piped stdout): the picker needs a TTY — print status.
         match config.model.as_deref() {
-            Some(m) => println!("model {m} — /model provider/id to switch"),
+            Some(m) => println!("model {m} — /models provider/id to switch"),
             None => {
                 println!(
-                    "no model configured — run /connect to set up provider & key (or /model provider/id; /help)"
+                    "no model configured — run /models to set up provider & key (or /models provider/id; /help)"
                 )
             }
         }
@@ -799,59 +1002,16 @@ pub(crate) async fn handle_model(
     .await;
     match result {
         Ok(true) => {
-            // The picker already committed the row's effort (and any Tab /
-            // ctrl+r toggle); clamp whatever came out so the footer never
-            // shows an unsupported level, and paint the committed state.
-            let clamped = super::clamp_thinking_to_model(config);
-            let show_changed = config.show_reasoning != prev_show;
-            let fast_changed = config.fast_mode != prev_fast;
-            if clamped.is_some() || config.thinking_effort != prev_effort || show_changed {
-                *hide_thinking = config.reasoning_hidden();
-            }
-            if let Some(shared) = tui {
-                let mut t = shared.lock().expect("tui lock");
-                if let Some(m) = &config.model {
-                    t.set_model(m.clone());
-                    t.set_model_label(crate::setup::composite_label_for(config));
-                    // Name the effort alongside the model when it has a
-                    // level to choose: the picker set both at once.
-                    let label = super::model_receipt_label(config).unwrap_or_else(|| m.clone());
-                    t.push_action("Model set to", Some(&label));
-                }
-                if (config.thinking_effort != prev_effort || fast_changed)
-                    && let Some(eff) = &config.thinking_effort
-                {
-                    t.set_thinking_effort(crate::setup::effort_chip(eff, config));
-                }
-                if config.thinking_effort != prev_effort || show_changed {
-                    t.set_hide_thinking(*hide_thinking);
-                }
-                if let Some((old, new)) = clamped {
-                    super::cron::push_notice(
-                        &mut t,
-                        "Thinking effort clamped",
-                        &format!("from {old} to {new} (not supported by this model)"),
-                        false,
-                    );
-                }
-                t.ensure_gap();
-                let _ = t.draw();
-            } else if let Some((old, new)) = clamped {
-                println!(
-                    "Thinking effort clamped from {old} to {new} (not supported by this model)"
-                );
-            }
-            if let Some(m) = config.model.clone()
-                && crate::setup::get_user_context_window().is_none()
-                && crate::setup::get_cached_model_context(&m).is_none()
-            {
-                let base = config.base_url.clone();
-                let key = config.api_key.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::setup::fetch_live_provider_models(&base, key.as_deref());
-                });
-            }
-            switch_agent_model(agent, config, cwd, session_id, tui).await;
+            finish_model_pick(
+                config,
+                cwd,
+                agent,
+                tui,
+                session_id,
+                hide_thinking,
+                (prev_effort, prev_show, prev_fast),
+            )
+            .await;
         }
         Ok(false) => {
             // Tab / ctrl+r are pending until Enter: a dismissed picker

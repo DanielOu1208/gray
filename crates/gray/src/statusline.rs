@@ -15,7 +15,8 @@
 //! }
 //! ```
 //!
-//! Segment names: `context`, `cache`, `timer`, `work`, `model`, `effort`,
+//! Segment names: `location` (`⣿ ~cwd (branch)`), `context`, `cache`,
+//! `timer`, `work`, `state` (`○ idle` / `⠋ working`), `model`, `effort`,
 //! `dir`, `cwd`, `branch`, `command` (first line of `command`'s stdout),
 //! `status` (every plugin status) and `status:<key>` (one). An entry with
 //! `{name}` placeholders is a template (`"⎇ {branch}"`); any other unknown
@@ -31,9 +32,11 @@ use std::time::{Duration, Instant};
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_LEFT: &[&str] = &["context", "cache", "timer", "work"];
-pub const DEFAULT_RIGHT: &[&str] = &["status", "model", "effort"];
-pub const DEFAULT_SEPARATOR: &str = " \u{b7} ";
+pub const DEFAULT_LEFT: &[&str] = &["model", "effort"];
+pub const DEFAULT_RIGHT: &[&str] = &["context", "cache", "timer", "work", "status"];
+pub const DEFAULT_SEPARATOR: &str = " ";
+/// The right group's default gap: plain spaces, no rule.
+pub const DEFAULT_RIGHT_SEPARATOR: &str = "  ";
 const DEFAULT_INTERVAL_MS: u64 = 5_000;
 const MIN_INTERVAL_MS: u64 = 500;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
@@ -68,6 +71,13 @@ impl StatusLineConfig {
             .clone()
             .unwrap_or_else(|| DEFAULT_SEPARATOR.to_string())
     }
+    /// A configured `separator` joins both groups; the stock right group
+    /// is spaced, not ruled.
+    pub fn right_separator(&self) -> String {
+        self.separator
+            .clone()
+            .unwrap_or_else(|| DEFAULT_RIGHT_SEPARATOR.to_string())
+    }
     pub fn interval(&self) -> Duration {
         Duration::from_millis(
             self.interval_ms
@@ -82,6 +92,10 @@ impl StatusLineConfig {
 pub struct Seg {
     pub text: String,
     pub color: Color,
+    /// Per-piece coloring within the segment (`text` stays the full string
+    /// for width math): `Some` renders each `(text, color)` piece as its
+    /// own span instead of one `color` span.
+    pub parts: Option<Vec<(String, Color)>>,
 }
 
 impl Seg {
@@ -89,6 +103,7 @@ impl Seg {
         Self {
             text: text.into(),
             color,
+            parts: None,
         }
     }
 }
@@ -118,6 +133,42 @@ pub fn compose(
         }
         out.push(p);
     }
+    out
+}
+
+/// Cuts `segs` to `max_w` columns, ending in `…` when anything was cut.
+pub fn clip(segs: Vec<Seg>, max_w: usize) -> Vec<Seg> {
+    use crate::text_width::{chars_width, display_width, fit_char_count};
+    if segs.iter().map(|s| display_width(&s.text)).sum::<usize>() <= max_w {
+        return segs;
+    }
+    fn cut(text: &str, left: &mut usize) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let n = fit_char_count(&chars, *left);
+        *left -= chars_width(&chars[..n]);
+        chars[..n].iter().collect()
+    }
+    let mut left = max_w.saturating_sub(1);
+    let mut out: Vec<Seg> = Vec::new();
+    for mut s in segs {
+        if left == 0 {
+            break;
+        }
+        if let Some(parts) = s.parts.take() {
+            let parts: Vec<(String, Color)> = parts
+                .into_iter()
+                .map(|(t, c)| (cut(&t, &mut left), c))
+                .filter(|(t, _)| !t.is_empty())
+                .collect();
+            s.text = parts.iter().map(|(t, _)| t.as_str()).collect();
+            s.parts = Some(parts);
+        } else {
+            s.text = cut(&s.text, &mut left);
+        }
+        out.push(s);
+    }
+    let color = out.last().map_or(Color::Reset, |s| s.color);
+    out.push(Seg::new("\u{2026}", color));
     out
 }
 

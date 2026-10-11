@@ -14,9 +14,11 @@ use serde::{Deserialize, Serialize};
 pub(crate) type Parts = BTreeMap<String, String>;
 
 /// What a row declares beyond its id and name.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RowShape {
+    #[serde(default)]
     pub variants: Vec<ModelVariant>,
+    #[serde(default)]
     pub slots: Vec<ModelSlot>,
 }
 
@@ -52,6 +54,27 @@ impl RowShape {
                 .map(|v| v.parts.clone())
                 .unwrap_or_default(),
         }
+    }
+
+    /// `cur` with slot `key` picked to `option`, coerced to a combination
+    /// a variant serves: the pick wins, the slots before it hold their
+    /// current options, later slots take whatever the matching variant
+    /// declares. `None` when no variant serves `option` there.
+    pub(crate) fn option_parts(&self, cur: &Parts, key: &str, option: &str) -> Option<Parts> {
+        let slot = self.slots.iter().position(|s| s.key == key)?;
+        let mut want = cur.clone();
+        want.insert(key.to_string(), option.to_string());
+        if self.serves(&want) {
+            return Some(want);
+        }
+        let earlier: Vec<&String> = self.slots[..slot].iter().map(|s| &s.key).collect();
+        self.variants
+            .iter()
+            .find(|v| {
+                v.parts.get(key).map(String::as_str) == Some(option)
+                    && earlier.iter().all(|k| v.parts.get(*k) == cur.get(*k))
+            })
+            .map(|v| v.parts.clone())
     }
 }
 
@@ -198,28 +221,33 @@ fn short_name(name: &str) -> &str {
     name.strip_prefix("Claude ").unwrap_or(name)
 }
 
-/// Footer / status label for a composite selection: `Fusion · Opus 5.5
-/// High + SWE-2 High` — row name, then each slot's option name, the first
-/// (lead) carrying the effort it runs at. `None` for a non-composite row.
-pub(crate) fn composite_label(
+/// A composite label as paintable segments: `(text, slot)` where `slot` is
+/// the owning index in `shape.slots` (`None` on the `row ·` prefix and `×`
+/// joins). Surfaces that can color spans brighten the segment whose model
+/// is producing output; the flat label is the segments' concatenation.
+/// `None` for a non-composite row.
+pub(crate) fn composite_label_parts(
     shape: &RowShape,
     row_name: &str,
     parts: &Parts,
     effort: Option<&str>,
-) -> Option<String> {
+) -> Option<Vec<(String, Option<usize>)>> {
     if !shape.is_composite() {
         return None;
     }
-    let mut names = Vec::new();
+    let mut segs: Vec<(String, Option<usize>)> = vec![(format!("{row_name} · "), None)];
     for (i, slot) in shape.slots.iter().enumerate() {
         let id = parts.get(&slot.key)?;
         let name = short_name(shape.option_name(&slot.key, id).unwrap_or(id));
-        match effort.filter(|e| i == 0 && *e != "off") {
-            Some(e) => names.push(format!("{name} {}", effort_word(e))),
-            None => names.push(name.to_string()),
+        if i > 0 {
+            segs.push((" × ".to_string(), None));
+        }
+        segs.push((name.to_string(), Some(i)));
+        if let Some(e) = effort.filter(|e| i == 0 && *e != "off") {
+            segs.push((format!(" {}", effort_word(e)), None));
         }
     }
-    Some(format!("{row_name} · {}", names.join(" + ")))
+    Some(segs)
 }
 
 /// `high` → `High`, `xhigh` → `XHigh`.

@@ -691,21 +691,30 @@ pub(crate) fn search_words(command: &str) -> Option<Vec<String>> {
 }
 
 impl BashTool {
-    /// Whole-command no-ops (`true`, `:`, a lone `echo`/`printf`) are how a
-    /// model stalls for a background job or placeholders work it announced
-    /// but never calls (`echo "switching tools"`). `search_words` yields None
-    /// on any pipe, redirect, separator or substitution, so `echo x > f`,
-    /// `echo x | wc` and `echo a; real-work` still reach the shell — only a
-    /// command whose sole effect is stdout is steered. Jobs report on their
-    /// own between turns, so say that instead of spawning a shell that does
-    /// nothing.
+    /// Whole-command no-ops are how a model stalls for a background job or
+    /// placeholders work it announced but never calls (`echo "switching
+    /// tools"`). The matcher is deliberately broad (`noop_family`): a model
+    /// that only saw `true` steered will shop for another shape (`echo stub`,
+    /// `foo() { :; }`, `bash -c 'echo x'`, `sleep 5`, `jobs`), so anything
+    /// that can provably do no work and report nothing new lands here. Jobs
+    /// report on their own between turns, so say that instead of spawning a
+    /// shell that does nothing.
     fn noop_steer(&self, ctx: &ToolContext, command: &str) -> Option<ToolOutput> {
         let trimmed = command.trim();
-        if !crate::shell::label::is_noop(trimmed) {
-            return None;
-        }
         let live = self.jobs.live_ids(ctx);
-        let mut note = format!("`{trimmed}` is a no-op: nothing ran and nothing was waited on.");
+        let family = noop_family(trimmed, !live.is_empty())?;
+        let mut note = match family {
+            // `jobs`/`wait` & friends actively mislead: they report this
+            // one-shot shell's own (empty) job table while session jobs run.
+            NoopFamily::JobControl => format!(
+                "`{trimmed}` can only see this one-shot shell's own children — \
+                 there are none; session jobs live outside it — nothing ran and \
+                 nothing was waited on."
+            ),
+            NoopFamily::Plain => {
+                format!("`{trimmed}` is a no-op: nothing ran and nothing was waited on.")
+            }
+        };
         match self.jobs.footer(ctx, &live) {
             None => {
                 note.push_str(" No background jobs are running; if you are done, end your turn.")
@@ -719,6 +728,248 @@ impl BashTool {
         }
         Some(ToolOutput::ok(note))
     }
+}
+
+/// Which no-op family a stalled command belongs to. `JobControl` builtins
+/// get their own note: they answer with the wrong table, not with nothing.
+pub(crate) enum NoopFamily {
+    Plain,
+    JobControl,
+}
+
+/// Whether `command` can only stall: every top-level stage produces no
+/// output the model didn't already write and leaves no state behind.
+/// Conservative — one real stage (`echo x > f`, `$()`, a glob) runs the
+/// whole line.
+pub(crate) fn noop_family(command: &str, live_jobs: bool) -> Option<NoopFamily> {
+    let segments = top_level_segments(command);
+    if segments.iter().all(|s| s.trim().is_empty()) {
+        // `;` alone & friends: a syntax error the shell should report itself.
+        return None;
+    }
+    let mut family = NoopFamily::Plain;
+    for seg in &segments {
+        match noop_segment(seg.trim(), live_jobs) {
+            Some(NoopFamily::JobControl) => family = NoopFamily::JobControl,
+            Some(NoopFamily::Plain) => {}
+            None => return None,
+        }
+    }
+    Some(family)
+}
+
+/// Splits a command line on top-level `;`, newlines, `&&`, `||` and a
+/// bare `&` — delimiters inside quotes or inside a `()`/`{}` group do not
+/// separate, so `f() { :; }` stays one segment. A single `|` does not
+/// separate either: a pipeline's stages cannot be judged independently,
+/// so it stays one segment and `search_words` refuses it.
+fn top_level_segments(command: &str) -> Vec<String> {
+    let mut segs = Vec::new();
+    let mut cur = String::new();
+    let mut quote = None;
+    let mut depth = 0usize;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            cur.push(c);
+            if c == '\\' && q == '"' {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                cur.push(c);
+            }
+            '(' | '{' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' | '}' => {
+                depth = depth.saturating_sub(1);
+                cur.push(c);
+            }
+            ';' | '\n' if depth == 0 => segs.push(std::mem::take(&mut cur)),
+            '&' if depth == 0 => {
+                if chars.peek() == Some(&c) {
+                    chars.next();
+                }
+                segs.push(std::mem::take(&mut cur));
+            }
+            '|' if depth == 0 && chars.peek() == Some(&'|') => {
+                chars.next();
+                segs.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(c),
+        }
+    }
+    segs.push(cur);
+    segs
+}
+
+/// One stage of a whole-command no-op. `None` = real work possible, run it.
+fn noop_segment(seg: &str, live_jobs: bool) -> Option<NoopFamily> {
+    if seg.is_empty() || seg.starts_with('#') {
+        // An empty stage (`x &&`) or a whole-line comment contributes nothing.
+        return Some(NoopFamily::Plain);
+    }
+    if is_fn_def(seg) {
+        return Some(NoopFamily::Plain);
+    }
+    // Metacharacters (`$`, backquote, `<`, `>`, glob joins …) mean the shell
+    // could do real work; leave it to the shell.
+    let words = search_words(seg)?;
+    // `FOO=bar` prefixes are transparent: they die with the one-shot shell,
+    // and the command they prefix decides the outcome. A line that is only
+    // assignments still dies with it — a no-op.
+    let lead = words.iter().take_while(|w| is_assignment(w)).count();
+    let words = &words[lead..];
+    if words.is_empty() {
+        return Some(NoopFamily::Plain);
+    }
+    let head = words[0].as_str();
+    let rest = &words[1..];
+    match head {
+        // Builtins whose arguments change nothing observable. `exit` is
+        // not here: it sets the status the result header reports.
+        "true" | ":" | "false" => Some(NoopFamily::Plain),
+        // Job control sees only this shell's own (empty) job table.
+        "jobs" | "wait" | "fg" | "bg" | "disown" => Some(NoopFamily::JobControl),
+        // A lone `cat` copies nothing it wasn't fed.
+        "cat" if rest.is_empty() => Some(NoopFamily::Plain),
+        // A literal print returns exactly what the model wrote.
+        "echo" | "printf" if rest.iter().all(|w| literal_word(w)) => Some(NoopFamily::Plain),
+        // A timed stall only matters when a job exists to await; with none,
+        // a bare `sleep` can be a deliberate pause (service startup, …).
+        "sleep" if live_jobs && rest.iter().all(|w| is_duration(w)) => Some(NoopFamily::Plain),
+        // Shell-state writes that die with the one-shot `sh -c`.
+        "export" | "readonly" | "declare" | "typeset" | "local" | "alias"
+            if !rest.is_empty() && rest.iter().all(|w| is_assignment(w)) =>
+        {
+            Some(NoopFamily::Plain)
+        }
+        "unset" | "unalias" | "umask"
+            if !rest.is_empty() && rest.iter().all(|w| !w.starts_with('-')) =>
+        {
+            Some(NoopFamily::Plain)
+        }
+        // Transparent wrappers: peel and re-check the inner command.
+        "sh" | "bash" | "dash" | "zsh" | "ksh" => {
+            let c_flag = words
+                .get(1)
+                .is_some_and(|f| f.starts_with('-') && f[1..].contains('c'));
+            match (c_flag, words.get(2)) {
+                (true, Some(script)) => noop_family(script, live_jobs),
+                _ => None,
+            }
+        }
+        "eval" if rest.is_empty() => None,
+        "eval" => noop_family(&rest.join(" "), live_jobs),
+        "command" | "builtin" | "exec" | "nohup" | "time" | "nice" | "timeout" | "env" => {
+            let rest = peel_wrapper(head, rest)?;
+            noop_segment(&rest.join(" "), live_jobs)
+        }
+        _ => None,
+    }
+}
+
+/// `name() {…}` / `name() (…)` / `function name[()] {…}` — a definition in
+/// a one-shot shell is dead code: the body never runs.
+fn is_fn_def(seg: &str) -> bool {
+    let mut t = seg;
+    let kw = t
+        .strip_prefix("function")
+        .is_some_and(|r| r.starts_with(|c: char| c.is_whitespace()));
+    if kw {
+        t = t["function".len()..].trim_start();
+    }
+    let name_len = t
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(t.len());
+    if name_len == 0 {
+        return false;
+    }
+    let mut rest = t[name_len..].trim_start();
+    match rest.strip_prefix('(') {
+        // `name()` — the parens must close immediately (`name(arg)` is not
+        // a definition; it isn't shell at all).
+        Some(r) => match r.trim_start().strip_prefix(')') {
+            Some(r) => rest = r.trim_start(),
+            None => return false,
+        },
+        // `function f {…}` may skip the parens; a bare `name {…}` is no def.
+        None if !kw => return false,
+        None => {}
+    }
+    let rest = rest.trim_end();
+    match rest.as_bytes().first() {
+        Some(b'{') => rest.ends_with('}'),
+        Some(b'(') => rest.ends_with(')'),
+        _ => false,
+    }
+}
+
+/// A word that expands to nothing the model didn't write: no glob (`*`,
+/// `?`, `[`), no brace expansion (`{a,b}`) and no leading `~`.
+/// `$`/backquote never reach this — the word splitter bails on them first.
+fn literal_word(w: &str) -> bool {
+    !w.contains(['*', '?', '[', ']', '{', '}']) && !w.starts_with('~')
+}
+
+/// `sleep`-shaped durations: `5`, `0.5`, `30s`, `2m`, `1h`, `1d`.
+fn is_duration(w: &str) -> bool {
+    let num = w.trim_end_matches(['s', 'm', 'h', 'd']);
+    !num.is_empty() && num.parse::<f64>().is_ok()
+}
+
+/// `NAME=value` / `NAME+=value`: a leading assignment in a one-shot shell.
+fn is_assignment(w: &str) -> bool {
+    let Some(eq) = w.find('=') else {
+        return false;
+    };
+    let mut name = &w[..eq];
+    name = name.strip_suffix('+').unwrap_or(name);
+    !name.is_empty()
+        && name
+            .chars()
+            .enumerate()
+            .all(|(i, c)| c == '_' || c.is_ascii_alphanumeric() && (i > 0 || !c.is_ascii_digit()))
+}
+
+/// Peels a transparent wrapper's own arguments (`nice -n 1`, `env A=1`,
+/// `timeout -s KILL 30`) and returns the real command words. Where a flag's
+/// value can't be told from the command the peel under-fires — the leaf
+/// check then fails and the command runs, which is the safe direction.
+fn peel_wrapper<'a>(head: &str, rest: &'a [String]) -> Option<&'a [String]> {
+    let value_flags: &[&str] = match head {
+        "nice" => &["-n", "--adjustment"],
+        "timeout" => &["-s", "--signal", "-k", "--kill-after"],
+        "env" => &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
+        _ => &[],
+    };
+    // `command -v x` / `time -v` & friends take flags that are themselves
+    // the query — only wrappers whose flags merely decorate the command
+    // get them peeled.
+    let peels_flags = matches!(head, "nice" | "timeout" | "env");
+    let mut r = rest;
+    loop {
+        match r.first().map(String::as_str) {
+            Some(w) if value_flags.contains(&w) && r.len() > 1 => r = &r[2..],
+            Some(w) if peels_flags && w.starts_with('-') => r = &r[1..],
+            Some(w) if head == "env" && is_assignment(w) => r = &r[1..],
+            _ => break,
+        }
+    }
+    // `timeout`'s duration word sits between its flags and the command.
+    if head == "timeout" {
+        r = r.split_first().map(|(_, tail)| tail)?;
+    }
+    if r.is_empty() { None } else { Some(r) }
 }
 
 /// What to say when a `cat <media>` ran as an ordinary shell command instead

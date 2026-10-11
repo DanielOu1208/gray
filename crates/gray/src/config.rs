@@ -7,6 +7,23 @@ use crate::Cli;
 /// Default API base URL pointing to OpenRouter.
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
+/// The level `effort_memory` holds for this connection+model, if any.
+fn remembered_effort(
+    memory: &std::collections::BTreeMap<String, String>,
+    provider_id: &str,
+    base_url: &str,
+    model: Option<&str>,
+) -> Option<String> {
+    let model = nonempty(model)?;
+    memory
+        .get(&crate::setup::effort_memory_key(
+            provider_id,
+            base_url,
+            &model,
+        ))
+        .cloned()
+}
+
 fn nonempty(s: Option<&str>) -> Option<String> {
     s.map(str::trim)
         .filter(|s| !s.is_empty())
@@ -207,10 +224,32 @@ impl Config {
             .or(saved.base_url)
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
+        // Provider identity envs let one process run a connection the
+        // saved file doesn't name — an empty value clears the field. The
+        // fusion sidekick's `gray -p` child targets its own provider
+        // through exactly this.
+        let provider_id = env("GRAY_PROVIDER_ID")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| nonempty(Some(saved.provider_id.as_str())).unwrap_or_default());
+        let target_effort = remembered_effort(
+            &saved.effort_memory,
+            &provider_id,
+            &base_url,
+            model.as_deref(),
+        );
+
         let api_key = resolve_api_key(cli, &base_url, &mut env, saved.api_key); // optional: validated on first use
 
-        let thinking_effort =
-            nonempty(env("GRAY_THINKING_EFFORT").as_deref()).or(saved.thinking_effort);
+        // Effort belongs to a connection+model (`effort_memory`), not to
+        // gray: the flat `thinking_effort` is only what the last session to
+        // save wrote. The resolved target restores its own remembered level
+        // first, so two sessions on different models never hand each other
+        // their tier — on a plugin relay that bakes the tier into the native
+        // model id (devin-sub `swe-2-high` vs `swe-2-max`) a flip re-bills
+        // the whole transcript.
+        let thinking_effort = nonempty(env("GRAY_THINKING_EFFORT").as_deref())
+            .or(target_effort)
+            .or(saved.thinking_effort);
 
         let show_reasoning = env("GRAY_SHOW_REASONING")
             .map(|s| {
@@ -300,13 +339,22 @@ impl Config {
             saved.lean.unwrap_or(true)
         };
 
+        let credential_source = env("GRAY_CREDENTIAL_SOURCE")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| {
+                nonempty(Some(saved.credential_source.as_str())).unwrap_or_default()
+            });
+        let auth_ref = env("GRAY_AUTH_REF")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| nonempty(Some(saved.auth_ref.as_str())).unwrap_or_default());
+
         let config = Self {
             model,
             base_url,
             api_key,
-            provider_id: nonempty(Some(saved.provider_id.as_str())).unwrap_or_default(),
-            credential_source: nonempty(Some(saved.credential_source.as_str())).unwrap_or_default(),
-            auth_ref: nonempty(Some(saved.auth_ref.as_str())).unwrap_or_default(),
+            provider_id,
+            credential_source,
+            auth_ref,
             thinking_effort,
             show_reasoning,
             fast_mode,

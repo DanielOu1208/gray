@@ -571,3 +571,85 @@ fn approved_job_fires_once_due() {
     store.set_next_run_for_test(&id, 1).unwrap();
     assert_eq!(store.claim_due(now_secs(), "t").unwrap().len(), 1);
 }
+
+#[test]
+fn repeat_times_retires_a_recurring_job_after_n_fires() {
+    let (_dir, store) = test_store();
+    let id = store
+        .add("twice", "every 1h", "hi", Deliver::Local)
+        .unwrap();
+    assert!(
+        store
+            .update(&id, |j| {
+                j.repeat.times = Some(2);
+                Ok(())
+            })
+            .unwrap()
+    );
+    for n in 1..=2u32 {
+        let job = store
+            .claim_one(now_secs(), "t", &id)
+            .unwrap()
+            .expect("claimable");
+        store
+            .mark_done(&id, job.fire_claim.as_ref(), RunStatus::Ok, None)
+            .unwrap();
+        let after = store.get(&id).unwrap().unwrap();
+        assert_eq!(after.repeat.completed, n);
+        let want = if n == 2 {
+            JobState::Done
+        } else {
+            JobState::Active
+        };
+        assert_eq!(after.state, want);
+    }
+    assert!(store.claim_one(now_secs(), "t", &id).unwrap().is_none());
+}
+
+#[test]
+fn unbounded_repeat_keeps_firing() {
+    let (_dir, store) = test_store();
+    let id = store
+        .add("forever", "every 1h", "hi", Deliver::Local)
+        .unwrap();
+    for _ in 0..3 {
+        let job = store.claim_one(now_secs(), "t", &id).unwrap().unwrap();
+        store
+            .mark_done(&id, job.fire_claim.as_ref(), RunStatus::Ok, None)
+            .unwrap();
+    }
+    let after = store.get(&id).unwrap().unwrap();
+    assert_eq!((after.state, after.repeat.completed), (JobState::Active, 3));
+}
+
+#[test]
+fn update_reschedules_active_jobs_and_revalidates() {
+    let (_dir, store) = test_store();
+    let id = store
+        .add("daily", "every 1h", "hi", Deliver::Local)
+        .unwrap();
+    let before = store.get(&id).unwrap().unwrap().next_run_at.unwrap();
+    assert!(
+        store
+            .update(&id, |j| {
+                j.schedule = parse_schedule("every 24h")?;
+                j.prompt = "daily digest".into();
+                Ok(())
+            })
+            .unwrap()
+    );
+    let after = store.get(&id).unwrap().unwrap();
+    assert_eq!(after.prompt, "daily digest");
+    assert!(after.next_run_at.unwrap() > before + 3600);
+    // invalid edits are rejected and leave the job untouched
+    assert!(
+        store
+            .update(&id, |j| {
+                j.name = String::new();
+                Ok(())
+            })
+            .is_err()
+    );
+    assert_eq!(store.get(&id).unwrap().unwrap().name, "daily");
+    assert!(!store.update("nope", |_| Ok(())).unwrap());
+}

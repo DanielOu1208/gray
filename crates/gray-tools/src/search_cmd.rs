@@ -58,7 +58,127 @@ impl SearchArgs {
 /// `gray find PATTERN [PATH]` — file names matching a glob, off the
 /// process-wide pool.
 pub async fn find(args: &SearchArgs, ctx: &ToolContext) -> String {
-    find_with_pool(args, ctx, crate::search_index::global_pool().clone()).await
+    find_on(args, ctx, &global_index()).await
+}
+
+/// `find` on a chosen backend — tests drive every lane through this.
+pub(crate) async fn find_on(args: &SearchArgs, ctx: &ToolContext, b: &IndexBackend) -> String {
+    match b {
+        IndexBackend::Fff(p) => find_with_pool(args, ctx, p.clone()).await,
+        #[cfg(unix)]
+        IndexBackend::Fs(p) => find_with_fsearch(args, ctx, p.clone()).await,
+        IndexBackend::Off => find_call(args, ctx).await,
+    }
+}
+
+/// The fallback `gray find` tool call — what `Off` and cold pools run.
+async fn find_call(args: &SearchArgs, ctx: &ToolContext) -> String {
+    tool_text(
+        &crate::FindTool,
+        ctx,
+        json!({
+            "pattern": args.pattern,
+            "path": args.root(&ctx.cwd).to_string_lossy(),
+            "limit": args.limit.unwrap_or(100),
+        }),
+    )
+    .await
+}
+
+/// Which resident index serves `find`/`grep`: `GRAY_SEARCH_INDEX` picks
+/// `fsearch` (default), `fff`, or `off` — the fallback lanes always answer.
+pub enum IndexBackend {
+    Fff(std::sync::Arc<crate::search_index::SearchPool>),
+    #[cfg(unix)]
+    Fs(std::sync::Arc<crate::search_index_fs::FsearchPool>),
+    Off,
+}
+
+fn global_index() -> IndexBackend {
+    static BACKEND: std::sync::OnceLock<IndexBackend> = std::sync::OnceLock::new();
+    BACKEND
+        .get_or_init(
+            || match backend_kind(std::env::var("GRAY_SEARCH_INDEX").ok().as_deref()) {
+                BackendKind::Fff => IndexBackend::Fff(crate::search_index::global_pool().clone()),
+                BackendKind::Off => IndexBackend::Off,
+                #[cfg(unix)]
+                BackendKind::Fs => {
+                    IndexBackend::Fs(crate::search_index_fs::global_fs_pool().clone())
+                }
+            },
+        )
+        .clone()
+}
+
+/// Which resident index `GRAY_SEARCH_INDEX` selects. Anything unrecognized
+/// is the default — fsearch — so a typo never silently disables indexing.
+/// fsearch is a unix daemon crate; elsewhere the default falls back to the
+/// in-process `fff` pool.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BackendKind {
+    Fff,
+    #[cfg(unix)]
+    Fs,
+    Off,
+}
+
+pub(crate) fn backend_kind(v: Option<&str>) -> BackendKind {
+    match v {
+        Some("fff") => BackendKind::Fff,
+        Some("off") | Some("none") => BackendKind::Off,
+        #[cfg(unix)]
+        _ => BackendKind::Fs,
+        #[cfg(not(unix))]
+        _ => BackendKind::Fff,
+    }
+}
+
+impl Clone for IndexBackend {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Fff(p) => Self::Fff(p.clone()),
+            #[cfg(unix)]
+            Self::Fs(p) => Self::Fs(p.clone()),
+            Self::Off => Self::Off,
+        }
+    }
+}
+
+/// [`find`] against the fsearch whole-disk index. Same warm/fallback shape
+/// as `find_with_pool` — the lanes only differ in which index answers.
+#[cfg(unix)]
+pub async fn find_with_fsearch(
+    args: &SearchArgs,
+    ctx: &ToolContext,
+    pool: std::sync::Arc<crate::search_index_fs::FsearchPool>,
+) -> String {
+    let root = args.root(&ctx.cwd);
+    let limit = args.limit.unwrap_or(100);
+    if !ctx.cancel.is_cancelled() && pool.warm_picker(&root).is_some() {
+        let (dir, pat) = (root.clone(), args.pattern.clone());
+        let lane = pool.clone();
+        let hits = tokio::select! {
+            out = spawn_index(move || lane.indexed_glob(&dir, &pat, limit)) => out,
+            _ = ctx.cancel.cancelled() => None,
+        };
+        if let Some(hits) = hits {
+            return render_find(&hits, limit);
+        }
+    }
+    if !ctx.cancel.is_cancelled() {
+        pool.warm_in_background(&root);
+    }
+    tool_text(
+        &crate::FindTool,
+        ctx,
+        json!({
+            "pattern": args.pattern,
+            "path": root.to_string_lossy(),
+            "limit": limit,
+        }),
+    )
+    .await
 }
 
 /// [`find`] against a caller-chosen pool. The global pool roots its frecency
@@ -102,7 +222,74 @@ pub async fn find_with_pool(
 /// `gray grep PATTERN [PATH]` — file contents matching a pattern, off the
 /// process-wide pool.
 pub async fn grep(args: &SearchArgs, ctx: &ToolContext) -> String {
-    grep_with_pool(args, ctx, crate::search_index::global_pool().clone()).await
+    grep_on(args, ctx, &global_index()).await
+}
+
+/// `grep` on a chosen backend — tests drive every lane through this.
+pub(crate) async fn grep_on(args: &SearchArgs, ctx: &ToolContext, b: &IndexBackend) -> String {
+    match b {
+        IndexBackend::Fff(p) => grep_with_pool(args, ctx, p.clone()).await,
+        #[cfg(unix)]
+        IndexBackend::Fs(p) => grep_with_fsearch(args, ctx, p.clone()).await,
+        IndexBackend::Off => grep_call(args, ctx).await,
+    }
+}
+
+/// [`grep`] against the fsearch whole-disk index.
+#[cfg(unix)]
+pub async fn grep_with_fsearch(
+    args: &SearchArgs,
+    ctx: &ToolContext,
+    pool: std::sync::Arc<crate::search_index_fs::FsearchPool>,
+) -> String {
+    let root = args.root(&ctx.cwd);
+    let limit = args.limit.unwrap_or(100);
+    let context = args.context.unwrap_or(0);
+    if !ctx.cancel.is_cancelled() && pool.warm_picker(&root).is_some() {
+        let (dir, pat, g) = (root.clone(), args.pattern.clone(), args.glob.clone());
+        let (ic, lit, lim, ctxn) = (args.ignore_case, args.literal, limit, context);
+        let lane = pool.clone();
+        let found = tokio::select! {
+            out = spawn_index(move || {
+                let cancel = CancellationToken::new();
+                lane.indexed_grep(&dir, &pat, g.as_deref(), ic, lit, lim, ctxn, &cancel)
+            }) => out,
+            _ = ctx.cancel.cancelled() => None,
+        };
+        if let Some(found) = found {
+            return crate::grep::render_matches(&root, &found.hits, limit, found.limit_reached);
+        }
+    }
+    if !ctx.cancel.is_cancelled() {
+        pool.warm_in_background(&root);
+    }
+    grep_call(args, ctx).await
+}
+
+/// The fallback `gray grep` tool call, factored out of `grep_with_pool` so
+/// every backend shares it.
+async fn grep_call(args: &SearchArgs, ctx: &ToolContext) -> String {
+    let root = args.root(&ctx.cwd);
+    let limit = args.limit.unwrap_or(100);
+    let context = args.context.unwrap_or(0);
+    let mut call = json!({
+        "pattern": args.pattern,
+        "path": root.to_string_lossy(),
+        "limit": limit,
+    });
+    if context > 0 {
+        call["context"] = json!(context);
+    }
+    if let Some(g) = &args.glob {
+        call["glob"] = json!(g);
+    }
+    if args.ignore_case {
+        call["ignoreCase"] = json!(true);
+    }
+    if args.literal {
+        call["literal"] = json!(true);
+    }
+    tool_text(&crate::GrepTool, ctx, call).await
 }
 
 /// [`grep`] against a caller-chosen pool.
@@ -134,24 +321,7 @@ pub async fn grep_with_pool(
     if !ctx.cancel.is_cancelled() {
         pool.warm_in_background(&root);
     }
-    let mut call = json!({
-        "pattern": args.pattern,
-        "path": root.to_string_lossy(),
-        "limit": limit,
-    });
-    if context > 0 {
-        call["context"] = json!(context);
-    }
-    if let Some(g) = &args.glob {
-        call["glob"] = json!(g);
-    }
-    if args.ignore_case {
-        call["ignoreCase"] = json!(true);
-    }
-    if args.literal {
-        call["literal"] = json!(true);
-    }
-    tool_text(&crate::GrepTool, ctx, call).await
+    grep_call(args, ctx).await
 }
 
 /// The index is synchronous CPU work, so it belongs off the async runtime.

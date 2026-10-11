@@ -8,6 +8,7 @@ members = [
     "crates/gray-tools",
     "crates/gray-plugin",
     "crates/gray-pkg",
+    "crates/fsearch",
 ]
 [workspace.package]
 version = "0.2.0"
@@ -32,6 +33,7 @@ url = { version = "2", features = ["serde"] }
 eventsource-stream = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+strsim = "0.11"
 thiserror = "2"
 async-trait = "0.1"
 anyhow = "1.0"
@@ -56,6 +58,7 @@ unicode-width = "0.2"
 ignore = "0.4"
 globset = "0.4"
 fff-search = "=0.10.6"
+fsearch = { path = "crates/fsearch" }
 regex = "1"
 libc = "0.2"
 zeroize = { version = "1.8", features = ["derive"] }

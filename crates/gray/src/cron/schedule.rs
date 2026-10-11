@@ -1,13 +1,15 @@
 //! Schedule expressions (pure math, no I/O).
 //!
-//! Gray-minimal kinds, no NL weekdays (follow-up):
+//! Gray-minimal kinds:
 //! `"in 10m"` / ISO `"2026-02-03T14:00:00Z"` -> Once;
 //! `"every 10m"` / bare `"10m"` -> Interval;
-//! 5-field `"0 9 * * *"` -> Cron (seconds prepended for the `cron` crate).
+//! 5-field `"0 9 * * *"` -> Cron (seconds prepended for the `cron` crate),
+//! evaluated in the host's local timezone — `0 9 * * *` means 9am here;
+//! `"daily 9am"` / `"weekdays 9:00"` / `"every monday 6pm"` compile to it.
 
 use std::str::FromStr;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 
 /// Minimum honored period: the daemon ticker runs every 60s.
 pub const MIN_INTERVAL_SECS: u64 = 60;
@@ -44,10 +46,93 @@ fn parse_duration_secs(raw: &str) -> anyhow::Result<u64> {
     Ok(secs)
 }
 
+const DAYS: [&str; 7] = [
+    "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+];
+
+/// `9am`, `9:30pm`, `18:00`, `noon`, `midnight` -> (hour, minute).
+fn parse_clock(raw: &str) -> Option<(u32, u32)> {
+    let t = raw.trim();
+    match t {
+        "noon" => return Some((12, 0)),
+        "midnight" => return Some((0, 0)),
+        _ => {}
+    }
+    let (body, half) = match (t.strip_suffix("am"), t.strip_suffix("pm")) {
+        (Some(b), _) => (b, Some(0)),
+        (_, Some(b)) => (b, Some(12)),
+        _ => (t, None),
+    };
+    let (h, m) = body.split_once(':').unwrap_or((body, "0"));
+    let (h, m): (u32, u32) = (h.trim().parse().ok()?, m.trim().parse().ok()?);
+    if m >= 60 {
+        return None;
+    }
+    match half {
+        Some(off) if (1..=12).contains(&h) => Some((h % 12 + off, m)),
+        Some(_) => None,
+        None => (h < 24).then_some((h, m)),
+    }
+}
+
+/// `monday`, `mon`, `mondays`, `mon,wed` -> cron day-of-week list.
+fn parse_days(raw: &str) -> Option<String> {
+    let days = raw
+        .split(',')
+        .map(|d| {
+            let d = d.trim();
+            let d = d.strip_suffix('s').filter(|d| d.len() >= 3).unwrap_or(d);
+            (d.len() >= 3)
+                .then(|| DAYS.iter().position(|full| full.starts_with(d)))
+                .flatten()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(
+        days.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+/// Human schedules compiled to 5-field cron: `hourly`, `daily 9am`,
+/// `every day at 9:00`, `weekdays 9am`, `weekends noon`,
+/// `every monday 18:00`, `mon,wed 6:30pm`. No time means midnight.
+fn natural_cron(input: &str) -> Option<String> {
+    let lower = input.to_ascii_lowercase();
+    let s = lower.strip_prefix("every ").unwrap_or(&lower).trim();
+    if s == "hourly" || s == "hour" {
+        return Some("0 * * * *".to_string());
+    }
+    let mut words = s.split_whitespace().filter(|w| !matches!(*w, "at" | "on"));
+    let dow = match words.next()? {
+        "day" | "daily" => "*".to_string(),
+        "weekday" | "weekdays" => "1-5".to_string(),
+        "weekend" | "weekends" => "0,6".to_string(),
+        d => parse_days(d)?,
+    };
+    let rest: String = words.collect();
+    let (h, m) = if rest.is_empty() {
+        (0, 0)
+    } else {
+        parse_clock(&rest)?
+    };
+    Some(format!("{m} {h} * * {dow}"))
+}
+
 pub fn parse_schedule(input: &str) -> anyhow::Result<Schedule> {
     let s = input.trim();
     if s.is_empty() {
         anyhow::bail!("empty schedule");
+    }
+    if let Some(expr) = natural_cron(s) {
+        return Ok(Schedule::Cron { expr });
     }
     if let Some(rest) = s.strip_prefix("in ").map(str::trim) {
         let secs = parse_duration_secs(rest)?;
@@ -80,7 +165,7 @@ pub fn parse_schedule(input: &str) -> anyhow::Result<Schedule> {
         });
     }
     anyhow::bail!(
-        "bad schedule {:?}: want \"in 10m\", RFC3339, \"every 1h\" / \"30m\", or 5-field cron",
+        "bad schedule {:?}: want \"in 10m\", \"every 1h\", \"daily 9am\", \"weekdays 9:00\", \"every monday 6pm\", RFC3339, or 5-field cron",
         s
     )
 }
@@ -97,12 +182,16 @@ pub fn next_run(after: i64, s: &Schedule) -> Option<i64> {
             after.checked_add(secs_i64)
         }
         Schedule::Once { at } => Some(*at),
-        Schedule::Cron { expr } => {
-            let sched = cron::Schedule::from_str(&format!("0 {}", expr)).ok()?;
-            let after_dt = Utc.timestamp_opt(after, 0).single()?;
-            sched.after(&after_dt).next().map(|dt| dt.timestamp())
-        }
+        Schedule::Cron { expr } => next_cron_in(after, expr, &Local),
     }
+}
+
+/// Next fire of a 5-field cron `expr` strictly after `after`, with the
+/// fields read as wall-clock time in `tz`.
+pub(crate) fn next_cron_in<Tz: TimeZone>(after: i64, expr: &str, tz: &Tz) -> Option<i64> {
+    let sched = cron::Schedule::from_str(&format!("0 {}", expr)).ok()?;
+    let after_dt = tz.timestamp_opt(after, 0).single()?;
+    sched.after(&after_dt).next().map(|dt| dt.timestamp())
 }
 
 #[path = "schedule_tests.rs"]

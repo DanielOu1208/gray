@@ -11,6 +11,7 @@ use gray_core::message::{Message, ToolDef};
 pub mod builder;
 pub mod capabilities;
 pub mod host;
+pub mod lazy;
 mod live;
 pub mod lock;
 pub mod profile;
@@ -18,6 +19,7 @@ mod provider;
 pub mod scan;
 pub mod sidecar;
 
+pub use lazy::{LazySidecarPlugin, cached_manifest, lazy_enabled};
 pub use live::LiveRegistry;
 
 pub use sidecar::{

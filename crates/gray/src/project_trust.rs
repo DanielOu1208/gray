@@ -1,6 +1,6 @@
 //! Consent for project-level prompts, skills and rules.
 //!
-//! A cloned repo can ship `.claude/commands/*.md`, `SKILL.md` files and an
+//! A cloned repo can ship `.gray/prompts/*.md`, `SKILL.md` files and an
 //! `AGENTS.md`. The model reads them as instructions and its tools run
 //! unsandboxed (see SECURITY.md), so project content loads only for projects
 //! the user has trusted with `gray trust`. The list lives under the gray
@@ -99,7 +99,7 @@ pub fn run_cli(dir: Option<PathBuf>, revoke: bool) -> anyhow::Result<()> {
     } else {
         trust(&home, &dir)?;
         println!(
-            "trusted {} — its .claude/commands, .gray/prompts, SKILL.md and AGENTS.md now load",
+            "trusted {} — its .gray/prompts, SKILL.md and AGENTS.md now load",
             root.display()
         );
     }

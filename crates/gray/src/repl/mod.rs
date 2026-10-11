@@ -197,7 +197,7 @@ use crate::{DEFAULT_SYS_PROMPT, build_agent, load_or_create_system_prompt_at};
 pub mod agents_panel;
 pub mod attachments;
 pub mod commands;
-mod cron;
+pub(crate) mod cron;
 mod customize;
 mod dispatch;
 pub mod format;
@@ -210,7 +210,7 @@ mod plugin_cmds;
 mod prompt_turn;
 mod session;
 mod status;
-mod usage_panel;
+pub(crate) mod usage_panel;
 mod user_cmds;
 
 pub(crate) use commands::{REGISTRY, completion_fill, completion_matches_dyn, is_builtin_command};
@@ -310,7 +310,16 @@ pub(crate) fn clamp_thinking_to_model(config: &mut Config) -> Option<(String, St
     clamp_thinking_to_model_name(config, &model)
 }
 
-/// Post-`run_connect_modal` feedback shared by `/connect` and the
+/// Boot-time model+effort normalization shared by resume, fresh boot and
+/// `gray -p`: canonicalizes a stored `<base>-<tier>` id, then clamps a
+/// stale effort. Returns the clamp `(old, new)` for the caller to report;
+/// both steps persist through their own seams.
+pub(crate) fn normalize_adopted_model(config: &mut Config) -> Option<(String, String)> {
+    crate::setup::canonicalize_adopted_model(config);
+    clamp_thinking_to_model(config)
+}
+
+/// Post-`run_connect_modal` feedback shared by `/models` and the
 /// first-turn setup path: sync the chosen model into the composer and echo
 /// the provider name. Clamps a stale effort (e.g. deepseek `max` → Spark
 /// `xhigh`) before painting so the footer never shows an unsupported level.
@@ -335,14 +344,15 @@ pub(crate) fn push_provider_connected(
     if let Some(m) = &config.model {
         t.set_model(m.clone());
         t.set_model_label(crate::setup::composite_label_for(config));
+        t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
     }
-    // Paint the effort unconditionally: a provider/model switch adopts the
+    // Paint the effort unconditionally: a provider/models switch adopts the
     // target's own remembered level even when no clamp fires.
     if let Some(eff) = &config.thinking_effort {
         t.set_thinking_effort(eff.clone());
         t.set_hide_thinking(config.reasoning_hidden());
     }
-    // One receipt row, same shape as `/model`'s `✓ Model set to …`.
+    // One receipt row, same shape as `/models`'s `✓ Model set to …`.
     let prov_name = connected_provider_name(config);
     let detail = model_receipt_label(config);
     t.push_action(&format!("Connected to {prov_name}"), detail.as_deref());
@@ -460,7 +470,7 @@ impl crate::cron_serve::AsyncRunner for ReplRunner {
         prompt: String,
         cwd: std::path::PathBuf,
     ) -> anyhow::Result<crate::cron_serve::FireOutput> {
-        // The ticker thread holds a startup snapshot; a /model switch since
+        // The ticker thread holds a startup snapshot; a /models switch since
         // then lives in the saved config — follow it so cron fires ask the
         // same provider the session uses.
         let mut config = self.config.clone();
@@ -636,7 +646,7 @@ pub async fn run_repl_mode(
         unconfigured = config.model.is_none();
         if !ready {
             print!(
-                "\r\x1b[2mrunning without a provider — send a message to set one up (or /connect)\x1b[0m\r\n"
+                "\r\x1b[2mrunning without a provider — send a message to set one up (or /models)\x1b[0m\r\n"
             );
         }
         print!("\r\n");
@@ -747,16 +757,10 @@ pub async fn run_repl_mode(
         if config.model.is_none() && !meta.model.is_empty() {
             config.model = Some(meta.model.clone());
         }
-        // The session may predate the family collapse: canonicalize a
-        // stored variant id before the agent is built on it.
-        {
-            let rows = crate::setup::canonical_model_rows(config);
-            crate::setup::canonicalize_effort_variant(config, &rows);
-        }
-        // Startup resume lands on the session's model: clamp a stale effort
-        // (e.g. saved `max` under a Spark session) before the first build
-        // and before the TUI init below paints the footer.
-        if let Some((old, new)) = clamp_thinking_to_model(config) {
+        // Startup resume lands on the session's model: canonicalize a
+        // stored variant id and clamp a stale effort (e.g. saved `max`
+        // under a Spark session) before the first build and the TUI paint.
+        if let Some((old, new)) = normalize_adopted_model(config) {
             println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
         }
         let history: Vec<Message> = entries.iter().map(|e| e.message.clone()).collect();
@@ -775,20 +779,16 @@ pub async fn run_repl_mode(
             store,
             _open_guard: open_guard,
         });
+        session::export_session_env(sid.as_str());
         session_totals =
             SessionTotals::from_entries(&entries, config.model.as_deref().unwrap_or(""));
         resumed_session_info = Some((sid, entries));
     }
 
-    // A stored `<base>-<tier>` id — picked before its family collapsed into
-    // one row, or hand-typed — canonicalizes to the row + its tier effort
-    // (`swe-2-max` → `swe-2` at `max`) before the clamp runs below.
-    {
-        let rows = crate::setup::canonical_model_rows(config);
-        crate::setup::canonicalize_effort_variant(config, &rows);
-    }
-    // Fresh sessions need the same normalization as model switches and resumes.
-    if let Some((old, new)) = clamp_thinking_to_model(config) {
+    // Fresh sessions get the same normalization as resumes: a stored
+    // `<base>-<tier>` id canonicalizes to the row + its tier effort
+    // (`swe-2-max` → `swe-2` at `max`), then a stale effort clamps.
+    if let Some((old, new)) = normalize_adopted_model(config) {
         println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
     }
 
@@ -825,6 +825,7 @@ pub async fn run_repl_mode(
             if let Some(m) = &config.model {
                 t.set_model(m.clone());
                 t.set_model_label(crate::setup::composite_label_for(config));
+                t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
             }
             // A level this model no longer offers (a step-family `off` saved
             // before family truth won) must not ride into the footer.
@@ -845,8 +846,12 @@ pub async fn run_repl_mode(
                 t.ensure_gap();
             }
             if let Some(h) = &startup_hint {
-                t.push_dim(h.clone());
-                t.ensure_gap();
+                if t.is_home() {
+                    t.set_home_notice(Some(h.clone()));
+                } else {
+                    t.push_dim(h.clone());
+                    t.ensure_gap();
+                }
             }
             t
         }));
@@ -952,7 +957,7 @@ pub async fn run_repl_mode(
         }
     }
 
-    // pi's hideThinkingBlock — session-only, toggled in the /model picker
+    // pi's hideThinkingBlock — session-only, toggled in the /models picker
     // (ctrl+r). Reasoning is ON by default — user wants to see thinking
     // (high effort); the picker sets the level persisted to config.
     let mut hide_thinking = config.reasoning_hidden();

@@ -11,11 +11,14 @@ pub mod find;
 pub mod grep;
 pub mod grep_builtin;
 pub mod images;
+pub mod index_filter;
 pub mod ledger;
 pub mod ls;
 pub mod read;
 pub mod search_cmd;
 pub mod search_index;
+#[cfg(unix)]
+pub mod search_index_fs;
 pub mod shell;
 pub mod stats;
 pub mod truncate;
@@ -398,14 +401,7 @@ impl ToolExecutor for Registry {
             };
             let out = match tool {
                 Some(tool) => tool.execute(&ctx, coerced).await,
-                None => ToolOutput::error(format!(
-                    "Tool '{name}' does not exist. Available: {}",
-                    if available.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        available.join(", ")
-                    }
-                )),
+                None => ToolOutput::error(gray_core::tool_out::unknown_tool(&name, &available)),
             };
             if out.is_error {
                 log::warn!(target: "gray_tools", "tool {name} failed: {}", out.content);

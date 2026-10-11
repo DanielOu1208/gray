@@ -138,11 +138,11 @@ fn identity_block_names_the_picked_row_and_provider() {
 fn identity_block_keeps_a_composite_label_verbatim() {
     assert_eq!(
         identity_block(
-            "Fusion · Opus 5.5 High + SWE-2 High",
+            "Fusion · Opus 5.5 High × SWE-2 High",
             "fusion",
             "Devin Subscription"
         ),
-        "Model: Fusion · Opus 5.5 High + SWE-2 High (fusion)\nProvider: Devin Subscription"
+        "Model: Fusion · Opus 5.5 High × SWE-2 High (fusion)\nProvider: Devin Subscription"
     );
 }
 

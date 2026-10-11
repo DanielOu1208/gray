@@ -4,6 +4,7 @@ use ratatui::text::{Line, Span};
 fn live(id: &str, text: &str, running: bool) -> LiveTool {
     LiveTool {
         id: id.to_string(),
+        name: id.to_string(),
         header: Line::from(vec![Span::raw(text.to_string())]),
         running,
     }
@@ -30,6 +31,7 @@ fn live_rows_preserve_order_and_cap_at_three() {
 fn bash_live(command: &str, running: bool) -> LiveTool {
     LiveTool {
         id: "bash".into(),
+        name: "bash".into(),
         header: crate::tool_fmt::format_tool_call_header(
             "bash",
             &serde_json::json!({"command": command}),
@@ -99,6 +101,7 @@ fn running_label_does_not_orphan_a_trailing_status() {
 fn other_tools_keep_their_identity_and_empty_headers_are_safe() {
     let tool = LiveTool {
         id: "plugin".into(),
+        name: "custom".into(),
         header: crate::tool_fmt::format_tool_call_header(
             "custom",
             &serde_json::json!({}),

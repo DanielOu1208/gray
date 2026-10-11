@@ -1,15 +1,14 @@
 //! Agent skills backend: install/list/remove over `<agent_dir>/skills/`.
 //!
-//! Install resolves `clawhub:` / `github:` / `url:` /
+//! Install resolves `github:` / `url:` /
 //! local-path specs into `<agent_dir>/skills/<slug>/` (agent dir is
 //! [`crate::gray_home`], exactly like [`crate::ops`]), reusing the Task 2
 //! download/verify paths. `update` is OUT (later task).
 
 use std::path::{Path, PathBuf};
 
-/// Install origin, written to `<skill>/.gray-origin.json` (mirrors ClawHub's
-/// origin.json shape: version + registry/slug/owner + pinned version +
-/// timestamp + inspectable URL).
+/// Install origin, written to `<skill>/.gray-origin.json`: version +
+/// registry/slug/owner + pinned version + timestamp + inspectable URL.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SkillOrigin {
     pub version: u32,
@@ -47,20 +46,18 @@ pub(crate) fn skills_dir() -> PathBuf {
     crate::gray_home().join("skills")
 }
 
-/// Specs this installer resolves remotely (`clawhub:`/`github:`/`url:`);
+/// Specs this installer resolves remotely (`github:`/`url:`);
 /// anything else is a local path. Shared so `plugin install` routes skill
 /// specs here instead of into the plugin lock.
 pub fn is_skill_spec(spec: &str) -> bool {
     let t = spec.trim();
-    t.starts_with("clawhub:") || t.starts_with("github:") || t.starts_with("url:")
+    t.starts_with("github:") || t.starts_with("url:")
 }
 
 /// `(registry, item)` identity for install failures, from the spec kind.
 fn spec_identity(spec: &str) -> (String, String) {
     let t = spec.trim();
     match t.split_once(':') {
-        Some(("clawhub", _)) => ("clawhub".to_string(), t.to_string()),
-        Some(("claude", _)) => ("claude".to_string(), t.to_string()),
         Some(("github", _)) => ("github".to_string(), t.to_string()),
         Some(("url", _)) => ("url".to_string(), t.to_string()),
         _ => ("local".to_string(), t.to_string()),
@@ -78,10 +75,6 @@ pub async fn install(spec: &str) -> anyhow::Result<crate::ops::Report> {
 async fn install_inner(spec: &str) -> anyhow::Result<crate::ops::Report> {
     let client = crate::fetch::client()?;
     let t = spec.trim();
-    if let Some(body) = t.strip_prefix("clawhub:") {
-        let pending = stage_clawhub(&client, body).await?;
-        return finish_skill(pending);
-    }
     if let Some(body) = t.strip_prefix("github:") {
         let pending = stage_github(body).await?;
         return finish_skill(pending);
@@ -97,7 +90,7 @@ async fn install_inner(spec: &str) -> anyhow::Result<crate::ops::Report> {
 }
 
 /// A validated bundle awaiting the shared copy + origin write. `_staging`
-/// keeps tempdirs (ClawHub ZIP unpack, git clone, url SKILL.md) alive until
+/// keeps tempdirs (git clone, url SKILL.md) alive until
 /// the copy completes; local paths stage nothing.
 struct PendingSkill {
     _staging: Option<tempfile::TempDir>,
@@ -182,44 +175,6 @@ fn finish_skill(p: PendingSkill) -> anyhow::Result<crate::ops::Report> {
     })
 }
 
-/// `clawhub:<owner/slug>` (or bare slug): detail → ZIP download → per-file
-/// verify when the versions endpoint answers (else the honest unverified
-/// path), mirroring the ops ClawHub arm's unpack/verify pipeline.
-async fn stage_clawhub(client: &reqwest::Client, body: &str) -> anyhow::Result<PendingSkill> {
-    let slug = body.trim();
-    if slug.is_empty() {
-        anyhow::bail!("clawhub skill slug is empty (want clawhub:<owner/slug>)");
-    }
-    let crate::sources::StagedClawHub {
-        root,
-        detail,
-        verified,
-        _staging,
-    } = crate::sources::stage_clawhub_bundle(client, slug).await?;
-    let version = if detail.version.trim().is_empty() {
-        "0.0.0".to_string()
-    } else {
-        detail.version.clone()
-    };
-    crate::ops::validate_install_key(&detail.slug)?;
-    let source_url = crate::sources::clawhub_canonical_url(&detail.owner, &detail.slug);
-    Ok(PendingSkill {
-        root,
-        slug: detail.slug.clone(),
-        version,
-        unverified: !verified,
-        warn_source: if verified {
-            None
-        } else {
-            Some(source_url.clone())
-        },
-        registry: "clawhub".to_string(),
-        owner: detail.owner.clone(),
-        source_url,
-        _staging: Some(_staging),
-    })
-}
-
 /// Split `github:<owner/repo[/path]>` (path parts must be plain names —
 /// no `.`/`..`/empties/backslashes, so the join stays under the clone).
 fn parse_github_spec(body: &str) -> anyhow::Result<(String, String, Option<String>)> {
@@ -239,6 +194,54 @@ fn parse_github_spec(body: &str) -> anyhow::Result<(String, String, Option<Strin
         None
     };
     Ok((owner, repo, subpath))
+}
+
+/// A hub-index `skill` row: verified tarball (index sha256) unpacked into
+/// staging, then the shared bundle finish. `entry` comes from the hub
+/// index lookup in `ops::install_index`.
+pub async fn install_hub_entry(
+    client: &reqwest::Client,
+    name: &str,
+    entry: &crate::index::Entry,
+) -> anyhow::Result<crate::ops::Report> {
+    crate::ops::validate_install_key(name)?;
+    if entry.source.type_ != "tarball" || !entry.source.url.starts_with("https://") {
+        anyhow::bail!("hub skill '{name}' has no installable https tarball source");
+    }
+    let archive = crate::fetch::download(client, &entry.source.url, Some(&entry.hash)).await?;
+    let tmp_root = crate::plugins_dir().join("tmp");
+    std::fs::create_dir_all(&tmp_root)?;
+    let staging = tempfile::tempdir_in(&tmp_root)?;
+    let unpacked = crate::fetch::unpack_tar_gz(&archive, staging.path());
+    let _ = std::fs::remove_file(&archive);
+    unpacked?;
+    // Some bundles wrap everything in `package/` — the same convention the
+    // registry's SKILL.md check accepts.
+    let root = {
+        let wrapped = staging.path().join("package");
+        if wrapped.is_dir() {
+            wrapped
+        } else {
+            staging.path().to_path_buf()
+        }
+    };
+    if !root.join("SKILL.md").is_file() {
+        anyhow::bail!("hub skill '{name}' unpacked without a SKILL.md (registry drift)");
+    }
+    let source_url = format!("https://gray.alignment.id/plugins/{name}");
+    finish_skill(PendingSkill {
+        root,
+        slug: name.to_string(),
+        version: entry.version.clone(),
+        // Index-hash verified: this is the same trust level as a plugin
+        // index install.
+        unverified: false,
+        warn_source: None,
+        registry: "hub".to_string(),
+        owner: entry.author.clone().unwrap_or_default(),
+        source_url,
+        _staging: Some(staging),
+    })
 }
 
 /// `github:<owner/repo[/path]>`: shallow-clone via the shared git helper,

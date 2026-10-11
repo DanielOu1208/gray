@@ -45,6 +45,15 @@ pub(crate) fn shimmer_spans(text: &str, elapsed: Duration) -> Vec<Span<'static>>
 /// index into `lines`, so it carries the top pad's offset.
 pub(crate) struct InputBox {
     pub(crate) lines: Vec<Line<'static>>,
+    /// Leading rows that are the box itself (painted on `surface_bg`);
+    /// any rows after them are the home rows under it.
+    pub(crate) band_h: usize,
+    /// The box's column: `x` cells in from the left, `width` wide. Full
+    /// width in chat; on the home screen the welcome's centered column.
+    pub(crate) x: usize,
+    pub(crate) width: usize,
+    /// Home screen: the box carries the accent bar on its left edge.
+    pub(crate) home: bool,
     pub(crate) cur_row: usize,
     pub(crate) cur_col: usize,
 }
@@ -57,7 +66,9 @@ pub(crate) fn build_input_box(
     cursor: usize,
     w: usize,
     ghost: Option<&str>,
+    home: Option<HomeRows>,
 ) -> InputBox {
+    let (x, w) = home.map_or((0, w), |_| crate::composer::home_column(w));
     let content_w = w.saturating_sub(4).max(1);
 
     // Neutral Gray palette (no blue, transparent bg — text only)
@@ -195,13 +206,82 @@ pub(crate) fn build_input_box(
     // Bottom padding inside the box
     box_lines.push(Line::from(""));
 
+    let band_h = box_lines.len();
+    if let Some(home) = home {
+        box_lines.extend(home_rows(home, w));
+    }
     InputBox {
         lines: box_lines,
+        band_h,
+        x,
+        width: w,
+        home: home.is_some(),
         // Content rows were counted from the `❯` row; the top pad shifts
         // every one of them down a row.
         cur_row: cur_row + 1,
         cur_col,
     }
+}
+
+/// What devin's home screen shows under the box.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct HomeRows<'a> {
+    pub(crate) notice: Option<&'a str>,
+}
+
+/// devin's home rows under the box, on the screen bg and relative to the
+/// box's column: the hints flush with its right edge, the tip under the
+/// box text, then the startup notice as a block: its headline, then one
+/// `command  what it does` row per ` · `-separated `<command> to <action>`
+/// part.
+fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
+    let mut rows = vec![
+        Line::default(),
+        crate::composer::welcome_hints_line(0, w),
+        Line::default(),
+        Line::default(),
+        crate::composer::welcome_tip_line(3),
+    ];
+    if let Some(notice) = home.notice {
+        let t = crate::theme::theme();
+        let mut parts = notice.split(" · ");
+        rows.push(Line::default());
+        rows.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(
+                parts.next().unwrap_or_default().to_string(),
+                Style::default().fg(t.text_bright),
+            ),
+        ]));
+        let cmds: Vec<(&str, &str)> = parts
+            .map(|p| p.split_once(" to ").unwrap_or((p, "")))
+            .collect();
+        let key_w = cmds
+            .iter()
+            .map(|(k, _)| display_width(k))
+            .max()
+            .unwrap_or(0);
+        for (key, action) in cmds {
+            rows.push(Line::from(vec![
+                Span::raw("     "),
+                Span::styled(
+                    format!("{key:<key_w$}   "),
+                    Style::default().fg(t.text_body),
+                ),
+                Span::styled(action.to_string(), Style::default().fg(t.text_muted)),
+            ]));
+        }
+    }
+    rows
+}
+
+/// The home band's height before its spacer: the empty box, the home
+/// rows and the status bar.
+pub(crate) fn home_band_h(w: usize) -> usize {
+    build_input_box("", 0, w, None, Some(HomeRows::default()))
+        .lines
+        .len()
+        + 1
 }
 
 /// True when the last scrollback row is a bare blank (no bg, no glyphs):

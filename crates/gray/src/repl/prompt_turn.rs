@@ -289,6 +289,12 @@ pub(crate) async fn run_prompt_turn(
     // stops on any history rewrite (compaction saves the full file itself)
     // and on the first failed append (the end-of-turn path owns repair).
     super::session::ensure_session_state(&mut *session_state, config, cwd).await;
+    // A session ensured after the agent was built (first turn, `/new`)
+    // re-pins live plugins — until now every wire point but `tool/call`
+    // reported `session.id` as empty for the session's whole life.
+    if let Some(sid) = session_state.as_ref().map(|s| s.session_id.as_str()) {
+        agent.repin_session_id(sid);
+    }
     let checkpointed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(initial_count));
     let checkpoint_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Some(state) = session_state.as_ref().filter(|s| !s.full_save_pending) {
@@ -519,7 +525,7 @@ pub(crate) async fn run_prompt_turn(
             // A key rewritten on disk by another window reached this session
             // only on restart; pick it up now so Enter retries with it.
             let previous_key = config.api_key.clone();
-            let mut reloaded = matches!(e, gray_core::error::CoreError::Auth(_))
+            let mut reloaded = matches!(e.class(), gray_core::error::CoreError::Auth(_))
                 && crate::setup::adopt_saved_key(config);
             if reloaded {
                 let sid = session_state.as_ref().map(|s| s.session_id.as_str());
@@ -541,7 +547,7 @@ pub(crate) async fn run_prompt_turn(
             if !reloaded
                 && interactive
                 && tui.is_some()
-                && matches!(e, gray_core::error::CoreError::Auth(_))
+                && matches!(e.class(), gray_core::error::CoreError::Auth(_))
             {
                 auth_relogin = crate::setup::active_connect_id(config);
             }

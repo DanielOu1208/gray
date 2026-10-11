@@ -50,7 +50,7 @@ fn unsupported_model_500_maps_to_bad_request_and_preserves_cf_ray() {
         Some("abc123-ray"),
         Some("req-1"),
     );
-    assert!(matches!(err, ProviderError::BadRequest(_)));
+    assert!(matches!(err.class(), ProviderError::BadRequest(_)));
     assert!(!is_retryable_error(&err));
     let msg = err.to_string();
     assert!(msg.contains("cf-ray: abc123-ray"), "{msg}");
@@ -68,7 +68,7 @@ fn unsupported_model_401_body_outranks_auth_status() {
         None,
     );
     assert!(
-        matches!(err, ProviderError::BadRequest(_)),
+        matches!(err.class(), ProviderError::BadRequest(_)),
         "must classify as bad request, got {err:?}"
     );
     assert!(!is_retryable_error(&err));
@@ -82,7 +82,36 @@ fn auth_401_insufficient_balance_is_not_retryable() {
         None,
         None,
     );
-    assert!(matches!(err, ProviderError::Auth(_)));
+    assert!(matches!(err.class(), ProviderError::Auth(_)));
+    assert!(!is_retryable_error(&err));
+}
+
+#[test]
+fn cloudflare_edge_403_is_retryable_not_auth() {
+    // GMI-style edge: 403 + cf-ray + plain-text "error code: 1010" is
+    // Cloudflare's bot page — the key was never evaluated. ServerError
+    // (retryable), not Auth (would send the user to rotate a good key).
+    let err = classify_http_error(
+        reqwest::StatusCode::FORBIDDEN,
+        "error code: 1010",
+        Some("9abc-SIN"),
+        None,
+    );
+    assert!(matches!(err.class(), ProviderError::ServerError(_)));
+    assert!(is_retryable_error(&err));
+}
+
+#[test]
+fn real_api_403_stays_auth() {
+    // Provider's own JSON 403 (no cf-ray, JSON body) is a genuine auth
+    // failure — must not be swallowed by the edge-block arm.
+    let err = classify_http_error(
+        reqwest::StatusCode::FORBIDDEN,
+        r#"{"error":{"message":"invalid api key"}}"#,
+        None,
+        None,
+    );
+    assert!(matches!(err.class(), ProviderError::Auth(_)));
     assert!(!is_retryable_error(&err));
 }
 
@@ -94,7 +123,7 @@ fn plain_500_without_model_hint_is_server_error_retryable() {
         None,
         None,
     );
-    assert!(matches!(err, ProviderError::ServerError(_)));
+    assert!(matches!(err.class(), ProviderError::ServerError(_)));
     assert!(is_retryable_error(&err));
 }
 
@@ -392,7 +421,7 @@ fn context_overflow_bodies_map_to_non_retryable_context_overflow() {
     ] {
         let err = classify_http_error(reqwest::StatusCode::BAD_REQUEST, body, None, None);
         assert!(
-            matches!(err, ProviderError::ContextOverflow(_)),
+            matches!(err.class(), ProviderError::ContextOverflow(_)),
             "body: {body}"
         );
         assert!(!is_retryable_error(&err), "must not retry: {body}");
@@ -411,7 +440,10 @@ fn content_filter_bodies_map_to_non_retryable_bad_request() {
         "request violates usage policies",
     ] {
         let err = classify_http_error(reqwest::StatusCode::BAD_REQUEST, body, None, None);
-        assert!(matches!(err, ProviderError::BadRequest(_)), "body: {body}");
+        assert!(
+            matches!(err.class(), ProviderError::BadRequest(_)),
+            "body: {body}"
+        );
         assert!(!is_retryable_error(&err), "must not retry: {body}");
         assert!(!err.should_compress());
     }
@@ -419,7 +451,7 @@ fn content_filter_bodies_map_to_non_retryable_bad_request() {
     for body in ["content-filter triggered", "content_filter triggered"] {
         let err = classify_http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, body, None, None);
         assert!(
-            matches!(err, ProviderError::BadRequest(_)),
+            matches!(err.class(), ProviderError::BadRequest(_)),
             "filter must win over 500: {body} -> {err}"
         );
     }
@@ -432,7 +464,7 @@ fn content_filter_bodies_map_to_non_retryable_bad_request() {
     ] {
         let err = classify_http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, body, None, None);
         assert!(
-            matches!(err, ProviderError::ServerError(_)),
+            matches!(err.class(), ProviderError::ServerError(_)),
             "bare hint must not filter: {body} -> {err}"
         );
     }
@@ -445,7 +477,7 @@ fn content_filter_bodies_map_to_non_retryable_bad_request() {
             None,
         );
         assert!(
-            !matches!(err, ProviderError::ContextOverflow(_)),
+            !matches!(err.class(), ProviderError::ContextOverflow(_)),
             "bare max_tokens: {err}"
         );
     }
@@ -456,7 +488,7 @@ fn content_filter_bodies_map_to_non_retryable_bad_request() {
     ] {
         let err = classify_http_error(reqwest::StatusCode::BAD_REQUEST, body, None, None);
         assert!(
-            matches!(err, ProviderError::ContextOverflow(_)),
+            matches!(err.class(), ProviderError::ContextOverflow(_)),
             "body: {body}"
         );
     }
@@ -738,7 +770,10 @@ fn serialize_body_maps_failure_to_bad_request() {
     // an `Err`; prove the mapping with a value JSON cannot represent.
     let bad: std::collections::BTreeMap<(), u8> = [((), 1)].into_iter().collect();
     let err = serialize_body(&bad, "test body").expect_err("unit keys must fail");
-    assert!(matches!(err, ProviderError::BadRequest(_)), "got {err:?}");
+    assert!(
+        matches!(err.class(), ProviderError::BadRequest(_)),
+        "got {err:?}"
+    );
 }
 
 // UNRUN (cargo test banned under X — verified via check + clippy only).
@@ -757,7 +792,7 @@ fn quota_429_surfaces_immediately_as_non_retryable() {
     ] {
         let err = classify_http_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body, None, None);
         assert!(
-            matches!(err, ProviderError::Auth(_)),
+            matches!(err.class(), ProviderError::Auth(_)),
             "quota 429 must surface as terminal Auth: {body} -> {err}"
         );
         assert!(!is_retryable_error(&err), "must not fast-retry: {body}");
@@ -780,7 +815,7 @@ fn plain_429_without_quota_hints_stays_retryable() {
     ] {
         let err = classify_http_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body, None, None);
         assert!(
-            matches!(err, ProviderError::RateLimited(_)),
+            matches!(err.class(), ProviderError::RateLimited(_)),
             "plain 429 stays retryable: {body} -> {err}"
         );
         assert!(is_retryable_error(&err), "must retry: {body}");
@@ -797,7 +832,7 @@ fn http_413_maps_to_context_overflow_never_retried() {
         None,
     );
     assert!(
-        matches!(err, ProviderError::ContextOverflow(_)),
+        matches!(err.class(), ProviderError::ContextOverflow(_)),
         "413 must compact, not retry: {err}"
     );
     assert!(!is_retryable_error(&err), "never generic-retry: {err}");
@@ -875,7 +910,7 @@ fn long_body_quota_signal_survives_snippet_cap() {
         None,
     );
     assert!(
-        matches!(err, ProviderError::Auth(_)),
+        matches!(err.class(), ProviderError::Auth(_)),
         "late quota signal must surface: {err}"
     );
     let plain = format!("{pad} Rate limit reached, slow down");
@@ -886,7 +921,7 @@ fn long_body_quota_signal_survives_snippet_cap() {
         None,
     );
     assert!(
-        matches!(err, ProviderError::RateLimited(_)),
+        matches!(err.class(), ProviderError::RateLimited(_)),
         "long != quota: {err}"
     );
 }
@@ -919,7 +954,7 @@ async fn quota_429_body_past_500_chars_terminal_end_to_end() {
     let events: Vec<_> = provider.stream(req).collect().await;
     assert_eq!(events.len(), 1, "immediate terminal, no notice: {events:?}");
     assert!(
-        matches!(events[0], Err(ProviderError::Auth(_))),
+        matches!(events[0], Err(ref e) if matches!(e.class(), ProviderError::Auth(_))),
         "terminal Auth: {events:?}"
     );
     let received = server.received_requests().await.expect("requests recorded");
@@ -1810,7 +1845,10 @@ fn zen_500_retry_budget_constants() {
         Some("req-1"),
     );
     let msg = err.to_string();
-    assert!(matches!(err, ProviderError::ServerError(_)), "{msg}");
+    assert!(
+        matches!(err.class(), ProviderError::ServerError(_)),
+        "{msg}"
+    );
     assert!(msg.contains("provider-side"), "{msg}");
     assert!(msg.contains("request was valid"), "{msg}");
     assert!(msg.contains("cf-ray: ray-1"), "{msg}");
@@ -2433,7 +2471,7 @@ fn admission_consumed_400_is_terminal_bad_request() {
         None,
         None,
     );
-    assert!(matches!(err, ProviderError::BadRequest(_)));
+    assert!(matches!(err.class(), ProviderError::BadRequest(_)));
     assert!(!is_retryable_error(&err));
 }
 
@@ -2577,7 +2615,7 @@ fn chat_tool_result_fallback_text_follows_all_tool_results() {
 fn http_errors_show_the_providers_sentence_not_its_json() {
     let body = r#"{"error": {"message": "Rate limit reached for requests per min (RPM). Please try again in 1s.", "type": "requests", "code": "rate_limit_exceeded"}}"#;
     let err = classify_http_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body, None, None);
-    let ProviderError::RateLimited(msg) = err else {
+    let ProviderError::RateLimited(msg) = err.class() else {
         panic!("{err:?}")
     };
     assert_eq!(
@@ -2588,7 +2626,7 @@ fn http_errors_show_the_providers_sentence_not_its_json() {
     // terminal even when the sentence does not say so.
     let quota = r#"{"error": {"message": "slow down", "code": "insufficient_quota"}}"#;
     assert!(matches!(
-        classify_http_error(reqwest::StatusCode::TOO_MANY_REQUESTS, quota, None, None),
+        classify_http_error(reqwest::StatusCode::TOO_MANY_REQUESTS, quota, None, None).class(),
         ProviderError::Auth(_)
     ));
     // Plain-text bodies pass through unchanged.
@@ -2644,7 +2682,7 @@ async fn transient_403_retries_once_then_surfaces_auth() {
         .count();
     assert_eq!(notices, 1, "one reconnect notice per burst: {events:?}");
     assert!(
-        matches!(events.last(), Some(Err(ProviderError::Auth(_)))),
+        matches!(events.last(), Some(Err(e)) if matches!(e.class(), ProviderError::Auth(_))),
         "burst ends with terminal Auth: {events:?}"
     );
 }
@@ -2672,7 +2710,7 @@ async fn auth_401_is_single_attempt() {
         .count();
     assert_eq!(notices, 0, "no reconnect notice for 401: {events:?}");
     assert!(
-        matches!(events.last(), Some(Err(ProviderError::Auth(_)))),
+        matches!(events.last(), Some(Err(e)) if matches!(e.class(), ProviderError::Auth(_))),
         "ends with terminal Auth: {events:?}"
     );
 }

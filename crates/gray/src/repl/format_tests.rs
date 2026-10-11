@@ -38,7 +38,7 @@ fn nested_devin_limit_is_actionable_without_retry_logs() {
         "{out}"
     );
     assert!(
-        out.ends_with(").\n  Run /model to switch to another model."),
+        out.ends_with(").\n  Run /models to switch to another model."),
         "{out}"
     );
 }
@@ -162,7 +162,7 @@ fn typed_auth_error_names_connect_not_agent_error() {
         "https://127.0.0.1:1/",
     );
     assert!(out.contains("Auth failed"), "must classify: {out}");
-    assert!(out.contains("/connect"), "must name the fix: {out}");
+    assert!(out.contains("/models"), "must name the fix: {out}");
     assert!(!out.contains("agent error"), "must not fall through: {out}");
 }
 
@@ -208,5 +208,61 @@ fn localize_utc_time_converts_to_offset() {
         super::localize_utc_time_with("08:01 UTC", now, wib).as_deref(),
         Some("15:01")
     );
+    // Providers also send month+day ("Oct 11 00:01 UTC") — keep the date.
+    assert_eq!(
+        super::localize_utc_time_with("Oct 11 00:01 UTC", now, wib).as_deref(),
+        Some("Oct 11 07:01")
+    );
+    assert_eq!(
+        super::localize_utc_time_with("October 11, 00:01 UTC", now, wib).as_deref(),
+        Some("Oct 11 07:01")
+    );
+    // Same-year date already passed -> next year.
+    assert_eq!(
+        super::localize_utc_time_with("Oct 09 00:01 UTC", now, wib).as_deref(),
+        Some("Oct 09 07:01")
+    );
     assert_eq!(super::localize_utc_time_with("tomorrow", now, wib), None);
+}
+
+#[test]
+fn detailed_provider_error_classifies_by_variant_and_fields_not_text() {
+    // A 429 whose vendor message never says "rate limit": the class and the
+    // structured fields drive the render — no substring scraping.
+    let err = CoreError::Detailed {
+        class: Box::new(CoreError::RateLimited("status 429: slow down".into())),
+        detail: ProviderDetail {
+            status: Some(429),
+            vendor_code: Some("rate_limit_exceeded".into()),
+            vendor_message: Some("Rate limit reached for requests per min.".into()),
+            cf_ray: Some("a35cf09b-SEA".into()),
+            request_id: Some("req_abc123".into()),
+        },
+    };
+    let out = format_core_error(&err, "https://example.com");
+    assert!(out.starts_with("✗ Rate limited (retryable):"), "{out}");
+    assert!(
+        out.contains("Rate limit reached for requests per min."),
+        "{out}"
+    );
+    assert!(out.contains("rate_limit_exceeded"), "{out}");
+    assert!(out.contains("429"), "{out}");
+    assert!(out.contains("cf-ray: a35cf09b-SEA"), "{out}");
+    assert!(out.contains("request-id: req_abc123"), "{out}");
+}
+
+#[test]
+fn detailed_error_class_survives_the_wrap_for_code_and_retryable() {
+    let err = CoreError::Detailed {
+        class: Box::new(CoreError::Auth("status 401: bad key".into())),
+        detail: ProviderDetail {
+            status: Some(401),
+            ..Default::default()
+        },
+    };
+    assert_eq!(err.code(), "auth_failed");
+    assert!(!err.retryable());
+    assert!(matches!(err.class(), CoreError::Auth(_)));
+    let out = format_core_error(&err, "https://example.com");
+    assert!(out.starts_with("✗ Auth failed (not retryable):"), "{out}");
 }

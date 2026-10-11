@@ -153,10 +153,16 @@ impl Agent {
 
 /// One message's token estimate (bytes/4 over billable text).
 pub fn estimate_message_tokens(m: &Message) -> usize {
-    if m.content
-        .iter()
-        .any(|b| matches!(b, crate::message::ContentBlock::Image { .. }))
-    {
+    // Any inline media payload is priced per block: `context_text` carries
+    // the base64 bytes as its size signal, and bytes/4 of an 8 MB PDF or
+    // voice note is ~2.7M "tokens" — a number that tripped pre-turn
+    // compaction and the gauge the moment such a file was attached.
+    if m.content.iter().any(|b| {
+        matches!(
+            b,
+            crate::message::ContentBlock::Image { .. } | crate::message::ContentBlock::Media { .. }
+        )
+    }) {
         m.content.iter().map(crate::compact::block_tokens).sum()
     } else {
         m.context_text().len() / 4
@@ -183,6 +189,54 @@ pub(crate) fn needs_pre_turn_compact(
     match window {
         None => false,
         Some(w) => estimate.saturating_add(reserve.unwrap_or(COMPACT_RESERVE_TOKENS)) >= w,
+    }
+}
+
+/// Soft-threshold check (arXiv:2609.20804 T4): true when the estimate has
+/// reached `SOFT_ELIDE_RATIO` of a known window. `None` window never fires;
+/// `GRAY_NO_SOFT_ELIDE=1` turns the stage off (the hard-threshold summary
+/// pass still runs), mirroring `GRAY_NO_SQUEEZE` / `GRAY_NO_SPILL`.
+pub(crate) fn needs_soft_elide(estimate: usize, window: Option<usize>) -> bool {
+    if std::env::var_os("GRAY_NO_SOFT_ELIDE").is_some() {
+        return false;
+    }
+    window.is_some_and(|w| estimate >= crate::compact::soft_elide_threshold(w))
+}
+
+impl Agent {
+    /// The T4 soft stage: stub stale tool observations in place, no provider
+    /// call. The verbatim window is the user's keep-recent setting when set,
+    /// else `SOFT_ELIDE_KEEP_RATIO` of the window. A rewrite re-anchors the
+    /// token estimate exactly like compaction does. Returns results elided.
+    ///
+    /// Hysteresis: an in-place rewrite invalidates the provider's prompt
+    /// cache from the oldest changed message on, and past the soft threshold
+    /// one more round ages out of the verbatim window nearly every turn. So
+    /// a pass that changed anything disarms the stage until the estimate has
+    /// grown by [`SOFT_ELIDE_REARM_RATIO`] of the window: elisions land in
+    /// batches, each a single cache break, instead of one per round.
+    pub(crate) fn soft_elide(&mut self) -> usize {
+        let Some(window) = self.context_window else {
+            return 0;
+        };
+        if self.estimate_tokens() < self.soft_elide_rearm {
+            return 0;
+        }
+        let keep = self
+            .compact_keep
+            .unwrap_or_else(|| crate::compact::soft_elide_keep_budget(window));
+        let elided = crate::compact::elide_stale_tool_results(
+            &mut self.messages,
+            keep,
+            self.session_id.as_deref(),
+        );
+        if elided > 0 {
+            self.history_rewritten();
+            self.soft_elide_rearm = self
+                .estimate_tokens()
+                .saturating_add(crate::compact::soft_elide_rearm_step(window));
+        }
+        elided
     }
 }
 

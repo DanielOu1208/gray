@@ -26,21 +26,6 @@ fn fixture_bundle() -> (tempfile::TempDir, PathBuf) {
 #[test]
 fn spec_identity_routes_each_scheme() {
     assert_eq!(
-        spec_identity("clawhub:owner/slug"),
-        ("clawhub".to_string(), "clawhub:owner/slug".to_string())
-    );
-    assert_eq!(
-        spec_identity("claude:grep-skills"),
-        ("claude".to_string(), "claude:grep-skills".to_string())
-    );
-    assert_eq!(
-        spec_identity("claude:grep-skills@dogfood-fix"),
-        (
-            "claude".to_string(),
-            "claude:grep-skills@dogfood-fix".to_string()
-        )
-    );
-    assert_eq!(
         spec_identity("github:owner/repo"),
         ("github".to_string(), "github:owner/repo".to_string())
     );
@@ -293,12 +278,7 @@ async fn install_url_downloads_skill_md_over_loopback() {
 
 #[test]
 fn is_skill_spec_matches_only_the_remote_prefixes() {
-    for spec in [
-        "clawhub:owner/slug",
-        "github:owner/repo/path",
-        "url:https://example.com/SKILL.md",
-        "  clawhub:owner/slug  ",
-    ] {
+    for spec in ["github:owner/repo/path", "url:https://example.com/SKILL.md"] {
         assert!(is_skill_spec(spec), "{spec}");
     }
     for spec in [

@@ -97,31 +97,6 @@ fn prompt_block_gives_proactive_skill_guidance() {
 }
 
 #[test]
-fn pi_plugin_dir_is_a_discovery_root() {
-    // P2-2: `<agent_dir>/plugins/pi/<pkg>/<skill>/SKILL.md` (where pi
-    // installs land) must surface via default discovery.
-    let agent = tempfile::tempdir().unwrap();
-    let dir = agent
-        .path()
-        .join("plugins")
-        .join("pi")
-        .join("demo-pkg")
-        .join("pi-probe-zzz-skill");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("SKILL.md"),
-        "---\ndescription: probe skill\n---\nBody",
-    )
-    .unwrap();
-    let res = load_skills(agent.path(), agent.path());
-    assert!(
-        res.skills.iter().any(|s| s.name == "pi-probe-zzz-skill"),
-        "installed pi skill not discovered: {:?}",
-        res.skills.iter().map(|s| &s.name).collect::<Vec<_>>()
-    );
-}
-
-#[test]
 fn prompt_block_caps_skill_list_and_says_so() {
     // Lean cap (0.1.8): 12, not 40 — every listed skill costs its
     // description in every turn.

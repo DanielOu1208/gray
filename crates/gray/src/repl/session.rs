@@ -259,20 +259,14 @@ pub(crate) async fn handle_resume(
             // one string, so the resolved context window agrees on all paths.
             // A live or saved `<base>-<tier>` id canonicalizes first — a
             // session recorded on `swe-2-max` lands on `swe-2` at `max`.
-            {
-                let rows = crate::setup::canonical_model_rows(config);
-                crate::setup::canonicalize_effort_variant(config, &rows);
-            }
+            crate::setup::canonicalize_adopted_model(config);
             let eff_model = crate::resume::effective_session_model(
                 config.model.as_deref(),
                 meta.model.as_str(),
             );
             let mut build_config = config.clone();
             build_config.model = eff_model.clone();
-            {
-                let rows = crate::setup::canonical_model_rows(&build_config);
-                crate::setup::canonicalize_effort_variant(&mut build_config, &rows);
-            }
+            crate::setup::canonicalize_adopted_model(&mut build_config);
             let model = build_config.model.clone().unwrap_or_default();
             let model = model.as_str();
             // Resume lands on the session's model: adopt that target's own
@@ -314,6 +308,7 @@ pub(crate) async fn handle_resume(
                         store,
                         _open_guard: Some(open_guard),
                     });
+                    export_session_env(sid.as_str());
                     *totals = SessionTotals::from_entries(&entries, model);
                     if let Some(shared) = &tui {
                         let mut t = shared.lock().expect("tui lock");
@@ -324,6 +319,9 @@ pub(crate) async fn handle_resume(
                         if !model.is_empty() {
                             t.set_model(model.to_string());
                             t.set_model_label(crate::setup::composite_label_for(config));
+                            t.set_model_label_parts(crate::setup::composite_label_parts_for(
+                                config,
+                            ));
                         }
                         // The resumed model keeps its own effort: paint it so
                         // the footer follows the switch instead of the stale
@@ -442,6 +440,15 @@ pub(crate) fn should_ensure_session_before_build(has_session: bool, model: Optio
     !has_session && model.is_some_and(|m| !m.is_empty())
 }
 
+/// The owning session marker spawned processes inherit: `gray -p`
+/// children and plugin sidecars see `GRAY_SESSION_ID` and a run tree
+/// resolves back to this session without /proc archaeology. Interactive
+/// sessions are the root of their tree — always overwrite an inherited
+/// marker (a nested `gray` is a new root).
+pub(crate) fn export_session_env(sid: &str) {
+    unsafe { std::env::set_var("GRAY_SESSION_ID", sid) };
+}
+
 pub(crate) async fn ensure_session_state(
     session_state: &mut Option<SessionState>,
     config: &Config,
@@ -479,6 +486,9 @@ pub(crate) async fn ensure_session_state(
             session_id,
             _open_guard: open_guard,
         });
+    }
+    if let Some(sid) = session_state.as_ref().map(|s| s.session_id.as_str()) {
+        export_session_env(sid);
     }
     remember_exit_session(session_state.as_ref().map(|s| s.session_id.as_str()));
 }
@@ -627,7 +637,7 @@ pub(crate) fn dispatch_agent_event(
                 // `ToolResult`, so this never duplicates.
                 let header = crate::tool_fmt::format_live_tool_header(name, "", None);
                 t.atomic(|t| {
-                    t.upsert_live_tool(id, header, false);
+                    t.upsert_live_tool(id, name, header, false);
                     t.set_status(Some(&format!("Preparing tool: {name}")));
                 });
             }
@@ -646,7 +656,7 @@ pub(crate) fn dispatch_agent_event(
                 let preview = crate::repl::format::truncate_chars(&preview, 60);
                 // Card + status label repaint as one frame per delta (was two).
                 t.atomic(|t| {
-                    t.upsert_live_tool(id, header, false);
+                    t.upsert_live_tool(id, name, header, false);
                     if preview.is_empty() {
                         t.set_status(Some(&format!("Preparing tool: {name}")));
                     } else {
@@ -675,7 +685,7 @@ pub(crate) fn dispatch_agent_event(
                 // scrollback render, so a duplicate never lands.
                 let header = tool_header(tool_labels, tool_previews, &name, args, Some(cwd));
                 t.atomic(|t| {
-                    t.upsert_live_tool(id, header, true);
+                    t.upsert_live_tool(id, &name, header, true);
                     t.set_status(Some("Working"));
                 });
             }
@@ -1038,21 +1048,18 @@ async fn remint_missing_session(state: &SessionState) -> bool {
     }
 }
 
-/// Repair-then-retry for one per-turn append: heal a torn tail via `load`,
-/// re-mint a pruned file via `create_new`, then retry the single append
-/// once. Returns true when the message landed.
+/// Retry for one per-turn append: torn tails heal inside `append` itself
+/// (the store truncates to the last complete record under its lock), so
+/// the only recoverable failure left here is a pruned file — re-mint it
+/// via `create_new`, then retry the single append once. Interior
+/// corruption surfaces through the normal warning instead.
 async fn repair_and_retry_append(
     state: &SessionState,
     msg: &Message,
     usage: Option<gray_core::event::Usage>,
     duration_ms: Option<u64>,
 ) -> bool {
-    // `load` rejects interior corruption (returns Err, heals nothing),
-    // which repair must never touch — that path surfaces once via the
-    // normal warning instead.
-    let repaired =
-        state.store.load(&state.session_id).await.is_ok() || remint_missing_session(state).await;
-    if !repaired {
+    if !remint_missing_session(state).await {
         return false;
     }
     state

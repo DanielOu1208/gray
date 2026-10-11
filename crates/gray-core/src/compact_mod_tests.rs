@@ -767,3 +767,80 @@ fn fitting_groups_keep_large_output_verbatim() {
     let content = only_tool_result_content(&out).expect("fitting group keeps its result");
     assert_eq!(content, big, "no stub when the group fits");
 }
+
+// --- Soft-threshold elision (arXiv:2609.20804 T4 stage M1) -------------
+
+fn big_tool_result(id: &str) -> Message {
+    Message {
+        role: Role::User,
+        injected: false,
+        content: vec![ContentBlock::tool_result(
+            id,
+            "x".repeat(ARC_STUB_MIN_BYTES),
+            false,
+        )],
+    }
+}
+
+fn result_body(m: &Message) -> &str {
+    match &m.content[0] {
+        ContentBlock::ToolResult { content, .. } => content,
+        _ => panic!("not a tool result"),
+    }
+}
+
+#[test]
+fn soft_elision_stubs_old_large_results_and_keeps_the_recent_window_verbatim() {
+    // user, then four rounds each (assistant call, 8 KiB result).
+    let mut msgs = vec![Message::user("fix it")];
+    for id in ["a", "b", "c", "d"] {
+        msgs.push(assistant_tool_use(id));
+        msgs.push(big_tool_result(id));
+    }
+    let (calls_before, results_before) = call_result_ids(&msgs);
+    let len_before = msgs.len();
+    // Budget fits exactly one round (~2k tokens each); the two-group floor
+    // still keeps rounds c and d verbatim.
+    let elided = elide_stale_tool_results(&mut msgs, 2_100, Some("sess"));
+    assert_eq!(elided, 2, "rounds a and b are elided, c and d kept");
+    assert_eq!(msgs.len(), len_before, "nothing dropped or reordered");
+    assert_eq!(call_result_ids(&msgs), (calls_before, results_before));
+    assert!(result_body(&msgs[2]).starts_with("[tool output elided from context"));
+    assert!(
+        result_body(&msgs[2]).contains("sess"),
+        "stub cites the session file"
+    );
+    assert!(result_body(&msgs[4]).starts_with("[tool output elided"));
+    assert_eq!(
+        result_body(&msgs[6]).len(),
+        ARC_STUB_MIN_BYTES,
+        "recent round c verbatim"
+    );
+    assert_eq!(
+        result_body(&msgs[8]).len(),
+        ARC_STUB_MIN_BYTES,
+        "recent round d verbatim"
+    );
+    assert_eq!(msgs[0], Message::user("fix it"), "intent untouched");
+    // Idempotent: stubs are under the threshold, a second pass is a no-op.
+    assert_eq!(elide_stale_tool_results(&mut msgs, 2_100, Some("sess")), 0);
+}
+
+#[test]
+fn soft_elision_leaves_small_results_and_a_generous_window_alone() {
+    let mut msgs = vec![Message::user("go")];
+    for id in ["a", "b", "c"] {
+        msgs.push(assistant_tool_use(id));
+        msgs.push(user_tool_result(id));
+    }
+    msgs.insert(1, assistant_tool_use("big"));
+    msgs.insert(2, big_tool_result("big"));
+    let snapshot = msgs.clone();
+    // Keep budget covers the whole transcript: nothing is in the middle.
+    assert_eq!(elide_stale_tool_results(&mut msgs, 1_000_000, None), 0);
+    assert_eq!(msgs, snapshot);
+    // Tiny budget: only the one at-threshold body changes; small results
+    // older than the window are never stubbed.
+    assert_eq!(elide_stale_tool_results(&mut msgs, 1, None), 1);
+    assert_eq!(result_body(&msgs[4]), "ok");
+}

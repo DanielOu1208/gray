@@ -277,6 +277,7 @@ async fn origin_delivery_appends_to_session_and_keeps_file_on_failure() {
         workdir: None,
         fire_claim: None,
         reminder: false,
+        repeat: Default::default(),
         skills: vec![],
         script: None,
     };
@@ -558,6 +559,7 @@ async fn a_platform_chat_id_gets_its_own_transcript() {
         workdir: None,
         fire_claim: None,
         reminder: false,
+        repeat: Default::default(),
         skills: vec![],
         script: None,
     };
@@ -605,6 +607,7 @@ async fn a_missing_origin_session_still_delivers_to_the_route() {
         workdir: None,
         fire_claim: None,
         reminder: false,
+        repeat: Default::default(),
         skills: vec![],
         script: None,
     };

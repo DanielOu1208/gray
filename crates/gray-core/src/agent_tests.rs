@@ -430,8 +430,9 @@ async fn tool_error_is_fed_back_and_model_recovers() {
 }
 
 #[tokio::test]
-async fn loop_guard_aborts_at_six_silently() {
-    // Same tool+args 6× in a row → abort, with no nudge text injected.
+async fn loop_guard_nudges_once_at_four_then_aborts_at_six() {
+    // Same tool+args 6× in a row → one injected reminder after the 4th
+    // round (arXiv:2609.20804 stuck detection), then the abort at 6.
     let scripts: Vec<Vec<StreamEvent>> = (0..6).map(|i| tool_script(&format!("c{i}"))).collect();
     let provider = FakeProvider::new(scripts);
     let executor = FakeExecutor::new(ToolOutput::ok("ok"));
@@ -443,13 +444,17 @@ async fn loop_guard_aborts_at_six_silently() {
         .expect_err("six identical rounds must abort");
 
     assert!(matches!(err, CoreError::LoopDetected(_)), "got {err:?}");
-    assert!(
-        !agent
-            .messages()
-            .iter()
-            .any(|m| m.text_content().contains("gray loop guard")),
-        "the backstop must not inject text"
-    );
+    let nudges: Vec<usize> = agent
+        .messages()
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.injected && m.text_content().contains("tool calls were identical"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(nudges.len(), 1, "exactly one stall reminder: {nudges:?}");
+    // Reminder lands after the 4th round's result: user prompt, then four
+    // (assistant, result) pairs = index 8, so the reminder is index 9.
+    assert_eq!(nudges[0], 9, "reminder follows the 4th identical round");
 }
 
 #[tokio::test]
@@ -851,9 +856,12 @@ async fn unknown_tool_name_skips_executor_with_error_result() {
         .expect("expected tool result for unknown tool");
     assert!(is_error, "unknown tool must be is_error, got {output}");
     assert!(
-        output.contains("does not exist") && output.contains("nope") && output.contains(TOOL_NAME),
-        "got {output}"
+        output.contains("does not exist") && output.contains("nope") && !output.contains(TOOL_NAME),
+        "a far miss stays terse — no inventory dump: {output}"
     );
+    // A near-miss name earns a `did you mean` pointing at the real tool.
+    let hint = crate::tool_out::unknown_tool("lookpu", &[TOOL_NAME.to_string()]);
+    assert!(hint.contains("'lookup'"), "got {hint}");
     assert_eq!(agent.messages()[1].role, Role::Assistant);
     assert!(matches!(
         &agent.messages()[2].content[0],
@@ -1463,6 +1471,112 @@ fn context_estimate_anchors_on_provider_usage() {
         100,
         "a rewrite drops the stale anchor"
     );
+}
+
+#[tokio::test]
+async fn soft_elision_stubs_stale_results_without_a_summary_call() {
+    // 30 rounds of (call, 8 KiB result) ≈ 62k tokens on a 100k window: past
+    // the 0.6 soft threshold, under the hard one (window − 16k). The T4
+    // soft stage must stub the stale bodies in place and the provider must
+    // see exactly one request — no compaction call, no summary envelope.
+    let provider = FakeProvider::new(vec![end_script()]);
+    let mut history = vec![Message::user("fix the bug")];
+    for i in 0..30 {
+        let id = format!("c{i}");
+        history.push(Message {
+            role: Role::Assistant,
+            injected: false,
+            content: vec![ContentBlock::tool_use(
+                &id,
+                TOOL_NAME,
+                serde_json::json!({"q": i}),
+            )],
+        });
+        history.push(Message {
+            role: Role::User,
+            injected: false,
+            content: vec![ContentBlock::tool_result(&id, "y".repeat(8_192), false)],
+        });
+    }
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
+    )
+    .with_tools(vec![tool_def()])
+    .with_context_window(Some(100_000))
+    .with_messages(history);
+
+    agent
+        .run(Message::user("continue"), ToolContext::default())
+        .await
+        .expect("one plain reply");
+
+    let msgs = agent.messages();
+    assert!(
+        !msgs.iter().any(|m| m
+            .text_content()
+            .contains("compacted into the following summary")),
+        "soft stage alone must carry this: no summary call"
+    );
+    assert_eq!(
+        msgs.len(),
+        1 + 60 + 2,
+        "nothing dropped: history + prompt + reply"
+    );
+    let bodies: Vec<&str> = msgs
+        .iter()
+        .filter_map(|m| match m.content.first() {
+            Some(ContentBlock::ToolResult { content, .. }) => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        bodies[0].starts_with("[tool output elided from context"),
+        "oldest stubbed"
+    );
+    assert_eq!(bodies[29].len(), 8_192, "newest verbatim");
+    let stubbed = bodies
+        .iter()
+        .filter(|b| b.starts_with("[tool output elided"))
+        .count();
+    // 30k-token verbatim window ≈ 14 rounds kept, so roughly half are stubbed.
+    assert!((10..=20).contains(&stubbed), "stubbed {stubbed} of 30");
+    assert!(
+        agent.estimate_tokens() < 60_000,
+        "estimate re-anchored after the rewrite"
+    );
+
+    // Hysteresis: the pass that just ran disarms the stage until the
+    // estimate grows by a tenth of the window, so appending one more big
+    // round and re-running the soft stage changes nothing — one cache
+    // break per batch, not per round.
+    let after = agent.estimate_tokens();
+    // Set at the post-elision estimate + 10k; `after` also counts the reply.
+    assert!(
+        agent.soft_elide_rearm > after + 9_000,
+        "re-arm point set well past the current estimate"
+    );
+    let rev = agent.history_revision();
+    agent.messages.push(Message {
+        role: Role::Assistant,
+        injected: false,
+        content: vec![ContentBlock::tool_use(
+            "c99",
+            TOOL_NAME,
+            serde_json::json!({}),
+        )],
+    });
+    agent.messages.push(Message {
+        role: Role::User,
+        injected: false,
+        content: vec![ContentBlock::tool_result("c99", "z".repeat(8_192), false)],
+    });
+    assert_eq!(
+        agent.soft_elide(),
+        0,
+        "disarmed until the estimate grows enough"
+    );
+    assert_eq!(agent.history_revision(), rev, "no rewrite while disarmed");
 }
 
 #[tokio::test]

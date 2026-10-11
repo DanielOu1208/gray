@@ -27,6 +27,34 @@ pub const MAX_BYTES: usize = 12 * 1024;
 /// Hard cap for error outputs (applied after the general truncation).
 pub const MAX_ERROR_BYTES: usize = 2048;
 
+/// Error text for an unknown tool name. The full inventory used to ride
+/// this string: for a bridged-in agent it listed the *host's* tools (the
+/// wrong set entirely) and for everyone it rendered as a wall of names in
+/// the UI. Now terse — with a `did you mean` tail when the name is close
+/// to a real one.
+pub fn unknown_tool(name: &str, available: &[String]) -> String {
+    let mut scored: Vec<(&str, f64)> = available
+        .iter()
+        .map(|n| (n.as_str(), strsim::jaro_winkler(name, n)))
+        .filter(|(_, score)| *score >= 0.87)
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut msg = format!("Tool '{name}' does not exist.");
+    let mut names = scored.iter().take(3).map(|(n, _)| format!("'{n}'"));
+    if let Some(first) = names.next() {
+        let rest: Vec<String> = names.collect();
+        msg.push_str(&format!(
+            " Did you mean {first}{}?",
+            if rest.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", rest.join(", "))
+            }
+        ));
+    }
+    msg
+}
+
 /// Truncates a successful output: 2000-line / 12 KiB cap, head + tail kept,
 /// with a `[truncated N lines / M bytes]` annotation in the middle.
 pub fn truncate_output(text: &str) -> String {

@@ -10,7 +10,7 @@ use futures::StreamExt as _;
 use crate::agent::{
     Agent, InputSubmit, ToolBefore, ToolContext, ToolOutput, salvage_partial_text, thinking_block,
 };
-use crate::agent_compact::needs_pre_turn_compact;
+use crate::agent_compact::{needs_pre_turn_compact, needs_soft_elide};
 use crate::agent_tools::{PendingToolCall, answer_pending_tools};
 use crate::error::CoreError;
 use crate::event::{AgentEvent, StopReason, StreamEvent, Usage, append_thinking_chunk};
@@ -117,7 +117,11 @@ impl Agent {
     /// shorter prompt is what gets cached from here on. Never mid-turn — a
     /// prefix rewrite on a warm cache re-bills the whole prefix.
     pub fn mask_stale_tool_output(&mut self) {
-        self.masked_prefix = self.masked_prefix.max(self.stale_boundary());
+        let boundary = self.stale_boundary();
+        if boundary > self.masked_prefix {
+            self.prefix_guard.expect_change("stale output mask");
+        }
+        self.masked_prefix = self.masked_prefix.max(boundary);
     }
 }
 
@@ -175,17 +179,9 @@ impl Agent {
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, ToolOutput> {
         if !self.tools.iter().any(|t| t.name == name) {
-            let list = if self.tools.is_empty() {
-                "(none)".to_string()
-            } else {
-                self.tools
-                    .iter()
-                    .map(|t| t.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            return Err(ToolOutput::error(format!(
-                "Tool '{name}' does not exist. Available: {list}"
+            let names: Vec<String> = self.tools.iter().map(|t| t.name.clone()).collect();
+            return Err(ToolOutput::error(crate::tool_out::unknown_tool(
+                name, &names,
             )));
         }
         if !args.is_object() {
@@ -357,6 +353,9 @@ impl Agent {
         let mut turn_retries: u8 = 0;
         // Post-tool empty nudge fires once per run; silent-retry budget unchanged.
         let mut empty_nudge_sent = false;
+        // One stall reminder per run at `SIGNATURE_NUDGE_REPEATS` identical
+        // calls; the abort at `SIGNATURE_ABORT_REPEATS` is unchanged.
+        let mut stall_nudge_sent = false;
         // Consecutive leaked-markup endings get bounded nudges; a round with
         // real calls resets the streak.
         let mut leak_nudges: u8 = 0;
@@ -445,6 +444,22 @@ impl Agent {
                 hook(&self.messages, self.history_revision()).await;
             }
 
+            // Soft stage first (arXiv:2609.20804 T4): at 0.6 of the window,
+            // stale tool observations outside the verbatim recent window
+            // become citation stubs in place — no provider call, pairing and
+            // order intact. Most pressure is handled here, so the summary
+            // pass below fires far less often.
+            if needs_soft_elide(self.estimate_tokens(), self.context_window) {
+                let before = self.estimate_tokens();
+                let elided = self.soft_elide();
+                if elided > 0 {
+                    log::info!(
+                        target: "gray_agent",
+                        "soft elision: {elided} tool results stubbed, {before} -> {} tokens",
+                        self.estimate_tokens()
+                    );
+                }
+            }
             // Pre-turn budget (pi `_compactBeforeNextAssistantResponse`):
             // history is append-only (mini-swe-agent / pi), so each request
             // extends the previous one and the provider prefix cache stays
@@ -516,6 +531,18 @@ impl Agent {
                 tools: self.tools.clone(),
                 max_tokens: None,
             };
+            if let Some((change, announced)) =
+                self.prefix_guard.observe(self.provider.model_id(), &req)
+            {
+                match announced {
+                    Some(reason) => {
+                        log::debug!(target: "gray_agent", "prefix changed: {change} ({reason})")
+                    }
+                    None => {
+                        log::warn!(target: "gray_agent", "prefix changed: {change} — prompt cache misses from here")
+                    }
+                }
+            }
             // The exact request, kept for a cache refresh while this round's
             // tools run (pi cache warming). Only cloned when warming is on.
             // GC-3: `req` is already the scrubbed, hook-processed outbound list,
@@ -849,7 +876,7 @@ impl Agent {
                 total_usage.normalize();
             }
             billed.accumulate(&usage);
-            usage.log_request("turn");
+            usage.log_request("turn", self.session_id.as_deref());
             // Stream-identity hardening: calls that never got a provider ID
             // get a conversation-unique fallback now and emit their single
             // start here, so every dispatched call already has its start and
@@ -1039,9 +1066,13 @@ impl Agent {
                 leak_nudges = 0;
             }
 
-            // Loop backstop: no nudge text, just stop if the identical call
-            // keeps coming. Deliberate job polls reset the streak below.
+            // Loop guard: one reminder to change approach when the identical
+            // call keeps coming (arXiv:2609.20804 §2.4 stuck detection), then
+            // a hard stop if it still does. Deliberate job polls reset the
+            // streak below. The reminder is pushed after this round's
+            // results so the model sees it with the repeated output.
             const SIGNATURE_ABORT_REPEATS: usize = 6;
+            const SIGNATURE_NUDGE_REPEATS: usize = 4;
             {
                 let sig = tool_uses
                     .iter()
@@ -1392,6 +1423,13 @@ impl Agent {
                 last_sig = None;
             } else {
                 poll_rounds = 0;
+                if repeat == SIGNATURE_NUDGE_REPEATS && !stall_nudge_sent {
+                    stall_nudge_sent = true;
+                    log::info!(target: "gray_agent", "same tool call {repeat}x in a row; nudging once before the loop guard");
+                    self.messages.push(Message::user_injected(format!(
+                        "the last {repeat} tool calls were identical — repeating the call will not change its result, and the run stops after {SIGNATURE_ABORT_REPEATS}. Change approach: use what you already have, try a different command, or say what is blocking you"
+                    )));
+                }
             }
 
             // Tool calls ran, so the next round's answer is a new assistant

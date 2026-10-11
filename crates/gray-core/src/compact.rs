@@ -12,7 +12,7 @@ use crate::message::{ContentBlock, Message, Role};
 fn message_tokens(m: &Message) -> usize {
     if m.content
         .iter()
-        .any(|b| matches!(b, ContentBlock::Image { .. }))
+        .any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::Media { .. }))
     {
         m.content.iter().map(block_tokens).sum()
     } else {
@@ -259,6 +259,78 @@ pub(crate) fn build_retained_with_session(
         stub_large_media(group);
     }
     kept_reversed.into_iter().rev().flatten().collect()
+}
+
+/// Soft-threshold elision (arXiv:2609.20804, tier T4 stage M1): the share
+/// of the context window at which stale tool observations are stubbed with
+/// no provider call, well before the summary pass at the hard threshold.
+/// The paper's staged policy (0.6 soft / 0.85 hard) had the lowest cost in
+/// seven of eight model-benchmark panels at unchanged success, because cheap
+/// early elision handles most of the pressure before an LLM summary is
+/// ever needed.
+pub(crate) const SOFT_ELIDE_RATIO: f64 = 0.6;
+/// Verbatim recent window the soft pass never touches, as a share of the
+/// window (paper: 0.3), floored at [`SOFT_ELIDE_MIN_RECENT_GROUPS`].
+pub(crate) const SOFT_ELIDE_KEEP_RATIO: f64 = 0.3;
+/// Newest atomic groups kept verbatim whatever their size (paper: two turns).
+pub(crate) const SOFT_ELIDE_MIN_RECENT_GROUPS: usize = 2;
+/// Growth of the estimate, as a share of the window, before the soft stage
+/// re-runs after a pass that changed history (prompt-cache hysteresis).
+pub(crate) const SOFT_ELIDE_REARM_RATIO: f64 = 0.1;
+
+/// Estimated-token level at which the soft pass runs for `window`.
+pub(crate) fn soft_elide_threshold(window: usize) -> usize {
+    (window as f64 * SOFT_ELIDE_RATIO) as usize
+}
+
+/// Estimate growth after which a disarmed soft stage re-arms for `window`.
+pub(crate) fn soft_elide_rearm_step(window: usize) -> usize {
+    (window as f64 * SOFT_ELIDE_REARM_RATIO) as usize
+}
+
+/// Default verbatim-window budget of the soft pass for `window`.
+pub(crate) fn soft_elide_keep_budget(window: usize) -> usize {
+    (window as f64 * SOFT_ELIDE_KEEP_RATIO) as usize
+}
+
+/// In-place rule-based elision of the middle region: every at-threshold
+/// `ToolResult` body older than the verbatim recent window becomes the same
+/// citation stub compaction uses ([`tool_result_stub`]); the newest groups
+/// within `keep_budget` tokens (at least [`SOFT_ELIDE_MIN_RECENT_GROUPS`])
+/// stay verbatim. Call/result pairing is untouched (only bodies change), no
+/// message is dropped or reordered, and a stub is under the threshold, so
+/// the pass is idempotent. Returns the number of results elided.
+pub(crate) fn elide_stale_tool_results(
+    messages: &mut [Message],
+    keep_budget: usize,
+    session_id: Option<&str>,
+) -> usize {
+    let boundary = {
+        let groups = atomic_groups(messages);
+        let mut remaining = keep_budget;
+        let mut boundary = messages.len();
+        for (kept, group) in groups.iter().rev().enumerate() {
+            let cost = group_tokens(group).max(1);
+            if kept >= SOFT_ELIDE_MIN_RECENT_GROUPS && cost > remaining {
+                break;
+            }
+            remaining = remaining.saturating_sub(cost);
+            boundary -= group.len();
+        }
+        boundary
+    };
+    let mut elided = 0;
+    for m in messages[..boundary].iter_mut() {
+        for b in m.content.iter_mut() {
+            if let ContentBlock::ToolResult { id, content, .. } = b
+                && content.len() >= ARC_STUB_MIN_BYTES
+            {
+                *content = tool_result_stub(id, content.len(), session_id);
+                elided += 1;
+            }
+        }
+    }
+    elided
 }
 
 /// Split chronological `messages` into atomic retain/drop groups: an assistant

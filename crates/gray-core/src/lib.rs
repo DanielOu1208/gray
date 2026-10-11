@@ -11,6 +11,7 @@ pub mod input;
 pub mod message;
 pub mod parallel;
 pub mod paths;
+pub mod prefix_guard;
 pub mod redaction;
 pub mod spill;
 pub mod squeeze;
@@ -39,3 +40,7 @@ mod squeeze_tests;
 #[cfg(test)]
 #[path = "spill_tests.rs"]
 mod spill_tests;
+
+#[cfg(test)]
+#[path = "prefix_guard_tests.rs"]
+mod prefix_guard_tests;

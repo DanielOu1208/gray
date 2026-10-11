@@ -80,17 +80,6 @@ async fn echo_returns_exit_zero_with_output() {
 }
 
 #[tokio::test]
-async fn malformed_background_arg_fails_loud() {
-    let session = sess("bgone");
-    let ctx = ctx_for(&session);
-    let r = BashTool::default()
-        .execute(&ctx, json!({"command": "echo hi", "background": []}))
-        .await;
-    assert!(r.is_error, "{}", r.content);
-    assert!(r.content.contains("background"), "{}", r.content);
-}
-
-#[tokio::test]
 async fn empty_command_is_an_error() {
     let session = sess("empty");
     let ctx = ctx_for(&session);
@@ -552,6 +541,87 @@ async fn compound_cat_says_the_image_was_not_attached() {
     assert!(!out.is_error, "{}", out.content);
     assert!(out.images.is_empty());
     assert!(out.content.contains("NOT attached"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn noop_stall_shapes_are_steered_not_spawned() {
+    let ctx = ToolContext::default();
+    // Every shape a stalling model reaches for once `true` is refused:
+    // literal prints, dead function definitions, wrapped no-ops, dead
+    // shell state, comments, job-control builtins (which would answer
+    // with this shell's own — empty — job table).
+    for cmd in [
+        "echo stub",
+        "echo 'a literal' && echo \"another\"",
+        "printf 'placeholder'",
+        "gray_jobs() { :; }",
+        "f() { :; } && echo done",
+        "function f { :; }",
+        "bash -c 'echo placeholder'",
+        "sh -c 'true'",
+        "eval 'true'",
+        "command true",
+        "env FOO=bar echo stub",
+        "nice -n 5 true",
+        "timeout 5 echo stub",
+        "FOO=bar",
+        "export FOO=bar",
+        "jobs",
+        "wait",
+        "fg",
+        "# just a comment",
+        "true && : && echo done",
+    ] {
+        let out = BashTool::default()
+            .execute(&ctx, json!({"command": cmd}))
+            .await;
+        assert!(!out.is_error, "{cmd}: {}", out.content);
+        assert!(
+            out.content.contains("nothing ran") || out.content.contains("no-op"),
+            "{cmd}: {}",
+            out.content
+        );
+    }
+}
+
+#[tokio::test]
+async fn real_commands_disguised_as_noops_still_run() {
+    let ctx = ToolContext::default();
+    // Side effects or computed output hide inside near-noop shapes — all
+    // of these must reach the shell.
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        ..ctx
+    };
+    let out = BashTool::default()
+        .execute(&ctx, json!({"command": "echo stub > s.txt"}))
+        .await;
+    assert!(out.content.contains("exit 0"), "{}", out.content);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("s.txt")).unwrap(),
+        "stub\n"
+    );
+    // A bare `sleep` with no live jobs is a deliberate pause, not a stall.
+    let out = BashTool::default()
+        .execute(&ctx, json!({"command": "sleep 0.1 && echo woke"}))
+        .await;
+    assert!(out.content.contains("woke"), "{}", out.content);
+    // `echo` of an expansion reports real info.
+    let out = BashTool::default()
+        .execute(&ctx, json!({"command": "echo $((1 + 2))"}))
+        .await;
+    assert!(out.content.contains("3"), "{}", out.content);
+    // A definition that is actually called does work.
+    let out = BashTool::default()
+        .execute(&ctx, json!({"command": "f() { echo ran; }; f"}))
+        .await;
+    assert!(out.content.contains("ran"), "{}", out.content);
+    // `command -v` is a lookup, not a no-op.
+    let out = BashTool::default()
+        .execute(&ctx, json!({"command": "command -v echo"}))
+        .await;
+    assert!(out.content.contains("echo"), "{}", out.content);
 }
 
 #[tokio::test]
@@ -1435,6 +1505,11 @@ async fn bare_noop_commands_are_steered_not_spawned() {
         "echo hi",
         "echo \"switching to harness tools\"",
         "printf 'done\\n'",
+        // Compounds of literal prints and wrapper-peeled echoes are the same
+        // stall in another shape: nothing runs that the model didn't write.
+        "true && echo ran",
+        "echo a; echo b",
+        "env echo ran",
     ] {
         let out = BashTool::default()
             .execute(&ctx, json!({"command": cmd}))
@@ -1447,14 +1522,12 @@ async fn bare_noop_commands_are_steered_not_spawned() {
             out.content
         );
     }
-    // A compound that merely contains a no-op still reaches the shell.
+    // Side effects or computed output hide inside near-noop shapes — all of
+    // these still reach the shell.
     for cmd in [
-        "true && echo ran",
         "echo ran > gray-noop-test-out",
-        "echo a; echo b",
         "echo x | wc -c",
         "echo $((40 + 2))",
-        "env echo ran",
     ] {
         let out = BashTool::default()
             .execute(&ctx, json!({"command": cmd}))
@@ -1579,14 +1652,6 @@ fn the_schema_is_command_and_timeout_only() {
         "{}",
         bare.description
     );
-}
-
-#[test]
-fn default_timeout_is_finite_and_never_a_kill() {
-    // Without the old 30s auto-yield, an omitted `timeout` must still bound
-    // the call, or an un-timed `cargo build` blocks the turn forever.
-    const { assert!(DEFAULT_TIMEOUT_SECS < MAX_TIMEOUT_SECS) };
-    assert_eq!(DEFAULT_TIMEOUT_SECS, 120);
 }
 
 #[test]

@@ -3,135 +3,200 @@ pub(crate) struct CmdDef {
     pub(crate) name: &'static str,
     pub(crate) desc: &'static str,
     pub(crate) aliases: &'static [&'static str],
+    /// Which `GRAY_HOME` `gray cmd` runs against (see GRAY-CMD-CONTRACT.md).
+    pub(crate) scope: CmdScope,
+    /// What a headless adapter can render for this command.
+    pub(crate) surface: CmdSurface,
+}
+
+/// `gray cmd` scope: the per-conversation home channel adapters derive
+/// (`conversations/<sha256(conv-key)>`) or the user's main home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CmdScope {
+    Conversation,
+    Global,
+}
+
+/// `gray cmd` surface: `interactive` may answer `kind:"ui"` (pickers,
+/// panels), `text` always answers `kind:"text"`, `local` is TUI-only and
+/// `run` answers `local_only`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CmdSurface {
+    Interactive,
+    Text,
+    Local,
 }
 
 pub(crate) const REGISTRY: &[CmdDef] = &[
     CmdDef {
-        name: "connect",
-        desc: "setup provider & API key",
-        aliases: &["keys", "key", "providers", "provider"],
-    },
-    CmdDef {
-        name: "model",
-        desc: "switch model & effort",
-        // Retired `/thinking`, `/effort`, `/reasoning`, `/fast` land on the
-        // picker — effort and fast mode live there now.
-        aliases: &["models", "thinking", "effort", "reasoning", "fast"],
+        name: "models",
+        desc: "switch provider, model & effort",
+        aliases: &[],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Interactive,
     },
     CmdDef {
         name: "context",
         desc: "set context window",
         aliases: &[],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "sessions",
         desc: "browse, resume & manage past sessions",
         aliases: &["resume"],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "new",
         desc: "new conversation",
         aliases: &["clear", "reset"],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "compact",
         desc: "summarize context",
         aliases: &["compress"],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "undo",
         desc: "drop the last exchange",
         aliases: &[],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "retry",
         desc: "drop the last exchange and ask again",
         aliases: &[],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "update",
         desc: "install a new gray build",
         aliases: &["upgrade"],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "restart",
         desc: "restart the gateway & this session on the new build",
         aliases: &["reboot"],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "usage",
         desc: "session tokens & cost",
         aliases: &["cost"],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "jobs",
         desc: "background jobs & scheduled wakes (u stops/removes)",
         aliases: &[],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "cron",
         desc: "cron jobs (space pauses; add/remove via gray cron)",
         aliases: &[],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "copy",
         desc: "copy last assistant response",
         aliases: &[],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "feedback",
         desc: "send feedback",
         aliases: &[],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "theme",
         desc: "pick a color theme (~/.gray/themes/*.json; /theme new <name>)",
         aliases: &["themes"],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "hotkeys",
         desc: "show keybindings (~/.gray/keybindings.json; /hotkeys reload)",
         aliases: &["keybindings", "bindings"],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "reload",
         desc: "re-read theme, keybindings and prompt templates",
         aliases: &[],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "agentsmd",
         desc: "edit system prompt",
         aliases: &["sys"],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "skills",
         desc: "list skills (/skills [name] [args] to run one, /skills on|off for auto-context, /skills enable|disable <name>)",
         aliases: &["skill"],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "gateway",
         desc: "connections: apps + daemon/cron/memory (space toggles)",
         aliases: &["gw"],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "plugin",
         desc: "manage plugins",
         aliases: &["plugins"],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "hehe",
         desc: "something funny",
         aliases: &[],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Local,
     },
     CmdDef {
         name: "help",
         desc: "show commands",
         aliases: &[],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "quit",
         desc: "exit",
         aliases: &["exit"],
+        scope: CmdScope::Conversation,
+        surface: CmdSurface::Local,
     },
 ];
 
@@ -340,7 +405,7 @@ pub(crate) fn complete_command_args(
         "sessions" | "resume" => complete_resume_args(cmd, arg_text),
         "skill" | "skills" => complete_skill_args(cmd, arg_text, cwd),
         "agentsmd" | "sys" => complete_agentsmd_args(cmd, arg_text),
-        "model" | "models" => complete_model_args(cmd, arg_text),
+        "models" => complete_model_args(cmd, arg_text),
         "theme" | "themes" => complete_theme_args(cmd, arg_text),
         "hotkeys" | "keybindings" | "bindings" => {
             complete_from_table(cmd, arg_text, &[("reload", "re-read keybindings.json")])
@@ -522,8 +587,6 @@ pub enum ReplCommand {
     /// Open the system-prompt file in `$EDITOR` (`/agentsmd`), print it (`/agentsmd show`),
     /// or restore the default (`/agentsmd reset`). `/sys` is an alias.
     Sys(SysAction),
-    /// Open the provider selection menu (`/connect` or `/provider`).
-    Provider,
     /// Log in to one plugin provider directly (`/claude`, `/devin`, ...);
     /// holds its `plugin:provider` id. See [`provider_shortcuts`].
     ProviderLogin(String),
@@ -549,6 +612,8 @@ pub enum ReplCommand {
     Help,
     /// Open the model picker (`/model`) or set directly (`/model provider/id`).
     Model(Option<String>),
+    /// Open the two-pane provider×model picker (bare `/model`).
+    ModelPanes,
     /// Open the model picker focused on a row — never typed; a plugin's
     /// `model_picker` command outcome (`/fusion`) queues it.
     ModelFocus(String),
@@ -704,10 +769,10 @@ pub fn parse_command(line: &str) -> ReplCommand {
         Some("theme") => ReplCommand::Theme(opt(rest)),
         Some("hotkeys") => ReplCommand::Keys(opt(rest)),
         Some("reload") => ReplCommand::Reload,
-        // Every connect alias accepts optional args like `/key openrouter`
-        // (args are advisory; the provider menu always opens).
-        Some("connect") => ReplCommand::Provider,
-        Some("model") => ReplCommand::Model(opt(rest)),
+        Some("models") => match opt(rest) {
+            Some(id) => ReplCommand::Model(Some(id)),
+            None => ReplCommand::ModelPanes,
+        },
         Some("plugin") => ReplCommand::Plugin(t.to_string()),
         Some("skills") => {
             if rest.is_empty() {

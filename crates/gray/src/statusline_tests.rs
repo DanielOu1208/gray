@@ -28,7 +28,8 @@ fn defaults_match_the_stock_footer() {
     let c = StatusLineConfig::default();
     assert_eq!(c.left(), spec(DEFAULT_LEFT));
     assert_eq!(c.right(), spec(DEFAULT_RIGHT));
-    assert_eq!(c.separator(), " \u{b7} ");
+    assert_eq!(c.separator(), " ");
+    assert_eq!(c.right_separator(), "  ");
     assert_eq!(c.interval(), Duration::from_millis(5_000));
 }
 
@@ -138,4 +139,23 @@ fn read_branch_handles_refs_detached_and_worktrees() {
     )
     .unwrap();
     assert_eq!(read_branch(wt.path()).as_deref(), Some("side"));
+}
+
+#[test]
+fn clip_cuts_to_width_with_an_ellipsis() {
+    let segs = vec![
+        Seg::new("abcdef", Color::Reset),
+        Seg::new("ghij", Color::Reset),
+    ];
+    assert_eq!(texts(&clip(segs.clone(), 20)), "abcdefghij");
+    let cut = clip(segs, 8);
+    assert_eq!(texts(&cut), "abcdefg\u{2026}");
+    let mut fused = Seg::new("Opus × SWE", Color::Reset);
+    fused.parts = Some(vec![
+        ("Opus".into(), Color::Red),
+        (" × SWE".into(), Color::Reset),
+    ]);
+    let cut = clip(vec![fused], 6);
+    assert_eq!(cut[0].text, "Opus ");
+    assert_eq!(cut[0].parts.as_ref().map(Vec::len), Some(2));
 }

@@ -75,6 +75,10 @@ pub struct UiTheme {
     pub ctx_free: Color,
     // Shimmer sweep base (highlight is text_bright)
     pub shimmer_base: Color,
+    // Composer frame bezel: top/left edge, mixed corners, bottom/right edge
+    pub bezel_hi: Color,
+    pub bezel_mid: Color,
+    pub bezel_lo: Color,
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -119,6 +123,9 @@ pub const GRAY_UI_THEME: UiTheme = UiTheme {
     ctx_messages: rgb(254, 240, 138),
     ctx_free: rgb(100, 116, 139),
     shimmer_base: rgb(150, 148, 144),
+    bezel_hi: rgb(106, 106, 106),
+    bezel_mid: rgb(74, 74, 74),
+    bezel_lo: rgb(46, 46, 46),
 };
 /// Name of the built-in palette. Selecting it (or `default`) clears any
 /// user theme.
@@ -186,6 +193,9 @@ pub const ROLE_NAMES: &[&str] = &[
     "ctx_messages",
     "ctx_free",
     "shimmer_base",
+    "bezel_hi",
+    "bezel_mid",
+    "bezel_lo",
 ];
 
 impl UiTheme {
@@ -227,6 +237,9 @@ impl UiTheme {
             "ctx_messages" => &mut self.ctx_messages,
             "ctx_free" => &mut self.ctx_free,
             "shimmer_base" => &mut self.shimmer_base,
+            "bezel_hi" => &mut self.bezel_hi,
+            "bezel_mid" => &mut self.bezel_mid,
+            "bezel_lo" => &mut self.bezel_lo,
             _ => return None,
         })
     }

@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Direct `/model <id>` validation for the live connection — same candidate
+/// Direct `/models <id>` validation for the live connection — same candidate
 /// list as the picker: `provider/models` for plugin connections, a live
 /// `/models` fetch otherwise.
 pub(crate) fn provider_models_for_config(config: &Config) -> (String, Vec<(String, String)>) {
@@ -237,8 +237,15 @@ pub(crate) fn selected_model_label(config: &Config) -> Option<String> {
 }
 
 /// Footer / status label for the live selection when it is a composite
-/// row (`Fusion · Opus 5.5 High + SWE-2 High`); `None` otherwise.
+/// row (`Fusion · Opus 5.5 High × SWE-2 High`); `None` otherwise.
 pub(crate) fn composite_label_for(config: &Config) -> Option<String> {
+    composite_label_parts_for(config).map(|segs| segs.into_iter().map(|(t, _)| t).collect())
+}
+
+/// The same label as paintable `(text, slot)` segments — the footer's cue
+/// for which half of a fusion is producing output. `None` for a
+/// non-composite selection.
+pub(crate) fn composite_label_parts_for(config: &Config) -> Option<Vec<(String, Option<usize>)>> {
     let model = config.model.as_deref()?;
     let shape = super::variants::row_shape(model)?;
     let name = load_provider_names(config)
@@ -247,7 +254,7 @@ pub(crate) fn composite_label_for(config: &Config) -> Option<String> {
         .map(|(_, n)| n)
         .unwrap_or_else(|| super::context::friendly_model_name(model));
     let parts = selection_parts(&shape, &config.model_parts);
-    super::variants::composite_label(&shape, &name, &parts, config.thinking_effort.as_deref())
+    super::variants::composite_label_parts(&shape, &name, &parts, config.thinking_effort.as_deref())
 }
 
 /// The cached `(id, name)` list for the live provider (no network).
@@ -313,6 +320,15 @@ pub(crate) fn canonical_model_rows(config: &Config) -> Vec<(String, String)> {
         }
         _ => known,
     }
+}
+
+/// Model adoption at boot/resume/headless entry: canonicalize a stored
+/// `<base>-<tier>` id against the rows canonicalization may split on.
+/// Single seam so every entry path normalizes identically — see
+/// [`canonicalize_effort_variant`] for the semantics it wraps.
+pub(crate) fn canonicalize_adopted_model(config: &mut Config) {
+    let rows = canonical_model_rows(config);
+    canonicalize_effort_variant(config, &rows);
 }
 
 /// Adopt a `<base>-<tier>` id as `base` + `tier` effort: a collapsed
@@ -461,7 +477,11 @@ fn skip_divider(rows: &[Row], sel: usize, down: bool) -> usize {
 /// Levels a row offers: for a row with declared variants, the efforts of
 /// the variants matching `fast` and its (settled) `parts`; otherwise the
 /// model's `supported_thinking_levels`.
-fn row_levels(model: &str, fast: bool, parts: &super::variants::Parts) -> Vec<&'static str> {
+pub(crate) fn row_levels(
+    model: &str,
+    fast: bool,
+    parts: &super::variants::Parts,
+) -> Vec<&'static str> {
     if let Some(shape) = super::variants::row_shape(model)
         && !shape.variants.is_empty()
     {
@@ -492,7 +512,7 @@ fn initial_row_effort(config: &Config, saved: &SavedConfig, model: &str) -> Opti
 
 /// [`initial_row_effort`] over an explicit level list (variant rows offer
 /// different levels per fast flag and composite parts).
-fn initial_effort_in(
+pub(crate) fn initial_effort_in(
     config: &Config,
     saved: &SavedConfig,
     model: &str,
@@ -660,7 +680,7 @@ impl RowEfforts {
 /// chosen model. A row nobody stepped defers to `GRAY_THINKING_EFFORT`;
 /// a model without levels restores its remembered level or the default
 /// ([`super::provider_auth::apply_connection_effort`]).
-fn commit_row_effort(
+pub(crate) fn commit_row_effort(
     config: &mut Config,
     saved: &mut SavedConfig,
     shown: Option<&str>,
@@ -686,15 +706,15 @@ fn commit_row_effort(
 /// display. Both stay local until Enter commits them with the model, so
 /// Esc really cancels everything the picker touched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PickerToggles {
-    fast: bool,
-    show_reasoning: bool,
+pub(crate) struct PickerToggles {
+    pub(crate) fast: bool,
+    pub(crate) show_reasoning: bool,
     opened_fast: bool,
     opened_show: bool,
 }
 
 impl PickerToggles {
-    fn from_config(config: &Config) -> Self {
+    pub(crate) fn from_config(config: &Config) -> Self {
         let fast = config.fast_mode == Some(true);
         let show_reasoning = config.show_reasoning.unwrap_or(true);
         Self {
@@ -707,19 +727,19 @@ impl PickerToggles {
 
     /// Tab: flip fast mode — only while the highlighted model has a fast
     /// variant to send, so the toggle never claims a speedup it can't route.
-    fn toggle_fast(&mut self, supported: bool) {
+    pub(crate) fn toggle_fast(&mut self, supported: bool) {
         if supported {
             self.fast = !self.fast;
         }
     }
 
-    fn toggle_reasoning(&mut self) {
+    pub(crate) fn toggle_reasoning(&mut self) {
         self.show_reasoning = !self.show_reasoning;
     }
 
     /// Enter: land what changed on `config` and the saved file; an
     /// untouched toggle leaves both alone.
-    fn commit(&self, config: &mut Config, saved: &mut SavedConfig) {
+    pub(crate) fn commit(&self, config: &mut Config, saved: &mut SavedConfig) {
         if self.fast != self.opened_fast {
             config.fast_mode = Some(self.fast);
             saved.fast_mode = Some(self.fast);
@@ -836,13 +856,13 @@ fn per_million(rate: f64) -> String {
 }
 
 /// Cells in the price-level gauge.
-const PRICE_DOTS: usize = 5;
+pub(crate) const PRICE_DOTS: usize = 5;
 
 /// The model's price level, 1..=PRICE_DOTS, on absolute blended (input +
 /// output) $/1M bands — not the listed spread, which put every mid-priced
 /// model at the top of the gauge (a $18/1M model sat one dot under the
 /// priciest row). A level means the same thing in every provider's list.
-fn price_level(blended_per_million: f64) -> usize {
+pub(crate) fn price_level(blended_per_million: f64) -> usize {
     /// Band edges, roughly log-spaced: sub-$0.50 → 1, …, over $20 → 5.
     const BANDS: [f64; PRICE_DOTS - 1] = [0.5, 2.0, 8.0, 20.0];
     1 + BANDS.iter().filter(|&&b| blended_per_million > b).count()
@@ -851,7 +871,7 @@ fn price_level(blended_per_million: f64) -> usize {
 /// `in $2 · cached $0.2 · out $10 / 1M`: the model's per-million-token
 /// rates on one line. The cached segment drops first when narrow, then
 /// the `/ 1M` suffix; past that the text truncates.
-fn rate_text(r: &super::context::ModelRate, room: usize) -> String {
+pub(crate) fn rate_text(r: &super::context::ModelRate, room: usize) -> String {
     let build = |cached: bool, suffix: bool| {
         let mut segs = vec![format!("in {}", per_million(r.input))];
         if cached && r.has_cache_prices {
@@ -875,7 +895,7 @@ fn rate_text(r: &super::context::ModelRate, room: usize) -> String {
 
 /// Cell `i` of a `w`-cell price band: green (cheap) through the peach
 /// accent to rose (pricey), mixed from the palette.
-fn price_gradient(i: usize, w: usize) -> ratatui::style::Color {
+pub(crate) fn price_gradient(i: usize, w: usize) -> ratatui::style::Color {
     use ratatui::style::Color;
     let t = crate::theme::theme();
     let stops = [t.success, t.accent, t.error_soft];
@@ -897,7 +917,7 @@ fn price_gradient(i: usize, w: usize) -> ratatui::style::Color {
 
 /// A model's context window when some source reported it (live list,
 /// models.dev, LiteLLM, the disk cache) — never the family guess.
-fn known_context(model: &str) -> Option<usize> {
+pub(crate) fn known_context(model: &str) -> Option<usize> {
     super::context::ensure_disk_loaded();
     let tail = model.rsplit('/').next().unwrap_or(model);
     [model, tail]
@@ -906,7 +926,7 @@ fn known_context(model: &str) -> Option<usize> {
 }
 
 /// Keep the first `max` chars of `s`, marking a cut with `…`.
-fn fit_chars(s: &str, max: usize) -> String {
+pub(crate) fn fit_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -920,7 +940,7 @@ fn fit_chars(s: &str, max: usize) -> String {
 
 /// Connect-modal list: the last good list now, refreshed in the background.
 /// Only a provider never fetched before waits on the network (up to 3s per
-/// probed endpoint), which is what made /connect feel stuck.
+/// probed endpoint), which is what made /models feel stuck.
 pub(super) fn cached_models_for(base_url: &str, api_key: Option<&str>) -> Vec<(String, String)> {
     let cached = saved_models_for(base_url, base_url);
     if cached.is_empty() {
@@ -934,7 +954,7 @@ pub(super) fn cached_models_for(base_url: &str, api_key: Option<&str>) -> Vec<(S
 
 /// Merge a live list into what the picker already shows, keeping the
 /// saved ordering. Same result as [`picker_models_for`], minus the wait.
-fn merge_models(base_url: &str, live: Vec<(String, String)>) -> Vec<(String, String)> {
+pub(crate) fn merge_models(base_url: &str, live: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut models = live;
     if let Ok(path) = saved_config_path() {
         let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
@@ -943,7 +963,7 @@ fn merge_models(base_url: &str, live: Vec<(String, String)>) -> Vec<(String, Str
     models
 }
 
-/// Shared ordering for /model and every connect-modal model list.
+/// Shared ordering for /models and every connect-modal model list.
 pub(super) fn picker_models_for(base_url: &str, api_key: Option<&str>) -> Vec<(String, String)> {
     let mut models = fetch_live_provider_models(base_url, api_key);
     if let Ok(path) = saved_config_path() {
@@ -1096,20 +1116,7 @@ fn option_parts(
     option: &str,
 ) -> Option<super::variants::Parts> {
     let key = &shape.slots.get(slot)?.key;
-    let mut want = cur.clone();
-    want.insert(key.clone(), option.to_string());
-    if shape.serves(&want) {
-        return Some(want);
-    }
-    let earlier: Vec<&String> = shape.slots[..slot].iter().map(|s| &s.key).collect();
-    shape
-        .variants
-        .iter()
-        .find(|v| {
-            v.parts.get(key).map(String::as_str) == Some(option)
-                && earlier.iter().all(|k| v.parts.get(*k) == cur.get(*k))
-        })
-        .map(|v| v.parts.clone())
+    shape.option_parts(cur, key, option)
 }
 
 /// The next selectable option from `from` stepping by `dir` (±1), skipping
@@ -1302,7 +1309,7 @@ fn picker_row_line(
         let room = w.saturating_sub(used + 2);
         if room >= 8 && !summary.is_empty() {
             spans.push(Span::styled(
-                format!("  {}", fit_chars(&summary.join(" + "), room)),
+                format!("  {}", fit_chars(&summary.join(" × "), room)),
                 suffix,
             ));
         }
@@ -1327,7 +1334,7 @@ fn picker_row_line(
 /// The effort meter cells after a row's badge: step arrows on the selected
 /// row, the filled/hollow cells, and the 7-cell label. On the accent bar
 /// everything goes black, hollows to the bar's shade.
-fn meter_spans(
+pub(crate) fn meter_spans(
     levels: &[&'static str],
     level: &'static str,
     selected: bool,
@@ -1923,7 +1930,7 @@ pub fn run_model_modal(
     model_picker_loop(&mut terminal, config, bg, focus)
 }
 
-/// The picker's body on an already-open modal terminal — `/connect` reuses
+/// The picker's body on an already-open modal terminal — `/models` reuses
 /// it as its model step so both surfaces share rows, meters, effort keys
 /// and the commit path. `config` must already point at the provider being
 /// browsed: its fields are what the picker scopes and commits against.
@@ -2292,7 +2299,7 @@ pub(crate) fn model_picker_loop(
                         // Canonicalize known ids (case/tail); unknown
                         // filters still fall through as custom models —
                         // the picker keeps its "Use custom model" path.
-                        // Direct `/model <id>` callers must use
+                        // Direct `/models <id>` callers must use
                         // `validate_direct_model_id` and reject `Err`.
                         validate_direct_model_id(filter.trim(), &models)
                             .unwrap_or_else(|_| filter.trim().to_string())
@@ -2358,11 +2365,11 @@ fn commit_selection(
     Ok(())
 }
 
-/// Validates a directly-typed `/model <id>` against the picker's known list
+/// Validates a directly-typed `/models <id>` against the picker's known list
 /// (live `/models` + catalog snapshot behind `fetch_live_provider_models`).
 /// Exact id (or display name) wins; case-insensitive and unique `provider/`
 /// tail matches canonicalize. Unknown ids are rejected with a hint mirroring
-/// the picker empty-state (`type /model to browse ...`) instead of being
+/// the picker empty-state (`type /models to browse ...`) instead of being
 /// silently accepted until the first prompt fails. Empty known-list fails
 /// open (offline/custom endpoints like Ollama accept any id).
 pub(crate) fn validate_direct_model_id(
@@ -2371,7 +2378,7 @@ pub(crate) fn validate_direct_model_id(
 ) -> Result<String, String> {
     let input = raw.trim();
     if input.is_empty() {
-        return Err("usage: /model <model-id> — type /model to browse models".to_string());
+        return Err("usage: /models <model-id> — type /models to browse models".to_string());
     }
     if models.is_empty() {
         return Ok(input.to_string());
@@ -2403,14 +2410,14 @@ pub(crate) fn validate_direct_model_id(
             ids.sort();
             let shown = ids.iter().take(5).copied().collect::<Vec<_>>().join(", ");
             return Err(format!(
-                "ambiguous model '{input}' — matches {} models ({shown}{}); type /model to pick",
+                "ambiguous model '{input}' — matches {} models ({shown}{}); type /models to pick",
                 ids.len(),
                 if ids.len() > 5 { ", …" } else { "" },
             ));
         }
     }
     Err(format!(
-        "unknown model '{input}' — no match; type /model to browse {} models",
+        "unknown model '{input}' — no match; type /models to browse {} models",
         models.len(),
     ))
 }

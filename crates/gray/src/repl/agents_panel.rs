@@ -184,8 +184,6 @@ fn run_agents_panel(
     let mut sel: usize = 0;
     let mut scroll_top: usize = 0;
     let mut status = String::new();
-    let mut preview_key = String::new();
-    let mut preview = String::new();
     let mut chat_buf: Option<String> = None;
     let mut result: Option<PanelAction> = None;
 
@@ -196,19 +194,6 @@ fn run_agents_panel(
             } else if sel >= rows.len() {
                 sel = rows.len() - 1;
             }
-            // Lazy preview: only respawn `view` when the selection moved
-            // or a refresh landed.
-            let cur_key = rows
-                .get(sel)
-                .map(|r| format!("{}|{}", r.target, r.status))
-                .unwrap_or_default();
-            if cur_key != preview_key && !rows.is_empty() {
-                let row = &rows[sel];
-                preview = spawn_text(&argv, &["view", &row.target, "--lines", "60"])
-                    .unwrap_or_else(|| "(no transcript)".into());
-                preview_key = cur_key;
-            }
-
             terminal.draw(|frame| {
                 let area = frame.area();
                 if area.width < 40 || area.height < 10 {
@@ -216,10 +201,13 @@ fn run_agents_panel(
                 }
                 crate::setup::render_dimmed_background(frame, &bg_snapshot);
 
+                // Height hugs the rows: title + blank + list + blank +
+                // status + keys, plus the one-cell pad top and bottom.
+                let list_h = rows.len().clamp(1, 8);
                 let modal_w = 96.min(area.width.saturating_sub(2)).max(42).min(area.width);
-                let modal_h = 26
+                let modal_h = (list_h as u16 + 7)
                     .min(area.height.saturating_sub(2))
-                    .max(12)
+                    .max(8)
                     .min(area.height);
                 let modal_x = (area.width.saturating_sub(modal_w)) / 2;
                 let modal_y = (area.height.saturating_sub(modal_h)) / 4;
@@ -275,9 +263,8 @@ fn run_agents_panel(
                     ]),
                 );
 
-                // List band: up to 8 rows, then a preview band, then the
-                // status/input line, then the keys hint.
-                let list_h = rows.len().clamp(1, 8);
+                // List band: up to 8 rows, then the status/input line,
+                // then the keys hint.
                 let list_y = 2u16;
                 let visible = list_h;
                 if sel < scroll_top {
@@ -343,48 +330,6 @@ fn run_agents_panel(
                             ))
                         };
                         put(list_y + r as u16, line);
-                    }
-                }
-
-                // Preview band: the selected run's transcript tail, in
-                // the widget's own `view` voice.
-                let prev_y = list_y + list_h as u16 + 1;
-                let status_h = 2u16;
-                let keys_h = 1u16;
-                let prev_h = inner
-                    .height
-                    .saturating_sub(prev_y + status_h + keys_h + 1)
-                    .min(12);
-                if prev_h >= 2 {
-                    let title = rows
-                        .get(sel)
-                        .map(|r| {
-                            if r.session.is_empty() {
-                                format!(" ─ {} ", r.name)
-                            } else {
-                                format!(" ─ {} · {} ", r.name, r.session)
-                            }
-                        })
-                        .unwrap_or_else(|| " ─ ".to_string());
-                    put(
-                        prev_y - 1,
-                        Line::from(Span::styled(
-                            format!(
-                                "{title:─<w$}",
-                                w = inner.width as usize + title.chars().count()
-                            ),
-                            Style::default().fg(text_dim).bg(box_bg),
-                        )),
-                    );
-                    for (i, line) in preview.lines().take(prev_h as usize).enumerate() {
-                        let clipped: String = line.chars().take(inner.width as usize).collect();
-                        put(
-                            prev_y + i as u16,
-                            Line::from(Span::styled(
-                                format!(" {clipped}"),
-                                Style::default().fg(Color::White).bg(box_bg),
-                            )),
-                        );
                     }
                 }
 

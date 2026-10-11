@@ -72,10 +72,23 @@ fn welcome_is_the_ascii_logo_by_default() {
             "logo row missing from the welcome: {want:?}"
         );
     }
-    let banner = &welcome[welcome.len() - 2];
+    // The devin-tui home banner under the logo: `gray` + version once; the
+    // hints, tip and corner row moved into the composer's home band.
     assert!(
-        banner.contains("gray") && banner.contains("/help"),
-        "version banner must survive under the logo: {banner:?}"
+        welcome.iter().any(|l| l.trim() == "gray"),
+        "title line missing from the welcome: {welcome:?}"
+    );
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        welcome.iter().filter(|l| l.contains(&version)).count(),
+        1,
+        "the version shows once: {welcome:?}"
+    );
+    assert!(
+        !welcome
+            .iter()
+            .any(|l| l.contains("● Tip") || l.contains("newline")),
+        "hints and tip belong under the panel: {welcome:?}"
     );
 }
 
@@ -129,4 +142,37 @@ fn hehe_toggle_drops_the_mascot_entry() {
         !crate::composer::transcript::drop_mascot_entry(&mut entries),
         "a third /hehe has nothing left to drop"
     );
+}
+
+#[test]
+fn welcome_layout_is_devin_home() {
+    // devin-tui home: a `min(78, w-8)` column centered on screen and a
+    // blank tail so the composer's seam stays unspent.
+    let w = 100usize;
+    let text = plain(&build_welcome_lines(w));
+    let col_w = (w - 8).min(78);
+    let x = (w - col_w) / 2;
+
+    let title = text.iter().position(|l| l.trim() == "gray").unwrap();
+    let title_pad = text[title].len() - text[title].trim_start().len();
+    assert_eq!(title_pad, x + (col_w - 4) / 2, "title not centered");
+
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let ver_line = text.iter().position(|l| l.trim() == version).unwrap();
+    let ver_pad = text[ver_line].len() - text[ver_line].trim_start().len();
+    assert_eq!(
+        ver_pad,
+        x + (col_w - version.len()) / 2,
+        "version not centered"
+    );
+    assert_eq!(
+        ver_line,
+        title + 1,
+        "version must sit directly under the title"
+    );
+
+    // No corner row: the banner ends on the version and its blank tail,
+    // the gap above the composer's panel.
+    assert_eq!(ver_line + 2, text.len(), "{text:?}");
+    assert!(text.last().unwrap().trim().is_empty());
 }

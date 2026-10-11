@@ -1,4 +1,4 @@
-use gray_core::error::CoreError;
+use gray_core::error::{CoreError, ProviderDetail};
 use gray_core::message::Message;
 
 /// Truncates a string slice to at most `max_chars` unicode scalar values / chars.
@@ -159,22 +159,61 @@ fn localize_utc_time(raw: &str) -> String {
     }
 }
 
-/// Pure core of [`localize_utc_time`]: `HH:MM UTC` -> local `HH:MM` using
-/// `offset`. Returns `None` if `raw` isn't that shape.
+/// Pure core of [`localize_utc_time`]: `HH:MM UTC` or `Mon D HH:MM UTC` ->
+/// the local clock reading using `offset`. Returns `None` if `raw` isn't
+/// either shape.
 fn localize_utc_time_with(
     raw: &str,
     now: chrono::DateTime<chrono::Utc>,
     offset: chrono::FixedOffset,
 ) -> Option<String> {
-    use chrono::{Duration, Timelike};
+    use chrono::{Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc};
     let t = raw.trim().strip_suffix("UTC")?.trim();
-    let (h, m) = t.split_once(':')?;
-    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
-    let mut at = now.with_hour(h)?.with_minute(m)?.with_second(0)?;
-    if at < now {
-        at += Duration::days(1);
+    let normalized = t.replace(',', " ");
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+
+    let clock = |s: &str| -> Option<(u32, u32)> {
+        let (h, m) = s.split_once(':')?;
+        Some((h.parse().ok()?, m.parse().ok()?))
+    };
+    let month_of = |s: &str| -> Option<u32> {
+        const M: [&str; 12] = [
+            "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+        ];
+        let s = s.to_ascii_lowercase();
+        M.iter()
+            .position(|m| s.starts_with(m))
+            .map(|i| i as u32 + 1)
+    };
+
+    match words.as_slice() {
+        // `HH:MM` — today, or tomorrow when that clock time already passed.
+        [hm] => {
+            let (h, m) = clock(hm)?;
+            let mut at = now.with_hour(h)?.with_minute(m)?.with_second(0)?;
+            if at < now {
+                at += Duration::days(1);
+            }
+            Some(at.with_timezone(&offset).format("%H:%M").to_string())
+        }
+        // `Oct 11 00:01` — month + day + clock, no year: this year, rolling
+        // forward when the moment already passed (Dec 31 -> Jan 1 resets).
+        [mon, day, hm] => {
+            let (h, m) = clock(hm)?;
+            let (month, day) = (month_of(mon)?, day.parse::<u32>().ok()?);
+            let mut at = NaiveDate::from_ymd_opt(now.year(), month, day)?.and_hms_opt(h, m, 0)?;
+            if at <= now.naive_utc() {
+                at = NaiveDate::from_ymd_opt(now.year() + 1, month, day)?.and_hms_opt(h, m, 0)?;
+            }
+            Some(
+                Utc.from_utc_datetime(&at)
+                    .with_timezone(&offset)
+                    .format("%b %d %H:%M")
+                    .to_string(),
+            )
+        }
+        _ => None,
     }
-    Some(at.with_timezone(&offset).format("%H:%M").to_string())
 }
 
 fn format_model_limit(detail: &str) -> Option<String> {
@@ -222,14 +261,85 @@ fn format_model_limit(detail: &str) -> Option<String> {
             .into()
     };
     Some(format!(
-        "✗ Model limit reached\n  {explanation}\n  Run /model to switch to another model."
+        "✗ Model limit reached\n  {explanation}\n  Run /models to switch to another model."
     ))
 }
 
 /// Formats a [`CoreError`] for REPL display.
 /// Connection/timeout failures get a friendly, actionable message with the
 /// provider's `base_url`; all other errors fall back to the generic prefix.
+/// Render a [`ProviderDetail`]: vendor message + code/status + correlation
+/// ids — exactly the fields format.rs used to scrape out of the message.
+fn provider_detail_text(d: &ProviderDetail) -> String {
+    let mut out = d.vendor_message.clone().unwrap_or_default();
+    if out.is_empty()
+        && let Some(status) = d.status
+    {
+        out = format!("status {status}");
+    }
+    let mut meta = Vec::new();
+    if let Some(code) = &d.vendor_code {
+        meta.push(format!("code: {code}"));
+    }
+    if let Some(status) = d.status {
+        meta.push(format!("status {status}"));
+    }
+    if !meta.is_empty() {
+        out = format!("{out} ({})", meta.join(", "));
+    }
+    for (label, value) in [("cf-ray", &d.cf_ray), ("request-id", &d.request_id)] {
+        if let Some(v) = value {
+            out.push_str(&format!(", {label}: {v}"));
+        }
+    }
+    out
+}
+
+/// A provider failure with its response fields intact: classify on the
+/// variant + structured fields, never on the formatted text.
+fn format_detailed_error(e: &CoreError, d: &ProviderDetail, base_url: &str) -> String {
+    let short = provider_detail_text(d);
+    if let Some(message) = format_model_limit(&short) {
+        return message;
+    }
+    match e.class() {
+        CoreError::Connection(_) => format!(
+            "✗ Connection failed\n  Unable to reach {base_url}: {short}\n  Check your connection or run /models to configure the provider."
+        ),
+        CoreError::Timeout(_) => format!(
+            "✗ Request timed out\n  {short}\n  Try again or run /models to check the provider settings."
+        ),
+        CoreError::Auth(_) => format!(
+            "✗ Auth failed (not retryable):\n  {short}\n  Check API key or run /models to reconfigure provider."
+        ),
+        CoreError::RateLimited(_) => format!(
+            "✗ Rate limited (retryable):\n  {short}\n  Try again later or switch model via /models."
+        ),
+        CoreError::BadRequest(_) => format!(
+            "✗ Bad request (not retryable):\n  {short}\n  Check model/provider settings via /models."
+        ),
+        CoreError::ContextOverflow(_) => format!(
+            "✗ Context exhausted:\n  {short}\n  Start /new or compact the session to continue."
+        ),
+        CoreError::ServerError(_) => format!(
+            "✗ Provider server error (retryable):\n  {short}\n  Try again later or run /models to switch to another model."
+        ),
+        CoreError::Stream(_) => {
+            format!("✗ Stream broken (retryable):\n  {short}\n  Retry the turn.")
+        }
+        _ => format!(
+            "✗ Provider error:\n  {short}\n  Provider: {base_url} — try /models if this persists."
+        ),
+    }
+}
+
 pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
+    // Response fields arrived structured: use them directly. The text arms
+    // below remain the fallback for foreign errors (plugin relays) that
+    // never had the fields.
+    if let Some(detail) = e.detail() {
+        return format_detailed_error(e, detail, base_url);
+    }
     if let CoreError::Provider(detail)
     | CoreError::BadRequest(detail)
     | CoreError::Auth(detail)
@@ -243,13 +353,13 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
         CoreError::Connection(detail) => {
             let short = display_provider_detail(detail);
             format!(
-                "✗ Connection failed\n  Unable to reach {base_url}: {short}\n  Check your connection or run /connect to configure the provider."
+                "✗ Connection failed\n  Unable to reach {base_url}: {short}\n  Check your connection or run /models to configure the provider."
             )
         }
         CoreError::Timeout(detail) => {
             let short = display_provider_detail(detail);
             format!(
-                "✗ Request timed out\n  {short}\n  Try again or run /connect to check the provider settings."
+                "✗ Request timed out\n  {short}\n  Try again or run /models to check the provider settings."
             )
         }
         CoreError::Provider(detail) => {
@@ -267,7 +377,7 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
                 || short.contains("status 404")
             {
                 format!(
-                    "✗ Bad request (not retryable):\n  {short}\n  Model may not be supported on {base_url}. Run /model to pick a valid model or /connect to change provider."
+                    "✗ Bad request (not retryable):\n  {short}\n  Model may not be supported on {base_url}. Run /models to pick a valid model or provider."
                 )
             } else if lower.contains("auth")
                 || short.contains(" 401")
@@ -275,18 +385,18 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
                 || lower.contains("unauthorized")
             {
                 format!(
-                    "✗ Auth failed (not retryable):\n  {short}\n  Check API key or run /connect to reconfigure provider."
+                    "✗ Auth failed (not retryable):\n  {short}\n  Check API key or run /models to reconfigure provider."
                 )
             } else if lower.contains("rate limit")
                 || lower.contains("too many requests")
                 || short.contains(" 429")
             {
                 format!(
-                    "✗ Rate limited (retryable):\n  {short}\n  Try again later or switch model via /model."
+                    "✗ Rate limited (retryable):\n  {short}\n  Try again later or switch model via /models."
                 )
             } else if lower.contains("bad request") || short.contains(" 400") {
                 format!(
-                    "✗ Bad request (not retryable):\n  {short}\n  Check model/provider settings via /model or /connect."
+                    "✗ Bad request (not retryable):\n  {short}\n  Check model/provider settings via /models."
                 )
             } else if lower.contains("server error")
                 || lower.contains("status 5")
@@ -296,12 +406,12 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
                 || lower.contains("504")
             {
                 format!(
-                    "✗ Provider server error (retryable):\n  {short}\n  Try again later or run /model to switch to another model."
+                    "✗ Provider server error (retryable):\n  {short}\n  Try again later or run /models to switch to another model."
                 )
             } else {
                 // Steal codex's UnexpectedResponseError display: keep status+body but add provider hint
                 format!(
-                    "✗ Provider error:\n  {short}\n  Provider: {base_url} — try /model or /connect if this persists."
+                    "✗ Provider error:\n  {short}\n  Provider: {base_url} — try /models if this persists."
                 )
             }
         }
@@ -311,19 +421,19 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
             // the login that failed so the next command is obvious.
             let short = display_provider_detail(detail);
             format!(
-                "✗ Auth failed (not retryable):\n  {short}\n  Run /connect to sign in again or update your API key."
+                "✗ Auth failed (not retryable):\n  {short}\n  Run /models to sign in again or update your API key."
             )
         }
         CoreError::BadRequest(detail) => {
             let short = display_provider_detail(detail);
             format!(
-                "✗ Bad request (not retryable):\n  {short}\n  Check model/provider settings via /model or /connect."
+                "✗ Bad request (not retryable):\n  {short}\n  Check model/provider settings via /models."
             )
         }
         CoreError::RateLimited(detail) => {
             let short = display_provider_detail(detail);
             format!(
-                "✗ Rate limited (retryable):\n  {short}\n  Try again later or switch model via /model."
+                "✗ Rate limited (retryable):\n  {short}\n  Try again later or switch model via /models."
             )
         }
         CoreError::ContextOverflow(detail) => {
@@ -335,7 +445,7 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
         CoreError::ServerError(detail) => {
             let short = display_provider_detail(detail);
             format!(
-                "✗ Provider server error (retryable):\n  {short}\n  Try again later or run /model to switch to another model."
+                "✗ Provider server error (retryable):\n  {short}\n  Try again later or run /models to switch to another model."
             )
         }
         CoreError::Stream(detail) => {

@@ -272,16 +272,6 @@ pub(crate) fn validate_install_key(key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Some archives wrap everything in `package/`; use it when present.
-pub(crate) fn stage_root(dir: &Path) -> PathBuf {
-    let wrapped = dir.join("package");
-    if wrapped.is_dir() {
-        wrapped
-    } else {
-        dir.to_path_buf()
-    }
-}
-
 /// Shallow-clone `url` (under the plugins tmp dir) via the shared
 /// `sources::clone_into_tmp` helper and return the keeper tempdir, the clone
 /// dir, and the cloned HEAD commit sha. `--branch` only when pinned.
@@ -363,7 +353,10 @@ fn replace_archive(
 ) -> anyhow::Result<PathBuf> {
     validate_install_key(name)?;
     anyhow::ensure!(
-        !matches!(name, "tmp" | "pi" | "lock.json" | "index-cache.json"),
+        !matches!(
+            name,
+            "tmp" | "pi" | "lock.json" | "index-cache.json" | "hub-index-cache.json"
+        ),
         "reserved plugin name"
     );
     let root = crate::plugins_dir();
@@ -411,8 +404,22 @@ async fn install_index(
     opts: InstallOpts,
 ) -> anyhow::Result<Report> {
     validate_install_key(name)?;
-    let index = crate::index::fetch_index(client).await?;
+    // The hub index is the superset: kind routes the install — plugin rows
+    // keep the verified-tarball path below, skills dispatch to skills_ops,
+    // anything else is list-only for now. If the hub endpoint is down we
+    // degrade to the legacy plugin index rather than refusing to install.
+    let index = match crate::index::fetch_hub_index(client).await {
+        Ok(index) => index,
+        Err(_) => crate::index::fetch_index(client).await?,
+    };
     let entry = crate::index::lookup(&index, name)?;
+    match entry.kind.as_str() {
+        "" | "plugin" => {}
+        "skill" => return crate::skills_ops::install_hub_entry(client, name, entry).await,
+        other => {
+            anyhow::bail!("hub package '{name}' is kind '{other}' — not installable yet")
+        }
+    }
     if !supported_index_entry(entry) {
         anyhow::bail!(
             "unsupported ecosystem '{}' source type '{}' for {name} (installable: gray-native tarballs)",

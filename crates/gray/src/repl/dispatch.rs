@@ -70,6 +70,21 @@ pub(crate) async fn dispatch_command(
             .await;
             Flow::Continue
         }
+        ReplCommand::ModelPanes => {
+            if let Some(id) = super::handlers::handle_model_panes(
+                config,
+                cwd,
+                &mut *agent,
+                tui.as_ref().map(|(s, _)| s),
+                session_state.as_ref().map(|s| s.session_id.as_str()),
+                &mut *hide_thinking,
+            )
+            .await
+            {
+                *pending_command = Some(ReplCommand::ProviderLogin(id));
+            }
+            Flow::Continue
+        }
         ReplCommand::ModelFocus(row) => {
             handle_model(
                 config,
@@ -194,6 +209,7 @@ pub(crate) async fn dispatch_command(
                 };
                 short_id = crate::resume::short_id(&session_id);
                 new_sid = Some(session_id.clone());
+                super::session::export_session_env(session_id.as_str());
                 *session_state = Some(SessionState {
                     full_save_pending: false,
                     store,
@@ -428,11 +444,8 @@ pub(crate) async fn dispatch_command(
             );
             Flow::Continue
         }
-        cmd @ (ReplCommand::Provider | ReplCommand::ProviderLogin(_)) => {
-            let preselect = match cmd {
-                ReplCommand::ProviderLogin(id) => Some(id),
-                _ => None,
-            };
+        ReplCommand::ProviderLogin(id) => {
+            let preselect = Some(id);
             let bg = tui
                 .as_ref()
                 .map(|(shared, _)| shared.lock().expect("tui lock").snapshot());

@@ -181,6 +181,9 @@ async fn run() -> anyhow::Result<()> {
             gray::Commands::Sessions { cmd } => {
                 return run_sessions(cmd).await;
             }
+            gray::Commands::Cmd { cmd } => {
+                return gray::cmd::run_cli(cmd, &mut config).await;
+            }
             // Handled before Config::resolve so plugin commands work with no
             // provider configured (fresh machine, venv-only install).
             gray::Commands::External(_) => {
@@ -671,8 +674,9 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
             // Hosted chats are ticked by their host (`cron tick --json`).
             let chat_bound = origin.as_ref().is_some_and(gray::cron_serve::is_hosted);
             // A job a gray session's bash tool creates is the model asking for
-            // it: it waits for the user's `gray cron approve`.
-            let model_requested = in_gray_session();
+            // it: it waits for the user's `gray cron approve` — unless the
+            // user opted out of the gate with GRAY_CRON_AUTO_APPROVE.
+            let model_requested = in_gray_session() && !gray::cron::auto_approve();
             let id = if model_requested {
                 store.add_awaiting_approval(
                     &name,
@@ -700,7 +704,7 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
             };
             if model_requested {
                 println!(
-                    "added {id} awaiting approval; the user runs `gray cron approve {id}` to start it"
+                    "added {id} awaiting approval; the user approves it in /cron (space) or with `gray cron approve {id}`"
                 );
             } else {
                 let next = store
@@ -825,7 +829,7 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
         CronCmd::Approve { id } => {
             if in_gray_session() {
                 anyhow::bail!(
-                    "approval is the user's: run `gray cron approve` from your own terminal, not from a gray session"
+                    "approval is the user's: they press space on the job in /cron, or run `gray cron approve` outside gray"
                 );
             }
             if cron_store()?.approve(&id)? {

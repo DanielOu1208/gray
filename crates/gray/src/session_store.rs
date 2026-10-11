@@ -720,6 +720,12 @@ impl JsonlSessionStore {
         }
     }
 
+    /// Best-effort delete of the remembered-session pointer for `cwd`
+    /// (`/new` over `gray cmd` clears the pointer, never the session).
+    pub async fn forget(&self, cwd: &Path) {
+        let _ = tokio::fs::remove_file(self.remember_path_for_cwd(cwd)).await;
+    }
+
     /// Whether `<root>/<id>.jsonl` exists (invalid id or IO error → false).
     pub(crate) async fn exists_on_disk(&self, id: &SessionId) -> bool {
         let Ok(path) = self.session_path(id) else {
@@ -767,6 +773,29 @@ impl JsonlSessionStore {
             }
             Err(e) => return Err(SessionError::Io(e)),
         };
+        // A torn tail (kill/crash mid-append leaves a partial final line)
+        // heals here, under the session lock, exactly the way `load`
+        // repairs it: truncate after the last complete record and rescan.
+        // The caller appends as if the crash never happened — no
+        // repair-then-retry pass. A file with no newline at all is a
+        // single torn record: unsalvageable, `scan_entries` refuses it.
+        if !content.ends_with('\n')
+            && let Some(cut) = content.rfind('\n')
+        {
+            let file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .await
+                .map_err(SessionError::Io)?;
+            file.set_len((cut + 1) as u64)
+                .await
+                .map_err(SessionError::Io)?;
+            file.sync_all().await.map_err(SessionError::Io)?;
+            log::warn!(target: "gray_session",
+                "{}:{} truncated torn tail to last complete record",
+                path.display(), cut + 1);
+            return Self::scan_entries(id, &content[..cut + 1], path);
+        }
         Self::scan_entries(id, &content, path)
     }
 

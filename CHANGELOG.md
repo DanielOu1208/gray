@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Attaching a PDF, audio or video file no longer makes the context
+  jump to millions of tokens.** Non-image attachments ride inline as
+  base64 `Media` blocks, and every estimator priced them at bytes/4 of
+  the payload — a 6 MB file read as ~2M tokens the moment it was sent,
+  which tripped pre-turn compaction and pinned the gauge until the
+  provider's real usage report landed. Media now takes the same capped
+  per-block price images already did.
+
+### Changed
+- **Context management is staged: cheap elision before the LLM summary.**
+  At 0.6 of the window, tool outputs over 8 KiB that sit outside the
+  verbatim recent window (0.3 of the window, at least the last two
+  rounds, or `--context-keep`) become citation stubs in place — no
+  provider call, no message dropped. The summary pass still runs at the
+  hard threshold, but far less often. This is the T4 policy from
+  arXiv:2609.20804, the cheapest of five strategies at equal success.
+  `GRAY_NO_SOFT_ELIDE=1` turns the stage off.
+- **The loop guard warns before it stops.** Four identical tool calls in
+  a row inject one reminder to change approach; the abort at six is
+  unchanged. Previously the run ended with no warning.
+
 ### Added
 - **Custom endpoints are first-class connections.** `/connect` → Custom
   now offers a pick list of local OpenAI-compatible servers (Ollama, LM
@@ -377,8 +399,8 @@
   profile `ci`): every test in its own process, all binaries at once, each failure reported by
   name, so the sleep-bound shell lifecycle suites overlap instead of queueing binary by binary.
   That made the targeted Windows and macOS test steps and `cargo check --all-targets` pure
-  repetition, so they are gone. The tool-call latency bench is `#[ignore]`d and runs in
-  `perf-floor`. Docs-only changes skip the Rust jobs, a newer push cancels a PR's run in flight,
+  repetition, so they are gone. The tool-call latency bench is `#[ignore]`d and runs once, in
+  the Ubuntu test job, on the build that job already made. Docs-only changes skip the Rust jobs, a newer push cancels a PR's run in flight,
   only main writes the Rust cache, CI builds without dev debuginfo, and ripgrep installs without
   a package index refresh unless it needs one.
 - **Plugins have one registry and one installer.** `commands.json` is gone: a `cli_argv` field on

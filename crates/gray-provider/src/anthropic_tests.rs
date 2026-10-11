@@ -284,7 +284,7 @@ async fn a_bad_key_is_an_auth_error_without_retries() {
         .await;
     let p = AnthropicProvider::new("k", MODEL, format!("{}/v1", server.uri()), None).unwrap();
     let evs: Vec<_> = p.stream(turn()).collect().await;
-    assert!(matches!(evs.as_slice(), [Err(ProviderError::Auth(_))]));
+    assert!(matches!(evs.as_slice(), [Err(e)] if matches!(e.class(), ProviderError::Auth(_))));
 }
 
 #[test]
