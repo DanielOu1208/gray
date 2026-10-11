@@ -215,8 +215,18 @@ fn list_into(path: &[u8], l: &mut Listing) -> bool {
     true
 }
 
+/// The fields one walk needs from a stat, whichever libc call supplied
+/// them: musl has no statx, so it answers through fstatat/fstat.
+struct Stat {
+    dev: u64,
+    mode: u32,
+    size: u64,
+    mtime: i64,
+}
+
 /// The directory's own device id, for FLAG_MOUNT on children. 0 = unknown
-/// (statx refused AT_EMPTY_PATH): children then never flag.
+/// (stat refused): children then never flag.
+#[cfg(not(target_env = "musl"))]
 fn dev_of(fd: i32) -> u64 {
     let mut st: libc::statx = unsafe { std::mem::zeroed() };
     if unsafe {
@@ -231,11 +241,53 @@ fn dev_of(fd: i32) -> u64 {
     {
         return 0;
     }
-    stx_dev(&st)
+    libc::makedev(st.stx_dev_major, st.stx_dev_minor)
 }
 
-fn stx_dev(st: &libc::statx) -> u64 {
-    libc::makedev(st.stx_dev_major, st.stx_dev_minor)
+#[cfg(target_env = "musl")]
+fn dev_of(fd: i32) -> u64 {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return 0;
+    }
+    st.st_dev
+}
+
+#[cfg(not(target_env = "musl"))]
+fn stat_at(dir: i32, name: &CString) -> Option<Stat> {
+    let mut st: libc::statx = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::statx(
+            dir,
+            name.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT,
+            libc::STATX_ALL,
+            &mut st,
+        )
+    } != 0
+    {
+        return None;
+    }
+    Some(Stat {
+        dev: libc::makedev(st.stx_dev_major, st.stx_dev_minor),
+        mode: st.stx_mode as u32,
+        size: st.stx_size,
+        mtime: st.stx_mtime.tv_sec,
+    })
+}
+
+#[cfg(target_env = "musl")]
+fn stat_at(dir: i32, name: &CString) -> Option<Stat> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return None;
+    }
+    Some(Stat {
+        dev: st.st_dev,
+        mode: st.st_mode as u32,
+        size: st.st_size as u64,
+        mtime: st.st_mtime as i64,
+    })
 }
 
 /// linux_dirent64: ino(8) off(8) reclen(2) type(1) name[].
@@ -271,21 +323,9 @@ fn parse_entry(dir: i32, name: &[u8], dev: u64, l: &mut Listing) {
         return;
     }
     let Ok(c) = CString::new(name) else { return };
-    let mut st: libc::statx = unsafe { std::mem::zeroed() };
-    if unsafe {
-        libc::statx(
-            dir,
-            c.as_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT,
-            libc::STATX_ALL,
-            &mut st,
-        )
-    } != 0
-    {
-        // Vanished between the listing and the stat.
-        return;
-    }
-    let mut kind = match st.stx_mode as u32 & libc::S_IFMT {
+    // Vanished between the listing and the stat.
+    let Some(st) = stat_at(dir, &c) else { return };
+    let mut kind = match st.mode & libc::S_IFMT {
         libc::S_IFREG => KIND_FILE,
         libc::S_IFDIR => KIND_DIR,
         libc::S_IFLNK => KIND_LINK,
@@ -294,12 +334,12 @@ fn parse_entry(dir: i32, name: &[u8], dev: u64, l: &mut Listing) {
     if name[0] == b'.' {
         kind |= FLAG_HIDDEN;
     }
-    if kind == KIND_DIR && dev != 0 && stx_dev(&st) != dev {
+    if kind == KIND_DIR && dev != 0 && st.dev != dev {
         kind |= FLAG_MOUNT;
     }
     // macOS's datalength covers files and links; directories report 0.
-    let size = if kind & 3 == KIND_DIR { 0 } else { st.stx_size };
-    let mtime = st.stx_mtime.tv_sec.clamp(0, u32::MAX as i64) as u32;
+    let size = if kind & 3 == KIND_DIR { 0 } else { st.size };
+    let mtime = st.mtime.clamp(0, u32::MAX as i64) as u32;
     l.ents.push(RawEnt {
         name_off: l.names.len() as u32,
         name_len: name.len() as u16,
