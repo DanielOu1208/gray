@@ -56,9 +56,10 @@ pub(crate) fn latched_viewport_floor(
     with_dock.max(no_status).max(live_overrun).min(max_h)
 }
 
-/// The draft's attachment chips, one input-box row: each placeholder's
-/// label (`Image #1`) as a quiet pill, plus the file name when it is a
-/// real file — clipboard pastes land in `.tmpXXXX.png`, which names nothing.
+/// The draft's attachment chips, one input-box row: a kind pill
+/// (`Image`/`File`) plus the file's real name — repeating the `[Image #n]`
+/// placeholder would just say what the draft already says. Clipboard
+/// pastes land in `clipboard-XXXXXX.png`, which is a name too.
 fn attachment_chips(attachments: &[(String, std::path::PathBuf)]) -> Line<'static> {
     let t = crate::theme::theme();
     let mut spans = vec![Span::styled("   ", Style::default().bg(t.surface_bg))];
@@ -66,21 +67,23 @@ fn attachment_chips(attachments: &[(String, std::path::PathBuf)]) -> Line<'stati
         if i > 0 {
             spans.push(Span::styled("  ", Style::default().bg(t.surface_bg)));
         }
-        let label = ph.trim_start_matches('[').trim_end_matches(']');
+        let kind = ph
+            .trim_start_matches('[')
+            .split(' ')
+            .next()
+            .unwrap_or("File");
         spans.push(Span::styled(
-            format!(" {label} "),
+            format!(" {kind} "),
             Style::default().fg(t.text_bright).bg(t.input_bg),
         ));
-        if let Some(name) = path
+        let name = path
             .file_name()
             .and_then(|n| n.to_str())
-            .filter(|n| !n.starts_with(".tmp"))
-        {
-            spans.push(Span::styled(
-                format!(" {name}"),
-                Style::default().fg(t.text_muted).bg(t.surface_bg),
-            ));
-        }
+            .unwrap_or("clipboard");
+        spans.push(Span::styled(
+            format!(" {name}"),
+            Style::default().fg(t.text_muted).bg(t.surface_bg),
+        ));
     }
     Line::from(spans)
 }

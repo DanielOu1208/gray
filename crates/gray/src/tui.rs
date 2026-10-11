@@ -124,16 +124,11 @@ pub fn print_wrapped(text: &str, pad: usize) {
 }
 
 pub const LOGO: &str = include_str!("../assets/logo.txt");
-pub const LOGO_SMALL: &str = include_str!("../assets/logo_small.txt");
 
-/// The gray logo (icon) as plain indented lines sized to the terminal —
-/// for callers that insert it into scrollback rather than printing raw.
+/// The gray logo (icon) as plain indented lines — for callers that
+/// insert it into scrollback rather than printing raw.
 pub fn logo_lines() -> Vec<String> {
-    let width = crossterm::terminal::size()
-        .map(|(c, _)| c as usize)
-        .unwrap_or(80);
-    let logo = if width < 40 { LOGO_SMALL } else { LOGO };
-    logo.lines()
+    LOGO.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| format!("  {l}"))
         .collect()

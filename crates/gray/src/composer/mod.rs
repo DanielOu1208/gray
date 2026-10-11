@@ -635,7 +635,23 @@ pub(crate) fn home_column(w: usize) -> (usize, usize) {
 /// notice under it, and the status bar where the corner row was. Deliberately not the graychan art —
 /// that is `/hehe` only, so the startup screen is the logo and `/hehe`
 /// again puts the logo back.
-pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
+/// The bloom's first-frame radius — the SVG's gem pops in at scale 0.55
+/// and the facet lines chase out from there (`assets/logo-animated.svg`).
+const INTRO_BASE_R: f32 = 0.55;
+/// Leading-edge glow, as a radius fraction: cells the front just reached
+/// paint full-bright for a frame before settling into the gradient.
+const INTRO_FRONT_W: f32 = 0.16;
+/// Reveal where the `gray`/version pair joins.
+const INTRO_TEXT_AT: f32 = 0.9;
+/// ~0.7s: long enough to read, short enough to not tax every launch.
+const INTRO_FRAMES: usize = 20;
+const INTRO_FRAME_MS: u64 = 36;
+
+/// The welcome body at `reveal` of the radial bloom — `1.0` is the
+/// finished banner. The mark is one glyph field, so the SVG's
+/// grow-from-centre becomes a radius reveal about its middle: cells past
+/// the front render as spaces, cells on the front paint full-bright.
+fn welcome_body_lines(w: usize, reveal: f32) -> Vec<Line<'static>> {
     let theme = crate::theme::theme();
     let version = format!("v{}", env!("CARGO_PKG_VERSION"));
 
@@ -665,6 +681,19 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
         .unwrap_or(0);
     let l_cols = (max_logo_w as f32).max(1.0);
     let logo_pad = x + col_w.saturating_sub(max_logo_w) / 2;
+    // The bloom's centre and far edge, in cell units (a cell is twice as
+    // tall as it is wide, so the row axis counts double).
+    let cy = (l_rows - 1.0) / 2.0;
+    let cx = (max_logo_w as f32 - 1.0) / 2.0;
+    let cell_d = |row: usize, col: usize| {
+        ((col as f32 - cx).powi(2) + ((row as f32 - cy) * 2.0).powi(2)).sqrt()
+    };
+    let mut max_d = 1.0f32;
+    for (row, line) in logo_raw.iter().enumerate() {
+        for (col, _) in line.trim().chars().enumerate() {
+            max_d = max_d.max(cell_d(row, col));
+        }
+    }
     for (row, line) in logo_raw.iter().enumerate() {
         let trimmed = line.trim();
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -672,9 +701,18 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
             spans.push(Span::raw(" ".repeat(logo_pad)));
         }
         for (col, ch) in trimmed.chars().enumerate() {
-            let diag = (col as f32 + (l_rows - 1.0 - row as f32)) / (l_cols + l_rows);
-            let t = (0.15 + 0.85 * diag).clamp(0.0, 1.0);
-            let color = crate::tui::blend_color(base, hilite, t);
+            let d = cell_d(row, col) / max_d;
+            if d > reveal {
+                spans.push(Span::raw(" "));
+                continue;
+            }
+            let color = if reveal < 1.0 && d > reveal - INTRO_FRONT_W {
+                hilite
+            } else {
+                let diag = (col as f32 + (l_rows - 1.0 - row as f32)) / (l_cols + l_rows);
+                let t = (0.15 + 0.85 * diag).clamp(0.0, 1.0);
+                crate::tui::blend_color(base, hilite, t)
+            };
             spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
         body.push(Line::from(spans));
@@ -682,25 +720,36 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
     body.push(Line::from(""));
 
     // `gray` bold bright, then the muted version — devin's title pair.
-    body.push(centered(
-        vec![Span::styled(
-            "gray",
-            Style::default().bold().fg(theme.text_bright),
-        )],
-        4,
-    ));
-    body.push(centered(
-        vec![Span::styled(
-            version.clone(),
-            Style::default().fg(theme.text_muted),
-        )],
-        display_width(&version),
-    ));
+    // They join once the mark has landed; before that their rows stay
+    // blank so the body's line count never moves.
+    if reveal >= INTRO_TEXT_AT {
+        body.push(centered(
+            vec![Span::styled(
+                "gray",
+                Style::default().bold().fg(theme.text_bright),
+            )],
+            4,
+        ));
+        body.push(centered(
+            vec![Span::styled(
+                version.clone(),
+                Style::default().fg(theme.text_muted),
+            )],
+            display_width(&version),
+        ));
+    } else {
+        body.push(Line::from(""));
+        body.push(Line::from(""));
+    }
     body.push(Line::from(""));
+    body
+}
 
-    // Vertical centering: the block is this banner plus the composer's
-    // home band; the band's spacer rows take the other half of the free
-    // rows.
+/// `top` blank rows over the body: the block is this banner plus the
+/// composer's home band; the band's spacer rows take the other half of
+/// the free rows. `pub(crate)` so the reveal contract is testable.
+pub(crate) fn welcome_lines_at(w: usize, reveal: f32) -> Vec<Line<'static>> {
+    let body = welcome_body_lines(w, reveal);
     let rows = crossterm::terminal::size()
         .map(|(_, r)| r as usize)
         .unwrap_or(0);
@@ -711,6 +760,67 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
     }
     welcome_lines.extend(body);
     welcome_lines
+}
+
+pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
+    welcome_lines_at(w, 1.0)
+}
+
+/// The startup bloom: the welcome mark grows out from its centre in the
+/// rows the banner insert is about to fill, so the animation *becomes*
+/// the banner — the insert repaints the same cells, which is what pushes
+/// them into scrollback. Skipped under `NO_COLOR` or when the block can't
+/// fit; either way the caller still runs the plain insert.
+fn play_logo_intro(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return;
+    }
+    // The banner lands `overflow` rows above the band's anchor: that's how
+    // much the insert and the first band draw would scroll past the
+    // bottom. Scrolling first keeps the painted rows final — run the
+    // insert first and the frames would scroll into scrollback as a ghost
+    // copy above the real banner.
+    let y0 = terminal.viewport_area.y as usize;
+    let overflow = (y0 + welcome_h + draw::home_band_h(w)).saturating_sub(h);
+    if overflow > y0 {
+        return;
+    }
+    let start = y0 - overflow;
+    if overflow > 0 {
+        let mut out = std::io::stdout().lock();
+        let _ = write!(out, "\x1b[{h};1H{}", "\n".repeat(overflow));
+        let _ = out.flush();
+    }
+    terminal.set_viewport_area(ratatui::layout::Rect::new(
+        0,
+        start as u16,
+        w as u16,
+        welcome_h as u16,
+    ));
+    for f in 0..INTRO_FRAMES {
+        let p = f as f32 / (INTRO_FRAMES - 1) as f32;
+        // expo-out, the SVG's cubic-bezier(0.16, 1, 0.3, 1).
+        let ease = if p >= 1.0 {
+            1.0
+        } else {
+            1.0 - 2f32.powf(-10.0 * p)
+        };
+        let reveal = INTRO_BASE_R + (1.0 - INTRO_BASE_R) * ease;
+        let _ = terminal.draw(|frame| {
+            let area = frame.area();
+            frame.render_widget(Paragraph::new(welcome_lines_at(w, reveal)), area);
+        });
+        // poll() is the frame clock *and* the skip: a queued key cuts to
+        // the finished banner instead of being eaten.
+        if f + 1 < INTRO_FRAMES
+            && crossterm::event::poll(Duration::from_millis(INTRO_FRAME_MS)).unwrap_or(false)
+        {
+            break;
+        }
+    }
+    // Collapse the band back to a zero-height anchor at the banner's top
+    // row so the insert draws over the last frame rather than shifting it.
+    terminal.set_viewport_area(ratatui::layout::Rect::new(0, start as u16, w as u16, 0));
 }
 
 impl Tui {
@@ -738,6 +848,12 @@ impl Tui {
         // Print welcome logo into scrollback once at startup
         let welcome_lines = build_welcome_lines(cols as usize);
         let welcome_h = welcome_lines.len() as u16;
+        play_logo_intro(
+            &mut terminal,
+            cols as usize,
+            rows as usize,
+            welcome_h as usize,
+        );
         let _ = terminal.insert_before(welcome_h, |buf| {
             Paragraph::new(welcome_lines.clone()).render(buf.area, buf);
         });
