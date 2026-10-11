@@ -577,3 +577,73 @@ fn write_title_rejects_a_path_like_id() {
         crate::session_store::write_title(dir.path(), &SessionId::new("../evil"), "x").is_err()
     );
 }
+
+// ── take over ──
+
+#[test]
+fn take_over_a_free_lock_is_a_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path().to_path_buf());
+    let id = SessionId::new("takeover-free");
+    // Lock already free: nothing to take, no pid needed.
+    assert!(try_take_over(&store, &id, None).is_ok());
+    assert!(try_take_over(&store, &id, Some(9_999_999)).is_ok());
+}
+
+#[tokio::test]
+async fn take_over_our_own_pid_never_signals() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path().to_path_buf());
+    let id = seed(&store, "takeover-self", dir.path().to_path_buf(), &["hi"]).await;
+    let _guard = store.acquire_open(&id).await.unwrap();
+    assert!(store.open_lock_held_sync(&id));
+    // Held by us and the recorded holder is this process: pass through
+    // without a signal — SIGTERM to self would kill the REPL.
+    assert_eq!(store.open_holder_pid(&id), Some(std::process::id()));
+    assert!(try_take_over(&store, &id, Some(std::process::id())).is_ok());
+}
+
+#[tokio::test]
+async fn take_over_without_a_pid_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path().to_path_buf());
+    let id = seed(&store, "takeover-nopid", dir.path().to_path_buf(), &["hi"]).await;
+    let _guard = store.acquire_open(&id).await.unwrap();
+    let err = try_take_over(&store, &id, None).unwrap_err();
+    assert!(err.contains("unreadable"), "{err}");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn take_over_sigterm_frees_a_foreign_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path().to_path_buf());
+    let id = seed(
+        &store,
+        "takeover-foreign",
+        dir.path().to_path_buf(),
+        &["hi"],
+    )
+    .await;
+    let open_path = dir.path().join(format!("{}.open", id.as_str()));
+    // One bash holds the lock on inherited fd 9 and execs `sleep` under
+    // the argv0 "gray", so the pid is both holder and a /proc gray.
+    let mut child = std::process::Command::new("bash")
+        .arg("-c")
+        .arg("exec 9>$1; flock -n 9; exec -a gray sleep 60")
+        .arg("_")
+        .arg(&open_path)
+        .spawn()
+        .unwrap();
+    for _ in 0..200 {
+        if store.open_lock_held_sync(&id) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(store.open_lock_held_sync(&id), "flock holder never claimed");
+    std::fs::write(&open_path, child.id().to_string()).unwrap();
+    try_take_over(&store, &id, Some(child.id())).unwrap();
+    assert!(!store.open_lock_held_sync(&id));
+    let _ = child.wait();
+}
