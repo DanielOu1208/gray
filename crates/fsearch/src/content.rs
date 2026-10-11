@@ -3145,7 +3145,8 @@ fn defined_at(hay: &[u8], p: usize, len: usize) -> bool {
 /// The first place at or after `from` where `hay` holds `needle` (lower
 /// case) in either case; `pair` are two positions of rare bytes in it, the
 /// ones checked first.
-fn find_folded(hay: &[u8], from: usize, needle: &[u8], _pair: (usize, usize)) -> Option<usize> {
+fn find_folded(hay: &[u8], from: usize, needle: &[u8], pair: (usize, usize)) -> Option<usize> {
+    let _ = pair;
     let k = needle.len();
     let last = hay.len().checked_sub(k)?;
     let at = |c: usize| {
@@ -3154,7 +3155,8 @@ fn find_folded(hay: &[u8], from: usize, needle: &[u8], _pair: (usize, usize)) ->
             .zip(needle)
             .all(|(&x, &y)| fold(x) == y)
     };
-    let i = from;
+    #[allow(unused_mut)]
+    let mut i = from;
     #[cfg(target_arch = "aarch64")]
     // Safety: every load reads 16 bytes at i + pair.1 at most, and the loop
     // keeps i + 16 <= last + 1, so they end by hay.len().

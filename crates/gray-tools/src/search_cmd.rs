@@ -65,6 +65,7 @@ pub async fn find(args: &SearchArgs, ctx: &ToolContext) -> String {
 pub(crate) async fn find_on(args: &SearchArgs, ctx: &ToolContext, b: &IndexBackend) -> String {
     match b {
         IndexBackend::Fff(p) => find_with_pool(args, ctx, p.clone()).await,
+        #[cfg(unix)]
         IndexBackend::Fs(p) => find_with_fsearch(args, ctx, p.clone()).await,
         IndexBackend::Off => find_call(args, ctx).await,
     }
@@ -88,6 +89,7 @@ async fn find_call(args: &SearchArgs, ctx: &ToolContext) -> String {
 /// `fsearch` (default), `fff`, or `off` — the fallback lanes always answer.
 pub enum IndexBackend {
     Fff(std::sync::Arc<crate::search_index::SearchPool>),
+    #[cfg(unix)]
     Fs(std::sync::Arc<crate::search_index_fs::FsearchPool>),
     Off,
 }
@@ -99,6 +101,7 @@ fn global_index() -> IndexBackend {
             || match backend_kind(std::env::var("GRAY_SEARCH_INDEX").ok().as_deref()) {
                 BackendKind::Fff => IndexBackend::Fff(crate::search_index::global_pool().clone()),
                 BackendKind::Off => IndexBackend::Off,
+                #[cfg(unix)]
                 BackendKind::Fs => {
                     IndexBackend::Fs(crate::search_index_fs::global_fs_pool().clone())
                 }
@@ -109,10 +112,13 @@ fn global_index() -> IndexBackend {
 
 /// Which resident index `GRAY_SEARCH_INDEX` selects. Anything unrecognized
 /// is the default — fsearch — so a typo never silently disables indexing.
+/// fsearch is a unix daemon crate; elsewhere the default falls back to the
+/// in-process `fff` pool.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum BackendKind {
     Fff,
+    #[cfg(unix)]
     Fs,
     Off,
 }
@@ -121,7 +127,10 @@ pub(crate) fn backend_kind(v: Option<&str>) -> BackendKind {
     match v {
         Some("fff") => BackendKind::Fff,
         Some("off") | Some("none") => BackendKind::Off,
+        #[cfg(unix)]
         _ => BackendKind::Fs,
+        #[cfg(not(unix))]
+        _ => BackendKind::Fff,
     }
 }
 
@@ -129,6 +138,7 @@ impl Clone for IndexBackend {
     fn clone(&self) -> Self {
         match self {
             Self::Fff(p) => Self::Fff(p.clone()),
+            #[cfg(unix)]
             Self::Fs(p) => Self::Fs(p.clone()),
             Self::Off => Self::Off,
         }
@@ -137,6 +147,7 @@ impl Clone for IndexBackend {
 
 /// [`find`] against the fsearch whole-disk index. Same warm/fallback shape
 /// as `find_with_pool` — the lanes only differ in which index answers.
+#[cfg(unix)]
 pub async fn find_with_fsearch(
     args: &SearchArgs,
     ctx: &ToolContext,
@@ -218,12 +229,14 @@ pub async fn grep(args: &SearchArgs, ctx: &ToolContext) -> String {
 pub(crate) async fn grep_on(args: &SearchArgs, ctx: &ToolContext, b: &IndexBackend) -> String {
     match b {
         IndexBackend::Fff(p) => grep_with_pool(args, ctx, p.clone()).await,
+        #[cfg(unix)]
         IndexBackend::Fs(p) => grep_with_fsearch(args, ctx, p.clone()).await,
         IndexBackend::Off => grep_call(args, ctx).await,
     }
 }
 
 /// [`grep`] against the fsearch whole-disk index.
+#[cfg(unix)]
 pub async fn grep_with_fsearch(
     args: &SearchArgs,
     ctx: &ToolContext,
