@@ -130,6 +130,17 @@ pub enum RunStatus {
     DeliveryFailed,
 }
 
+/// Bounded recurrence (hermes `repeat`): `times: None` runs forever;
+/// `completed` counts finished fires and retires the job once it reaches
+/// `times`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Repeat {
+    #[serde(default)]
+    pub times: Option<u32>,
+    #[serde(default)]
+    pub completed: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CronJob {
     pub id: String,
@@ -167,6 +178,8 @@ pub struct CronJob {
     /// No script, no skills, no model turn, no tools.
     #[serde(default)]
     pub reminder: bool,
+    #[serde(default)]
+    pub repeat: Repeat,
 }
 
 fn default_enabled() -> bool {
@@ -543,6 +556,7 @@ impl CronStore {
             script,
             fire_claim: None,
             reminder,
+            repeat: Repeat::default(),
         };
         let id = job.id.clone();
         with_jobs_lock(&self.lock_path(), || {
@@ -711,7 +725,7 @@ impl CronStore {
             };
             if job.state == JobState::AwaitingApproval {
                 anyhow::bail!(
-                    "job {:?} is awaiting approval; the user runs `gray cron approve {}`",
+                    "job {:?} is awaiting approval; approve it in /cron (space) or with `gray cron approve {}`",
                     job.name,
                     job.id
                 );
@@ -834,10 +848,46 @@ impl CronStore {
                 RunStatus::DeliveryFailed => job.last_delivery_error = err.map(str::to_string),
                 _ => job.last_error = err.map(str::to_string),
             }
-            if matches!(job.schedule, Schedule::Once { .. }) {
+            job.repeat.completed = job.repeat.completed.saturating_add(1);
+            let exhausted = job.repeat.times.is_some_and(|t| job.repeat.completed >= t);
+            if exhausted || matches!(job.schedule, Schedule::Once { .. }) {
                 job.state = JobState::Done;
             }
             self.save_jobs(&mut raw, &jobs)
+        })
+    }
+
+    /// Edit a job in place under the lock. `f` may reject the change; the
+    /// result is re-validated like a new job, and a schedule edit on an
+    /// active job recomputes `next_run_at`. `Ok(false)` when unknown.
+    pub fn update(
+        &self,
+        id_or_name: &str,
+        f: impl FnOnce(&mut CronJob) -> anyhow::Result<()>,
+    ) -> anyhow::Result<bool> {
+        with_jobs_lock(&self.lock_path(), || {
+            let mut raw = self.load_raw()?;
+            let mut jobs = Self::parse_jobs(&raw);
+            let Some(job) = jobs
+                .iter_mut()
+                .find(|j| j.id == id_or_name || j.name == id_or_name)
+            else {
+                return Ok(false);
+            };
+            let before = job.schedule.clone();
+            f(job)?;
+            validate_new_job(
+                &job.name,
+                &job.prompt,
+                job.workdir.as_deref(),
+                &job.skills,
+                job.script.as_deref(),
+            )?;
+            if job.schedule != before && job.state == JobState::Active {
+                job.next_run_at = next_run(now_secs(), &job.schedule);
+            }
+            self.save_jobs(&mut raw, &jobs)?;
+            Ok(true)
         })
     }
 

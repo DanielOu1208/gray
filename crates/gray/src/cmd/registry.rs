@@ -10,7 +10,7 @@ use crate::repl::REGISTRY;
 /// command takes no arguments.
 fn args_hint(name: &str) -> Option<&'static str> {
     match name {
-        "model" => Some("provider/model-id [slot=option ...] (empty opens the picker)"),
+        "models" => Some("provider/model-id [slot=option ...] (empty opens the picker)"),
         "sessions" => Some("[id|--last|--all]"),
         "new" => Some("[first message]"),
         "compact" => Some("[instructions]"),

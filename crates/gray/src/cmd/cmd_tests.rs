@@ -107,15 +107,10 @@ fn list_shape_matches_contract() {
     let commands = list["commands"].as_array().expect("commands array");
     assert_eq!(commands.len(), crate::repl::REGISTRY.len());
     let by_name = |n: &str| commands.iter().find(|c| c["name"] == n).expect(n);
-    let model = by_name("model");
+    let model = by_name("models");
     assert_eq!(model["surface"], "interactive");
     assert_eq!(model["scope"], "conversation");
-    assert!(
-        model["aliases"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("models"))
-    );
+    assert!(model["aliases"].as_array().unwrap().is_empty());
     assert_eq!(model["args"][0]["name"], "args");
     assert_eq!(model["args"][0]["required"], false);
     assert_eq!(by_name("help")["surface"], "text");
@@ -195,8 +190,7 @@ fn model_picker_doc_from_draft() {
         fast: false,
         parts: Default::default(),
     };
-    let v =
-        serde_json::to_value(model_picker_doc(&draft, &models, &BTreeMap::new())).unwrap();
+    let v = serde_json::to_value(model_picker_doc(&draft, &models, &BTreeMap::new())).unwrap();
     assert_eq!(v["document_id"], "model-picker");
     assert_eq!(v["lifecycle"], "editable");
     assert_eq!(
@@ -391,7 +385,7 @@ async fn run_rejects_local_and_unknown() {
         .await
         .unwrap_err();
     assert_eq!(err.0, "unknown_command");
-    for name in ["theme", "quit", "context", "undo", "connect", "gateway"] {
+    for name in ["theme", "quit", "context", "undo", "gateway"] {
         let err = run_command(&mut config, home.path(), name, &[])
             .await
             .unwrap_err();
@@ -422,7 +416,7 @@ async fn run_rejects_local_and_unknown() {
 async fn run_model_direct_set() {
     let home = tempfile::tempdir().unwrap();
     let mut config = test_config();
-    let res = run_command(&mut config, home.path(), "model", &["m1".to_string()])
+    let res = run_command(&mut config, home.path(), "models", &["m1".to_string()])
         .await
         .unwrap();
     let CommandResult::Text { text, close } = res else {
@@ -540,7 +534,10 @@ fn model_picker_fallback_lists_slot_options() {
     assert!(text.contains("1. Opus 5.5 (opus)"), "{text}");
     assert!(text.contains("sidekick:"), "{text}");
     assert!(text.contains("2. Beta (b)"), "{text}");
-    assert!(text.contains("model <id> [lead=<opt>] [sidekick=<opt>]"), "{text}");
+    assert!(
+        text.contains("model <id> [lead=<opt>] [sidekick=<opt>]"),
+        "{text}"
+    );
 }
 
 #[tokio::test]
@@ -698,7 +695,7 @@ async fn run_model_direct_composite_args() {
     let res = run_command(
         &mut config,
         home.path(),
-        "model",
+        "models",
         &[
             "fusion-x".to_string(),
             "lead=swe".to_string(),
@@ -723,7 +720,7 @@ async fn run_model_direct_composite_args() {
     let res = run_command(
         &mut config,
         home.path(),
-        "model",
+        "models",
         &["fusion-x".to_string(), "lead=opus".to_string()],
     )
     .await
@@ -746,7 +743,7 @@ async fn run_model_direct_composite_args() {
         (vec!["fusion-x", "dangling"], "bad token 'dangling'"),
     ] {
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        let err = run_command(&mut config, home.path(), "model", &args)
+        let err = run_command(&mut config, home.path(), "models", &args)
             .await
             .unwrap_err();
         assert_eq!(err.0, "invalid_args");
@@ -764,9 +761,14 @@ async fn run_model_direct_composite_bare_lands_default_parts() {
         shape.variants.clone(),
         shape.slots.clone(),
     );
-    let res = run_command(&mut config, home.path(), "model", &["fusion-x".to_string()])
-        .await
-        .unwrap();
+    let res = run_command(
+        &mut config,
+        home.path(),
+        "models",
+        &["fusion-x".to_string()],
+    )
+    .await
+    .unwrap();
     let CommandResult::Text { text, close } = res else {
         panic!("expected text result");
     };
@@ -779,4 +781,3 @@ async fn run_model_direct_composite_bare_lands_default_parts() {
     let saved = crate::setup::load_saved_config_at(&home.path().join("config.json"));
     assert_eq!(saved.model_parts["lead"], "opus");
 }
-

@@ -101,9 +101,7 @@ fn cross_product_variants_with_qualified_sidekicks() {
 #[test]
 fn a_native_composite_row_blocks_synthesis() {
     let own = vec![pair("a", "A"), composite("fusion")];
-    assert!(
-        synthesize_row("http://x.test/v1", &own, &BTreeMap::new()).is_none()
-    );
+    assert!(synthesize_row("http://x.test/v1", &own, &BTreeMap::new()).is_none());
     // Any composite does — not just one named `fusion`.
     let own = vec![composite("trio"), pair("a", "A")];
     assert!(synthesize_row("http://x.test/v1", &own, &BTreeMap::new()).is_none());
@@ -146,8 +144,9 @@ fn the_footer_label_is_fusion_lead_effort_times_sidekick() {
         ("lead".to_string(), "opus".to_string()),
         ("sidekick".to_string(), "custom-lead-test:haiku".to_string()),
     ]);
-    let segs = crate::setup::variants::composite_label_parts(&shape, "Fusion", &parts, Some("high"))
-        .unwrap();
+    let segs =
+        crate::setup::variants::composite_label_parts(&shape, "Fusion", &parts, Some("high"))
+            .unwrap();
     let flat: String = segs.iter().map(|(t, _)| t.clone()).collect();
     assert_eq!(flat, "Fusion · Opus 5 High × Haiku");
 }
@@ -214,11 +213,7 @@ fn an_http_sidekick_resolves_to_base_url_and_stored_key() {
         "provider_models.json",
         r#"{"http://sk.test/v1": [["sk-1", "Side"]], "http://lead.test/v1": [["opus", "Opus"]]}"#,
     );
-    write(
-        dir.path(),
-        "auth.json",
-        r#"{"custom:sk.test": "KEY42"}"#,
-    );
+    write(dir.path(), "auth.json", r#"{"custom:sk.test": "KEY42"}"#);
     let spec = resolve_sidekick(dir.path(), "custom-sk-test:sk-1").unwrap();
     assert_eq!(spec.model, "sk-1");
     let env: BTreeMap<&str, &str> = spec
@@ -292,18 +287,26 @@ fn handoff_exists_exactly_while_a_local_fusion_is_selected() {
     assert_eq!(local_sidekick().as_deref(), Some("custom-sk-test:sk-1"));
     let plugin = FusionPlugin::default();
     let tools = plugin.tools();
-    assert_eq!(tools.len(), 1);
+    // Both wire aliases resolve to the same tool: `handoff` is the
+    // canonical name, `native__handoff` the one Devin-trained leads emit.
+    assert_eq!(tools.len(), 2);
     assert_eq!(tools[0].def().name, "handoff");
+    assert_eq!(tools[1].def().name, "native__handoff");
 
-    // A native (bare-id) parts selection injects nothing.
+    // A native (bare-id) parts selection resolves against the lead's own
+    // provider — the bare option id qualified under its token — and gets
+    // the tool too: no provider runs a client-side sidekick for you.
     write(
         dir.path(),
         "config.json",
         r#"{"model": "fusion", "base_url": "http://lead.test/v1",
             "model_parts": {"lead": "opus", "sidekick": "haiku"}}"#,
     );
-    assert!(local_sidekick().is_none());
-    assert!(plugin.tools().is_empty());
+    assert_eq!(
+        local_sidekick().as_deref(),
+        Some(format!("{}:haiku", provider_token("http://lead.test/v1")).as_str())
+    );
+    assert_eq!(plugin.tools().len(), 2);
 
     // Nor inside a sidekick's own process.
     let _env2 = EnvGuard::apply(&[(ENV_SIDEKICK, Some("1"))]);
@@ -330,6 +333,7 @@ fn fake_gray(dir: &Path, name: &str, body: &str) -> PathBuf {
 
 fn tool(bin: PathBuf, home: &Path, qualified: &str) -> HandoffTool {
     HandoffTool {
+        name: "handoff",
         qualified: qualified.to_string(),
         home: home.to_path_buf(),
         bin,
@@ -359,18 +363,25 @@ async fn first_call_pools_the_session_and_later_calls_resume_it() {
     let dir = tempfile::tempdir().unwrap();
     let _env = EnvGuard::apply(&[("GRAY_HOME", Some(dir.path().to_str().unwrap()))]);
     provider_file(dir.path());
+    // The fake can't echo `$*` back in JSON (the contract carries raw
+    // newlines), so it logs args to a file the test inspects instead.
     let bin = fake_gray(
         dir.path(),
         "gray-sess",
-        r#"printf '%s\n' "{\"type\":\"result\",\"text\":\"args: $*\",\"session_id\":\"sid-9\"}"
+        r#"printf '%s' "$*" >> "$(dirname "$0")/args.txt"
+printf '%s\n' '{"type":"result","text":"ok","session_id":"sid-9"}'
 "#,
     );
-    let t = tool(bin, dir.path(), "custom-sk-test:sk-1");
+    let t = tool(bin, dir.path(), "custom-sk-test:haiku");
     let args = serde_json::json!({"task": "do the thing"});
     let out = t.execute(&ctx(dir.path()), args.clone()).await;
     assert!(!out.is_error, "{}", out.content);
-    assert!(out.content.contains("--model sk-1"), "{}", out.content);
-    assert!(!out.content.contains("--session"), "{}", out.content);
+    let args_log = || std::fs::read_to_string(dir.path().join("args.txt")).unwrap();
+    let logged = args_log();
+    assert!(logged.contains("--model haiku"), "{logged}");
+    assert!(!logged.contains("--session"), "{logged}");
+    // A fresh session opens with the sidekick contract once.
+    assert_eq!(logged.matches("<sidekick_contract>").count(), 1);
     // The reported session id is pooled for next time.
     let files: Vec<_> = std::fs::read_dir(dir.path().join("fusion"))
         .unwrap()
@@ -380,10 +391,12 @@ async fn first_call_pools_the_session_and_later_calls_resume_it() {
         std::fs::read_to_string(files[0].as_ref().unwrap().path()).unwrap(),
         "sid-9\n"
     );
-    // Second call resumes it.
+    // Second call resumes it — and does not re-brief the contract.
     let out = t.execute(&ctx(dir.path()), args).await;
     assert!(!out.is_error, "{}", out.content);
-    assert!(out.content.contains("--session sid-9"), "{}", out.content);
+    let logged = args_log();
+    assert!(logged.contains("--session sid-9"), "{logged}");
+    assert_eq!(logged.matches("<sidekick_contract>").count(), 1);
 }
 
 #[tokio::test]

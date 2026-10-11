@@ -89,7 +89,7 @@ fn forget_provider_at(
     Ok(name)
 }
 
-fn forget_provider(item: &ConnectItem, config: &mut Config) -> anyhow::Result<String> {
+pub(crate) fn forget_provider(item: &ConnectItem, config: &mut Config) -> anyhow::Result<String> {
     forget_provider_at(
         item,
         config,
@@ -369,15 +369,15 @@ fn connect_modal(
                 } else if matches!(item.auth, ConnectAuth::ApiKey) {
                     // Reached after the provider rejected the saved key: ask
                     // for a new one, since re-saving the old one can't help.
+                    let existing_key = load_auth_keys().get(&item.id).cloned();
                     state = ModalState::EnteringKey {
                         item: item.clone(),
                         key_buf: String::new(),
-                        existing_key: load_auth_keys().get(&item.id).cloned(),
+                        status_msg: existing_key.is_some().then(|| {
+                            format!("{} rejected the saved key — paste a new one", item.name)
+                        }),
+                        existing_key,
                         env_var: None,
-                        status_msg: Some(format!(
-                            "{} rejected the saved key — paste a new one",
-                            item.name
-                        )),
                     };
                 }
             }

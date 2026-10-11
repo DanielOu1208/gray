@@ -181,3 +181,36 @@ fn desktop_bus_replaces_only_a_dead_bus() {
     std::fs::remove_file(&sock).unwrap();
     assert_eq!(desktop_bus(Some(dead), home.path()), None);
 }
+
+/// The flat `thinking_effort` is whichever session saved last; a target
+/// with its own `effort_memory` entry gets that level, not the stranger's.
+#[test]
+fn remembered_effort_prefers_the_target_memory_over_the_flat_level() {
+    let mut saved = crate::setup::SavedConfig::default();
+    saved.thinking_effort = Some("high".to_string());
+    saved.effort_memory.insert(
+        crate::setup::effort_memory_key("devin-sub", "https://127.0.0.1:1/", "swe-2"),
+        "max".to_string(),
+    );
+    assert_eq!(
+        remembered_effort(&saved.effort_memory, "devin-sub", "https://127.0.0.1:1/", Some("swe-2")).as_deref(),
+        Some("max")
+    );
+    // No entry for this model (or no model at all): nothing to prefer, the
+    // caller falls back to the flat level.
+    assert_eq!(
+        remembered_effort(&saved.effort_memory, "devin-sub", "https://127.0.0.1:1/", Some("fusion")),
+        None
+    );
+    assert_eq!(remembered_effort(&saved.effort_memory, "devin-sub", "https://127.0.0.1:1/", None), None);
+    assert_eq!(remembered_effort(&saved.effort_memory, "devin-sub", "https://127.0.0.1:1/", Some("  ")), None);
+    // A URL-keyed connection (no provider id) resolves through the same key.
+    saved.effort_memory.insert(
+        crate::setup::effort_memory_key("", "https://kenari.id/v1", "claude-sonnet-5-5"),
+        "medium".to_string(),
+    );
+    assert_eq!(
+        remembered_effort(&saved.effort_memory, "", "https://kenari.id/v1/", Some("claude-sonnet-5-5")).as_deref(),
+        Some("medium")
+    );
+}

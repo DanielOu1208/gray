@@ -100,62 +100,16 @@ impl ProviderRegistry {
     /// Rebuild the provider cache from installed sidecar manifests. A
     /// plugin without a cached manifest is command-only and contributes no
     /// providers, so this never needs to spawn a sidecar.
-    /// Rebuild the provider cache from installed sidecar manifests. A
-    /// plugin without a cached manifest is command-only and contributes no
-    /// providers, so this never needs to spawn a sidecar.
     pub fn refresh(home: &Path) -> anyhow::Result<()> {
         let lock = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(home))?;
         let path = cache_path(home);
         let mut cache = ProviderCache::load(&path);
         let mut seen = std::collections::BTreeSet::new();
         for (name, entry) in &lock.plugins {
-            let manifest_path = home.join("plugins").join(format!("{name}-manifest.json"));
-            let Ok(text) = std::fs::read_to_string(&manifest_path) else {
-                continue;
-            };
-            let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
-                continue;
-            };
-            // The manifest's own `name` may differ from the lock key: an
-            // index install adopts the CLI manifest of a plugin published
-            // under a different registry key (the `-sub` plugins). The
-            // `<key>-manifest.json` filename is what binds it to the entry.
-            let raw_providers = manifest
-                .get("providers")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let granted = entry
-                .granted_capabilities
-                .iter()
-                .any(|capability| capability == PROVIDER_CAPABILITY);
-            let mut providers = Vec::new();
-            let mut errors = Vec::new();
-            if !raw_providers.is_empty() && granted {
-                match serde_json::from_value::<Vec<ProviderDecl>>(serde_json::Value::Array(
-                    raw_providers.clone(),
-                )) {
-                    Ok(declared) => providers = declared,
-                    Err(_) => {
-                        providers.clear();
-                        errors.push("provider declarations are invalid".to_string());
-                    }
-                }
-            } else if !raw_providers.is_empty() {
-                errors.push(
-                    "provider capability not granted; provider declarations hidden".to_string(),
-                );
-            }
-            let cached = CachedProviderPlugin {
-                identity: lock_identity(name, entry),
-                enabled: entry.enabled,
-                manifest_sha256: lock_identity(name, entry),
-                providers,
-                errors,
-                argv: Vec::new(),
-            };
             seen.insert(name.clone());
-            cache.plugins.insert(name.clone(), cached);
+            cache
+                .plugins
+                .insert(name.clone(), cached_from_manifest(home, name, entry));
         }
         cache.plugins.retain(|name, _| seen.contains(name));
         cache.save(&path)?;
@@ -269,12 +223,83 @@ fn entry_name(home: &Path, entry: &LockEntry) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("provider plugin entry is not present in the sidecar lock"))
 }
 
+/// A lock entry's cache row derived from its on-disk manifest — the one
+/// place rows come from, shared by `refresh()` and the read-side heal in
+/// `refresh_installed_argv`. An absent or unparseable manifest yields an
+/// empty provider set: the lock entry still exists, it just contributes
+/// no providers until the manifest lands.
+fn cached_from_manifest(home: &Path, name: &str, entry: &LockEntry) -> CachedProviderPlugin {
+    let mut cached = CachedProviderPlugin {
+        identity: lock_identity(name, entry),
+        enabled: entry.enabled,
+        manifest_sha256: lock_identity(name, entry),
+        ..Default::default()
+    };
+    let manifest_path = home.join("plugins").join(format!("{name}-manifest.json"));
+    let Ok(text) = std::fs::read_to_string(&manifest_path) else {
+        return cached;
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return cached;
+    };
+    // The manifest's own `name` may differ from the lock key: an
+    // index install adopts the CLI manifest of a plugin published
+    // under a different registry key (the `-sub` plugins). The
+    // `<key>-manifest.json` filename is what binds it to the entry.
+    let raw_providers = manifest
+        .get("providers")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let granted = entry
+        .granted_capabilities
+        .iter()
+        .any(|capability| capability == PROVIDER_CAPABILITY);
+    if !raw_providers.is_empty() && granted {
+        match serde_json::from_value::<Vec<ProviderDecl>>(serde_json::Value::Array(raw_providers)) {
+            Ok(declared) => cached.providers = declared,
+            Err(_) => cached
+                .errors
+                .push("provider declarations are invalid".to_string()),
+        }
+    } else if !raw_providers.is_empty() {
+        cached
+            .errors
+            .push("provider capability not granted; provider declarations hidden".to_string());
+    }
+    cached
+}
+
 fn refresh_installed_argv(home: &Path, cache: &mut ProviderCache) -> anyhow::Result<()> {
     let lock = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(home))?;
-    for (name, entry) in lock.plugins {
-        if let Some(cached) = cache.plugins.get_mut(&name) {
-            cached.enabled = entry.enabled;
-            cached.argv = spawn_argv(&name, home, &entry).unwrap_or_default();
+    for (name, entry) in &lock.plugins {
+        let argv = spawn_argv(name, home, entry).unwrap_or_default();
+        match cache.plugins.get_mut(name) {
+            // Lock identity newer than the cached row means an install
+            // landed between the last provider refresh and now — heal the
+            // row from the manifest on disk rather than resolving against
+            // a stale (or absent) provider set.
+            Some(cached) if cached.identity != lock_identity(name, entry) => {
+                *cached = CachedProviderPlugin {
+                    argv,
+                    ..cached_from_manifest(home, name, entry)
+                };
+            }
+            Some(cached) => {
+                cached.enabled = entry.enabled;
+                cached.argv = argv;
+            }
+            // Never cached (install's refresh hasn't run or was skipped):
+            // same heal, so a completed install resolves immediately.
+            None => {
+                cache.plugins.insert(
+                    name.clone(),
+                    CachedProviderPlugin {
+                        argv,
+                        ..cached_from_manifest(home, name, entry)
+                    },
+                );
+            }
         }
     }
     Ok(())

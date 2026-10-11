@@ -202,9 +202,9 @@ fn the_composite_label_names_each_pick_and_the_lead_effort() {
         ],
     };
     assert_eq!(
-        composite_label_parts(&shape, "Fusion", &parts("opus", "swe"), Some("high")).map(|segs| {
-            segs.into_iter().map(|(t, _)| t).collect::<String>()
-        }).as_deref(),
+        composite_label_parts(&shape, "Fusion", &parts("opus", "swe"), Some("high"))
+            .map(|segs| { segs.into_iter().map(|(t, _)| t).collect::<String>() })
+            .as_deref(),
         Some("Fusion · Opus 5.5 High × SWE-2 High")
     );
     assert_eq!(

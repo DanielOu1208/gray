@@ -31,18 +31,9 @@ pub(crate) enum CmdSurface {
 
 pub(crate) const REGISTRY: &[CmdDef] = &[
     CmdDef {
-        name: "connect",
-        desc: "setup provider & API key",
-        aliases: &["keys", "key", "providers", "provider"],
-        scope: CmdScope::Global,
-        surface: CmdSurface::Local,
-    },
-    CmdDef {
-        name: "model",
-        desc: "switch model & effort",
-        // Retired `/thinking`, `/effort`, `/reasoning`, `/fast` land on the
-        // picker — effort and fast mode live there now.
-        aliases: &["models", "thinking", "effort", "reasoning", "fast"],
+        name: "models",
+        desc: "switch provider, model & effort",
+        aliases: &[],
         scope: CmdScope::Conversation,
         surface: CmdSurface::Interactive,
     },
@@ -414,7 +405,7 @@ pub(crate) fn complete_command_args(
         "sessions" | "resume" => complete_resume_args(cmd, arg_text),
         "skill" | "skills" => complete_skill_args(cmd, arg_text, cwd),
         "agentsmd" | "sys" => complete_agentsmd_args(cmd, arg_text),
-        "model" | "models" => complete_model_args(cmd, arg_text),
+        "models" => complete_model_args(cmd, arg_text),
         "theme" | "themes" => complete_theme_args(cmd, arg_text),
         "hotkeys" | "keybindings" | "bindings" => {
             complete_from_table(cmd, arg_text, &[("reload", "re-read keybindings.json")])
@@ -596,8 +587,6 @@ pub enum ReplCommand {
     /// Open the system-prompt file in `$EDITOR` (`/agentsmd`), print it (`/agentsmd show`),
     /// or restore the default (`/agentsmd reset`). `/sys` is an alias.
     Sys(SysAction),
-    /// Open the provider selection menu (`/connect` or `/provider`).
-    Provider,
     /// Log in to one plugin provider directly (`/claude`, `/devin`, ...);
     /// holds its `plugin:provider` id. See [`provider_shortcuts`].
     ProviderLogin(String),
@@ -623,6 +612,8 @@ pub enum ReplCommand {
     Help,
     /// Open the model picker (`/model`) or set directly (`/model provider/id`).
     Model(Option<String>),
+    /// Open the two-pane provider×model picker (bare `/model`).
+    ModelPanes,
     /// Open the model picker focused on a row — never typed; a plugin's
     /// `model_picker` command outcome (`/fusion`) queues it.
     ModelFocus(String),
@@ -778,10 +769,10 @@ pub fn parse_command(line: &str) -> ReplCommand {
         Some("theme") => ReplCommand::Theme(opt(rest)),
         Some("hotkeys") => ReplCommand::Keys(opt(rest)),
         Some("reload") => ReplCommand::Reload,
-        // Every connect alias accepts optional args like `/key openrouter`
-        // (args are advisory; the provider menu always opens).
-        Some("connect") => ReplCommand::Provider,
-        Some("model") => ReplCommand::Model(opt(rest)),
+        Some("models") => match opt(rest) {
+            Some(id) => ReplCommand::Model(Some(id)),
+            None => ReplCommand::ModelPanes,
+        },
         Some("plugin") => ReplCommand::Plugin(t.to_string()),
         Some("skills") => {
             if rest.is_empty() {

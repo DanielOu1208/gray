@@ -28,6 +28,36 @@ and is never rewritten — the paging hints (`sed -n 'A,Bp'`, `dd bs=1`) address
 line numbers in that log, so the window is chosen first and the line numbers
 stay anchored to the log.
 
+## Soft elision (before any summary)
+
+The cap/squeeze/spill pipeline above runs when a result *enters* the
+context. A fourth step runs on what is already there
+(`crates/gray-core/src/compact.rs`, `elide_stale_tool_results`): once the
+estimate reaches 0.6 of the window, every `ToolResult` body at or over
+8 KiB that is older than the verbatim recent window (0.3 of the window,
+floored at the last two rounds, or `--context-keep`) is replaced in place by
+the same citation stub compaction uses. No provider call, nothing dropped or
+reordered, call/result pairing intact, and idempotent (a stub is under the
+threshold). Only if the estimate still reaches the hard threshold does the
+LLM summary pass (`compact_v2`) run.
+
+This is the staged policy arXiv:2609.20804 calls T4: rule-based elision at
+a soft threshold, summarization at a hard one. In that study it had the
+lowest cost in seven of eight model/benchmark panels at unchanged success,
+because early elision absorbs most of the pressure that would otherwise
+trigger a summary. The same study found a `recall` *tool* for elided
+output is almost never used — which is why recovery here stays a stub
+pointing at the transcript plus `gray spill`, not a tool.
+
+Each pass that changes history is a prompt-cache break from the oldest
+changed message on, and past the soft threshold a round ages out of the
+verbatim window almost every turn — so a pass that elided anything disarms
+the stage until the estimate has grown by another 0.1 of the window.
+Elisions land in batches, one cache break each.
+
+`GRAY_NO_SOFT_ELIDE=1` disables this stage only; the summary pass and the
+ingest pipeline are unaffected.
+
 ## Reading a spilled result back
 
 ```

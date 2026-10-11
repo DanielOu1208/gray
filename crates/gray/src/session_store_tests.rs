@@ -49,7 +49,7 @@ async fn prune_before_deletes_only_old_sessions() {
 }
 
 #[tokio::test]
-async fn append_refuses_damaged_tail() {
+async fn append_heals_damaged_tail() {
     let dir = tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path());
     let id = SessionId::new("s1");
@@ -62,10 +62,13 @@ async fn append_refuses_damaged_tail() {
     let mut raw = tokio::fs::read_to_string(&path).await.unwrap();
     raw.push_str("{torn");
     tokio::fs::write(&path, raw).await.unwrap();
-    assert!(store.append(&id, &Message::user("two")).await.is_err());
-    // History untouched by the refused append.
+    // The torn final line is truncated under the lock and the append
+    // lands as if the crash never happened.
+    store.append(&id, &Message::user("two")).await.unwrap();
     let raw = tokio::fs::read_to_string(&path).await.unwrap();
-    assert!(raw.ends_with("{torn"));
+    assert!(!raw.contains("{torn"));
+    let (_, entries) = store.load(&id).await.unwrap();
+    assert_eq!(entries.len(), 2);
 }
 
 #[tokio::test]

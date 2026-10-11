@@ -239,14 +239,13 @@ pub(crate) fn composite_label_parts(
     for (i, slot) in shape.slots.iter().enumerate() {
         let id = parts.get(&slot.key)?;
         let name = short_name(shape.option_name(&slot.key, id).unwrap_or(id));
-        let name = match effort.filter(|e| i == 0 && *e != "off") {
-            Some(e) => format!("{name} {}", effort_word(e)),
-            None => name.to_string(),
-        };
         if i > 0 {
             segs.push((" × ".to_string(), None));
         }
-        segs.push((name, Some(i)));
+        segs.push((name.to_string(), Some(i)));
+        if let Some(e) = effort.filter(|e| i == 0 && *e != "off") {
+            segs.push((format!(" {}", effort_word(e)), None));
+        }
     }
     Some(segs)
 }

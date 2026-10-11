@@ -626,7 +626,7 @@ pub(crate) async fn switch_agent_model(
     }
 }
 
-/// What `/model` was asked for: the picker (optionally focused on a row —
+/// What `/models` was asked for: the picker (optionally focused on a row —
 /// a plugin `model_picker` outcome like `/fusion`), or a direct id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelArg {
@@ -652,7 +652,7 @@ pub(crate) struct ModelApply {
     pub(crate) prev_effort: Option<String>,
 }
 
-/// The persisted half of `/model <id>` — shared with `gray cmd`, where it
+/// The persisted half of `/models <id>` — shared with `gray cmd`, where it
 /// is also the model picker's apply. Validates against the cached list
 /// (falling back to the live fetch), decomposes a variant id, then writes
 /// model + effort + fast through to saved config. `effort`/`fast` are a
@@ -775,8 +775,140 @@ pub(crate) fn apply_model_selection_at(
     })
 }
 
-/// Handles `/model`: interactive picker (no arg) or direct set (`/model provider/id`).
+/// Handles `/models`: interactive picker (no arg) or direct set (`/models provider/id`).
 /// Switching updates the live agent and persists to ~/.gray/config.json.
+/// After a picker commit: clamp the effort, paint the footer and receipt
+/// for what changed against `prev` (effort, reasoning display, fast mode),
+/// then rebuild the agent on the new model.
+async fn finish_model_pick(
+    config: &mut Config,
+    cwd: &Path,
+    agent: &mut Option<Agent>,
+    tui: Option<&crate::composer::SharedTui>,
+    session_id: Option<&str>,
+    hide_thinking: &mut bool,
+    (prev_effort, prev_show, prev_fast): (Option<String>, Option<bool>, Option<bool>),
+) {
+    // The picker already committed the row's effort (and any Tab /
+    // ctrl+r toggle); clamp whatever came out so the footer never
+    // shows an unsupported level, and paint the committed state.
+    let clamped = super::clamp_thinking_to_model(config);
+    let show_changed = config.show_reasoning != prev_show;
+    let fast_changed = config.fast_mode != prev_fast;
+    if clamped.is_some() || config.thinking_effort != prev_effort || show_changed {
+        *hide_thinking = config.reasoning_hidden();
+    }
+    if let Some(shared) = tui {
+        let mut t = shared.lock().expect("tui lock");
+        if let Some(m) = &config.model {
+            t.set_model(m.clone());
+            t.set_model_label(crate::setup::composite_label_for(config));
+            t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
+            // Name the effort alongside the model when it has a
+            // level to choose: the picker set both at once.
+            let label = super::model_receipt_label(config).unwrap_or_else(|| m.clone());
+            t.push_action("Model set to", Some(&label));
+        }
+        if (config.thinking_effort != prev_effort || fast_changed)
+            && let Some(eff) = &config.thinking_effort
+        {
+            t.set_thinking_effort(crate::setup::effort_chip(eff, config));
+        }
+        if config.thinking_effort != prev_effort || show_changed {
+            t.set_hide_thinking(*hide_thinking);
+        }
+        if let Some((old, new)) = clamped {
+            super::cron::push_notice(
+                &mut t,
+                "Thinking effort clamped",
+                &format!("from {old} to {new} (not supported by this model)"),
+                false,
+            );
+        }
+        t.ensure_gap();
+        let _ = t.draw();
+    } else if let Some((old, new)) = clamped {
+        println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
+    }
+    if let Some(m) = config.model.clone()
+        && crate::setup::get_user_context_window().is_none()
+        && crate::setup::get_cached_model_context(&m).is_none()
+    {
+        let base = config.base_url.clone();
+        let key = config.api_key.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::setup::fetch_live_provider_models(&base, key.as_deref());
+        });
+    }
+    switch_agent_model(agent, config, cwd, session_id, tui).await;
+}
+
+/// Bare `/models`: the two-pane provider×model picker. The modal commits
+/// provider + model itself; what remains is the shared receipt (effort
+/// clamp, footer, action line, live fetch, agent swap).
+pub(crate) async fn handle_model_panes(
+    config: &mut Config,
+    cwd: &Path,
+    agent: &mut Option<Agent>,
+    tui: Option<&crate::composer::SharedTui>,
+    session_id: Option<&str>,
+    hide_thinking: &mut bool,
+) -> Option<String> {
+    if tui.is_none() {
+        match config.model.as_deref() {
+            Some(m) => println!("model {m} — /models provider/id to switch"),
+            None => println!(
+                "no model configured — run /models to set up provider & key (or /models provider/id; /help)"
+            ),
+        }
+        return None;
+    }
+    let prev_effort = config.thinking_effort.clone();
+    let prev_show = config.show_reasoning;
+    let prev_fast = config.fast_mode;
+    let bg = tui.map(|shared| shared.lock().expect("tui lock").snapshot());
+    let result = super::with_modal_sync(tui, || crate::setup::run_model_panes(config, bg.as_ref()));
+    match result {
+        Ok(crate::setup::PanesOutcome::Picked) => {
+            finish_model_pick(
+                config,
+                cwd,
+                agent,
+                tui,
+                session_id,
+                hide_thinking,
+                (prev_effort, prev_show, prev_fast),
+            )
+            .await;
+        }
+        Ok(crate::setup::PanesOutcome::Removed(name)) => {
+            reload_agent(agent, config, cwd, session_id, tui).await;
+            super::say(tui, &format!("removed {name}"));
+        }
+        Ok(outcome) => {
+            if let Some(shared) = tui {
+                let mut t = shared.lock().expect("tui lock");
+                t.clear_draft();
+                t.ensure_gap();
+                let _ = t.draw();
+            }
+            if let crate::setup::PanesOutcome::Connect(id) = outcome {
+                return Some(id);
+            }
+        }
+        Err(e) => {
+            if let Some(shared) = tui {
+                let mut t = shared.lock().expect("tui lock");
+                super::cron::push_notice(&mut t, "Model error", &e.to_string(), true);
+                t.ensure_gap();
+            } else {
+                println!("model error: {e}");
+            }
+        }
+    }
+    None
+}
+
 pub(crate) async fn handle_model(
     config: &mut Config,
     cwd: &Path,
@@ -808,7 +940,7 @@ pub(crate) async fn handle_model(
             let mut t = shared.lock().expect("tui lock");
             t.set_model(m.clone());
             t.set_model_label(crate::setup::composite_label_for(config));
-        t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
+            t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
             if config.thinking_effort != applied.prev_effort
                 && let Some(eff) = &config.thinking_effort
             {
@@ -850,10 +982,10 @@ pub(crate) async fn handle_model(
     if tui.is_none() {
         // Headless (piped stdout): the picker needs a TTY — print status.
         match config.model.as_deref() {
-            Some(m) => println!("model {m} — /model provider/id to switch"),
+            Some(m) => println!("model {m} — /models provider/id to switch"),
             None => {
                 println!(
-                    "no model configured — run /connect to set up provider & key (or /model provider/id; /help)"
+                    "no model configured — run /models to set up provider & key (or /models provider/id; /help)"
                 )
             }
         }
@@ -870,60 +1002,16 @@ pub(crate) async fn handle_model(
     .await;
     match result {
         Ok(true) => {
-            // The picker already committed the row's effort (and any Tab /
-            // ctrl+r toggle); clamp whatever came out so the footer never
-            // shows an unsupported level, and paint the committed state.
-            let clamped = super::clamp_thinking_to_model(config);
-            let show_changed = config.show_reasoning != prev_show;
-            let fast_changed = config.fast_mode != prev_fast;
-            if clamped.is_some() || config.thinking_effort != prev_effort || show_changed {
-                *hide_thinking = config.reasoning_hidden();
-            }
-            if let Some(shared) = tui {
-                let mut t = shared.lock().expect("tui lock");
-                if let Some(m) = &config.model {
-                    t.set_model(m.clone());
-                    t.set_model_label(crate::setup::composite_label_for(config));
-        t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
-                    // Name the effort alongside the model when it has a
-                    // level to choose: the picker set both at once.
-                    let label = super::model_receipt_label(config).unwrap_or_else(|| m.clone());
-                    t.push_action("Model set to", Some(&label));
-                }
-                if (config.thinking_effort != prev_effort || fast_changed)
-                    && let Some(eff) = &config.thinking_effort
-                {
-                    t.set_thinking_effort(crate::setup::effort_chip(eff, config));
-                }
-                if config.thinking_effort != prev_effort || show_changed {
-                    t.set_hide_thinking(*hide_thinking);
-                }
-                if let Some((old, new)) = clamped {
-                    super::cron::push_notice(
-                        &mut t,
-                        "Thinking effort clamped",
-                        &format!("from {old} to {new} (not supported by this model)"),
-                        false,
-                    );
-                }
-                t.ensure_gap();
-                let _ = t.draw();
-            } else if let Some((old, new)) = clamped {
-                println!(
-                    "Thinking effort clamped from {old} to {new} (not supported by this model)"
-                );
-            }
-            if let Some(m) = config.model.clone()
-                && crate::setup::get_user_context_window().is_none()
-                && crate::setup::get_cached_model_context(&m).is_none()
-            {
-                let base = config.base_url.clone();
-                let key = config.api_key.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::setup::fetch_live_provider_models(&base, key.as_deref());
-                });
-            }
-            switch_agent_model(agent, config, cwd, session_id, tui).await;
+            finish_model_pick(
+                config,
+                cwd,
+                agent,
+                tui,
+                session_id,
+                hide_thinking,
+                (prev_effort, prev_show, prev_fast),
+            )
+            .await;
         }
         Ok(false) => {
             // Tab / ctrl+r are pending until Enter: a dismissed picker

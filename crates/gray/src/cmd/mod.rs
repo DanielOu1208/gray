@@ -135,7 +135,7 @@ async fn run_command(
     match def.name {
         "help" => Ok(help_result()),
         "usage" => usage_result(config, home).await,
-        "model" => model_result(config, home, &rest),
+        "models" => model_result(config, home, &rest),
         "new" => new_result(home).await,
         "sessions" => sessions_result(home, &rest).await,
         "cron" => cron_result(home, &rest),
@@ -235,7 +235,7 @@ fn pointed_session(home: &Path) -> Option<SessionId> {
         .map(SessionId::new)
 }
 
-/// `/model`: bare mints the editable picker doc; `model <id>` is the
+/// `/models`: bare mints the editable picker doc; `model <id>` is the
 /// direct-set path shared with the REPL handler.
 fn model_result(config: &mut Config, home: &Path, rest: &str) -> Result<CommandResult, CmdError> {
     let raw = rest.trim();
@@ -245,7 +245,7 @@ fn model_result(config: &mut Config, home: &Path, rest: &str) -> Result<CommandR
     let mut models = model_list_for(config);
     if models.is_empty() {
         return Ok(CommandResult::text(
-            "no provider configured — run /connect to set up provider & key",
+            "no provider configured — run /models to set up provider & key",
         ));
     }
     let mut draft = store::ModelDraft {
@@ -314,7 +314,7 @@ fn model_direct(config: &mut Config, home: &Path, raw: &str) -> Result<CommandRe
             }
             _ => {
                 return Err(CmdError::args(format!(
-                    "usage: /model <id> [slot=option ...] — bad token '{t}'"
+                    "usage: /models <id> [slot=option ...] — bad token '{t}'"
                 )));
             }
         }
@@ -325,8 +325,7 @@ fn model_direct(config: &mut Config, home: &Path, raw: &str) -> Result<CommandRe
             .map_err(CmdError::args)?;
         // A composite row picked bare lands its settled parts; a plain
         // row sheds a stale composite's (empty clears the live field).
-        let shape =
-            crate::setup::variants::row_shape(&applied.model).filter(|s| s.is_composite());
+        let shape = crate::setup::variants::row_shape(&applied.model).filter(|s| s.is_composite());
         let parts = shape
             .as_ref()
             .map(|s| opening_parts(prev.as_deref(), config, home, &applied.model, s))
@@ -339,8 +338,7 @@ fn model_direct(config: &mut Config, home: &Path, raw: &str) -> Result<CommandRe
     // Slot picks need the row's declared slots. A registered composite
     // row resolves in-process; anything else canonicalizes (names, case)
     // against the known list before its shape lookup.
-    let (id, shape) = match crate::setup::variants::row_shape(id).filter(|s| s.is_composite())
-    {
+    let (id, shape) = match crate::setup::variants::row_shape(id).filter(|s| s.is_composite()) {
         Some(shape) => (id.to_string(), shape),
         None => {
             let models = model_list_for(config);
@@ -382,9 +380,8 @@ fn model_direct(config: &mut Config, home: &Path, raw: &str) -> Result<CommandRe
     // and stays closest to the remembered/default combination, so a lone
     // `sidekick=b` lands `swe` when only `swe × b` exists.
     let baseline = opening_parts(prev.as_deref(), config, home, &id, &shape);
-    let satisfies = |v: &gray_plugin::ModelVariant| {
-        picks.iter().all(|(k, val)| v.parts.get(k) == Some(val))
-    };
+    let satisfies =
+        |v: &gray_plugin::ModelVariant| picks.iter().all(|(k, val)| v.parts.get(k) == Some(val));
     let drift = |v: &gray_plugin::ModelVariant| {
         shape
             .slots
@@ -698,9 +695,7 @@ fn interact(
                         .and_then(|m| rec.shapes.get(m))
                         .filter(|s| s.is_composite())
                     else {
-                        return Err(CmdError::invalid_action(format!(
-                            "unknown control '{k}'"
-                        )));
+                        return Err(CmdError::invalid_action(format!("unknown control '{k}'")));
                     };
                     // The pick wins, earlier slots hold, later ones take
                     // the serving variant's — the TUI dropdown's coerce.

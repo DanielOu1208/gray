@@ -52,11 +52,16 @@ pub fn estimate_tokens(msg: &Message) -> usize {
     // Must measure billable context, not displayable prose: a message whose
     // only block is a 50 KiB tool result is ~12.8k tokens, not 0. See
     // `Message::context_text`.
-    if msg
-        .content
-        .iter()
-        .any(|block| matches!(block, gray_core::message::ContentBlock::Image { .. }))
-    {
+    // Images AND other inline media (PDF/audio/video) take the per-block
+    // path: `context_text` includes the base64 payload, so bytes/4 of a
+    // large attachment read as millions of tokens the moment it was sent.
+    if msg.content.iter().any(|block| {
+        matches!(
+            block,
+            gray_core::message::ContentBlock::Image { .. }
+                | gray_core::message::ContentBlock::Media { .. }
+        )
+    }) {
         gray_core::agent::estimate_message_tokens(msg)
     } else {
         msg.context_text().len().div_ceil(4)

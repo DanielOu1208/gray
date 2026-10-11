@@ -132,6 +132,7 @@ fn local_output_writes_atomic_md() {
         workdir: None,
         fire_claim: None,
         reminder: false,
+        repeat: Default::default(),
         skills: vec![],
         script: None,
     };

@@ -44,9 +44,9 @@ pub(crate) fn format_cron_dashboard(
 const CRON_SPEC: ManagerSpec = ManagerSpec {
     title: "Cron",
     empty_hint: "no cron jobs \u{2014} gray cron add \"every 1h\" \"prompt\"",
-    error_verb: "toggle failed",
+    error_verb: "cron action failed",
     supports_toggle: true,
-    supports_remove: false,
+    supports_remove: true,
     errors_tab: false,
     keep_stale_on_relist_error: false,
 };
@@ -73,9 +73,14 @@ pub(crate) fn items(
                 crate::cron::store::JobState::Active => ("\u{25cb}", " [disabled]", false, false),
                 crate::cron::store::JobState::Paused => ("\u{25cb}", " [paused]", false, true),
                 crate::cron::store::JobState::Done => ("\u{b7}", " [done]", false, false),
-                crate::cron::store::JobState::AwaitingApproval => {
-                    ("?", " [awaiting approval]", false, false)
-                }
+                // The picker is the user's own keyboard, so approving here
+                // is the user's decision — no second terminal needed.
+                crate::cron::store::JobState::AwaitingApproval => (
+                    "?",
+                    " [awaiting approval \u{b7} space approves \u{b7} u rejects]",
+                    false,
+                    true,
+                ),
             };
             let next = j
                 .next_run_at
@@ -85,14 +90,21 @@ pub(crate) fn items(
                 .last_status
                 .map(|s| format!("{s:?}"))
                 .unwrap_or_else(|| "-".to_string());
-            let row = format!(
-                "{glyph} {} ({}) \u{2014} {:?} \u{2014} next {} \u{2014} last {}{tag}",
+            let mut row = format!(
+                "{glyph} {} ({}) \u{2014} {} \u{2014} next {} \u{2014} last {}{tag}",
                 j.name,
                 &j.id[..8.min(j.id.len())],
-                j.schedule,
+                crate::cron_tool::schedule_text(&j.schedule),
                 next,
                 last,
             );
+            // Approval is only informed if the user sees what will run.
+            if j.state == crate::cron::store::JobState::AwaitingApproval {
+                row.push_str(&format!(
+                    " \u{2014} \"{}\"",
+                    crate::cron_tool::visible(&j.prompt)
+                ));
+            }
             ManagerItem {
                 name: j.id.clone(),
                 row,
@@ -120,8 +132,9 @@ pub(crate) fn items(
     out
 }
 
-/// The job picker: `space` pauses/resumes via the store's own toggle, which
-/// recomputes `next_run_at` on resume. Adding and removing stay on the CLI.
+/// The job picker: `space` pauses/resumes via the store's own toggle (which
+/// recomputes `next_run_at` on resume) and approves a job the model asked
+/// for; `u` twice removes (rejects) a job. Adding stays on the CLI.
 pub(crate) fn run_cron_modal(
     bg: Option<&crate::setup::BackgroundSnapshot>,
     home: &Path,
@@ -137,11 +150,26 @@ pub(crate) fn run_cron_modal(
             let health = store.health(now).ok();
             Some(items(&jobs, health.as_ref(), now))
         },
-        |_| anyhow::bail!("remove jobs with gray cron remove <id>"),
-        |id, on| {
+        |id| {
             let store = crate::cron::CronStore::open(home.join("cron"))?;
             anyhow::ensure!(
-                store.set_paused(id, !on)?,
+                store.remove(id)?,
+                "unknown cron job {id:?} \u{2014} it may have been removed"
+            );
+            Ok(())
+        },
+        |id, on| {
+            let store = crate::cron::CronStore::open(home.join("cron"))?;
+            let awaiting = store
+                .get(id)?
+                .is_some_and(|j| j.state == crate::cron::store::JobState::AwaitingApproval);
+            let known = if awaiting {
+                store.approve(id)?
+            } else {
+                store.set_paused(id, !on)?
+            };
+            anyhow::ensure!(
+                known,
                 "unknown cron job {id:?} \u{2014} it may have been removed"
             );
             Ok(())

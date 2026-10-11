@@ -457,11 +457,11 @@ impl PrintFailure {
     fn hint_for(code: &str) -> Option<&'static str> {
         Some(match code {
             "auth_failed" => {
-                "Check the API key for this provider: `gray setup` (or `/connect` in the REPL)."
+                "Check the API key for this provider: `gray setup` (or `/models` in the REPL)."
             }
-            "rate_limited" => "Back off and retry, or switch provider/model with `/model`.",
+            "rate_limited" => "Back off and retry, or switch provider/models with `/models`.",
             "bad_request" => {
-                "Often a model id the endpoint does not serve; `/model` shows what is configured."
+                "Often a model id the endpoint does not serve; `/models` shows what is configured."
             }
             "context_overflow" => "Start `/new` or run `/compact`.",
             "connection_failed" => {
@@ -853,6 +853,56 @@ fn tool_detail(name: &str, args: &serde_json::Value, preview: Option<&str>) -> O
     }
 }
 
+/// A live `gray -p` worker's self-registration: `~/.gray/running/<pid>.json`
+/// holds the record for the process's life so run registries
+/// (gray-subagents' widget) adopt scripted/`gray_prompt` children without
+/// argv archaeology. Removed on drop; a `kill -9` leftover is a stale row
+/// consumers discard on the pid's liveness.
+struct RunningGuard(Option<std::path::PathBuf>);
+
+impl RunningGuard {
+    fn register(session_id: &str, task: &str, model: &str) -> Self {
+        let Ok(home) = crate::setup::gray_home() else {
+            return Self(None);
+        };
+        let dir = home.join("running");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return Self(None);
+        }
+        let pid = std::process::id();
+        let path = dir.join(format!("{pid}.json"));
+        let task: String = task.split_whitespace().collect::<Vec<_>>().join(" ");
+        let task: String = task.chars().take(160).collect();
+        let row = serde_json::json!({
+            "pid": pid,
+            "ppid": std::os::unix::process::parent_id(),
+            "session": session_id,
+            "owner": std::env::var("GRAY_SESSION_ID").unwrap_or_default(),
+            "name": std::env::var("GRAY_AGENT_NAME").unwrap_or_default(),
+            "origin": std::env::var("GRAY_SESSION_ORIGIN").unwrap_or_default(),
+            "model": model,
+            "cwd": std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            "task": task,
+            "started": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
+        });
+        if std::fs::write(&path, row.to_string()).is_err() {
+            return Self(None);
+        }
+        Self(Some(path))
+    }
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 async fn run_print_inner(
     config: &Config,
     prompt: Option<&str>,
@@ -865,10 +915,7 @@ async fn run_print_inner(
     // `swe-2` at `max` before the agent is built, so headless runs ride
     // the family row too (the wire id is re-expanded at request build).
     let mut config_owned = config.clone();
-    {
-        let rows = crate::setup::canonical_model_rows(&config_owned);
-        crate::setup::canonicalize_effort_variant(&mut config_owned, &rows);
-    }
+    let _ = crate::repl::normalize_adopted_model(&mut config_owned);
     let config = &config_owned;
     crate::setup::set_user_context_window(config.context_window);
     crate::setup::set_user_reserve_tokens(config.context_reserve);
@@ -935,6 +982,22 @@ async fn run_print_inner(
         cancel: cancel.clone(),
         session_id: Some(session_id.as_str().to_owned()),
     };
+    if std::env::var_os("GRAY_SESSION_ID").is_none() {
+        unsafe { std::env::set_var("GRAY_SESSION_ID", session_id.as_str()) };
+    }
+    let task_text = user_message
+        .content
+        .iter()
+        .find_map(|b| match b {
+            gray_core::message::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or("");
+    let _running = RunningGuard::register(
+        session_id.as_str(),
+        task_text,
+        config.model.as_deref().unwrap_or(""),
+    );
 
     // One-shot run = one turn: only max_turns=0 (nonsensical but
     // explicit) and an already-blown wall clock can stop it pre-run.

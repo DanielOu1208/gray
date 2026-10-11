@@ -1,20 +1,25 @@
 //! Local fusion: a synthesized `fusion` composite row for providers that
-//! don't declare one natively, plus the `handoff` tool that runs its
-//! sidekick half.
+//! don't declare one natively, plus the `handoff` tool that runs the
+//! sidekick half of ANY composite selection.
 //!
-//! Devin's upstream fusion is provider-native: the catalog declares the
-//! composite row and the server runs both halves. Every other provider
-//! gets the same UX locally — a row synthesized from the cached model
-//! lists ([`synthesize_row`]), a lead that streams as its own model id
-//! (the variant id IS the lead row id; effort rides as the ordinary
-//! request parameter), and a persistent sidekick the lead drives through
-//! a `handoff` tool backed by `gray -p … --json` children.
+//! Fusion's sidekick is client-side orchestration, never a server
+//! feature: a composite row is only catalog metadata — something on the
+//! client's side must offer the lead a delegation tool and spawn the
+//! cheaper model. Devin declares its row natively but runs the sidekick
+//! inside Devin CLI's own agent loop, so a `fusion` selection through
+//! any other client — this one included — silently degrades to the lead
+//! alone unless the client orchestrates. Gray therefore runs it for
+//! every composite row: a lead that streams as the variant's wire id,
+//! a persistent sidekick the lead drives through a `handoff` tool
+//! backed by `gray -p … --json` children, and lead-framing context
+//! injected per turn while the selection is composite.
 //!
-//! Self-describing marker: a local sidekick option id is always a
-//! qualified `provider:model` — the ':' a native composite's parts never
-//! carry (upstream slot options are bare catalog ids). [`is_local_parts`]
-//! is the one check the tool gate keys on, so native fusion (where the
-//! provider itself orchestrates) never gains a client-side sidekick.
+//! Providers without a declared composite get the same UX via a row
+//! synthesized from the cached model lists ([`synthesize_row`]). Its
+//! sidekick options are qualified `provider:model` ids — the ':' a
+//! native composite's parts never carry (upstream slot options are bare
+//! catalog ids naming the lead provider's own models). [`is_local_parts`]
+//! tells those apart; a bare id resolves against the lead's provider.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -48,6 +53,34 @@ const STDERR_TAIL: usize = 2 * 1024;
 /// A dead child reaps instantly; the bound covers a failed group kill.
 const REAP_GRACE: Duration = Duration::from_secs(5);
 
+/// Lead framing, appended to the system prompt while the selection is a
+/// composite — adapted from Devin CLI's own fusion lead prompt. Without
+/// it the lead has a `handoff` tool it never thinks to call. Rides the
+/// system prompt rather than `prompt_context`: hooks are skipped under
+/// the default lean prompt.
+const LEAD_PROMPT: &str = r#"\
+You have a `handoff` tool: a persistent sidekick subagent that works alongside you on the same machine (shared filesystem and repos; its shell sessions are separate from yours). You are the lead: you own the outcome and the user-facing and authority actions — talking to the user, planning, and directing the sidekick. The user interacts with one agent: you. Unless they explicitly ask about the sidekick, do not mention it or distinguish its work from yours; own the combined result and present it in the first person.
+
+- **Delegate by default** the hands-on work: implementation, verification (builds, lints, type-checks, test runs), environment setup and repair, and broad fan-out searches where you only need the conclusion. Keep for yourself: planning and design, judgment calls, correctness-critical work where wrong output looks plausible (queries, measurements, eval harnesses, pipeline/model configuration — author and check those yourself), reviewing the sidekick's diffs, and everything user-facing or authority-bound (commits, pushes, PRs, answering the user).
+- A `handoff` call blocks until the sidekick reports back — never run the same work yourself in parallel or poll for its result. Write each brief self-contained: the goal, the context and file pointers it needs, your plan, the constraints, and the narrowest verification commands that cover the change — the sidekick treats your list as mandatory, so a "run everything" brief re-gates unchanged work on every handoff.
+- It remembers previous handoffs and its runtime state persists (dev servers, background jobs, in-flight commands) — don't re-explain what it already knows. For work involving servers or long-running processes, say what may still be running and whether to leave it up.
+- Never make the sidekick redo work you already did: results you derived go into the brief as settled inputs. And review the evidence it reports back (diffs, logs, test output, artifact paths) instead of re-running its verification — check yourself only when the evidence is missing or suspicious."#;
+
+/// Prepended to the first task of a fresh sidekick session (a resumed
+/// session already carries it in history) — adapted from Devin's
+/// sidekick prompt: its report is all the lead ever sees.
+const SIDEKICK_CONTRACT: &str = "<sidekick_contract>
+You are the sidekick: a persistent collaborator agent executing task briefs handed off by the lead agent. You do not see the user's messages or the lead's conversation — everything you need is in the brief. Work autonomously with your own tools and verify your work before reporting.
+
+- The lead owns user-facing and authority actions. Do not contact the user, create or update pull requests, commit, or push — for ordinary implementation tasks leave the work tree ready for the lead to review. If the task needs something only the lead or user can do (a secret, information only the user has, a PR action), stop and report what you need instead of working around it.
+- Git safety: never run destructive or irreversible git commands unless the brief directs it; stage files explicitly (never `git add .`) and never stage files likely to contain secrets.
+- Keep diffs minimal and match the repo's existing conventions; touch only what the task asks for.
+- Report back so it stands alone — the user never sees your output: what you did or found, how you verified it (commands run, results, evidence paths), any deviations, and anything left for the lead.
+</sidekick_contract>
+
+Brief:
+";
+
 // ---------------------------------------------------------------------------
 // Row synthesis
 // ---------------------------------------------------------------------------
@@ -69,7 +102,8 @@ fn provider_token(list_key: &str) -> String {
     {
         return id.clone();
     }
-    crate::setup::catalog::custom_key_id(list_key).replace(|c: char| !(c.is_ascii_alphanumeric() || c == '-'), "-")
+    crate::setup::catalog::custom_key_id(list_key)
+        .replace(|c: char| !(c.is_ascii_alphanumeric() || c == '-'), "-")
 }
 
 /// A `provider_models.json` key's auth-store id: the catalog provider id
@@ -219,9 +253,11 @@ pub(crate) fn is_local_parts(parts: &Parts) -> bool {
     parts.get("sidekick").is_some_and(|s| s.contains(':'))
 }
 
-/// The qualified sidekick id of the live selection, when it is a local
-/// fusion. Reads the saved config so a mid-session `/model` switch is
-/// seen on the next turn without a rebuild (the plugin's `tools()` is
+/// The qualified sidekick id of the live selection, when it is a
+/// composite row — local (synthesized) or provider-declared alike: the
+/// declaration only describes the pairing, gray always runs the sidekick
+/// half itself. Reads the saved config so a mid-session `/model` switch
+/// is seen on the next turn without a rebuild (the plugin's `tools()` is
 /// resolved per turn — see below). The env guard runs first: a sidekick's
 /// own `gray` spawns with [`ENV_SIDEKICK`], so it can never offer
 /// `handoff` — sidekicks cannot chain sidekicks.
@@ -246,10 +282,16 @@ fn local_sidekick() -> Option<String> {
     if !shape.is_composite() {
         return None;
     }
-    if !is_local_parts(&saved.model_parts) {
-        return None;
-    }
-    saved.model_parts.get("sidekick").cloned()
+    let sidekick = saved.model_parts.get("sidekick")?;
+    // A qualified id already names its provider (synthesized options);
+    // a bare id — the only form native rows offer — names one of the
+    // lead provider's own models, so qualify it with that provider's
+    // token for `resolve_sidekick` to map back.
+    Some(if is_local_parts(&saved.model_parts) {
+        sidekick.clone()
+    } else {
+        format!("{}:{sidekick}", provider_token(&list_key))
+    })
 }
 
 /// Carries `handoff` as a protocol-1.3 plugin: registered on every
@@ -289,20 +331,37 @@ impl Plugin for FusionPlugin {
             .map(PathBuf::from)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| PathBuf::from("gray"));
-        vec![Arc::new(HandoffTool {
-            qualified,
-            home,
-            bin,
-            timeout: HANDOFF_TIMEOUT,
-            gate: self.gate.clone(),
-        })]
+        ["handoff", "native__handoff"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(HandoffTool {
+                    name,
+                    qualified: qualified.clone(),
+                    home: home.clone(),
+                    bin: bin.clone(),
+                    timeout: HANDOFF_TIMEOUT,
+                    gate: self.gate.clone(),
+                }) as Arc<dyn Tool>
+            })
+            .collect()
     }
+}
+
+/// The lead framing for the current selection: `Some` exactly while a
+/// local fusion is selected (the same gate as [`FusionPlugin::tools`]).
+/// Consumed by `build_agent`'s system-prompt assembly, which — unlike
+/// `prompt_context` hooks — is never suppressed by the lean prompt.
+pub(crate) fn lead_framing() -> Option<&'static str> {
+    local_sidekick().is_some().then_some(LEAD_PROMPT)
 }
 
 /// `handoff {task, label?}`: runs the sidekick as a `gray -p --json`
 /// child in the same `GRAY_HOME`, pooling the session id it reports so
 /// the agent — and its context — persists across handoffs.
 struct HandoffTool {
+    /// Wire name: `handoff` is the canonical alias, `native__handoff`
+    /// matches the name Devin-trained leads emit for this tool.
+    name: &'static str,
     /// `provider:model` from `model_parts.sidekick`.
     qualified: String,
     home: PathBuf,
@@ -317,7 +376,7 @@ struct HandoffTool {
 impl Tool for HandoffTool {
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "handoff".to_string(),
+            name: self.name.to_string(),
             description: concat!(
                 "Delegate a task to your sidekick: a persistent collaborator agent that ",
                 "keeps its context, history and runtime state across calls. Give it a ",
@@ -453,8 +512,10 @@ fn resolve_sidekick(home: &Path, qualified: &str) -> Option<SidekickSpec> {
             .into_iter()
             .find(|p| p.provider_id() == pid)?;
         spec.env.push(("GRAY_PROVIDER_ID".into(), pid.to_string()));
-        spec.env.push(("GRAY_CREDENTIAL_SOURCE".into(), "plugin".into()));
-        spec.env.push(("GRAY_AUTH_REF".into(), installed.auth_ref()));
+        spec.env
+            .push(("GRAY_CREDENTIAL_SOURCE".into(), "plugin".into()));
+        spec.env
+            .push(("GRAY_AUTH_REF".into(), installed.auth_ref()));
         spec.env.push((
             "GRAY_BASE_URL".into(),
             installed.provider.transport.base_url.to_string(),
@@ -464,7 +525,11 @@ fn resolve_sidekick(home: &Path, qualified: &str) -> Option<SidekickSpec> {
         // Empty strings are the override: they clear whatever plugin
         // identity the saved config (the lead's provider) holds, so the
         // child resolves as a plain API-key connection.
-        for k in ["GRAY_PROVIDER_ID", "GRAY_CREDENTIAL_SOURCE", "GRAY_AUTH_REF"] {
+        for k in [
+            "GRAY_PROVIDER_ID",
+            "GRAY_CREDENTIAL_SOURCE",
+            "GRAY_AUTH_REF",
+        ] {
             spec.env.push((k.into(), String::new()));
         }
         spec.env.push(("GRAY_BASE_URL".into(), key.clone()));
@@ -509,6 +574,15 @@ impl HandoffTool {
         ctx: &ToolContext,
     ) -> SidekickOutcome {
         let mut out = SidekickOutcome::default();
+        // A fresh sidekick session gets the role contract once; a resumed
+        // one already carries it in its history.
+        let brief;
+        let task = if session.is_none() {
+            brief = format!("{SIDEKICK_CONTRACT}\n{task}");
+            brief.as_str()
+        } else {
+            task
+        };
         let mut cmd = tokio::process::Command::new(&self.bin);
         cmd.arg("-p")
             .arg(task)
@@ -553,8 +627,7 @@ impl HandoffTool {
             }
         };
         let pid = child.id().unwrap_or(0);
-        let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take())
-        else {
+        let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
             out.error = Some("sidekick spawn failed: no pipes".into());
             return out;
         };

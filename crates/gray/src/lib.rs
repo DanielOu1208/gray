@@ -12,6 +12,7 @@ pub mod cron;
 pub mod cron_fire;
 pub mod cron_serve;
 pub mod cron_status;
+pub(crate) mod cron_tool;
 pub mod feedback;
 pub(crate) mod fusion;
 pub mod gateway;
@@ -246,7 +247,7 @@ async fn build_agent_with(
 ) -> anyhow::Result<gray_core::agent::Agent> {
     let Some(model) = &config.model else {
         anyhow::bail!(
-            "no model configured yet — run /connect to set up your provider & key (or /model provider/id; /help for all commands)"
+            "no model configured yet — run /models to set up your provider & key (or /models provider/id; /help for all commands)"
         );
     };
     // Keyless upstreams (free tiers, local servers) run with an empty key.
@@ -351,6 +352,14 @@ async fn build_agent_with(
                         std::time::Duration::from_secs(cache_ttl_secs),
                     )));
                 }
+                // Fusion lead framing rides the system prompt, not a
+                // `prompt_context` hook: hooks are skipped under the
+                // default lean prompt. Re-reads the saved selection each
+                // build, so `/models` picks it up or drops it with the row.
+                if let Some(framing) = crate::fusion::lead_framing() {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(framing);
+                }
                 prompt
             },
         )),
@@ -370,6 +379,7 @@ async fn build_agent_with(
             }
             if !config.bare && spawn_plugins {
                 extra.push(Arc::new(crate::fusion::FusionPlugin::default()));
+                extra.push(Arc::new(crate::cron_tool::CronPlugin));
             }
             extra
         },
@@ -417,7 +427,7 @@ async fn build_agent_with(
     group(ArgGroup::new("one_shot_input").args(["print", "input_json"]))
 )]
 pub struct Cli {
-    /// Model to use (e.g. provider/model-id)
+    /// Model to use (e.g. provider/models-id)
     #[arg(long)]
     pub model: Option<String>,
 

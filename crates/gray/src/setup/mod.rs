@@ -105,6 +105,7 @@ pub mod tabs;
 mod context_modal;
 mod install_manager;
 mod model_modal;
+mod model_panes;
 pub(crate) mod variants;
 
 pub use context_modal::run_context_modal;
@@ -119,12 +120,12 @@ pub(crate) use install_manager::{
 };
 pub use install_manager::{run_plugins_modal, run_skills_modal};
 pub(crate) use model_modal::{
-    canonical_model_rows, canonicalize_effort_variant, composite_label_for,
-    composite_label_parts_for,
-    decompose_model_variant, effort_chip, picker_scope, provider_models_for_config,
-    run_model_modal, saved_models_for, selected_model_label, selection_parts,
-    validate_direct_model_id, wire_model_for,
+    canonical_model_rows, canonicalize_adopted_model, canonicalize_effort_variant,
+    composite_label_for, composite_label_parts_for, decompose_model_variant, effort_chip,
+    picker_scope, provider_models_for_config, run_model_modal, saved_models_for,
+    selected_model_label, selection_parts, validate_direct_model_id, wire_model_for,
 };
+pub(crate) use model_panes::{PanesOutcome, run_model_panes};
 pub use provider_auth::{
     PluginLoginProgress, activate_plugin_connection, adopt_saved_key, connect_saved_key,
     forget_plugin_connection, run_plugin_login, select_api_key_connection,
@@ -177,7 +178,7 @@ pub async fn run_onboarding(config: &mut Config) -> anyhow::Result<bool> {
         .is_some_and(|k| !k.trim().is_empty());
     if model_ok && key_ok {
         let model = config.model.as_deref().unwrap_or("default");
-        print_wrapped(&format!("using {model} — /connect to change"), 2);
+        print_wrapped(&format!("using {model} — /models to change"), 2);
         print!("\r\n");
         return Ok(true);
     }

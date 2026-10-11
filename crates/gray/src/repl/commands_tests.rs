@@ -28,7 +28,10 @@ fn slash_name_with_slash_is_plain_prompt_like_codex() {
     ));
     // Known commands unaffected.
     assert!(matches!(parse_command("/help"), ReplCommand::Help));
-    assert!(matches!(parse_command("/model foo"), ReplCommand::Model(_)));
+    assert!(matches!(
+        parse_command("/models foo"),
+        ReplCommand::Model(_)
+    ));
 }
 
 #[test]
@@ -95,8 +98,8 @@ fn empty_prompt_hides_slash_popup_like_codex() {
 #[test]
 fn registry_resolve_canonical_and_aliases() {
     for name in [
-        "connect", "model", "context", "sessions", "new", "compact", "usage", "feedback",
-        "agentsmd", "skills", "plugin", "help", "quit",
+        "models", "context", "sessions", "new", "compact", "usage", "feedback", "agentsmd",
+        "skills", "plugin", "help", "quit",
     ] {
         let d = super::resolve(name).unwrap_or_else(|| panic!("resolve {name}"));
         assert_eq!(d.name, name);
@@ -107,14 +110,6 @@ fn registry_resolve_canonical_and_aliases() {
         ("clear", "new"),
         ("reset", "new"),
         ("exit", "quit"),
-        ("keys", "connect"),
-        ("key", "connect"),
-        ("providers", "connect"),
-        ("provider", "connect"),
-        ("thinking", "model"),
-        ("effort", "model"),
-        ("reasoning", "model"),
-        ("fast", "model"),
         ("compress", "compact"),
         ("sys", "agentsmd"),
         ("cost", "usage"),
@@ -137,14 +132,6 @@ fn registry_completion_covers_aliases() {
         ("clear", "new"),
         ("reset", "new"),
         ("exit", "quit"),
-        ("keys", "connect"),
-        ("key", "connect"),
-        ("providers", "connect"),
-        ("provider", "connect"),
-        ("thinking", "model"),
-        ("effort", "model"),
-        ("reasoning", "model"),
-        ("fast", "model"),
         ("compress", "compact"),
         ("sys", "agentsmd"),
         ("cost", "usage"),
@@ -201,16 +188,20 @@ fn registry_parse_uses_canonical() {
     assert!(
         matches!(parse_command("/GATEWAY off"), ReplCommand::Gateway(Some(arg)) if arg == "off")
     );
-    assert!(matches!(parse_command("/keys foo"), ReplCommand::Provider));
-    assert!(matches!(
-        parse_command("/connect foo"),
-        ReplCommand::Provider
-    ));
-    assert!(matches!(parse_command("/key foo"), ReplCommand::Provider));
-    assert!(matches!(
-        parse_command("/provider openrouter"),
-        ReplCommand::Provider
-    ));
+    for gone in [
+        "/keys foo",
+        "/connect foo",
+        "/key foo",
+        "/provider x",
+        "/browse",
+        "/model",
+        "/fast",
+    ] {
+        assert!(
+            matches!(parse_command(gone), ReplCommand::Unknown(_)),
+            "{gone}"
+        );
+    }
     assert!(matches!(
         parse_command("/login openrouter"),
         ReplCommand::Unknown(_)
@@ -381,24 +372,24 @@ fn model_completes_cached_ids() {
         assert_eq!(models.len(), 2);
     });
     response.join().unwrap();
-    let rows = complete_command_args("model", "", cwd);
+    let rows = complete_command_args("models", "", cwd);
     assert!(
         rows.iter()
-            .any(|(n, _)| n == "model test-completion-model-xyz"),
+            .any(|(n, _)| n == "models test-completion-model-xyz"),
         "cached model id must complete: {rows:?}"
     );
-    let filtered = complete_command_args("model", "xyz", cwd);
+    let filtered = complete_command_args("models", "xyz", cwd);
     assert!(
         filtered
             .iter()
-            .any(|(n, _)| n == "model test-completion-model-xyz")
+            .any(|(n, _)| n == "models test-completion-model-xyz")
     );
     // an impossible filter still yields nothing (deterministic even
     // when other tests pollute the process-global cache)
     assert!(complete_command_args("model", "no-such-model-xyz-123", cwd).is_empty());
     // Switching to an unfetched/offline provider clears the visible list.
     crate::setup::set_active_model_provider("http://127.0.0.1:1/v1");
-    assert!(complete_command_args("model", "xyz", cwd).is_empty());
+    assert!(complete_command_args("models", "xyz", cwd).is_empty());
     // Trailing slashes do not create a different connection scope.
     crate::setup::set_active_model_provider(&format!("{base}/"));
     assert!(
@@ -482,8 +473,28 @@ fn cron_parses_bare_and_single_arg() {
 }
 
 #[test]
+fn bare_model_and_provider_aliases_open_two_pane_picker() {
+    assert!(matches!(parse_command("/models"), ReplCommand::ModelPanes));
+    assert!(matches!(parse_command("/MODELS"), ReplCommand::ModelPanes));
+    for cmd in [
+        "/model",
+        "/browse",
+        "/providers",
+        "/key",
+        "/effort",
+        "/connect",
+    ] {
+        assert!(
+            matches!(parse_command(cmd), ReplCommand::Unknown(_)),
+            "{cmd}"
+        );
+    }
+    assert!(matches!(parse_command("/browsex"), ReplCommand::Unknown(_)));
+}
+
+#[test]
 fn models_alias_opens_picker_and_preserves_direct_argument() {
-    assert!(matches!(parse_command("/models"), ReplCommand::Model(None)));
+    assert!(matches!(parse_command("/models"), ReplCommand::ModelPanes));
     assert!(
         matches!(parse_command("/models deepseek-v4.1-flash"), ReplCommand::Model(Some(id)) if id == "deepseek-v4.1-flash")
     );
