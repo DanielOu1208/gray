@@ -11,7 +11,8 @@ use crate::text_width::display_width;
 mod widgets;
 
 pub(crate) use widgets::{
-    build_input_box, needs_seam, queued_preview_lines, shimmer_spans, status_dock_h,
+    HomeRows, build_input_box, home_band_h, needs_seam, queued_preview_lines,
+    shimmer_spans, status_dock_h,
 };
 
 /// Exact-fit viewport height for the given content, clamped to
@@ -53,6 +54,35 @@ pub(crate) fn latched_viewport_floor(
     // the estimate's box + footer floor.
     let live_overrun = live_h + box_rows + attach_h + 1;
     with_dock.max(no_status).max(live_overrun).min(max_h)
+}
+
+/// The draft's attachment chips, one input-box row: each placeholder's
+/// label (`Image #1`) as a quiet pill, plus the file name when it is a
+/// real file — clipboard pastes land in `.tmpXXXX.png`, which names nothing.
+fn attachment_chips(attachments: &[(String, std::path::PathBuf)]) -> Line<'static> {
+    let t = crate::theme::theme();
+    let mut spans = vec![Span::styled("   ", Style::default().bg(t.surface_bg))];
+    for (i, (ph, path)) in attachments.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default().bg(t.surface_bg)));
+        }
+        let label = ph.trim_start_matches('[').trim_end_matches(']');
+        spans.push(Span::styled(
+            format!(" {label} "),
+            Style::default().fg(t.text_bright).bg(t.input_bg),
+        ));
+        if let Some(name) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.starts_with(".tmp"))
+        {
+            spans.push(Span::styled(
+                format!(" {name}"),
+                Style::default().fg(t.text_muted).bg(t.surface_bg),
+            ));
+        }
+    }
+    Line::from(spans)
 }
 
 /// Upper bound for the inline viewport.
@@ -175,10 +205,32 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let cursor = tui.textarea.cursor().min(text.len());
     // Ghost resume hint in the empty box while bare Enter would continue.
     let ghost = continue_ghost(tui.allow_empty_submit, tui.is_task_running, &text);
-    let ibox = build_input_box(&text, cursor, w, ghost);
+    let home = tui.is_home().then_some(HomeRows {
+        notice: tui.home_notice.as_deref(),
+    });
+    let mut ibox = build_input_box(&text, cursor, w, ghost, home);
+    if !tui.attachments.is_empty() {
+        // Chips ride inside the box, under the text and above its bottom
+        // pad, so they read as part of the draft they belong to.
+        ibox.lines
+            .insert(ibox.band_h - 1, attachment_chips(&tui.attachments));
+        ibox.band_h += 1;
+    }
+    if home.is_some() {
+        // Fill the screen: spacer rows under the home rows center the
+        // block and pin the status bar to the bottom row.
+        let above: usize = tui
+            .transcript
+            .iter()
+            .map(|l| l.width().max(1).div_ceil(w.max(1)))
+            .sum();
+        let spacer = (rows as usize).saturating_sub(above + ibox.lines.len() + 1);
+        ibox.lines
+            .extend(std::iter::repeat_n(Line::default(), spacer));
+    }
     let box_h = ibox.lines.len().max(1) as u16;
-    // Attachments row.
-    let attach_h: u16 = u16::from(!tui.attachments.is_empty());
+    // Attachments render inside the input box (see `attachment_chips`).
+    let attach_h: u16 = 0;
     // Seam (the one gap under the transcript) + shimmer status text + one
     // bare breathing row below it.
     let needs_seam = needs_seam(&tui.transcript);
@@ -220,7 +272,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let widget_budget = rows
         .saturating_sub(box_h + status_h + queued_est + live_est + panel_est + attach_h + 2)
         .min(12);
-    let mut widget_rows = tui.plugin_widget.rows(widget_budget as usize);
+    let mut widget_rows = tui.plugin_widget.rows(widget_budget as usize, w as usize);
     let max_viewport_h = viewport_cap(rows);
 
     // The text area and the context footer always keep their rows, so the
@@ -505,12 +557,27 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         }
         let rendered_box_h = box_h.min(area.bottom().saturating_sub(box_y));
         if rendered_box_h > 0 {
-            let box_block =
-                Block::default().style(Style::default().bg(crate::theme::theme().surface_bg));
+            let band_h = (ibox.band_h as u16).min(rendered_box_h);
+            let box_x = area.x + (ibox.x as u16).min(area.width);
+            let box_w = (ibox.width as u16).min(area.right().saturating_sub(box_x));
             frame.render_widget(
-                Paragraph::new(ibox.lines.clone()).block(box_block),
-                Rect::new(area.x, box_y, area.width, rendered_box_h),
+                Block::default().style(Style::default().bg(crate::theme::theme().surface_bg)),
+                Rect::new(box_x, box_y, box_w, band_h),
             );
+            // The home rows under the box may run past its right edge (a
+            // long tip on a narrow column); only the box text is wrapped.
+            frame.render_widget(
+                Paragraph::new(ibox.lines.clone()),
+                Rect::new(box_x, box_y, area.right() - box_x, rendered_box_h),
+            );
+            if ibox.home && box_w > 0 {
+                let t = crate::theme::theme();
+                let bar = Style::default().fg(t.accent).bg(t.surface_bg);
+                frame.render_widget(
+                    Paragraph::new(vec![Line::styled("▎", bar); band_h as usize]),
+                    Rect::new(box_x, box_y, 1, band_h),
+                );
+            }
         }
 
         if visible_count > 0 {
@@ -612,38 +679,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
             }
         }
 
-        if attach_h > 0 && attach_y < area.y + area.height {
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            for (_ph, p) in &tui.attachments {
-                let fname = p
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("clipboard")
-                    .to_string();
-                // blue File badge like opencode
-                spans.push(Span::styled(
-                    " File ",
-                    Style::default()
-                        .fg(Color::White)
-                        .bg(crate::theme::theme().info)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    fname,
-                    Style::default()
-                        .fg(crate::theme::theme().text_soft)
-                        .bg(crate::theme::theme().input_bg),
-                ));
-                spans.push(Span::raw("  "));
-            }
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)),
-                Rect::new(area.x, attach_y, area.width, 1),
-            );
-        }
-
-        let (_, max_label) = crate::setup::model_context_info(&tui.model_name);
+        let (max_tokens, max_label) = crate::setup::model_context_info(&tui.model_name);
         // Live gauge (bottom): latest report plus the shared streamed
         // estimate, so the `223.8k/300k` footer ticks per chunk with the
         // same delta as the top pill (different base: context vs output;
@@ -661,11 +697,13 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         } else {
             (0, 0.0)
         };
+        let ctx_pct = (used_tokens * 100).checked_div(max_tokens).unwrap_or(0);
         let ctx_display = format!(
-            "{}/{}",
+            "{} / {}",
             crate::setup::format_context_length(used_tokens),
             max_label
         );
+        let ctx_compact = format!("ctx {ctx_pct}%");
         let cache_display = format!("{hit_rate:.1}% cache");
 
         let model_display = tui
@@ -696,17 +734,76 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
             crate::theme::theme().text_faint
         };
         // The footer is two configurable segment lists (`statusline`);
-        // the stock layout is `context · cache · timer · work` on the left
-        // and `model · effort` on the right. Empty segments vanish with
-        // their separator.
+        // the stock layout is `model effort` on the left (effort muted) and
+        // `context cache timer work status` on the right. Empty segments
+        // vanish with their separator.
         let line_cfg = crate::statusline::config();
         let sep = line_cfg.separator();
+        // Effort rides the model name (`Swe 2 Max`) the way a fusion label
+        // already carries it; a configured `effort` segment shows it instead.
+        let effort_seg = line_cfg
+            .left()
+            .iter()
+            .chain(line_cfg.right().iter())
+            .any(|s| s == "effort");
+        let model_text = match effort_display.chars().next() {
+            Some(c)
+                if !effort_seg
+                    && tui.model_label_parts.is_none()
+                    && !model_display
+                        .to_lowercase()
+                        .contains(&tui.thinking_effort.to_lowercase()) =>
+            {
+                let rest = &effort_display[c.len_utf8()..];
+                format!("{model_display} {}{rest}", c.to_uppercase())
+            }
+            _ => model_display.clone(),
+        };
         let muted = crate::theme::theme().text_muted;
+        // Width pressure, shed in devin's order: 1 drops the branch, 2 bares
+        // the dir, 3 compacts the context, 4 drops the cache readouts.
+        let level = std::cell::Cell::new(0u8);
+        let dir_name = std::path::Path::new(&tui.cwd)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let builtin = |name: &str| -> Option<crate::statusline::Seg> {
             use crate::statusline::Seg;
             let t = crate::theme::theme();
+            let pieces = |parts: Vec<(String, Color)>| Seg {
+                text: parts.iter().map(|(s, _)| s.as_str()).collect(),
+                color: muted,
+                parts: Some(parts),
+            };
             Some(match name {
-                "context" => Seg::new(ctx_display.clone(), t.tool_dim),
+                "cache" | "timer" if level.get() > 3 => Seg::new("", muted),
+                "location" => {
+                    let mut parts = vec![("\u{28ff} ".to_string(), t.text_bright)];
+                    let dir = if level.get() > 1 {
+                        dir_name.clone()
+                    } else {
+                        crate::statusline::short_cwd(&tui.cwd)
+                    };
+                    parts.push((dir, t.text_body));
+                    let branch = crate::statusline::git_branch(std::path::Path::new(&tui.cwd));
+                    if level.get() == 0 && !branch.is_empty() {
+                        parts.push((format!(" ({branch})"), muted));
+                    }
+                    pieces(parts)
+                }
+                "state" => match turn_started.filter(|_| is_task_running) {
+                    Some(start) => {
+                        let frame = (start.elapsed().as_millis() / 80) as usize % 10;
+                        let spin = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".chars().nth(frame).unwrap_or('⠋');
+                        pieces(vec![
+                            (spin.to_string(), muted),
+                            (" working".to_string(), t.text_bright),
+                        ])
+                    }
+                    None => Seg::new("\u{25cb} idle", muted),
+                },
+                "context" if level.get() > 2 => Seg::new(ctx_compact.clone(), muted),
+                "context" => Seg::new(ctx_display.clone(), muted),
                 "cache" => Seg::new(cache_display.clone(), cache_color),
                 "timer" => cache_timer
                     .as_ref()
@@ -714,7 +811,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                     .unwrap_or_else(|| Seg::new("", muted)),
                 "work" => Seg::new(tui.background_work.clone().unwrap_or_default(), t.accent),
                 "model" => {
-                    let mut seg = Seg::new(model_display.clone(), muted);
+                    let mut seg = Seg::new(model_text.clone(), t.text_bright);
                     if let Some(parts) = &tui.model_label_parts {
                         // The working model's half of a fusion label burns
                         // accent: the sidekick's while its `handoff` call
@@ -734,7 +831,11 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                             parts
                                 .iter()
                                 .map(|(txt, slot)| {
-                                    let c = if *slot == lit { t.accent } else { muted };
+                                    let c = match slot {
+                                        Some(_) if *slot == lit => t.accent,
+                                        Some(_) => t.text_bright,
+                                        None => muted,
+                                    };
                                     (txt.clone(), c)
                                 })
                                 .collect(),
@@ -742,15 +843,9 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                     }
                     seg
                 }
-                "effort" => Seg::new(effort_display.clone(), t.tool_dim),
+                "effort" => Seg::new(effort_display.clone(), muted),
                 "cwd" => Seg::new(crate::statusline::short_cwd(&tui.cwd), muted),
-                "dir" => Seg::new(
-                    std::path::Path::new(&tui.cwd)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    muted,
-                ),
+                "dir" => Seg::new(dir_name.clone(), muted),
                 "branch" => Seg::new(
                     crate::statusline::git_branch(std::path::Path::new(&tui.cwd)),
                     t.tool_dim,
@@ -766,10 +861,24 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
             })
         };
         let sep_color = crate::theme::theme().text_faint;
+        let right_sep = line_cfg.right_separator();
+        let seg_width = |segs: &[crate::statusline::Seg]| -> usize {
+            segs.iter().map(|s| display_width(&s.text)).sum()
+        };
+        // 2-col inset each side + at least a 3-col gap between the groups.
+        let (mut left_segs, mut right_segs) = (Vec::new(), Vec::new());
+        for l in 0..=4 {
+            level.set(l);
+            left_segs =
+                crate::statusline::compose(&line_cfg.left(), &builtin, &sep, sep_color, muted);
+            right_segs =
+                crate::statusline::compose(&line_cfg.right(), &builtin, &right_sep, sep_color, muted);
+            if seg_width(&left_segs) + seg_width(&right_segs) + 7 <= w {
+                break;
+            }
+        }
         let left_segs =
-            crate::statusline::compose(&line_cfg.left(), &builtin, &sep, sep_color, muted);
-        let right_segs =
-            crate::statusline::compose(&line_cfg.right(), &builtin, &sep, sep_color, muted);
+            crate::statusline::clip(left_segs, w.saturating_sub(seg_width(&right_segs) + 7));
         if line_cfg.command.is_some() {
             crate::statusline::publish_facts(serde_json::json!({
                 "cwd": tui.cwd,
@@ -782,11 +891,8 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 "version": env!("CARGO_PKG_VERSION"),
             }));
         }
-        let seg_width = |segs: &[crate::statusline::Seg]| -> usize {
-            segs.iter().map(|s| display_width(&s.text)).sum()
-        };
-        let left_len = 1 + seg_width(&left_segs);
-        let right_len = seg_width(&right_segs);
+        let left_len = 2 + seg_width(&left_segs);
+        let right_len = seg_width(&right_segs) + 2;
         let pad_len = w.saturating_sub(left_len + right_len);
         let to_spans = |s: crate::statusline::Seg| -> Vec<Span<'static>> {
             match s.parts {
@@ -797,7 +903,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 None => vec![Span::styled(s.text, Style::default().fg(s.color))],
             }
         };
-        let mut footer_spans = vec![Span::raw(" ")];
+        let mut footer_spans = vec![Span::raw("  ")];
         footer_spans.extend(left_segs.into_iter().flat_map(to_spans));
         footer_spans.push(Span::raw(" ".repeat(pad_len)));
         footer_spans.extend(right_segs.into_iter().flat_map(to_spans));
@@ -828,7 +934,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         // idle hides the caret exactly while the user is typing blind. Modals
         // own the screen and return before this point, so no other consumer
         // competes for the cursor.
-        let cur_x = (area.x + 3 + ibox.cur_col as u16).min(area.x + area.width.saturating_sub(1));
+        let cur_x = (area.x + ibox.x as u16 + 3 + ibox.cur_col as u16).min(area.x + area.width.saturating_sub(1));
         let cur_y = (box_y + ibox.cur_row as u16).min(area.y + area.height.saturating_sub(1));
         frame.set_cursor_position(Position::new(cur_x, cur_y));
     });

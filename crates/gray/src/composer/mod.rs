@@ -407,6 +407,9 @@ pub struct Tui {
     live_tools: Vec<LiveTool>,
     plugin_widget: plugin_widget::Widget,
     pub(crate) ask_modal: Option<AskModal>,
+    /// The startup notice (interrupted sessions) shown under the home
+    /// tip, until the first transcript item ends the home screen.
+    pub(crate) home_notice: Option<String>,
     /// Last `statusline::version()` painted; a change (plugin status,
     /// status command output, `/reload`) repaints the footer.
     status_line_seen: u64,
@@ -466,15 +469,114 @@ pub enum TranscriptEntry {
     Gap(usize),
 }
 
-/// The welcome banner: the gray ASCII logo, the version line, nothing else.
-/// Deliberately not the graychan art — that is `/hehe` only, so the startup
-/// screen is the logo and `/hehe` again puts the logo back.
-pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
-    let base = crate::theme::theme().text_dim;
-    let hilite = crate::theme::theme().text_bright;
+/// devin-tui's home hints (`shift+tab mode`, `ctrl+p commands`, …) mapped
+/// onto gray's default keymap — right-aligned under the input panel.
+const WELCOME_HINTS: &[(&str, &str)] = &[("/", "commands")];
 
-    let mut welcome_lines: Vec<Line<'static>> = Vec::new();
-    welcome_lines.push(Line::from(""));
+/// devin-tui's rotating `● Tip` row, gray's verbs. The scrollback banner
+/// can't tick, so one tip is picked per process and every re-emit
+/// (resize reflow, `/hehe` revert) keeps it.
+const WELCOME_TIPS: &[(&str, &str)] = &[
+    ("/", "shows every command and skill"),
+    ("/models", "picks a model"),
+    ("/help", "lists every command and key"),
+    ("/resume", "reopens an earlier session"),
+    ("alt+enter", "inserts a newline"),
+    ("ctrl+v", "pastes an image from the clipboard"),
+    ("esc", "cancels the running turn"),
+    ("ctrl+c", "clears the draft — exits when it's empty"),
+];
+
+fn welcome_tip_index() -> usize {
+    static PICK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *PICK.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as usize)
+            .unwrap_or(0)
+            % WELCOME_TIPS.len()
+    })
+}
+
+/// devin's home hints row, right-aligned to the `x..x + col_w` column:
+/// keys bright, labels muted; the rightmost pairs drop first when narrow.
+pub(crate) fn welcome_hints_line(x: usize, col_w: usize) -> Line<'static> {
+    let theme = crate::theme::theme();
+    let hint_w = |hints: &[(&str, &str)]| -> usize {
+        hints
+            .iter()
+            .map(|(k, l)| k.len() + 1 + l.len())
+            .sum::<usize>()
+            + hints.len().saturating_sub(1) * 3
+    };
+    let mut hints = WELCOME_HINTS.to_vec();
+    while hints.len() > 1 && hint_w(&hints) > col_w {
+        hints.pop();
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let pad = x + col_w.saturating_sub(hint_w(&hints));
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad)));
+    }
+    for (i, (key, label)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("   "));
+        }
+        spans.push(Span::styled(key.to_string(), Style::default().fg(theme.text_bright)));
+        spans.push(Span::styled(format!(" {label}"), Style::default().fg(theme.text_muted)));
+    }
+    Line::from(spans)
+}
+
+/// The tip row at column `x`: `● Tip  key` bright, the rest muted.
+pub(crate) fn welcome_tip_line(x: usize) -> Line<'static> {
+    let theme = crate::theme::theme();
+    let (key, text) = WELCOME_TIPS[welcome_tip_index()];
+    Line::from(vec![
+        Span::raw(" ".repeat(x)),
+        Span::styled("● Tip  ", Style::default().fg(theme.text_bright)),
+        Span::styled(key, Style::default().fg(theme.text_bright)),
+        Span::styled(format!(" {text}"), Style::default().fg(theme.text_muted)),
+    ])
+}
+
+/// The column devin centers its home block on: `(x, width)`, `min(78, w-8)`
+/// wide. The welcome logo and the home input box share it.
+pub(crate) fn home_column(w: usize) -> (usize, usize) {
+    let col_w = w.saturating_sub(8).clamp(1, 78);
+    (w.saturating_sub(col_w) / 2, col_w)
+}
+
+/// The welcome banner — devin-tui's home screen as scrollback: the gray
+/// ASCII logo (its diagonal gradient stands in for the braille mark's
+/// shimmer) and `gray` + version, centered horizontally on the
+/// `min(78, w-8)` column devin uses and vertically together with the
+/// composer's home band ([`draw::home_band_h`]). The composer is the rest
+/// of devin's home: the framed panel with the hints, tip and startup
+/// notice under it, and the status bar where the corner row was. Deliberately not the graychan art —
+/// that is `/hehe` only, so the startup screen is the logo and `/hehe`
+/// again puts the logo back.
+pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
+    let theme = crate::theme::theme();
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+
+    let (x, col_w) = home_column(w);
+
+    let centered = |segs: Vec<Span<'static>>, text_w: usize| -> Line<'static> {
+        let pad = x + col_w.saturating_sub(text_w) / 2;
+        let mut spans = Vec::with_capacity(segs.len() + 1);
+        if pad > 0 {
+            spans.push(Span::raw(" ".repeat(pad)));
+        }
+        spans.extend(segs);
+        Line::from(spans)
+    };
+
+    let mut body: Vec<Line<'static>> = Vec::new();
+
+    // The mark — the diagonal gradient stands in for the shimmer sweep.
+    let base = theme.text_dim;
+    let hilite = theme.text_bright;
     let logo_raw = crate::tui::logo_lines();
     let l_rows = logo_raw.len().max(1) as f32;
     let max_logo_w = logo_raw
@@ -483,7 +585,7 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
         .max()
         .unwrap_or(0);
     let l_cols = (max_logo_w as f32).max(1.0);
-    let logo_pad = w.saturating_sub(max_logo_w) / 2;
+    let logo_pad = x + col_w.saturating_sub(max_logo_w) / 2;
     for (row, line) in logo_raw.iter().enumerate() {
         let trimmed = line.trim();
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -496,30 +598,40 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
             let color = crate::tui::blend_color(base, hilite, t);
             spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
-        welcome_lines.push(Line::from(spans));
+        body.push(Line::from(spans));
     }
-    welcome_lines.push(Line::from(""));
-    let banner_raw = format!(
-        "gray {} \u{b7} Run /help for commands",
-        env!("CARGO_PKG_VERSION")
-    );
-    let banner_len = display_width(&banner_raw);
-    let pad = w.saturating_sub(banner_len) / 2;
-    welcome_lines.push(Line::from(vec![
-        Span::raw(" ".repeat(pad)),
-        Span::styled(
+    body.push(Line::from(""));
+
+    // `gray` bold bright, then the muted version — devin's title pair.
+    body.push(centered(
+        vec![Span::styled(
             "gray",
-            Style::default().bold().fg(crate::theme::theme().text_body),
-        ),
-        Span::styled(
-            format!(
-                " {} \u{b7} Run /help for commands",
-                env!("CARGO_PKG_VERSION")
-            ),
-            Style::default().fg(crate::theme::theme().text_muted),
-        ),
-    ]));
-    welcome_lines.push(Line::from(""));
+            Style::default().bold().fg(theme.text_bright),
+        )],
+        4,
+    ));
+    body.push(centered(
+        vec![Span::styled(
+            version.clone(),
+            Style::default().fg(theme.text_muted),
+        )],
+        display_width(&version),
+    ));
+    body.push(Line::from(""));
+
+
+    // Vertical centering: the block is this banner plus the composer's
+    // home band; the band's spacer rows take the other half of the free
+    // rows.
+    let rows = crossterm::terminal::size()
+        .map(|(_, r)| r as usize)
+        .unwrap_or(0);
+    let top = rows.saturating_sub(body.len() + draw::home_band_h(w)) / 2;
+    let mut welcome_lines = Vec::with_capacity(top + body.len());
+    for _ in 0..top {
+        welcome_lines.push(Line::from(""));
+    }
+    welcome_lines.extend(body);
     welcome_lines
 }
 
@@ -616,6 +728,7 @@ impl Tui {
             plugin_widget: plugin_widget::Widget::new(std::env::current_dir().unwrap_or_default()),
             status_line_seen: crate::statusline::version(),
             ask_modal: None,
+            home_notice: None,
         })
     }
 
@@ -807,9 +920,14 @@ impl Tui {
             match entry {
                 TranscriptEntry::Welcome => {
                     // The banner keeps its own spacing, blank rows included.
+                    // Recorded first: the home band sizes its spacer from
+                    // `transcript`, and the insert settles the band — an
+                    // empty transcript there sized it to the full screen, so
+                    // the insert scrolled the logo off and left the band
+                    // stranded mid-screen.
                     let lines = build_welcome_lines(w);
+                    self.record_rows(lines.clone());
                     self.insert_paragraph(&lines, None);
-                    self.record_rows(lines);
                 }
                 TranscriptEntry::UserPrompt(text, attached) => {
                     let lines =
@@ -874,6 +992,18 @@ impl Tui {
         self.model_name = model;
     }
     /// Footer label for the model (`None` = its friendly name).
+    pub fn set_home_notice(&mut self, notice: Option<String>) {
+        self.home_notice = notice;
+    }
+
+    /// devin's home screen: until the first transcript item, scrollback
+    /// holds only the welcome banner.
+    pub(crate) fn is_home(&self) -> bool {
+        self.history_entries
+            .iter()
+            .all(|e| matches!(e, TranscriptEntry::Welcome | TranscriptEntry::Gap(_)))
+    }
+
     pub fn set_model_label(&mut self, label: Option<String>) {
         self.model_label = label;
     }

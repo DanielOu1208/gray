@@ -24,7 +24,7 @@ fn transcript_ends_blank_matches_ensure_gap() {
 #[test]
 fn desired_viewport_exact_fit() {
     // The idle box is measured, not hard-coded: 3 rows (top pad, `❯`, pad).
-    let box_rows = build_input_box("", 0, 80, None).lines.len() as u16;
+    let box_rows = build_input_box("", 0, 80, None, None).lines.len() as u16;
     assert_eq!(box_rows, 3, "top pad + prompt + bottom pad");
     // Idle: box 3 + footer 1 = 4 rows (MIN_VIEWPORT_H).
     assert_eq!(
