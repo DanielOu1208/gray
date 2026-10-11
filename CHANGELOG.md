@@ -1,22 +1,85 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-10-12
 
-### Removed
-- **fff-search index removed; fsearch is the only resident file index
-  (unix).** `GRAY_SEARCH_INDEX=fff` now means the default.
-- **pi-extension leftovers removed.** `gray plugin remove` no longer
-  looks under `plugins/pi/` and `pi` is no longer a reserved install
-  name.
-
-### Fixed
-- **Attaching a PDF, audio or video file no longer makes the context
-  jump to millions of tokens.** Non-image attachments ride inline as
-  base64 `Media` blocks, and every estimator priced them at bytes/4 of
-  the payload — a 6 MB file read as ~2M tokens the moment it was sent,
-  which tripped pre-turn compaction and pinned the gauge until the
-  provider's real usage report landed. Media now takes the same capped
-  per-block price images already did.
+### Added
+- **Welcome intro on TUI start.** The home block plays a sweep over the
+  gray logo, shows `gray` + version, a rotating tips row, and a plugin
+  stats row (`N plugins · M loaded · K updated`).
+- **`/plugins` manager.** An interactive panel lists installed plugins
+  with loaded/local-build/index state, `/` filters, and update controls;
+  Esc drops back to the prompt.
+- **Live command-output tail.** While a bash tool call runs, its last
+  five lines roll under the reply; assistant text streams paced instead
+  of in bursts.
+- **`gray cmd` registry.** `gray cmd list` / `gray cmd run <name>`
+  expose the machine-readable command table gateways render — skills
+  ride `/skills <name>` with autocomplete (no bare skill commands), and
+  long command output is paged: `◀ Page x/y ▶` edits in place on
+  Discord/Telegram, sequential pages or a file attachment elsewhere.
+- **Headless steering.** `GRAY_STDIN_STEER=1` turns `gray -p` stdin into
+  a JSON demux: `{"type":"steer","text":...}` lines inject mid-turn or
+  queue as a follow-up turn in the same session (a `progress` row with
+  `phase: "steered"` acknowledges), while ask-answer lines still route
+  to pending asks.
+- **Retract rows.** When a model leaks raw tool-call markup, gray emits
+  `{"type":"retract","segment":N}` for the withdrawn segment, nudges the
+  model, and the regenerated reply lands in a fresh segment — the final
+  `result` carries only the clean text.
+- **Global plugins.** `gray plugin enable <name> --global` marks a lock
+  entry global; global entries boot in every `GRAY_HOME` (gateway
+  conversation homes included), show `[global]` in `gray plugin list`,
+  and their `prompt/context` hooks still run under the lean prompt —
+  this is what makes memory universal across sessions.
+- **Single binary, auto-update, update propagation.** One installed
+  `gray` binary serves the TUI, `-p` and the gateway; `/update` installs
+  a new build, and `gray plugin update --check` flags local builds whose
+  source hash drifted so `gray plugin update` rebuilds them.
+- **User themes.** `~/.gray/themes/<name>.json` overrides any of the
+  palette's color roles; `/theme <name>` switches and saves, `/theme new
+  <name>` writes the current palette as a starting point, `GRAY_THEME`
+  overrides per run. Gray still ships one built-in palette.
+- **Prompt templates.** `prompts/*.md` files become slash commands with
+  pi's placeholders (`$1`, `$@`, `${1:-default}`, `${@:2}`). Read from
+  `.gray/prompts` and `~/.gray/prompts`, plus pi's `prompts` and Claude
+  Code's `commands` folders. Shown in completion and `/help`.
+- **Keybindings.** `~/.gray/keybindings.json` in pi's format and action
+  ids rebinds editor and app keys (`[]` unbinds); `"/cmd": "ctrl+shift+k"`
+  binds a slash command. `/hotkeys` lists the live table.
+- **Configurable footer.** `"status_line"` in `config.json` picks the
+  left/right segments (context, cache, timer, model, effort, cwd, branch,
+  plugin statuses, templates like `"⎇ {branch}"`) and can run a status
+  command with a Claude Code–style JSON snapshot on stdin.
+- **`/reload`** re-reads theme, keybindings, prompt templates and the
+  status line.
+- **Always-on gateway.** An optional agent brain runs in the gateway
+  daemon with outbox delivery; the heartbeat is gone — cron fires reach
+  chat-bound sessions through a spool any driver can deliver.
+- **Plugin protocol 2.0/1.3.** Four mutating hooks (`input/submit`,
+  `agent/before_start`, `context/build`, `tool/after`) plus live tool
+  sets that refresh on `host/tools_changed` instead of only at spawn.
+- **`provider/usage`.** Subscription providers can report quota windows
+  (Claude's five-hour/weekly buckets, Devin's ACU monthly window) into
+  `/usage`.
+- **Agents panel.** A plugin's `agent_picker` outcome opens an
+  interactive `/subagents`-style picker — browse runs, view transcripts,
+  chat into a run, resume a finished one's session. Read-only mode works
+  mid-turn.
+- **Project trust** for per-directory consent, **auto-titled sessions**,
+  and tool-style cards for cron/reminder/background-job wakes.
+- **Provider command argv, subscription tool policy, stream-phase cache
+  warming** (0.2.0 line): provider plugins declare `command/run` argv,
+  subscription auth carries a per-provider tool policy, and cache warmth
+  spans streaming, not just the request gap.
+- **Custom endpoints are first-class connections.** `/connect` → Custom
+  now offers a pick list of local OpenAI-compatible servers (Ollama, LM
+  Studio, llama.cpp, vLLM, Jan, LiteLLM — live-probed, running ones
+  badged), probes the typed URL before asking for a key, and saves each
+  endpoint as its own row in the provider list — several customs can
+  stay connected at once, each with its own key (`custom:<host[:port]>`
+  in `auth.json`), model picker, and Shift+Enter removal. The legacy
+  single `custom` key migrates on the next `/connect` open. Endpoints
+  persist in `~/.gray/custom_endpoints.json`.
 
 ### Changed
 - **Images go to the model at original bytes, resolution and quality.**
@@ -38,61 +101,6 @@
 - **The loop guard warns before it stops.** Four identical tool calls in
   a row inject one reminder to change approach; the abort at six is
   unchanged. Previously the run ended with no warning.
-
-### Added
-- **Custom endpoints are first-class connections.** `/connect` → Custom
-  now offers a pick list of local OpenAI-compatible servers (Ollama, LM
-  Studio, llama.cpp, vLLM, Jan, LiteLLM — live-probed, running ones
-  badged), probes the typed URL before asking for a key, and saves each
-  endpoint as its own row in the provider list — several customs can
-  stay connected at once, each with its own key (`custom:<host[:port]>`
-  in `auth.json`), model picker, and Shift+Enter removal. The legacy
-  single `custom` key migrates on the next `/connect` open. Endpoints
-  persist in `~/.gray/custom_endpoints.json`.
-
-## [0.2.0] - 2026-10-10
-
-### Added
-- **User themes.** `~/.gray/themes/<name>.json` overrides any of the
-  palette's color roles; `/theme <name>` switches and saves, `/theme new
-  <name>` writes the current palette as a starting point, `GRAY_THEME`
-  overrides per run. Gray still ships one built-in palette.
-- **Prompt templates.** `prompts/*.md` files become slash commands with
-  pi's placeholders (`$1`, `$@`, `${1:-default}`, `${@:2}`). Read from
-  `.gray/prompts` and `~/.gray/prompts`, plus pi's `prompts` and Claude
-  Code's `commands` folders. Shown in completion and `/help`.
-- **Keybindings.** `~/.gray/keybindings.json` in pi's format and action
-  ids rebinds editor and app keys (`[]` unbinds); `"/cmd": "ctrl+shift+k"`
-  binds a slash command. `/hotkeys` lists the live table.
-- **Configurable footer.** `"status_line"` in `config.json` picks the
-  left/right segments (context, cache, timer, model, effort, cwd, branch,
-  plugin statuses, templates like `"⎇ {branch}"`) and can run a status
-  command with a Claude Code–style JSON snapshot on stdin.
-- **`/reload`** re-reads theme, keybindings, prompt templates and the
-  status line.
-
-### Added
-- **Always-on gateway.** An optional agent brain runs in the gateway
-  daemon with outbox delivery; the heartbeat is gone — cron fires reach
-  chat-bound sessions through a spool any driver can deliver.
-- **Plugin protocol 2.0/1.3.** Four mutating hooks (`input/submit`,
-  `agent/before_start`, `context/build`, `tool/after`) plus live tool
-  sets that refresh on `host/tools_changed` instead of only at spawn.
-- **`provider/usage`.** Subscription providers can report quota windows
-  (Claude's five-hour/weekly buckets, Devin's ACU monthly window) into
-  `/usage`.
-- **Agents panel.** A plugin's `agent_picker` outcome opens an
-  interactive `/subagents`-style picker — browse runs, view transcripts,
-  chat into a run, resume a finished one's session. Read-only mode works
-  mid-turn.
-- **Project trust** for per-directory consent, **auto-titled sessions**,
-  and tool-style cards for cron/reminder/background-job wakes.
-- **Provider command argv, subscription tool policy, stream-phase cache
-  warming** (0.2.0 line): provider plugins declare `command/run` argv,
-  subscription auth carries a per-provider tool policy, and cache warmth
-  spans streaming, not just the request gap.
-
-### Changed
 - Ctrl+A / Ctrl+E / Ctrl+U / Ctrl+K act on the current line of a
   multi-line draft instead of the whole draft.
 - **Bash tool is mini-swe-agent shaped** — `command` + `timeout` only;
@@ -108,7 +116,24 @@
 - **Lower token burn per turn**: batched hint text, media stubs on the
   wire, and a scrubbed request payload.
 
+### Removed
+- **fff-search index removed; fsearch is the only resident file index
+  (unix).** `GRAY_SEARCH_INDEX=fff` now means the default.
+- **pi-extension leftovers removed.** `gray plugin remove` no longer
+  looks under `plugins/pi/` and `pi` is no longer a reserved install
+  name.
+
 ### Fixed
+- **Attaching a PDF, audio or video file no longer makes the context
+  jump to millions of tokens.** Non-image attachments ride inline as
+  base64 `Media` blocks, and every estimator priced them at bytes/4 of
+  the payload — a 6 MB file read as ~2M tokens the moment it was sent,
+  which tripped pre-turn compaction and pinned the gauge until the
+  provider's real usage report landed. Media now takes the same capped
+  per-block price images already did.
+- **Expired plugin credentials refresh instead of forcing a new login.**
+- **ChatGPT usage-limit errors no longer retry** — the limit response is
+  surfaced as-is instead of burning retries that cannot succeed.
 - **A slow `plugin/tools` answer no longer stalls every spawn.** The
   first fetch is detached (sidecars announce via `host/tools_changed`),
   so one 30 s plugin can't serialize the whole spawn loop.
