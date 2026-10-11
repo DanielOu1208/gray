@@ -167,14 +167,14 @@ fn plugin_list_shows_registered_command_alongside_sidecars() {
     let out = cli(temp.path()).args(["plugin", "list"]).output().unwrap();
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(!text.contains("[disabled]"), "{text}");
-    // A native/CLI command is not an updatable sidecar: warn + no-op.
+    // A native/CLI command is not an updatable sidecar: skipped, no update.
     let out = cli(temp.path())
         .args(["plugin", "update", "sample"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
-    let err = String::from_utf8(out.stderr).unwrap();
-    assert!(err.contains("non-index source"), "{err}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("sample: skipped"), "{text}");
     // Remove drops the registry row (and manifest), list is empty again.
     let out = cli(temp.path())
         .args(["plugin", "remove", "sample"])
