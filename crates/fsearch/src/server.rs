@@ -18,17 +18,34 @@ pub fn serve(dir: PathBuf, home: String) {
     // index: an app embedding fsearch may own it while the daemon follows.)
     std::fs::create_dir_all(&dir).ok();
     // Opened without truncating: a loser must not wipe the owner's pid.
-    let Ok(mut lock) = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(dir.join("socket.lock")) else { return };
+    let Ok(mut lock) = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("socket.lock"))
+    else {
+        return;
+    };
     if !try_lock(&lock) {
-        eprintln!("{} another fsearch daemon is running", fsearch::query::now_secs());
+        eprintln!(
+            "{} another fsearch daemon is running",
+            fsearch::query::now_secs()
+        );
         return;
     }
     // The pid lets `stop` find us.
-    let _ = lock.set_len(0).and_then(|_| write!(lock, "{}", std::process::id()));
+    let _ = lock
+        .set_len(0)
+        .and_then(|_| write!(lock, "{}", std::process::id()));
     // FSEARCH_ROOT narrows the scan for a test corpus or a chroot-style
     // deployment; unset means the whole disk.
     let root = std::env::var_os("FSEARCH_ROOT").map(PathBuf::from);
-    let engine = match Engine::start(Options { dir: dir.clone(), home, root, skip: None }) {
+    let engine = match Engine::start(Options {
+        dir: dir.clone(),
+        home,
+        root,
+        skip: None,
+    }) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("{} {e}", fsearch::query::now_secs());
@@ -45,7 +62,12 @@ pub fn serve(dir: PathBuf, home: String) {
 }
 
 fn try_lock(f: &std::fs::File) -> bool {
-    unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(f), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    unsafe {
+        libc::flock(
+            std::os::fd::AsRawFd::as_raw_fd(f),
+            libc::LOCK_EX | libc::LOCK_NB,
+        ) == 0
+    }
 }
 
 /// Stop the daemon serving `dir`, if one is running, and wait until it has
@@ -53,14 +75,19 @@ fn try_lock(f: &std::fs::File) -> bool {
 /// launchd bootout) is just waited for.
 pub fn stop(dir: &Path) -> Result<(), String> {
     let path = dir.join("socket.lock");
-    let Ok(lock) = std::fs::File::open(&path) else { return Ok(()) };
+    let Ok(lock) = std::fs::File::open(&path) else {
+        return Ok(());
+    };
     let mut killed = None;
     for _ in 0..300 {
         if try_lock(&lock) {
             return Ok(());
         }
         if killed.is_none() {
-            killed = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<i32>().ok()).filter(|&p| p > 1);
+            killed = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .filter(|&p| p > 1);
             if let Some(pid) = killed {
                 unsafe { libc::kill(pid, libc::SIGTERM) };
             }
@@ -80,7 +107,9 @@ const WARM: Duration = Duration::from_millis(250);
 fn handle(mut conn: UnixStream, engine: &Engine) {
     // Content searches run on this thread: keep them on performance cores.
     #[cfg(target_os = "macos")]
-    unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0) };
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+    };
     let Ok(r) = conn.try_clone() else { return };
     let mut out = Vec::new();
     for line in BufReader::new(r).lines() {
@@ -104,7 +133,14 @@ fn handle(mut conn: UnixStream, engine: &Engine) {
 /// close their side as soon as the request is out.)
 fn waiting(conn: &UnixStream) -> bool {
     let mut b = 0u8;
-    let n = unsafe { libc::recv(std::os::fd::AsRawFd::as_raw_fd(conn), (&raw mut b).cast(), 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+    let n = unsafe {
+        libc::recv(
+            std::os::fd::AsRawFd::as_raw_fd(conn),
+            (&raw mut b).cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
     n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
 }
 
@@ -112,16 +148,35 @@ fn waiting(conn: &UnixStream) -> bool {
 fn respond(line: &str, engine: &Engine, out: &mut Vec<u8>) {
     let v: Value = match serde_json::from_str(line) {
         Ok(v) => v,
-        Err(e) => return put(out, &json!({"ok": false, "error": format!("bad json: {e}")})),
+        Err(e) => {
+            return put(
+                out,
+                &json!({"ok": false, "error": format!("bad json: {e}")}),
+            );
+        }
     };
     let id = v.get("id").unwrap_or(&Value::Null);
     match run(&v, engine) {
         Ok(Reply::Hits(found, took_us)) => {
             let hits = found
                 .iter()
-                .map(|f| Hit { kind: kind_name(f.kind), mtime: f.mtime, path: f.path.to_string_lossy(), score: f.score, size: f.size })
+                .map(|f| Hit {
+                    kind: kind_name(f.kind),
+                    mtime: f.mtime,
+                    path: f.path.to_string_lossy(),
+                    score: f.score,
+                    size: f.size,
+                })
                 .collect();
-            put(out, &Hits { hits, id, ok: true, took_us })
+            put(
+                out,
+                &Hits {
+                    hits,
+                    id,
+                    ok: true,
+                    took_us,
+                },
+            )
         }
         Ok(Reply::Value(mut r)) => {
             r["id"] = id.clone();
@@ -166,7 +221,11 @@ fn run(v: &Value, engine: &Engine) -> Result<Reply, String> {
     let op = v.get("op").and_then(Value::as_str).unwrap_or("search");
     let is_grep = op == "grep"
         || (op == "search"
-            && v.get("q").and_then(Value::as_str).is_some_and(|q| ["grep:", "regex:", "sym:", "content:", "symbol:"].iter().any(|k| q.contains(k))));
+            && v.get("q").and_then(Value::as_str).is_some_and(|q| {
+                ["grep:", "regex:", "sym:", "content:", "symbol:"]
+                    .iter()
+                    .any(|k| q.contains(k))
+            }));
     match op {
         "ping" => Ok(Reply::Value(json!({"ok": true}))),
         "save" => {
@@ -205,7 +264,12 @@ fn grep(v: &Value, engine: &Engine) -> Result<Value, String> {
         Some(m) => return Err(format!("unknown mode {m}")),
         None => q.grep_mode,
     };
-    let pattern = v.get("pattern").and_then(Value::as_str).map(str::to_string).or(q.grep.take()).ok_or("grep needs a pattern")?;
+    let pattern = v
+        .get("pattern")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or(q.grep.take())
+        .ok_or("grep needs a pattern")?;
     let mut g = fsearch::Grep::new(&pattern, mode)?;
     if let Some(n) = v.get("per_file").and_then(Value::as_u64) {
         g.max_per_file = n as usize;
@@ -272,7 +336,10 @@ pub fn connect(dir: &Path) -> std::io::Result<UnixStream> {
     if let Ok(s) = UnixStream::connect(&sock) {
         return Ok(s);
     }
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("daemon.log"))?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("daemon.log"))?;
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
     // Own session: closing the terminal that started it doesn't kill it.
@@ -282,7 +349,11 @@ pub fn connect(dir: &Path) -> std::io::Result<UnixStream> {
             Ok(())
         });
     }
-    cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log).spawn()?;
+    cmd.arg("serve")
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .spawn()?;
     for _ in 0..1500 {
         std::thread::sleep(Duration::from_millis(2));
         if let Ok(s) = UnixStream::connect(&sock) {

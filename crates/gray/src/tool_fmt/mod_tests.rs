@@ -984,9 +984,13 @@ fn noop_commands_read_as_skipped_not_ran() {
     for cmd in ["echo x > f", "true && make"] {
         let text = header(serde_json::json!({"command": cmd}));
         assert!(text.contains("Ran "), "{text:?}");
+    }
+}
+
+#[test]
 fn discord_send_preview_strips_markdown_markers() {
     let args = serde_json::json!({"content": "**gray updated + Discord restarted**"});
-    let text = row_text(&format_tool_call_header("discord_send", &args, None));
+    let text = row_text(&format_tool_call_header("discord_send", &args, None, None));
     assert!(text.contains("Sent Discord"), "verb missing: {text:?}");
     assert!(
         text.contains("gray updated + Discord restarted"),
@@ -1003,7 +1007,7 @@ fn discord_send_preview_strips_pairs_but_keeps_singles() {
         ("a * b and 5_6 stay", "a * b and 5_6 stay"),
     ] {
         let args = serde_json::json!({"content": raw});
-        let text = row_text(&format_tool_call_header("discord_send", &args, None));
+        let text = row_text(&format_tool_call_header("discord_send", &args, None, None));
         assert!(text.contains(want), "{raw:?} became {text:?}");
     }
 }

@@ -11,8 +11,8 @@ use crate::text_width::display_width;
 mod widgets;
 
 pub(crate) use widgets::{
-    HomeRows, build_input_box, home_band_h, needs_seam, queued_preview_lines,
-    shimmer_spans, status_dock_h,
+    HomeRows, build_input_box, home_band_h, needs_seam, queued_preview_lines, shimmer_spans,
+    status_dock_h,
 };
 
 /// Exact-fit viewport height for the given content, clamped to
@@ -272,7 +272,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let widget_budget = rows
         .saturating_sub(box_h + status_h + queued_est + live_est + panel_est + attach_h + 2)
         .min(12);
-    let mut widget_rows = tui.plugin_widget.rows(widget_budget as usize, w as usize);
+    let mut widget_rows = tui.plugin_widget.rows(widget_budget as usize, w);
     let max_viewport_h = viewport_cap(rows);
 
     // The text area and the context footer always keep their rows, so the
@@ -871,8 +871,13 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
             level.set(l);
             left_segs =
                 crate::statusline::compose(&line_cfg.left(), &builtin, &sep, sep_color, muted);
-            right_segs =
-                crate::statusline::compose(&line_cfg.right(), &builtin, &right_sep, sep_color, muted);
+            right_segs = crate::statusline::compose(
+                &line_cfg.right(),
+                &builtin,
+                &right_sep,
+                sep_color,
+                muted,
+            );
             if seg_width(&left_segs) + seg_width(&right_segs) + 7 <= w {
                 break;
             }
@@ -934,7 +939,8 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         // idle hides the caret exactly while the user is typing blind. Modals
         // own the screen and return before this point, so no other consumer
         // competes for the cursor.
-        let cur_x = (area.x + ibox.x as u16 + 3 + ibox.cur_col as u16).min(area.x + area.width.saturating_sub(1));
+        let cur_x = (area.x + ibox.x as u16 + 3 + ibox.cur_col as u16)
+            .min(area.x + area.width.saturating_sub(1));
         let cur_y = (box_y + ibox.cur_row as u16).min(area.y + area.height.saturating_sub(1));
         frame.set_cursor_position(Position::new(cur_x, cur_y));
     });

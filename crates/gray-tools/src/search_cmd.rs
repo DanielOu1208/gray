@@ -95,11 +95,15 @@ pub enum IndexBackend {
 fn global_index() -> IndexBackend {
     static BACKEND: std::sync::OnceLock<IndexBackend> = std::sync::OnceLock::new();
     BACKEND
-        .get_or_init(|| match backend_kind(std::env::var("GRAY_SEARCH_INDEX").ok().as_deref()) {
-            BackendKind::Fff => IndexBackend::Fff(crate::search_index::global_pool().clone()),
-            BackendKind::Off => IndexBackend::Off,
-            BackendKind::Fs => IndexBackend::Fs(crate::search_index_fs::global_fs_pool().clone()),
-        })
+        .get_or_init(
+            || match backend_kind(std::env::var("GRAY_SEARCH_INDEX").ok().as_deref()) {
+                BackendKind::Fff => IndexBackend::Fff(crate::search_index::global_pool().clone()),
+                BackendKind::Off => IndexBackend::Off,
+                BackendKind::Fs => {
+                    IndexBackend::Fs(crate::search_index_fs::global_fs_pool().clone())
+                }
+            },
+        )
         .clone()
 }
 

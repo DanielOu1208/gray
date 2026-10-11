@@ -91,7 +91,7 @@ pub fn diff(prev: &Fingerprint, next: &Fingerprint) -> Option<Change> {
     {
         return Some(Change::HistoryAt(k));
     }
-    (next.messages.len() < prev.messages.len()).then(|| Change::HistoryTruncated {
+    (next.messages.len() < prev.messages.len()).then_some(Change::HistoryTruncated {
         from: prev.messages.len(),
         to: next.messages.len(),
     })

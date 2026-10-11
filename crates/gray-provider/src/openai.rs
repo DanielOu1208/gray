@@ -1810,6 +1810,7 @@ fn session_affinity_headers(session_id: Option<&str>) -> Vec<(&'static str, &str
 /// Single POST attempt (no retry). Retry + `Reconnecting...` notices live in
 /// `stream_unfold_step` so each attempt surfaces to the UI like Codex's
 /// `notify_stream_error` instead of stalling silently in a sleep loop.
+#[allow(clippy::result_large_err)]
 async fn send_json_once(
     client: &reqwest::Client,
     url: &Url,
@@ -3830,9 +3831,7 @@ impl Provider for OpenAiProvider {
     /// when it no longer fits under the cap).
     fn warm_output_cap(&self, _req: &ChatRequest) -> u32 {
         match self.reasoning_effort.as_deref() {
-            Some(eff) if eff != "off" && self.caps.anthropic_cache => {
-                chat_thinking_budget(eff) + 1
-            }
+            Some(eff) if eff != "off" && self.caps.anthropic_cache => chat_thinking_budget(eff) + 1,
             _ => 1,
         }
     }

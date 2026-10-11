@@ -85,7 +85,9 @@ fn welcome_is_the_ascii_logo_by_default() {
         "the version shows once: {welcome:?}"
     );
     assert!(
-        !welcome.iter().any(|l| l.contains("● Tip") || l.contains("newline")),
+        !welcome
+            .iter()
+            .any(|l| l.contains("● Tip") || l.contains("newline")),
         "hints and tip belong under the panel: {welcome:?}"
     );
 }

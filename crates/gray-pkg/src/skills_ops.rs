@@ -219,7 +219,11 @@ pub async fn install_hub_entry(
     // registry's SKILL.md check accepts.
     let root = {
         let wrapped = staging.path().join("package");
-        if wrapped.is_dir() { wrapped } else { staging.path().to_path_buf() }
+        if wrapped.is_dir() {
+            wrapped
+        } else {
+            staging.path().to_path_buf()
+        }
     };
     if !root.join("SKILL.md").is_file() {
         anyhow::bail!("hub skill '{name}' unpacked without a SKILL.md (registry drift)");

@@ -728,9 +728,6 @@ impl BashTool {
         }
         Some(ToolOutput::ok(note))
     }
-        }
-        Some(ToolOutput::ok(note))
-    }
 }
 
 /// Which no-op family a stalled command belongs to. `JobControl` builtins

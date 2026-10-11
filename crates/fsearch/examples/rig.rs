@@ -24,8 +24,15 @@ fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     match a.first().map(String::as_str) {
         Some("gen") => gen_corpus(Path::new(&a[1]), &a[2]),
-        Some("run") => run(Path::new(&a[1]), &a[2], &a[3], a.get(4).map_or("name,idle,typing,grep", String::as_str)),
-        _ => eprintln!("usage: rig gen <snap> <corpus.json> | rig run <snap> <corpus.json> <out.json> [kinds]"),
+        Some("run") => run(
+            Path::new(&a[1]),
+            &a[2],
+            &a[3],
+            a.get(4).map_or("name,idle,typing,grep", String::as_str),
+        ),
+        _ => eprintln!(
+            "usage: rig gen <snap> <corpus.json> | rig run <snap> <corpus.json> <out.json> [kinds]"
+        ),
     }
 }
 
@@ -62,8 +69,17 @@ fn gen_corpus(snap: &Path, out: &str) {
         let n = text(k);
         // Words, not cache hashes: mostly letters, no long hex runs.
         let letters = n.chars().filter(char::is_ascii_alphabetic).count();
-        let hexy = n.as_bytes().windows(8).any(|w| w.iter().all(u8::is_ascii_hexdigit));
-        if ne[k + 1] - ne[k] == 1 && (6..=32).contains(&n.len()) && n.is_ascii() && !n.contains(' ') && letters * 10 >= n.len() * 7 && !hexy {
+        let hexy = n
+            .as_bytes()
+            .windows(8)
+            .any(|w| w.iter().all(u8::is_ascii_hexdigit));
+        if ne[k + 1] - ne[k] == 1
+            && (6..=32).contains(&n.len())
+            && n.is_ascii()
+            && !n.contains(' ')
+            && letters * 10 >= n.len() * 7
+            && !hexy
+        {
             targets.push((k, n));
         }
     }
@@ -72,15 +88,25 @@ fn gen_corpus(snap: &Path, out: &str) {
     }
     for (i, (_, t)) in targets.iter().enumerate() {
         let mut s: Vec<char> = t.chars().collect();
-        let letters: Vec<usize> = (1..s.len()).filter(|&i| s[i].is_ascii_alphabetic()).collect();
+        let letters: Vec<usize> = (1..s.len())
+            .filter(|&i| s[i].is_ascii_alphabetic())
+            .collect();
         let p = letters[rng.below(letters.len())];
         match i % 4 {
-            0 if p + 1 < s.len() && s[p + 1].is_ascii_alphabetic() && s[p] != s[p + 1] => s.swap(p, p + 1),
+            0 if p + 1 < s.len() && s[p + 1].is_ascii_alphabetic() && s[p] != s[p + 1] => {
+                s.swap(p, p + 1)
+            }
             1 => {
                 s.remove(p);
             }
             2 => s.insert(p, (b'a' + rng.below(26) as u8) as char),
-            _ => s[p] = if s[p].eq_ignore_ascii_case(&'x') { 'q' } else { 'x' },
+            _ => {
+                s[p] = if s[p].eq_ignore_ascii_case(&'x') {
+                    'q'
+                } else {
+                    'x'
+                }
+            }
         }
         push("typo", s.into_iter().collect());
     }
@@ -89,7 +115,10 @@ fn gen_corpus(snap: &Path, out: &str) {
     while words.len() < 30 {
         let k = rng.below(idx.u);
         let stem = text(k).split('.').next().unwrap_or("").to_ascii_lowercase();
-        if ne[k + 1] - ne[k] >= 20 && (3..=10).contains(&stem.len()) && stem.chars().all(|c| c.is_ascii_lowercase()) {
+        if ne[k + 1] - ne[k] >= 20
+            && (3..=10).contains(&stem.len())
+            && stem.chars().all(|c| c.is_ascii_lowercase())
+        {
             words.insert(stem);
         }
     }
@@ -101,7 +130,10 @@ fn gen_corpus(snap: &Path, out: &str) {
         let dir = idx.dir_entry()[idx.parent()[e] as usize] as usize;
         let folder = String::from_utf8_lossy(idx.name(dir)).into_owned();
         let stem = t.split('.').next().unwrap_or(t);
-        push("multi", format!("{} {stem}", folder.split(['.', ' ']).next().unwrap_or("")));
+        push(
+            "multi",
+            format!("{} {stem}", folder.split(['.', ' ']).next().unwrap_or("")),
+        );
     }
     #[rustfmt::skip]
     let filters = [
@@ -112,7 +144,11 @@ fn gen_corpus(snap: &Path, out: &str) {
     for f in filters {
         push("filter", f.into());
     }
-    let typing: Vec<Vec<String>> = targets.iter().take(10).map(|(_, t)| (1..=t.len()).map(|n| t[..n].to_string()).collect()).collect();
+    let typing: Vec<Vec<String>> = targets
+        .iter()
+        .take(10)
+        .map(|(_, t)| (1..=t.len()).map(|n| t[..n].to_string()).collect())
+        .collect();
 
     // Content: rare identifiers from random indexed files, then common words,
     // regexes, definitions, scoped and unindexed-folder searches.
@@ -123,17 +159,26 @@ fn gen_corpus(snap: &Path, out: &str) {
         .segs
         .iter()
         .enumerate()
-        .flat_map(|(si, s)| (0..s.ndocs as u32).filter(move |&d| !s.is_dead(d) && s.rank()[d as usize] >= 0).map(move |d| (si, d)))
+        .flat_map(|(si, s)| {
+            (0..s.ndocs as u32)
+                .filter(move |&d| !s.is_dead(d) && s.rank()[d as usize] >= 0)
+                .map(move |d| (si, d))
+        })
         .collect();
     while rare.len() < 40 {
         let (si, d) = docs[rng.below(docs.len())];
-        let Ok(body) = std::fs::read_to_string(std::str::from_utf8(content.segs[si].path(d)).unwrap_or("")) else { continue };
+        let Ok(body) =
+            std::fs::read_to_string(std::str::from_utf8(content.segs[si].path(d)).unwrap_or(""))
+        else {
+            continue;
+        };
         let found: Vec<&str> = ident.find_iter(&body).map(|m| m.as_str()).collect();
         if !found.is_empty() {
             rare.insert(format!("grep:{}", found[rng.below(found.len())]));
         }
     }
-    let mut grep: Vec<(String, String)> = rare.into_iter().map(|q| ("rare".to_string(), q)).collect();
+    let mut grep: Vec<(String, String)> =
+        rare.into_iter().map(|q| ("rare".to_string(), q)).collect();
     #[rustfmt::skip]
     let fixed = [
         ("common", "grep:TODO"), ("common", "grep:import"), ("common", "\"grep:fn main\""), ("common", "grep:return"), ("common", "\"grep:use std\""),
@@ -150,7 +195,12 @@ fn gen_corpus(snap: &Path, out: &str) {
         "grep": grep.iter().map(|(c, q)| json!({"cat": c, "q": q})).collect::<Vec<_>>(),
     });
     std::fs::write(out, serde_json::to_string_pretty(&corpus).unwrap()).unwrap();
-    eprintln!("{} name queries, {} typing runs, {} content queries", names.len(), typing.len(), grep.len());
+    eprintln!(
+        "{} name queries, {} typing runs, {} content queries",
+        names.len(),
+        typing.len(),
+        grep.len()
+    );
 }
 
 fn fnv(h: &mut u64, b: &[u8]) {
@@ -178,12 +228,22 @@ fn name_search(live: &Live, pool: &rayon::ThreadPool, q: &str, home: &str) -> u6
 }
 
 /// A content search as the daemon answers it (see `Engine::grep`).
-fn grep_search(live: &Live, content: &Content, pool: &rayon::ThreadPool, q: &str, home: &str, budget: Option<Duration>) -> (u64, usize) {
+fn grep_search(
+    live: &Live,
+    content: &Content,
+    pool: &rayon::ThreadPool,
+    q: &str,
+    home: &str,
+    budget: Option<Duration>,
+) -> (u64, usize) {
     let mut q = Query::parse(q, home).unwrap();
     let mode = q.grep_mode;
     let mut g = Grep::new(&q.grep.take().unwrap(), mode).unwrap();
     g.budget = budget;
-    let indexed = q.scope.as_ref().is_none_or(|s| content::in_scope(s, home.as_bytes()));
+    let indexed = q
+        .scope
+        .as_ref()
+        .is_none_or(|s| content::in_scope(s, home.as_bytes()));
     let r = if indexed {
         pool.install(|| content.search(&g, &q))
     } else {
@@ -213,21 +273,35 @@ fn run(snap: &Path, corpus: &str, out: &str, kinds: &str) {
         .start_handler(|_| {
             #[cfg(target_os = "macos")]
             unsafe {
-                libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+                libc::pthread_set_qos_class_self_np(
+                    libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,
+                    0,
+                );
             }
         })
         .build()
         .unwrap();
     let mut res = serde_json::Map::new();
     let mut record = |kind: &str, cat: &str, q: &str, t: f64, digest: u64| {
-        let e = res.entry(format!("{kind} {q}")).or_insert_with(|| json!({"kind": kind, "cat": cat, "ms": [], "digest": format!("{digest:016x}")}));
+        let e = res.entry(format!("{kind} {q}")).or_insert_with(
+            || json!({"kind": kind, "cat": cat, "ms": [], "digest": format!("{digest:016x}")}),
+        );
         e["ms"].as_array_mut().unwrap().push(t.into());
         if e["digest"] != format!("{digest:016x}") {
             e["unstable"] = true.into();
         }
     };
-    let names: Vec<(String, String)> =
-        corpus["names"].as_array().unwrap().iter().map(|v| (v["cat"].as_str().unwrap().into(), v["q"].as_str().unwrap().into())).collect();
+    let names: Vec<(String, String)> = corpus["names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            (
+                v["cat"].as_str().unwrap().into(),
+                v["q"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
     // Warm: one pass to fault things in, then rounds where every query
     // follows a different one (so the name cache never answers).
     for (_, q) in &names {
@@ -253,7 +327,12 @@ fn run(snap: &Path, corpus: &str, out: &str, kinds: &str) {
     for _ in 0..if want("typing") { 5 } else { 0 } {
         for run in corpus["typing"].as_array().unwrap() {
             live.names_cache.trim_if_idle(Duration::ZERO);
-            let keys: Vec<&str> = run.as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+            let keys: Vec<&str> = run
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
             let (t, mut d) = (Instant::now(), 0u64);
             for k in &keys {
                 d ^= name_search(&live, &pool, k, &home);
@@ -261,8 +340,17 @@ fn run(snap: &Path, corpus: &str, out: &str, kinds: &str) {
             record("typing", "typing", keys.last().unwrap(), ms(t.elapsed()), d);
         }
     }
-    let greps: Vec<(String, String)> =
-        corpus["grep"].as_array().unwrap().iter().map(|v| (v["cat"].as_str().unwrap().into(), v["q"].as_str().unwrap().into())).collect();
+    let greps: Vec<(String, String)> = corpus["grep"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            (
+                v["cat"].as_str().unwrap().into(),
+                v["q"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
     for (_, q) in greps.iter().filter(|_| want("grep")) {
         grep_search(&live, &content, &pool, q, &home, None);
     }
@@ -281,13 +369,26 @@ fn run(snap: &Path, corpus: &str, out: &str, kinds: &str) {
 fn summarize(res: &serde_json::Map<String, Value>) {
     let mut cats: std::collections::BTreeMap<(String, String), Vec<f64>> = Default::default();
     for v in res.values().filter(|v| v.is_object()) {
-        let mut t: Vec<f64> = v["ms"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+        let mut t: Vec<f64> = v["ms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect();
         t.sort_by(f64::total_cmp);
-        cats.entry((v["kind"].as_str().unwrap().into(), v["cat"].as_str().unwrap().into())).or_default().push(t[t.len() / 2]);
+        cats.entry((
+            v["kind"].as_str().unwrap().into(),
+            v["cat"].as_str().unwrap().into(),
+        ))
+        .or_default()
+        .push(t[t.len() / 2]);
     }
     for ((kind, cat), meds) in cats {
         let geo = (meds.iter().map(|m| m.max(1e-3).ln()).sum::<f64>() / meds.len() as f64).exp();
         let max = meds.iter().cloned().fold(0.0, f64::max);
-        println!("{kind:7} {cat:8} n={:3}  geomean {geo:8.3} ms  worst {max:8.2} ms", meds.len());
+        println!(
+            "{kind:7} {cat:8} n={:3}  geomean {geo:8.3} ms  worst {max:8.2} ms",
+            meds.len()
+        );
     }
 }

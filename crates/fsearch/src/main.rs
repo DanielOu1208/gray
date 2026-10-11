@@ -19,12 +19,29 @@ unsafe impl GlobalAlloc for Alloc {
         if l.size() < BIG || l.align() > 16384 {
             return unsafe { System.alloc(l) };
         }
-        let p = unsafe { libc::mmap(std::ptr::null_mut(), l.size(), libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0) };
-        if p == libc::MAP_FAILED { std::ptr::null_mut() } else { p as *mut u8 }
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                l.size(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if p == libc::MAP_FAILED {
+            std::ptr::null_mut()
+        } else {
+            p as *mut u8
+        }
     }
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
         // Fresh anonymous pages are already zero.
-        if l.size() < BIG || l.align() > 16384 { unsafe { System.alloc_zeroed(l) } } else { unsafe { self.alloc(l) } }
+        if l.size() < BIG || l.align() > 16384 {
+            unsafe { System.alloc_zeroed(l) }
+        } else {
+            unsafe { self.alloc(l) }
+        }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         if l.size() < BIG || l.align() > 16384 {
@@ -98,14 +115,19 @@ fn main() {
         Some("uninstall") => uninstall(),
         Some(_) => {
             let json = args.iter().any(|a| a == "--json");
-            let q: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a != "--json").collect();
+            let q: Vec<&str> = args
+                .iter()
+                .map(String::as_str)
+                .filter(|a| *a != "--json")
+                .collect();
             print_one(&serde_json::json!({"q": q.join(" ")}), json);
         }
     }
 }
 
 fn print_one(req: &serde_json::Value, raw: bool) {
-    let mut s = server::connect(&data_dir()).unwrap_or_else(|e| die(&format!("cannot reach daemon: {e}")));
+    let mut s =
+        server::connect(&data_dir()).unwrap_or_else(|e| die(&format!("cannot reach daemon: {e}")));
     s.write_all(format!("{req}\n").as_bytes()).unwrap();
     // One request only: the daemon needn't keep the cores warm for a next one.
     let _ = s.shutdown(std::net::Shutdown::Write);
@@ -125,14 +147,21 @@ fn print_one(req: &serde_json::Value, raw: bool) {
     }
     for f in v["files"].as_array().into_iter().flatten() {
         for m in f["matches"].as_array().into_iter().flatten() {
-            let _ = writeln!(out, "{}:{}: {}", f["path"].as_str().unwrap_or(""), m["line"], m["text"].as_str().unwrap_or("").trim());
+            let _ = writeln!(
+                out,
+                "{}:{}: {}",
+                f["path"].as_str().unwrap_or(""),
+                m["line"],
+                m["text"].as_str().unwrap_or("").trim()
+            );
         }
     }
     let _ = out.flush();
 }
 
 fn stdio() {
-    let s = server::connect(&data_dir()).unwrap_or_else(|e| die(&format!("cannot reach daemon: {e}")));
+    let s =
+        server::connect(&data_dir()).unwrap_or_else(|e| die(&format!("cannot reach daemon: {e}")));
     let mut up = s.try_clone().unwrap();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -154,19 +183,28 @@ fn stdio() {
 
 fn bench(qs: &str) {
     let dir = data_dir();
-    let idx = index::Index::load(&dir.join("index.bin")).unwrap_or_else(|| die("no index yet; run fsearch serve"));
+    let idx = index::Index::load(&dir.join("index.bin"))
+        .unwrap_or_else(|| die("no index yet; run fsearch serve"));
     let live = live::Live::new(idx);
     let home = home();
     let mut q = query::Query::parse(qs, &home).unwrap_or_else(|e| die(&e));
     // Like the daemon: a content search when the query has a pattern, on
     // user-interactive threads, paths included.
-    let grep = q.grep.take().map(|p| fsearch::Grep::new(&p, q.grep_mode).unwrap_or_else(|e| die(&e)));
-    let content = grep.as_ref().map(|_| fsearch::content::Content::open_shared(dir.join("content")));
+    let grep = q
+        .grep
+        .take()
+        .map(|p| fsearch::Grep::new(&p, q.grep_mode).unwrap_or_else(|e| die(&e)));
+    let content = grep
+        .as_ref()
+        .map(|_| fsearch::content::Content::open_shared(dir.join("content")));
     let pool = rayon::ThreadPoolBuilder::new()
         .start_handler(|_| {
             #[cfg(target_os = "macos")]
             unsafe {
-                libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+                libc::pthread_set_qos_class_self_np(
+                    libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,
+                    0,
+                );
             }
         })
         .build()
@@ -183,14 +221,25 @@ fn bench(qs: &str) {
                 })
                 .collect();
         };
-        let r = if q.scope.as_ref().is_none_or(|s| fsearch::content::in_scope(s, home.as_bytes())) {
+        let r = if q
+            .scope
+            .as_ref()
+            .is_none_or(|s| fsearch::content::in_scope(s, home.as_bytes()))
+        {
             pool.install(|| c.search(g, &q))
         } else {
             let paths = pool.install(|| fsearch::content::scan_paths(&live, q.clone_for_scan()));
             fsearch::content::verify(g, &paths, q.limit)
         };
-        let first = |f: &fsearch::FileMatches| f.lines.first().map_or(String::new(), |(n, t)| format!("{n}: {}", t.trim()));
-        r.files.iter().map(|f| format!("{}:{}", String::from_utf8_lossy(&f.path), first(f))).collect()
+        let first = |f: &fsearch::FileMatches| {
+            f.lines
+                .first()
+                .map_or(String::new(), |(n, t)| format!("{n}: {}", t.trim()))
+        };
+        r.files
+            .iter()
+            .map(|f| format!("{}:{}", String::from_utf8_lossy(&f.path), first(f)))
+            .collect()
     };
     // Between runs, another name search: a repeat would be answered from
     // the names cache, which only a repeat of the last query hits.
@@ -208,7 +257,11 @@ fn bench(qs: &str) {
     }
     let first = times[0];
     times.sort();
-    eprintln!("first {first:.2?}  median {:.2?}  min {:.2?}", times[times.len() / 2], times[0]);
+    eprintln!(
+        "first {first:.2?}  median {:.2?}  min {:.2?}",
+        times[times.len() / 2],
+        times[0]
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -218,7 +271,11 @@ fn plist_path() -> PathBuf {
 
 #[cfg(target_os = "macos")]
 fn launchctl(args: &[&str]) -> bool {
-    std::process::Command::new("launchctl").args(args).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+    std::process::Command::new("launchctl")
+        .args(args)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 #[cfg(target_os = "macos")]
@@ -241,9 +298,14 @@ fn install(login: bool) {
     // path can be SIGKILLed by the code-signing cache. Copy then rename, so
     // reinstalling from the installed copy works too.
     let tmp = bin.with_extension("new");
-    std::fs::copy(std::env::current_exe().unwrap(), &tmp).and_then(|_| std::fs::rename(&tmp, &bin)).unwrap_or_else(|e| die(&format!("copy: {e}")));
+    std::fs::copy(std::env::current_exe().unwrap(), &tmp)
+        .and_then(|_| std::fs::rename(&tmp, &bin))
+        .unwrap_or_else(|e| die(&format!("copy: {e}")));
     if !login {
-        println!("installed {}; the daemon starts on first use", bin.display());
+        println!(
+            "installed {}; the daemon starts on first use",
+            bin.display()
+        );
         return;
     }
     let log = data_dir().join("daemon.log");
@@ -283,7 +345,10 @@ fn install(login: bool) {
 fn uninstall() {
     launchctl(&["bootout", &format!("{}/{LABEL}", domain())]);
     let _ = std::fs::remove_file(plist_path());
-    println!("removed LaunchAgent {LABEL}; index kept in {}", data_dir().display());
+    println!(
+        "removed LaunchAgent {LABEL}; index kept in {}",
+        data_dir().display()
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -294,9 +359,14 @@ fn install(login: bool) {
     // Replace, never overwrite in place: a running daemon holds its text
     // file, and ETXTBSY is the price of writing it.
     let tmp = bin.with_extension("new");
-    std::fs::copy(std::env::current_exe().unwrap(), &tmp).and_then(|_| std::fs::rename(&tmp, &bin)).unwrap_or_else(|e| die(&format!("copy: {e}")));
+    std::fs::copy(std::env::current_exe().unwrap(), &tmp)
+        .and_then(|_| std::fs::rename(&tmp, &bin))
+        .unwrap_or_else(|e| die(&format!("copy: {e}")));
     if !login {
-        println!("installed {}; the daemon starts on first use", bin.display());
+        println!(
+            "installed {}; the daemon starts on first use",
+            bin.display()
+        );
         return;
     }
     // `systemd --user` is the login-item equivalent on a desktop Linux.
@@ -316,22 +386,37 @@ fn install(login: bool) {
     .unwrap();
     let ok = systemctl(&["daemon-reload"]) && systemctl(&["enable", "--now", "fsearch.service"]);
     if ok {
-        println!("installed {} (systemd user unit fsearch.service)", bin.display());
+        println!(
+            "installed {} (systemd user unit fsearch.service)",
+            bin.display()
+        );
     } else {
-        println!("installed {}; systemctl --user unavailable — start the daemon on login yourself", bin.display());
+        println!(
+            "installed {}; systemctl --user unavailable — start the daemon on login yourself",
+            bin.display()
+        );
     }
 }
 
 #[cfg(target_os = "linux")]
 fn systemctl(args: &[&str]) -> bool {
-    std::process::Command::new("systemctl").arg("--user").args(args).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+    std::process::Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 #[cfg(target_os = "linux")]
 fn uninstall() {
     let _ = systemctl(&["disable", "--now", "fsearch.service"]);
-    let _ = std::fs::remove_file(PathBuf::from(home()).join(".config/systemd/user/fsearch.service"));
-    println!("removed systemd unit; index kept in {}", data_dir().display());
+    let _ =
+        std::fs::remove_file(PathBuf::from(home()).join(".config/systemd/user/fsearch.service"));
+    println!(
+        "removed systemd unit; index kept in {}",
+        data_dir().display()
+    );
 }
 
 fn die(msg: &str) -> ! {

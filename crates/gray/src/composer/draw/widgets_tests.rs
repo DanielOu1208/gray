@@ -66,14 +66,21 @@ fn home_box_is_the_flat_band_with_hints_tip_and_notice_under_it() {
     // blank, hints, 2 blanks, tip, blank, notice headline + one row per command
     assert_eq!(rows.len(), 12, "{rows:?}");
     assert!(rows[4].contains("commands"), "{rows:?}");
-    assert_eq!(display_width(&rows[4]), 78, "hints flush with the box's right edge");
+    assert_eq!(
+        display_width(&rows[4]),
+        78,
+        "hints flush with the box's right edge"
+    );
     assert!(rows[7].starts_with("   ● Tip"), "{rows:?}");
     assert_eq!(rows[9], "   ⚠ 3 interrupted sessions in ~/gray");
     assert_eq!(rows[10], "     /sessions           pick up");
     assert_eq!(rows[11], "     /sessions dismiss   clear");
     // Off the home screen the box is the full-width band alone.
     let chat = build_input_box("hi", 2, w, None, None);
-    assert_eq!((chat.lines.len(), chat.x, chat.width, chat.home), (3, 0, w, false));
+    assert_eq!(
+        (chat.lines.len(), chat.x, chat.width, chat.home),
+        (3, 0, w, false)
+    );
     // The band the welcome centers over: box, home rows, status bar.
     assert_eq!(home_band_h(w), 3 + 5 + 1);
 }
@@ -88,6 +95,10 @@ fn home_box_wraps_at_the_column_width() {
     let chat = build_input_box(text, text.len(), 100, None, None);
     assert_eq!(home.band_h, 4, "{:?}", row_texts(&home));
     assert_eq!(chat.band_h, 3, "{:?}", row_texts(&chat));
-    assert!(row_texts(&home)[..home.band_h].iter().all(|r| display_width(r) <= 78));
+    assert!(
+        row_texts(&home)[..home.band_h]
+            .iter()
+            .all(|r| display_width(r) <= 78)
+    );
     assert_eq!(home.cur_row, 2);
 }

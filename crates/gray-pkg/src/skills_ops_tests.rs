@@ -278,10 +278,7 @@ async fn install_url_downloads_skill_md_over_loopback() {
 
 #[test]
 fn is_skill_spec_matches_only_the_remote_prefixes() {
-    for spec in [
-        "github:owner/repo/path",
-        "url:https://example.com/SKILL.md",
-    ] {
+    for spec in ["github:owner/repo/path", "url:https://example.com/SKILL.md"] {
         assert!(is_skill_spec(spec), "{spec}");
     }
     for spec in [

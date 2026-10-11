@@ -58,7 +58,12 @@ impl IgnoreChain {
         // the search root outside one): that's what both tools apply.
         let global_at = git_root.clone().unwrap_or_else(|| root.to_path_buf());
         let global = GitignoreBuilder::new(&global_at).build_global().0;
-        Self { lane, git_root, global, cache: HashMap::new() }
+        Self {
+            lane,
+            git_root,
+            global,
+            cache: HashMap::new(),
+        }
     }
 
     /// `path`'s ignore verdict under this lane's rules: true = the real
@@ -77,7 +82,11 @@ impl IgnoreChain {
         for dir in dirs {
             // An ignored ancestor prunes everything below it — git never
             // descends, so no deeper ignore file may contradict.
-            if seen.iter().flat_map(|v| v.iter()).any(|m| m.matched(dir, true).is_ignore()) {
+            if seen
+                .iter()
+                .flat_map(|v| v.iter())
+                .any(|m| m.matched(dir, true).is_ignore())
+            {
                 return true;
             }
             seen.push(self.level(dir));

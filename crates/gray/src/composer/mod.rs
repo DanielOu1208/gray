@@ -522,8 +522,14 @@ pub(crate) fn welcome_hints_line(x: usize, col_w: usize) -> Line<'static> {
         if i > 0 {
             spans.push(Span::raw("   "));
         }
-        spans.push(Span::styled(key.to_string(), Style::default().fg(theme.text_bright)));
-        spans.push(Span::styled(format!(" {label}"), Style::default().fg(theme.text_muted)));
+        spans.push(Span::styled(
+            key.to_string(),
+            Style::default().fg(theme.text_bright),
+        ));
+        spans.push(Span::styled(
+            format!(" {label}"),
+            Style::default().fg(theme.text_muted),
+        ));
     }
     Line::from(spans)
 }
@@ -618,7 +624,6 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
         display_width(&version),
     ));
     body.push(Line::from(""));
-
 
     // Vertical centering: the block is this banner plus the composer's
     // home band; the band's spacer rows take the other half of the free

@@ -272,7 +272,6 @@ pub(crate) fn validate_install_key(key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 /// Shallow-clone `url` (under the plugins tmp dir) via the shared
 /// `sources::clone_into_tmp` helper and return the keeper tempdir, the clone
 /// dir, and the cloned HEAD commit sha. `--branch` only when pinned.

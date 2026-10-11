@@ -256,11 +256,18 @@ fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
         let cmds: Vec<(&str, &str)> = parts
             .map(|p| p.split_once(" to ").unwrap_or((p, "")))
             .collect();
-        let key_w = cmds.iter().map(|(k, _)| display_width(k)).max().unwrap_or(0);
+        let key_w = cmds
+            .iter()
+            .map(|(k, _)| display_width(k))
+            .max()
+            .unwrap_or(0);
         for (key, action) in cmds {
             rows.push(Line::from(vec![
                 Span::raw("     "),
-                Span::styled(format!("{key:<key_w$}   "), Style::default().fg(t.text_body)),
+                Span::styled(
+                    format!("{key:<key_w$}   "),
+                    Style::default().fg(t.text_body),
+                ),
                 Span::styled(action.to_string(), Style::default().fg(t.text_muted)),
             ]));
         }

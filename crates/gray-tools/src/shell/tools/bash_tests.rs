@@ -544,23 +544,6 @@ async fn compound_cat_says_the_image_was_not_attached() {
 }
 
 #[tokio::test]
-async fn bare_noop_commands_are_steered_not_spawned() {
-    let ctx = ToolContext::default();
-    for cmd in ["true", ":", " true "] {
-        let out = BashTool::default()
-            .execute(&ctx, json!({"command": cmd}))
-            .await;
-        assert!(!out.is_error, "{cmd}: {}", out.content);
-        assert!(out.content.contains("no-op"), "{cmd}: {}", out.content);
-    }
-    // A compound that merely contains `true` still reaches the shell.
-    let out = BashTool::default()
-        .execute(&ctx, json!({"command": "true && echo ran"}))
-        .await;
-    assert!(out.content.contains("ran"), "{}", out.content);
-}
-
-#[tokio::test]
 async fn noop_stall_shapes_are_steered_not_spawned() {
     let ctx = ToolContext::default();
     // Every shape a stalling model reaches for once `true` is refused:
@@ -1522,6 +1505,11 @@ async fn bare_noop_commands_are_steered_not_spawned() {
         "echo hi",
         "echo \"switching to harness tools\"",
         "printf 'done\\n'",
+        // Compounds of literal prints and wrapper-peeled echoes are the same
+        // stall in another shape: nothing runs that the model didn't write.
+        "true && echo ran",
+        "echo a; echo b",
+        "env echo ran",
     ] {
         let out = BashTool::default()
             .execute(&ctx, json!({"command": cmd}))
@@ -1534,14 +1522,12 @@ async fn bare_noop_commands_are_steered_not_spawned() {
             out.content
         );
     }
-    // A compound that merely contains a no-op still reaches the shell.
+    // Side effects or computed output hide inside near-noop shapes — all of
+    // these still reach the shell.
     for cmd in [
-        "true && echo ran",
         "echo ran > gray-noop-test-out",
-        "echo a; echo b",
         "echo x | wc -c",
         "echo $((40 + 2))",
-        "env echo ran",
     ] {
         let out = BashTool::default()
             .execute(&ctx, json!({"command": cmd}))

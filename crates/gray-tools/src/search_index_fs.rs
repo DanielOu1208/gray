@@ -47,11 +47,20 @@ pub struct FsearchPool {
     hits: AtomicUsize,
 }
 
+impl Default for FsearchPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FsearchPool {
     pub fn new() -> Self {
-        let home = std::env::var_os("HOME").map_or_else(String::new, |h| h.to_string_lossy().into_owned());
+        let home =
+            std::env::var_os("HOME").map_or_else(String::new, |h| h.to_string_lossy().into_owned());
         Self::with_options(fsearch::Options {
-            dir: gray_core::paths::gray_home().unwrap_or_else(|| PathBuf::from(".")).join("fsearch"),
+            dir: gray_core::paths::gray_home()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("fsearch"),
             home,
             // Whole disk: `in:` scopes handle any directory the index
             // has covered, not just repos under $HOME. Pseudo-
@@ -64,7 +73,11 @@ impl FsearchPool {
     /// A pool over caller-chosen engine options — tests point `root` at a
     /// fixture and `dir` at a scratch index instead of `gray_home()`.
     pub fn with_options(opts: fsearch::Options) -> Self {
-        Self { opts, engine: OnceLock::new(), hits: AtomicUsize::new(0) }
+        Self {
+            opts,
+            engine: OnceLock::new(),
+            hits: AtomicUsize::new(0),
+        }
     }
 
     /// Tool calls served by the index rather than a fallback lane.
@@ -119,7 +132,7 @@ impl FsearchPool {
     /// `find` lane: basename glob over the index → `fd --glob`-shaped
     /// relative paths. `None` = caller falls back to fd/walk.
     pub fn indexed_glob(&self, dir: &Path, pattern: &str, limit: usize) -> Option<Vec<String>> {
-        let Some(cdir) = self.warm_picker(dir) else { return None };
+        let cdir = self.warm_picker(dir)?;
         let e = self.engine()?;
         // Absolute and depth-anchored globs are matched on full paths by fd
         // --full-path; the name regex here only sees basenames — decline.
@@ -127,10 +140,17 @@ impl FsearchPool {
             return None;
         }
         // globset rejects what fd rejects — let fd surface its parse error.
-        globset::GlobBuilder::new(pattern).literal_separator(true).build().ok()?;
+        globset::GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
+            .ok()?;
         // fd --glob is a case-sensitive basename match.
-        let name_re = regex::bytes::Regex::new(&format!("^(?:{})", glob_to_regex(pattern)?)).ok()?;
-        let fetch = limit.saturating_mul(FETCH_HEADROOM).saturating_add(FETCH_MIN).min(FETCH_MAX);
+        let name_re =
+            regex::bytes::Regex::new(&format!("^(?:{})", glob_to_regex(pattern)?)).ok()?;
+        let fetch = limit
+            .saturating_mul(FETCH_HEADROOM)
+            .saturating_add(FETCH_MIN)
+            .min(FETCH_MAX);
         let q = Query {
             scope: Some(cdir.as_os_str().as_bytes().to_vec()),
             name_re: Some(name_re),
@@ -149,7 +169,9 @@ impl FsearchPool {
             if chain.is_ignored(&h.path, is_dir) {
                 continue;
             }
-            let Ok(rel) = h.path.strip_prefix(&cdir) else { continue };
+            let Ok(rel) = h.path.strip_prefix(&cdir) else {
+                continue;
+            };
             let mut s = rel.to_string_lossy().into_owned();
             if is_dir {
                 s.push('/');
@@ -179,7 +201,7 @@ impl FsearchPool {
         if cancel.is_cancelled() || context > 0 {
             return None;
         }
-        let Some(cdir) = self.warm_picker(dir) else { return None };
+        let cdir = self.warm_picker(dir)?;
         let e = self.engine()?;
         // `GrepResult.complete` only says the scan finished — it does not
         // say the scope's files are in the trigram index. Coverage is
@@ -198,7 +220,11 @@ impl FsearchPool {
         }
         let mut g = Grep::with_case(
             pattern,
-            if literal { GrepMode::Literal } else { GrepMode::Regex },
+            if literal {
+                GrepMode::Literal
+            } else {
+                GrepMode::Regex
+            },
             ignore_case,
         )
         .ok()?; // invalid regex → rg reports the canonical error
@@ -211,8 +237,12 @@ impl FsearchPool {
             ..parse_defaults()
         };
         if let Some(glob) = glob {
-            globset::GlobBuilder::new(glob).literal_separator(true).build().ok()?;
-            q.name_re = Some(regex::bytes::Regex::new(&format!("^(?:{})", glob_to_regex(glob)?)).ok()?);
+            globset::GlobBuilder::new(glob)
+                .literal_separator(true)
+                .build()
+                .ok()?;
+            q.name_re =
+                Some(regex::bytes::Regex::new(&format!("^(?:{})", glob_to_regex(glob)?)).ok()?);
         }
         let (res, _indexed) = e.grep(&q, &g).ok()?;
         // The time budget ran out mid-scan: a partial candidate set is
@@ -228,7 +258,9 @@ impl FsearchPool {
             if chain.is_ignored(p, false) {
                 continue;
             }
-            let Ok(rel) = p.strip_prefix(&cdir) else { continue };
+            let Ok(rel) = p.strip_prefix(&cdir) else {
+                continue;
+            };
             // dir.join(rel) keeps the raw (uncanonicalized) root in the
             // path — format_matches relativizes against it.
             let path = dir.join(rel).to_string_lossy().into_owned();
@@ -241,7 +273,10 @@ impl FsearchPool {
             }
         }
         self.hits.fetch_add(1, Ordering::Relaxed);
-        Some(Found { hits, limit_reached })
+        Some(Found {
+            hits,
+            limit_reached,
+        })
     }
 }
 
@@ -249,7 +284,11 @@ impl FsearchPool {
 /// files and instant mtimes. The CLI parser seeds unconstrained fields with
 /// the full span; build queries on that same base.
 fn parse_defaults() -> Query {
-    Query { size: (0, u64::MAX), mtime: (0, u32::MAX), ..Default::default() }
+    Query {
+        size: (0, u64::MAX),
+        mtime: (0, u32::MAX),
+        ..Default::default()
+    }
 }
 
 /// Basename glob → anchored-ready regex body (`*.rs` → `.*\.rs`), or `None`
@@ -257,7 +296,11 @@ fn parse_defaults() -> Query {
 /// real tool answers. Handles `*`, `?`, `[...]` classes (incl. `[:posix:]`
 /// and `!` negation), `{a,b}` alternates, and `\` escapes.
 fn glob_to_regex(pat: &str) -> Option<String> {
-    fn inner(chars: &mut std::iter::Peekable<std::str::Chars>, out: &mut String, in_alt: bool) -> Option<()> {
+    fn inner(
+        chars: &mut std::iter::Peekable<std::str::Chars>,
+        out: &mut String,
+        in_alt: bool,
+    ) -> Option<()> {
         while let Some(c) = chars.next() {
             match c {
                 '*' => out.push_str(".*"),

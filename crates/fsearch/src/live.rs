@@ -28,7 +28,14 @@ impl OEnt {
     /// `path` may be the whole path or just the name.
     pub fn new(path: &[u8], kind: u8, size: u64, mtime: u32) -> OEnt {
         let name = &path[path.iter().rposition(|&b| b == b'/').map_or(0, |p| p + 1)..];
-        OEnt { kind, size, mtime, mask: crate::index::name_mask(name), prior: 0, slot: 0 }
+        OEnt {
+            kind,
+            size,
+            mtime,
+            mask: crate::index::name_mask(name),
+            prior: 0,
+            slot: 0,
+        }
     }
 }
 
@@ -180,7 +187,10 @@ impl Live {
     fn kill_subtree(&mut self, e: u32) {
         self.kill(e);
         if let Some(d) = self.base.dir_of(e) {
-            let (a, b) = (self.base.dir_start()[d as usize], self.base.dir_end()[d as usize]);
+            let (a, b) = (
+                self.base.dir_start()[d as usize],
+                self.base.dir_end()[d as usize],
+            );
             for i in a..b {
                 self.kill(i);
             }
@@ -225,7 +235,14 @@ impl Live {
     /// caller does this under a read lock and searches keep answering.
     pub fn fetch(&self, path: &[u8], recursive: bool) -> Fetched {
         let p = normalize(path);
-        let mut f = Fetched { path: p, recursive, blocked: false, attrs: None, listing: None, scans: HashMap::new() };
+        let mut f = Fetched {
+            path: p,
+            recursive,
+            blocked: false,
+            attrs: None,
+            listing: None,
+            scans: HashMap::new(),
+        };
         // Not even an lstat inside folders we may not touch.
         if walk::blocked(&f.path) {
             f.blocked = true;
@@ -240,7 +257,9 @@ impl Live {
         if recursive {
             if f.path != b"/" {
                 f.attrs = lstat(&f.path);
-                if f.attrs.is_some_and(|a| a.kind & 3 == KIND_DIR && a.kind & FLAG_MOUNT == 0) {
+                if f.attrs
+                    .is_some_and(|a| a.kind & 3 == KIND_DIR && a.kind & FLAG_MOUNT == 0)
+                {
                     f.scans.insert(f.path.clone(), walk::scan(&f.path, 4));
                 }
             }
@@ -259,7 +278,10 @@ impl Live {
             let name = &listing.names[r.name_off as usize..][..r.name_len as usize];
             let was_dir = match cur.get(name) {
                 Some(Some(c)) => self.base.kind()[*c as usize] & 3 == KIND_DIR,
-                Some(None) => self.over.get(&join(&f.path, name)).is_some_and(|o| o.kind & 3 == KIND_DIR),
+                Some(None) => self
+                    .over
+                    .get(&join(&f.path, name))
+                    .is_some_and(|o| o.kind & 3 == KIND_DIR),
                 None => false,
             };
             if !was_dir {
@@ -333,7 +355,10 @@ impl Live {
                         self.kill_subtree(c as u32);
                         let scan = f.scans.remove(&child);
                         self.add_new(child, now, scan);
-                    } else if now.kind & 3 != KIND_DIR && (self.base.size_raw()[c] != enc_size(now.size) || self.base.mtime()[c] != now.mtime) {
+                    } else if now.kind & 3 != KIND_DIR
+                        && (self.base.size_raw()[c] != enc_size(now.size)
+                            || self.base.mtime()[c] != now.mtime)
+                    {
                         self.kill(c as u32);
                         self.put(child, now);
                     }
@@ -360,7 +385,11 @@ impl Live {
                     self.kill_subtree(c)
                 }
                 None => {
-                    if self.over.get(&child).is_some_and(|o| o.kind & 3 == KIND_DIR) {
+                    if self
+                        .over
+                        .get(&child)
+                        .is_some_and(|o| o.kind & 3 == KIND_DIR)
+                    {
                         self.trees.push(child.clone());
                     }
                     self.drop_over_subtree(&child)
@@ -395,7 +424,9 @@ impl Live {
         use rayon::prelude::*;
         let idx = &self.base;
         let de = idx.dir_entry();
-        let check = |p: &[u8]| self.under_root(p) && !walk::blocked(p) && lstat(p).is_some_and(|o| o.mtime >= since);
+        let check = |p: &[u8]| {
+            self.under_root(p) && !walk::blocked(p) && lstat(p).is_some_and(|o| o.mtime >= since)
+        };
         let pool = stat_pool();
         let mut out: Vec<Vec<u8>> = pool.install(|| {
             (1..idx.d)
@@ -409,7 +440,12 @@ impl Live {
                 .flatten()
                 .collect()
         });
-        out.extend(self.over.iter().filter(|(p, o)| o.kind & 3 == KIND_DIR && o.kind & FLAG_MOUNT == 0 && check(p)).map(|(p, _)| p.clone()));
+        out.extend(
+            self.over
+                .iter()
+                .filter(|(p, o)| o.kind & 3 == KIND_DIR && o.kind & FLAG_MOUNT == 0 && check(p))
+                .map(|(p, _)| p.clone()),
+        );
         if lstat(&self.root).is_some_and(|o| o.mtime >= since) {
             out.push(self.root.clone());
         }
@@ -423,15 +459,28 @@ impl Live {
         for (k, v) in &self.over {
             let cut = k.iter().rposition(|&b| b == b'/').unwrap_or(0);
             let parent: &[u8] = if cut == 0 { b"/" } else { &k[..cut] };
-            by_parent.entry(parent).or_default().push((&k[cut + 1..], *v));
+            by_parent
+                .entry(parent)
+                .or_default()
+                .push((&k[cut + 1..], *v));
         }
         let mut out = Vec::new();
         // (base dir id if alive in base, path, listing id)
         let mut stack: Vec<(Option<u32>, Vec<u8>, u32)> = vec![(Some(0), b"/".to_vec(), 0)];
         let mut next = 1u32;
         while let Some((bd, path, id)) = stack.pop() {
-            let mut l = Listing { id, names: Vec::new(), ents: Vec::new() };
-            let mut push = |l: &mut Listing, name: &[u8], kind: u8, size: u64, mtime: u32, child_path: Option<Vec<u8>>, bdir: Option<u32>| {
+            let mut l = Listing {
+                id,
+                names: Vec::new(),
+                ents: Vec::new(),
+            };
+            let mut push = |l: &mut Listing,
+                            name: &[u8],
+                            kind: u8,
+                            size: u64,
+                            mtime: u32,
+                            child_path: Option<Vec<u8>>,
+                            bdir: Option<u32>| {
                 let child = match child_path {
                     Some(cp) => {
                         let c = next;
@@ -441,7 +490,14 @@ impl Live {
                     }
                     None => NONE,
                 };
-                l.ents.push(RawEnt { name_off: l.names.len() as u32, name_len: name.len() as u16, kind, size, mtime, child });
+                l.ents.push(RawEnt {
+                    name_off: l.names.len() as u32,
+                    name_len: name.len() as u16,
+                    kind,
+                    size,
+                    mtime,
+                    child,
+                });
                 l.names.extend_from_slice(name);
             };
             if let Some(d) = bd {
@@ -453,13 +509,29 @@ impl Live {
                     let k = self.base.kind()[c];
                     let sub = self.base.dir_of(c as u32);
                     let cp = sub.map(|_| join(&path, name));
-                    push(&mut l, name, k, self.base.size_of(c), self.base.mtime()[c], cp, sub);
+                    push(
+                        &mut l,
+                        name,
+                        k,
+                        self.base.size_of(c),
+                        self.base.mtime()[c],
+                        cp,
+                        sub,
+                    );
                 }
             }
             if let Some(kids) = by_parent.get(path.as_slice()) {
                 for &(name, o) in kids {
                     let descend = o.kind & 3 == KIND_DIR && o.kind & FLAG_MOUNT == 0;
-                    push(&mut l, name, o.kind, o.size, o.mtime, descend.then(|| join(&path, name)), None);
+                    push(
+                        &mut l,
+                        name,
+                        o.kind,
+                        o.size,
+                        o.mtime,
+                        descend.then(|| join(&path, name)),
+                        None,
+                    );
                 }
             }
             out.push(l);
@@ -470,7 +542,11 @@ impl Live {
 
 /// Threads for bulk lstat: path lookups scale further than opens do.
 pub fn stat_pool() -> rayon::ThreadPool {
-    rayon::ThreadPoolBuilder::new().num_threads(12).start_handler(|_| crate::no_materialize()).build().unwrap()
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(12)
+        .start_handler(|_| crate::no_materialize())
+        .build()
+        .unwrap()
 }
 
 /// Visit every entry of a scan with its full path.
@@ -483,7 +559,10 @@ pub fn for_each_path(ls: &[Listing], root: &[u8], mut f: impl FnMut(Vec<u8>, &Ra
     while let Some((id, path)) = stack.pop() {
         let Some(l) = by_id.get(&id) else { continue };
         for r in &l.ents {
-            let p = join(&path, &l.names[r.name_off as usize..][..r.name_len as usize]);
+            let p = join(
+                &path,
+                &l.names[r.name_off as usize..][..r.name_len as usize],
+            );
             if r.child != NONE {
                 stack.push((r.child, p.clone()));
             }
@@ -530,5 +609,10 @@ pub fn lstat(path: &[u8]) -> Option<OEnt> {
         libc::S_IFLNK => walk::KIND_LINK,
         _ => walk::KIND_OTHER,
     };
-    Some(OEnt::new(path, kind, st.st_size as u64, st.st_mtime.clamp(0, u32::MAX as i64) as u32))
+    Some(OEnt::new(
+        path,
+        kind,
+        st.st_size as u64,
+        st.st_mtime.clamp(0, u32::MAX as i64) as u32,
+    ))
 }

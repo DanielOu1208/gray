@@ -440,7 +440,10 @@ fn content_filter_bodies_map_to_non_retryable_bad_request() {
         "request violates usage policies",
     ] {
         let err = classify_http_error(reqwest::StatusCode::BAD_REQUEST, body, None, None);
-        assert!(matches!(err.class(), ProviderError::BadRequest(_)), "body: {body}");
+        assert!(
+            matches!(err.class(), ProviderError::BadRequest(_)),
+            "body: {body}"
+        );
         assert!(!is_retryable_error(&err), "must not retry: {body}");
         assert!(!err.should_compress());
     }
@@ -767,7 +770,10 @@ fn serialize_body_maps_failure_to_bad_request() {
     // an `Err`; prove the mapping with a value JSON cannot represent.
     let bad: std::collections::BTreeMap<(), u8> = [((), 1)].into_iter().collect();
     let err = serialize_body(&bad, "test body").expect_err("unit keys must fail");
-    assert!(matches!(err.class(), ProviderError::BadRequest(_)), "got {err:?}");
+    assert!(
+        matches!(err.class(), ProviderError::BadRequest(_)),
+        "got {err:?}"
+    );
 }
 
 // UNRUN (cargo test banned under X — verified via check + clippy only).
@@ -1839,7 +1845,10 @@ fn zen_500_retry_budget_constants() {
         Some("req-1"),
     );
     let msg = err.to_string();
-    assert!(matches!(err.class(), ProviderError::ServerError(_)), "{msg}");
+    assert!(
+        matches!(err.class(), ProviderError::ServerError(_)),
+        "{msg}"
+    );
     assert!(msg.contains("provider-side"), "{msg}");
     assert!(msg.contains("request was valid"), "{msg}");
     assert!(msg.contains("cf-ray: ray-1"), "{msg}");

@@ -31,7 +31,10 @@ pub struct Event {
 /// steps one per call within a millisecond.
 pub fn current_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     NEXT.fetch_max(now, Ordering::Relaxed);
     NEXT.fetch_add(1, Ordering::Relaxed) + 1
 }
@@ -51,14 +54,22 @@ pub fn watch(_since: u64, _latency: f64, tx: Sender<Vec<Event>>, stream: u32) ->
         std::thread::Builder::new()
             .name(format!("fsearch-events-{stream}"))
             .spawn(move || {
-                let _ = tx.send(vec![Event { path: b"/".to_vec(), flags: HISTORY_DONE, id: current_id(), stream }]);
+                let _ = tx.send(vec![Event {
+                    path: b"/".to_vec(),
+                    flags: HISTORY_DONE,
+                    id: current_id(),
+                    stream,
+                }]);
                 while !stop.load(Ordering::Relaxed) {
                     std::thread::park_timeout(Duration::from_secs(3600));
                 }
             })
             .expect("spawn")
     };
-    Stream { stop, thread: Some(thread) }
+    Stream {
+        stop,
+        thread: Some(thread),
+    }
 }
 
 impl Drop for Stream {

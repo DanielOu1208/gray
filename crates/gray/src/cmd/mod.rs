@@ -956,7 +956,7 @@ fn slot_select_row(slot: &gray_plugin::ModelSlot, current: Option<&str>) -> ui::
         .iter()
         .map(|o| (o.id.clone(), o.name.clone()))
         .collect();
-    let current = current.filter(|id| slot.options.iter().any(|o| &o.id == *id));
+    let current = current.filter(|id| slot.options.iter().any(|o| o.id == *id));
     let keep = current.or_else(|| slot.options.first().map(|o| o.id.as_str()));
     cap_options(&mut options, keep);
     ui::MessageNode::ActionRow {

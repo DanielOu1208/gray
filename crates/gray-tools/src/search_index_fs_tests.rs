@@ -31,7 +31,11 @@ fn tree() -> TempDir {
         .status();
     assert!(ok.is_ok_and(|s| s.success()), "git init failed");
     let r = dir.path();
-    write(r, "a.txt", "alpha needle one\nnothing here\nbeta needle two\n");
+    write(
+        r,
+        "a.txt",
+        "alpha needle one\nnothing here\nbeta needle two\n",
+    );
     write(r, "sub/c.txt", "deep needle four\n");
     write(r, "src/lib.rs", "pub fn needle_fn() {}\n");
     write(r, "awkward.txt", "a:b:c needle\nUPPER needle lower\n");
@@ -65,7 +69,10 @@ fn pool_for(dir: &TempDir) -> (FsearchPool, TempDir) {
 }
 
 fn ctx_for(dir: &std::path::Path) -> ToolContext {
-    ToolContext { cwd: dir.to_path_buf(), ..Default::default() }
+    ToolContext {
+        cwd: dir.to_path_buf(),
+        ..Default::default()
+    }
 }
 
 async fn wait_warm(pool: &FsearchPool, dir: &std::path::Path) {
@@ -81,7 +88,9 @@ async fn wait_warm(pool: &FsearchPool, dir: &std::path::Path) {
 async fn wait_content(pool: &FsearchPool) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let done = pool.status_for_test().is_some_and(|s| s.ready && s.content_pending == 0);
+        let done = pool
+            .status_for_test()
+            .is_some_and(|s| s.ready && s.content_pending == 0);
         if done {
             return;
         }
@@ -113,11 +122,21 @@ async fn find_serves_from_index_and_drops_gitignored() {
     wait_warm(&pool, dir.path()).await;
     let before = pool.lane_hits();
     let second = crate::search_cmd::find_with_fsearch(&args(), &ctx, pool.clone()).await;
-    assert_eq!(sorted_lines(&second), sorted_lines(&first), "lanes must agree");
+    assert_eq!(
+        sorted_lines(&second),
+        sorted_lines(&first),
+        "lanes must agree"
+    );
     assert!(pool.lane_hits() > before, "warm find must hit the index");
     // The point of the ignore chain: the index scans ignored.txt, fd does not.
-    assert!(second.contains(".hidden/h.txt"), "dotfiles must show: {second}");
-    assert!(!second.contains("ignored.txt"), "gitignored file leaked: {second}");
+    assert!(
+        second.contains(".hidden/h.txt"),
+        "dotfiles must show: {second}"
+    );
+    assert!(
+        !second.contains("ignored.txt"),
+        "gitignored file leaked: {second}"
+    );
 }
 
 #[tokio::test]
@@ -128,7 +147,11 @@ async fn find_returns_matching_dirs_with_slash() {
     let ctx = ctx_for(dir.path());
     wait_warm(&pool, dir.path()).await;
     let text = crate::search_cmd::find_with_fsearch(
-        &SearchArgs { pattern: "sub".to_string(), limit: Some(100), ..Default::default() },
+        &SearchArgs {
+            pattern: "sub".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        },
         &ctx,
         pool.clone(),
     )
@@ -145,7 +168,11 @@ async fn find_declines_slash_patterns() {
     wait_warm(&pool, dir.path()).await;
     let before = pool.lane_hits();
     let text = crate::search_cmd::find_with_fsearch(
-        &SearchArgs { pattern: "sub/*.txt".to_string(), limit: Some(100), ..Default::default() },
+        &SearchArgs {
+            pattern: "sub/*.txt".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        },
         &ctx,
         pool.clone(),
     )
@@ -177,7 +204,10 @@ async fn grep_served_by_index_with_gitignore_filter() {
     assert_eq!(sorted_lines(&text), sorted_lines(&cold), "lanes must agree");
     assert!(pool.lane_hits() > before, "warm grep must hit the index");
     assert!(text.contains(".hidden/h.txt:1: hidden needle"), "{text}");
-    assert!(!text.contains("ignored.txt"), "gitignored file leaked: {text}");
+    assert!(
+        !text.contains("ignored.txt"),
+        "gitignored file leaked: {text}"
+    );
 }
 
 #[tokio::test]
@@ -299,7 +329,9 @@ async fn e2e_all_backends_render_identically() {
         ..Default::default()
     };
 
-    let fff = Arc::new(crate::search_index::SearchPool::new(dir.path().join("fff-frecency")));
+    let fff = Arc::new(crate::search_index::SearchPool::new(
+        dir.path().join("fff-frecency"),
+    ));
     let (fs, _idx) = pool_for(&dir);
     let fs = Arc::new(fs);
     let backends = [
@@ -313,11 +345,21 @@ async fn e2e_all_backends_render_identically() {
     let mut cold_find = Vec::new();
     let mut cold_grep = Vec::new();
     for (_name, b) in &backends {
-        cold_find.push(sorted_owned(&crate::search_cmd::find_on(&find_args(), &ctx, b).await));
-        cold_grep.push(sorted_owned(&crate::search_cmd::grep_on(&grep_args(), &ctx, b).await));
+        cold_find.push(sorted_owned(
+            &crate::search_cmd::find_on(&find_args(), &ctx, b).await,
+        ));
+        cold_grep.push(sorted_owned(
+            &crate::search_cmd::grep_on(&grep_args(), &ctx, b).await,
+        ));
     }
-    assert!(cold_find.windows(2).all(|w| w[0] == w[1]), "cold find diverged: {cold_find:?}");
-    assert!(cold_grep.windows(2).all(|w| w[0] == w[1]), "cold grep diverged: {cold_grep:?}");
+    assert!(
+        cold_find.windows(2).all(|w| w[0] == w[1]),
+        "cold find diverged: {cold_find:?}"
+    );
+    assert!(
+        cold_grep.windows(2).all(|w| w[0] == w[1]),
+        "cold grep diverged: {cold_grep:?}"
+    );
 
     // Warm both indexes; content sync too — the trigram lane declines until then.
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -356,7 +398,9 @@ async fn e2e_index_survives_restart() {
     let first = {
         let pool = pool_for_opts(opts());
         wait_warm(&pool, dir.path()).await;
-        let hits = pool.indexed_glob(dir.path(), "*.txt", 100).expect("index should serve");
+        let hits = pool
+            .indexed_glob(dir.path(), "*.txt", 100)
+            .expect("index should serve");
         assert!(hits.iter().any(|h| h == "a.txt"), "{hits:?}");
         pool.save_for_test();
         // `save()` just flags the apply thread; the file lands a beat later.
@@ -373,7 +417,9 @@ async fn e2e_index_survives_restart() {
     // identical query with the identical hits.
     let pool2 = pool_for_opts(opts());
     wait_warm(&pool2, dir.path()).await;
-    let hits2 = pool2.indexed_glob(dir.path(), "*.txt", 100).expect("reloaded index should serve");
+    let hits2 = pool2
+        .indexed_glob(dir.path(), "*.txt", 100)
+        .expect("reloaded index should serve");
     assert_eq!(first, hits2);
 }
 
@@ -384,7 +430,7 @@ fn pool_for_opts(opts: fsearch::Options) -> FsearchPool {
 /// `GRAY_SEARCH_INDEX` parsing — the only user-visible switch.
 #[test]
 fn backend_kind_from_env() {
-    use crate::search_cmd::{backend_kind, BackendKind};
+    use crate::search_cmd::{BackendKind, backend_kind};
     assert_eq!(backend_kind(None), BackendKind::Fs);
     assert_eq!(backend_kind(Some("fsearch")), BackendKind::Fs);
     assert_eq!(backend_kind(Some("fff")), BackendKind::Fff);

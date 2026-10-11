@@ -163,7 +163,7 @@ async fn fetch_index_url(
     if let Some(etag) = cached.as_ref().and_then(|c| c.etag.as_deref()) {
         req = req.header(reqwest::header::IF_NONE_MATCH, etag);
     }
-    log::debug!("fetching plugin index from {}", redact(&url));
+    log::debug!("fetching plugin index from {}", redact(url));
     let resp = req.send().await?;
     if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
         let mut cache =

@@ -27,9 +27,7 @@ use gray_core::agent::{Tool, ToolContext, ToolOutput};
 use gray_core::message::{Message, ToolDef};
 
 use crate::sidecar::HostHandler;
-use crate::{
-    CommandOutcome, CoreEvent, InputSubmit, Manifest, Plugin, SidecarPlugin, ToolBefore,
-};
+use crate::{CommandOutcome, CoreEvent, InputSubmit, Manifest, Plugin, SidecarPlugin, ToolBefore};
 
 /// Read-only env gate: `GRAY_LAZY_PLUGINS` unset/anything-but-false = lazy.
 pub fn lazy_enabled() -> bool {
@@ -336,10 +334,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lazy-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("demo-manifest.json");
-        std::fs::write(&p, r#"{"name":"demo","version":"0.1","protocol":"1.3","tools":[]}"#).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"name":"demo","version":"0.1","protocol":"1.3","tools":[]}"#,
+        )
+        .unwrap();
         assert!(cached_manifest(&p, "demo").is_none(), "1.3 must stay eager");
-        std::fs::write(&p, r#"{"name":"other","version":"0.1","protocol":"1.1","tools":[]}"#).unwrap();
-        assert!(cached_manifest(&p, "demo").is_none(), "name mismatch = stale cache");
+        std::fs::write(
+            &p,
+            r#"{"name":"other","version":"0.1","protocol":"1.1","tools":[]}"#,
+        )
+        .unwrap();
+        assert!(
+            cached_manifest(&p, "demo").is_none(),
+            "name mismatch = stale cache"
+        );
         std::fs::write(&p, "not json").unwrap();
         assert!(cached_manifest(&p, "demo").is_none());
         std::fs::remove_dir_all(&dir).ok();

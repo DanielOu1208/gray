@@ -33,7 +33,10 @@ pub static DENIED: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 pub static LISTED: AtomicUsize = AtomicUsize::new(0);
 
 pub fn blocked(path: &[u8]) -> bool {
-    SKIP.get().is_some_and(|v| v.iter().any(|s| path.starts_with(s) && (path.len() == s.len() || path[s.len()] == b'/')))
+    SKIP.get().is_some_and(|v| {
+        v.iter()
+            .any(|s| path.starts_with(s) && (path.len() == s.len() || path[s.len()] == b'/'))
+    })
 }
 
 pub const KIND_FILE: u8 = 0;
@@ -76,14 +79,32 @@ thread_local! {
 
 /// Scan `root` recursively. Listing id 0 is `root` itself.
 pub fn scan(root: &[u8], threads: usize) -> Vec<Listing> {
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).start_handler(|_| crate::no_materialize()).build().unwrap();
-    let ctx = Ctx { next_id: AtomicU32::new(1), out: (0..threads + 1).map(|_| Mutex::new(Vec::new())).collect() };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .start_handler(|_| crate::no_materialize())
+        .build()
+        .unwrap();
+    let ctx = Ctx {
+        next_id: AtomicU32::new(1),
+        out: (0..threads + 1).map(|_| Mutex::new(Vec::new())).collect(),
+    };
     raise_fd_limit();
-    let fd = if blocked(root) { -1 } else { CString::new(root).map_or(-1, |c| unsafe { libc::open(c.as_ptr(), OPEN_DIR) }) };
+    let fd = if blocked(root) {
+        -1
+    } else {
+        CString::new(root).map_or(-1, |c| unsafe { libc::open(c.as_ptr(), OPEN_DIR) })
+    };
     // Paths are only tracked when there is something to skip.
-    let path = SKIP.get().is_some_and(|v| !v.is_empty()).then(|| root.to_vec());
+    let path = SKIP
+        .get()
+        .is_some_and(|v| !v.is_empty())
+        .then(|| root.to_vec());
     pool.scope(|s| finish_dir(s, fd, path, 0, &ctx));
-    let parts: Vec<Vec<Listing>> = ctx.out.into_iter().map(|m| m.into_inner().unwrap()).collect();
+    let parts: Vec<Vec<Listing>> = ctx
+        .out
+        .into_iter()
+        .map(|m| m.into_inner().unwrap())
+        .collect();
     let mut out = Vec::with_capacity(parts.iter().map(Vec::len).sum());
     for p in parts {
         out.extend(p);
@@ -104,7 +125,11 @@ pub fn list_one(path: &[u8]) -> Option<Listing> {
     if blocked(path) {
         return None;
     }
-    let mut l = Listing { id: 0, names: Vec::new(), ents: Vec::new() };
+    let mut l = Listing {
+        id: 0,
+        names: Vec::new(),
+        ents: Vec::new(),
+    };
     if !list_into(path, &mut l) {
         return None;
     }
@@ -126,7 +151,11 @@ impl Drop for Fd {
 // and the macOS version's entrycount trick (skip opening empty dirs) has no
 // equivalent, so every child dir is opened.
 fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &'s Ctx) {
-    let mut l = Listing { id, names: Vec::new(), ents: Vec::new() };
+    let mut l = Listing {
+        id,
+        names: Vec::new(),
+        ents: Vec::new(),
+    };
     if fd < 0 {
         push(l, ctx);
         return;
@@ -153,7 +182,10 @@ fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &
             let fd = unsafe { libc::openat(parent.0, name.as_ptr(), OPEN_DIR) };
             drop(parent);
             if fd < 0
-                && matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES))
+                && matches!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EPERM) | Some(libc::EACCES)
+                )
                 && let Some(p) = &child_path
             {
                 DENIED.lock().unwrap().push(p.clone());
@@ -171,7 +203,9 @@ fn push(l: Listing, ctx: &Ctx) {
 
 /// Returns false if the directory could not be opened.
 fn list_into(path: &[u8], l: &mut Listing) -> bool {
-    let Ok(cpath) = CString::new(path) else { return false };
+    let Ok(cpath) = CString::new(path) else {
+        return false;
+    };
     let fd = unsafe { libc::open(cpath.as_ptr(), OPEN_DIR) };
     if fd < 0 {
         return false;
@@ -185,7 +219,16 @@ fn list_into(path: &[u8], l: &mut Listing) -> bool {
 /// (statx refused AT_EMPTY_PATH): children then never flag.
 fn dev_of(fd: i32) -> u64 {
     let mut st: libc::statx = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statx(fd, c"".as_ptr(), libc::AT_EMPTY_PATH, libc::STATX_BASIC_STATS, &mut st) } != 0 {
+    if unsafe {
+        libc::statx(
+            fd,
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            libc::STATX_BASIC_STATS,
+            &mut st,
+        )
+    } != 0
+    {
         return 0;
     }
     stx_dev(&st)
@@ -229,7 +272,16 @@ fn parse_entry(dir: i32, name: &[u8], dev: u64, l: &mut Listing) {
     }
     let Ok(c) = CString::new(name) else { return };
     let mut st: libc::statx = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statx(dir, c.as_ptr(), libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT, libc::STATX_ALL, &mut st) } != 0 {
+    if unsafe {
+        libc::statx(
+            dir,
+            c.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT,
+            libc::STATX_ALL,
+            &mut st,
+        )
+    } != 0
+    {
         // Vanished between the listing and the stat.
         return;
     }
@@ -248,6 +300,13 @@ fn parse_entry(dir: i32, name: &[u8], dev: u64, l: &mut Listing) {
     // macOS's datalength covers files and links; directories report 0.
     let size = if kind & 3 == KIND_DIR { 0 } else { st.stx_size };
     let mtime = st.stx_mtime.tv_sec.clamp(0, u32::MAX as i64) as u32;
-    l.ents.push(RawEnt { name_off: l.names.len() as u32, name_len: name.len() as u16, kind, size, mtime, child: NONE });
+    l.ents.push(RawEnt {
+        name_off: l.names.len() as u32,
+        name_len: name.len() as u16,
+        kind,
+        size,
+        mtime,
+        child: NONE,
+    });
     l.names.extend_from_slice(name);
 }

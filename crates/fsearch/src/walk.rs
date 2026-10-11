@@ -27,7 +27,10 @@ pub static DENIED: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 pub static LISTED: AtomicUsize = AtomicUsize::new(0);
 
 pub fn blocked(path: &[u8]) -> bool {
-    SKIP.get().is_some_and(|v| v.iter().any(|s| path.starts_with(s) && (path.len() == s.len() || path[s.len()] == b'/')))
+    SKIP.get().is_some_and(|v| {
+        v.iter()
+            .any(|s| path.starts_with(s) && (path.len() == s.len() || path[s.len()] == b'/'))
+    })
 }
 
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
@@ -77,14 +80,32 @@ thread_local! {
 
 /// Scan `root` recursively. Listing id 0 is `root` itself.
 pub fn scan(root: &[u8], threads: usize) -> Vec<Listing> {
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).start_handler(|_| crate::no_materialize()).build().unwrap();
-    let ctx = Ctx { next_id: AtomicU32::new(1), out: (0..threads + 1).map(|_| Mutex::new(Vec::new())).collect() };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .start_handler(|_| crate::no_materialize())
+        .build()
+        .unwrap();
+    let ctx = Ctx {
+        next_id: AtomicU32::new(1),
+        out: (0..threads + 1).map(|_| Mutex::new(Vec::new())).collect(),
+    };
     raise_fd_limit();
-    let fd = if blocked(root) { -1 } else { CString::new(root).map_or(-1, |c| unsafe { libc::open(c.as_ptr(), OPEN_DIR) }) };
+    let fd = if blocked(root) {
+        -1
+    } else {
+        CString::new(root).map_or(-1, |c| unsafe { libc::open(c.as_ptr(), OPEN_DIR) })
+    };
     // Paths are only tracked when there is something to skip.
-    let path = SKIP.get().is_some_and(|v| !v.is_empty()).then(|| root.to_vec());
+    let path = SKIP
+        .get()
+        .is_some_and(|v| !v.is_empty())
+        .then(|| root.to_vec());
     pool.scope(|s| finish_dir(s, fd, path, 0, &ctx));
-    let parts: Vec<Vec<Listing>> = ctx.out.into_iter().map(|m| m.into_inner().unwrap()).collect();
+    let parts: Vec<Vec<Listing>> = ctx
+        .out
+        .into_iter()
+        .map(|m| m.into_inner().unwrap())
+        .collect();
     let mut out = Vec::with_capacity(parts.iter().map(Vec::len).sum());
     for p in parts {
         out.extend(p);
@@ -105,7 +126,11 @@ pub fn list_one(path: &[u8]) -> Option<Listing> {
     if blocked(path) {
         return None;
     }
-    let mut l = Listing { id: 0, names: Vec::new(), ents: Vec::new() };
+    let mut l = Listing {
+        id: 0,
+        names: Vec::new(),
+        ents: Vec::new(),
+    };
     if !list_into(path, &mut l) {
         return None;
     }
@@ -132,7 +157,11 @@ impl Drop for Fd {
 // 18% of directories are empty: those the parent's listing already says
 // so (rechecked with one lookup) are never opened.
 fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &'s Ctx) {
-    let mut l = Listing { id, names: Vec::new(), ents: Vec::new() };
+    let mut l = Listing {
+        id,
+        names: Vec::new(),
+        ents: Vec::new(),
+    };
     if fd < 0 {
         push(l, ctx);
         return;
@@ -162,7 +191,14 @@ fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &
     }
     push(l, ctx);
     for id in empty {
-        push(Listing { id, names: Vec::new(), ents: Vec::new() }, ctx);
+        push(
+            Listing {
+                id,
+                names: Vec::new(),
+                ents: Vec::new(),
+            },
+            ctx,
+        );
     }
     for (name, cid, child_path) in kids {
         let parent = me.clone();
@@ -186,7 +222,16 @@ fn entry_count(dir: i32, name: &CString) -> Option<u32> {
     al.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
     al.dirattr = libc::ATTR_DIR_ENTRYCOUNT;
     let mut b = [0u32; 2];
-    let r = unsafe { libc::getattrlistat(dir, name.as_ptr(), (&raw mut al).cast(), b.as_mut_ptr().cast(), 8, libc::FSOPT_NOFOLLOW as _) };
+    let r = unsafe {
+        libc::getattrlistat(
+            dir,
+            name.as_ptr(),
+            (&raw mut al).cast(),
+            b.as_mut_ptr().cast(),
+            8,
+            libc::FSOPT_NOFOLLOW as _,
+        )
+    };
     (r == 0).then_some(b[1])
 }
 
@@ -206,7 +251,9 @@ fn rd64(b: &[u8], at: usize) -> u64 {
 
 /// Returns false if the directory could not be opened.
 fn list_into(path: &[u8], l: &mut Listing) -> bool {
-    let Ok(cpath) = CString::new(path) else { return false };
+    let Ok(cpath) = CString::new(path) else {
+        return false;
+    };
     let fd = unsafe { libc::open(cpath.as_ptr(), OPEN_DIR) };
     if fd < 0 {
         return false;
@@ -219,13 +266,25 @@ fn list_into(path: &[u8], l: &mut Listing) -> bool {
 fn list_fd(fd: i32, l: &mut Listing) {
     let mut al: libc::attrlist = unsafe { std::mem::zeroed() };
     al.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
-    al.commonattr =
-        libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_NAME | ATTR_CMN_ERROR | libc::ATTR_CMN_OBJTYPE | libc::ATTR_CMN_MODTIME | libc::ATTR_CMN_FLAGS;
+    al.commonattr = libc::ATTR_CMN_RETURNED_ATTRS
+        | libc::ATTR_CMN_NAME
+        | ATTR_CMN_ERROR
+        | libc::ATTR_CMN_OBJTYPE
+        | libc::ATTR_CMN_MODTIME
+        | libc::ATTR_CMN_FLAGS;
     al.dirattr = libc::ATTR_DIR_ENTRYCOUNT | libc::ATTR_DIR_MOUNTSTATUS;
     al.fileattr = libc::ATTR_FILE_DATALENGTH;
     BUF.with_borrow_mut(|buf| {
         loop {
-            let n = unsafe { libc::getattrlistbulk(fd, &mut al as *mut _ as *mut libc::c_void, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
+            let n = unsafe {
+                libc::getattrlistbulk(
+                    fd,
+                    &mut al as *mut _ as *mut libc::c_void,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                    0,
+                )
+            };
             if n <= 0 {
                 break;
             }
@@ -310,6 +369,13 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
     if name.is_empty() || name.len() > u16::MAX as usize {
         return;
     }
-    l.ents.push(RawEnt { name_off: l.names.len() as u32, name_len: name.len() as u16, kind, size, mtime, child: NONE });
+    l.ents.push(RawEnt {
+        name_off: l.names.len() as u32,
+        name_len: name.len() as u16,
+        kind,
+        size,
+        mtime,
+        child: NONE,
+    });
     l.names.extend_from_slice(name);
 }

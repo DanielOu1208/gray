@@ -154,8 +154,8 @@ pub use gray_plugin::builder::{
 /// (A single function: earlier split variants had an unused `None` leg.)
 ///
 /// Skills are `SKILL.md` files discovered via [`skills::discover_skills`]
-/// (global `~/.gray/skills`, OpenCode plugins, `~/.agents/skills`
-/// + project skills walked up to git root) respecting
+/// (global `~/.gray/skills`, OpenCode plugins, `~/.agents/skills`, and
+/// project skills walked up to git root) respecting
 /// `.gitignore`/`.ignore`/`.fdignore`.
 /// The context-only [`skills_tool::SkillsPlugin`] (always active, every
 /// profile) serves the per-turn `<available_skills>` block through the

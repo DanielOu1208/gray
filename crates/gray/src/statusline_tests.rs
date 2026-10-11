@@ -143,12 +143,18 @@ fn read_branch_handles_refs_detached_and_worktrees() {
 
 #[test]
 fn clip_cuts_to_width_with_an_ellipsis() {
-    let segs = vec![Seg::new("abcdef", Color::Reset), Seg::new("ghij", Color::Reset)];
+    let segs = vec![
+        Seg::new("abcdef", Color::Reset),
+        Seg::new("ghij", Color::Reset),
+    ];
     assert_eq!(texts(&clip(segs.clone(), 20)), "abcdefghij");
     let cut = clip(segs, 8);
     assert_eq!(texts(&cut), "abcdefg\u{2026}");
     let mut fused = Seg::new("Opus × SWE", Color::Reset);
-    fused.parts = Some(vec![("Opus".into(), Color::Red), (" × SWE".into(), Color::Reset)]);
+    fused.parts = Some(vec![
+        ("Opus".into(), Color::Red),
+        (" × SWE".into(), Color::Reset),
+    ]);
     let cut = clip(vec![fused], 6);
     assert_eq!(cut[0].text, "Opus ");
     assert_eq!(cut[0].parts.as_ref().map(Vec::len), Some(2));

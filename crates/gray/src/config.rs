@@ -16,7 +16,11 @@ fn remembered_effort(
 ) -> Option<String> {
     let model = nonempty(model)?;
     memory
-        .get(&crate::setup::effort_memory_key(provider_id, base_url, &model))
+        .get(&crate::setup::effort_memory_key(
+            provider_id,
+            base_url,
+            &model,
+        ))
         .cloned()
 }
 
@@ -227,7 +231,12 @@ impl Config {
         let provider_id = env("GRAY_PROVIDER_ID")
             .map(|v| v.trim().to_string())
             .unwrap_or_else(|| nonempty(Some(saved.provider_id.as_str())).unwrap_or_default());
-        let target_effort = remembered_effort(&saved.effort_memory, &provider_id, &base_url, model.as_deref());
+        let target_effort = remembered_effort(
+            &saved.effort_memory,
+            &provider_id,
+            &base_url,
+            model.as_deref(),
+        );
 
         let api_key = resolve_api_key(cli, &base_url, &mut env, saved.api_key); // optional: validated on first use
 
