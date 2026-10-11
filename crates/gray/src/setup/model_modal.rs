@@ -361,14 +361,17 @@ pub(crate) fn canonicalize_effort_variant(
         if let Ok(path) = saved_config_path() {
             let _cfg_lock = lock_saved_config_at(&path).ok();
             let mut saved = load_saved_config_at(&path);
-            saved.model = Some(row.clone());
-            let key = crate::setup::effort_memory_key(&config.provider_id, &config.base_url, &row);
-            if let Some(e) = &v.effort {
-                saved.remember_effort(&key, e);
+            if saved.model.as_deref() == Some(model.as_str()) {
+                saved.model = Some(row.clone());
+                let key =
+                    crate::setup::effort_memory_key(&config.provider_id, &config.base_url, &row);
+                if let Some(e) = &v.effort {
+                    saved.remember_effort(&key, e);
+                }
+                saved.remember_parts(&key, &v.parts);
+                saved.fast_mode = config.fast_mode;
+                let _ = save_saved_config_at(&path, &saved);
             }
-            saved.remember_parts(&key, &v.parts);
-            saved.fast_mode = config.fast_mode;
-            let _ = save_saved_config_at(&path, &saved);
         }
         return Some((row, v.effort, v.fast));
     }
@@ -385,18 +388,20 @@ pub(crate) fn canonicalize_effort_variant(
     if let Ok(path) = saved_config_path() {
         let _cfg_lock = lock_saved_config_at(&path).ok();
         let mut saved = load_saved_config_at(&path);
-        saved.model = Some(base.clone());
-        if let Some(t) = &tier {
-            saved.remember_effort(
-                &crate::setup::effort_memory_key(&config.provider_id, &config.base_url, &base),
-                t,
-            );
+        if saved.model.as_deref() == Some(model.as_str()) {
+            saved.model = Some(base.clone());
+            if let Some(t) = &tier {
+                saved.remember_effort(
+                    &crate::setup::effort_memory_key(&config.provider_id, &config.base_url, &base),
+                    t,
+                );
+            }
+            saved.thinking_effort = config.thinking_effort.clone();
+            if fast {
+                saved.fast_mode = Some(true);
+            }
+            let _ = save_saved_config_at(&path, &saved);
         }
-        saved.thinking_effort = config.thinking_effort.clone();
-        if fast {
-            saved.fast_mode = Some(true);
-        }
-        let _ = save_saved_config_at(&path, &saved);
     }
     Some((base, tier, fast))
 }

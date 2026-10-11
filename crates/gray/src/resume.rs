@@ -584,7 +584,7 @@ fn run_picker_sync(
 ) -> anyhow::Result<Option<SessionId>> {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read};
     use ratatui::layout::Rect;
-    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Clear, Paragraph};
     use std::time::Duration;
@@ -676,7 +676,7 @@ fn run_picker_sync(
                     Span::styled(
                         title,
                         Style::default()
-                            .fg(Color::White)
+                            .fg(crate::theme::theme().text_bright)
                             .add_modifier(Modifier::BOLD)
                             .bg(box_bg),
                     ),
@@ -732,7 +732,7 @@ fn run_picker_sync(
                         Span::styled(
                             text.clone(),
                             Style::default()
-                                .fg(Color::White)
+                                .fg(crate::theme::theme().text_bright)
                                 .add_modifier(Modifier::BOLD)
                                 .bg(box_bg),
                         ),
@@ -766,7 +766,7 @@ fn run_picker_sync(
                         Span::styled(
                             query.clone(),
                             Style::default()
-                                .fg(Color::White)
+                                .fg(crate::theme::theme().text_bright)
                                 .add_modifier(Modifier::BOLD)
                                 .bg(box_bg),
                         ),
@@ -788,7 +788,9 @@ fn run_picker_sync(
                         Span::styled("Filtered to ", Style::default().fg(text_dim).bg(box_bg)),
                         Span::styled(
                             cwd_display(&cwd, 40),
-                            Style::default().fg(Color::White).bg(box_bg),
+                            Style::default()
+                                .fg(crate::theme::theme().text_bright)
+                                .bg(box_bg),
                         ),
                     ]
                 };
@@ -866,8 +868,8 @@ fn run_picker_sync(
                         let st = session_state(s, &running);
                         let (marker, marker_fg) = match st {
                             SessionState::Interrupted => ("\u{26a0}", accent_peach),
-                            SessionState::Running => ("\u{25cf}", Color::Green),
-                            SessionState::Done => (" ", Color::White),
+                            SessionState::Running => ("\u{25cf}", crate::theme::theme().success),
+                            SessionState::Done => (" ", crate::theme::theme().text_bright),
                         };
                         let right = match system_tag(s) {
                             Some(tag) if show_hidden => tag,
@@ -898,7 +900,9 @@ fn run_picker_sync(
                                     .add_modifier(Modifier::BOLD),
                             ))
                         } else {
-                            let base = Style::default().fg(Color::White).bg(box_bg);
+                            let base = Style::default()
+                                .fg(crate::theme::theme().text_bright)
+                                .bg(box_bg);
                             Line::from(vec![
                                 Span::styled(" ", base),
                                 Span::styled(marker, Style::default().fg(marker_fg).bg(box_bg)),
@@ -942,7 +946,7 @@ fn run_picker_sync(
                     footer_spans.push(Span::styled(
                         format!("{key} "),
                         Style::default()
-                            .fg(Color::White)
+                            .fg(crate::theme::theme().text_bright)
                             .add_modifier(Modifier::BOLD)
                             .bg(box_bg),
                     ));

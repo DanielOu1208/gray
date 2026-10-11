@@ -464,121 +464,17 @@ pub(crate) async fn handle_context_window(
             println!("{msg}");
         }
     }
-    fn persist_window(config: &Config) {
-        if let Ok(path) = crate::setup::saved_config_path() {
-            let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
-            let mut saved = crate::setup::load_saved_config_at(&path);
-            saved.context_window = config.context_window;
-            saved.context_reserve = config.context_reserve;
-            saved.context_keep = config.context_keep;
-            let _ = crate::setup::save_saved_config_at(&path, &saved);
-        }
-    }
     fn collect_parts(
         cwd: &Path,
         agent: &Option<Agent>,
         tui: Option<&crate::composer::SharedTui>,
     ) -> crate::setup::ContextParts {
-        // The prompt file is the stored system prompt (comments stripped).
-        // Per-turn hook blocks (`<available_skills>` + `<project_context>`,
-        // context-only) are estimated separately below so `/context` stays
-        // honest: the project estimate reads the exact block the hook serves.
-        let sys = crate::sys_prompt_path()
-            .ok()
-            .and_then(|p| load_or_create_system_prompt_at(&p).ok())
-            .map(|s| crate::setup::estimate_str_tokens(&crate::system_prompt::strip_comments(&s)))
-            .unwrap_or(0);
-        let skills = crate::setup::estimate_str_tokens(&crate::skills::format_skills_for_prompt(
-            &crate::skills::discover_skills(cwd).skills,
-            crate::setup::skills_auto_enabled(),
-            &crate::setup::disabled_skill_names(),
-        ));
-        let tools_toks = serde_json::to_string(&crate::profile::builtin_registry().defs())
-            .map(|s| crate::setup::estimate_str_tokens(&s))
-            .unwrap_or(0);
+        let messages: &[Message] = agent.as_ref().map(|a| a.messages()).unwrap_or(&[]);
         let latest = tui.and_then(|t| t.lock().ok().and_then(|g| g.latest_usage));
-        // Provider `total` already bills system + tools + history as input,
-        // so adding their estimates on top double-counts (opencode parity:
-        // its context number is the last usage report alone). When a real
-        // report is in force, messages is the residual after the other
-        // estimates, keeping `used()` equal to the provider total;
-        // otherwise it is the plain history estimate.
-        let history_est = agent
-            .as_ref()
-            .map(|a| {
-                a.messages()
-                    .iter()
-                    .map(crate::compact::estimate_tokens)
-                    .sum()
-            })
-            .unwrap_or(0);
-        let messages = match latest.map(|u| u.total()).filter(|t| *t > 0) {
-            Some(total) => total.saturating_sub(sys.saturating_add(tools_toks)),
-            None => history_est,
-        };
-        let project = crate::skills_tool::project_context_block(cwd)
-            .map(|b| crate::setup::estimate_str_tokens(&b))
-            .unwrap_or(0);
-        crate::setup::ContextParts {
-            system_prompt: sys,
-            project_context: project,
-            tools: tools_toks,
-            skills,
-            messages,
-        }
+        collect_context_parts(cwd, messages, latest)
     }
     fn breakdown_text(config: &Config, parts: &crate::setup::ContextParts) -> String {
-        let model = config.model.as_deref().unwrap_or("");
-        let window = crate::setup::resolve_model_context_length(model);
-        let max = crate::setup::model_max_context(model);
-        let source = crate::setup::context_source(model);
-        let reserve = crate::setup::user_reserve_tokens_for(window);
-        let keep = crate::setup::user_keep_for(window);
-        let used = parts.used();
-        let free = parts.free(window, reserve);
-        let pct = |n: usize| {
-            n.checked_mul(100)
-                .and_then(|v| v.checked_div(window))
-                .unwrap_or(0)
-        };
-        let f = crate::setup::format_context_length;
-        let model_label = if model.is_empty() { "no model" } else { model };
-        format!(
-            "Context Usage · {model_label}\n\
-             {}/{} tokens ({}%) — source: {source} (max {})\n\
-             \n\
-             Estimated usage by category:\n\
-               · System prompt:      {} tokens ({}%)\n\
-               · Project context:    {} tokens ({}%)\n\
-               · System tools:       {} tokens ({}%)\n\
-               · Skills:             {} tokens ({}%)\n\
-               · Messages:           {} tokens ({}%)\n\
-               · Free space:         {} ({}%)\n\
-               · Autocompact buffer: {} tokens ({}%)\n\
-             \n\
-             Settings: reserve: {}  keep: {}\n\
-             Commands: /context <size> | /context reserve <size> | /context keep <size> | /context auto",
-            f(used),
-            f(window),
-            pct(used),
-            f(max),
-            f(parts.system_prompt),
-            pct(parts.system_prompt),
-            f(parts.project_context),
-            pct(parts.project_context),
-            f(parts.tools),
-            pct(parts.tools),
-            f(parts.skills),
-            pct(parts.skills),
-            f(parts.messages),
-            pct(parts.messages),
-            f(free),
-            pct(free),
-            f(reserve),
-            pct(reserve),
-            f(reserve),
-            f(keep),
-        )
+        context_breakdown_text(config, parts)
     }
     let Some(val) = direct else {
         // Bare `/context`: modal in the TUI, static breakdown on pipes.
@@ -618,10 +514,125 @@ pub(crate) async fn handle_context_window(
         );
         return;
     }
+    let (msg, ok) = apply_context_arg(config, &val);
+    emit(msg, tui, ok);
+}
+
+pub(crate) fn persist_context_window(config: &Config) {
+    if let Ok(path) = crate::setup::saved_config_path() {
+        let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
+        let mut saved = crate::setup::load_saved_config_at(&path);
+        saved.context_window = config.context_window;
+        saved.context_reserve = config.context_reserve;
+        saved.context_keep = config.context_keep;
+        let _ = crate::setup::save_saved_config_at(&path, &saved);
+    }
+}
+
+pub(crate) fn collect_context_parts(
+    cwd: &Path,
+    messages: &[Message],
+    latest: Option<gray_core::event::Usage>,
+) -> crate::setup::ContextParts {
+    let sys = crate::sys_prompt_path()
+        .ok()
+        .and_then(|p| load_or_create_system_prompt_at(&p).ok())
+        .map(|s| crate::setup::estimate_str_tokens(&crate::system_prompt::strip_comments(&s)))
+        .unwrap_or(0);
+    let skills = crate::setup::estimate_str_tokens(&crate::skills::format_skills_for_prompt(
+        &crate::skills::discover_skills(cwd).skills,
+        crate::setup::skills_auto_enabled(),
+        &crate::setup::disabled_skill_names(),
+    ));
+    let tools_toks = serde_json::to_string(&crate::profile::builtin_registry().defs())
+        .map(|s| crate::setup::estimate_str_tokens(&s))
+        .unwrap_or(0);
+    // Provider `total` already bills system + tools + history as input,
+    // so adding their estimates on top double-counts (opencode parity:
+    // its context number is the last usage report alone). When a real
+    // report is in force, messages is the residual after the other
+    // estimates, keeping `used()` equal to the provider total;
+    // otherwise it is the plain history estimate.
+    let history_est = messages.iter().map(crate::compact::estimate_tokens).sum();
+    let messages = match latest.map(|u| u.total()).filter(|t| *t > 0) {
+        Some(total) => total.saturating_sub(sys.saturating_add(tools_toks)),
+        None => history_est,
+    };
+    let project = crate::skills_tool::project_context_block(cwd)
+        .map(|b| crate::setup::estimate_str_tokens(&b))
+        .unwrap_or(0);
+    crate::setup::ContextParts {
+        system_prompt: sys,
+        project_context: project,
+        tools: tools_toks,
+        skills,
+        messages,
+    }
+}
+
+pub(crate) fn context_breakdown_text(
+    config: &Config,
+    parts: &crate::setup::ContextParts,
+) -> String {
+    let model = config.model.as_deref().unwrap_or("");
+    let window = crate::setup::resolve_model_context_length(model);
+    let max = crate::setup::model_max_context(model);
+    let source = crate::setup::context_source(model);
+    let reserve = crate::setup::user_reserve_tokens_for(window);
+    let keep = crate::setup::user_keep_for(window);
+    let used = parts.used();
+    let free = parts.free(window, reserve);
+    let pct = |n: usize| {
+        n.checked_mul(100)
+            .and_then(|v| v.checked_div(window))
+            .unwrap_or(0)
+    };
+    let f = crate::setup::format_context_length;
+    let model_label = if model.is_empty() { "no model" } else { model };
+    format!(
+        "Context Usage · {model_label}\n\
+         {}/{} tokens ({}%) — source: {source} (max {})\n\
+         \n\
+         Estimated usage by category:\n\
+           · System prompt:      {} tokens ({}%)\n\
+           · Project context:    {} tokens ({}%)\n\
+           · System tools:       {} tokens ({}%)\n\
+           · Skills:             {} tokens ({}%)\n\
+           · Messages:           {} tokens ({}%)\n\
+           · Free space:         {} ({}%)\n\
+           · Autocompact buffer: {} tokens ({}%)\n\
+         \n\
+         Settings: reserve: {}  keep: {}\n\
+         Commands: /context <size> | /context reserve <size> | /context keep <size> | /context auto",
+        f(used),
+        f(window),
+        pct(used),
+        f(max),
+        f(parts.system_prompt),
+        pct(parts.system_prompt),
+        f(parts.project_context),
+        pct(parts.project_context),
+        f(parts.tools),
+        pct(parts.tools),
+        f(parts.skills),
+        pct(parts.skills),
+        f(parts.messages),
+        pct(parts.messages),
+        f(free),
+        pct(free),
+        f(reserve),
+        pct(reserve),
+        f(reserve),
+        f(keep),
+    )
+}
+
+pub(crate) fn apply_context_arg(config: &mut Config, val: &str) -> (String, bool) {
+    let lower = val.trim().to_lowercase();
     if lower == "auto" || lower == "clear" || lower == "reset" || lower == "0" {
         config.context_window = None;
         crate::setup::set_user_context_window(None);
-        persist_window(config);
+        persist_context_window(config);
         // re-prime cache if model present
         if let Some(m) = config.model.clone()
             && crate::setup::get_cached_model_context(&m).is_none()
@@ -634,16 +645,14 @@ pub(crate) async fn handle_context_window(
         }
         let effective =
             crate::setup::resolve_model_context_length(config.model.as_deref().unwrap_or(""));
-        emit(
+        return (
             format!(
                 "window reset to auto ({} / {})",
                 effective,
                 crate::setup::format_context_length(effective)
             ),
-            tui,
             true,
         );
-        return;
     }
     // Subcommands: `reserve <n|auto|default>` and `keep <n|auto|default|off`
     let mut parts = lower.splitn(2, char::is_whitespace);
@@ -659,16 +668,14 @@ pub(crate) async fn handle_context_window(
             } else {
                 crate::setup::user_keep_for(window)
             };
-            emit(
+            return (
                 format!(
                     "{head}: {} ({})",
                     cur,
                     crate::setup::format_context_length(cur)
                 ),
-                tui,
                 false,
             );
-            return;
         }
         if rest == "auto" || rest == "clear" || rest == "reset" || rest == "default" {
             if is_reserve {
@@ -678,18 +685,16 @@ pub(crate) async fn handle_context_window(
                 config.context_keep = None;
                 crate::setup::set_user_keep_recent_tokens(None);
             }
-            persist_window(config);
-            emit(format!("{head} cleared → auto"), tui, true);
-            return;
+            persist_context_window(config);
+            return (format!("{head} cleared → auto"), true);
         }
         if !is_reserve && (rest == "off" || rest == "0") {
             config.context_keep = Some(0);
             crate::setup::set_user_keep_recent_tokens(Some(0));
-            persist_window(config);
-            emit("keep set to 0 (summary only)".to_string(), tui, true);
-            return;
+            persist_context_window(config);
+            return ("keep set to 0 (summary only)".to_string(), true);
         }
-        match crate::setup::parse_context_window(rest) {
+        return match crate::setup::parse_context_window(rest) {
             Some(n) if n > 0 => {
                 if is_reserve {
                     config.context_reserve = Some(n);
@@ -698,32 +703,29 @@ pub(crate) async fn handle_context_window(
                     config.context_keep = Some(n);
                     crate::setup::set_user_keep_recent_tokens(Some(n));
                 }
-                persist_window(config);
-                emit(
+                persist_context_window(config);
+                (
                     format!(
                         "{head} set to {n} tokens ({})",
                         crate::setup::format_context_length(n)
                     ),
-                    tui,
                     true,
-                );
+                )
             }
-            _ => emit(
+            _ => (
                 format!("invalid value '{rest}' — use e.g. 16k, 20000, or 'auto' to clear"),
-                tui,
                 false,
             ),
-        }
-        return;
+        };
     }
-    match crate::setup::parse_context_window(&val) {
+    match crate::setup::parse_context_window(val) {
         Some(n) if n > 0 => {
             let model = config.model.as_deref().unwrap_or("");
             let max = crate::setup::model_max_context(model);
             let (final_n, clamped) = if n > max { (max, true) } else { (n, false) };
             config.context_window = Some(final_n);
             crate::setup::set_user_context_window(Some(final_n));
-            persist_window(config);
+            persist_context_window(config);
             let msg = if clamped {
                 format!(
                     "window clamped to model max {} ({}) — requested {}",
@@ -738,15 +740,12 @@ pub(crate) async fn handle_context_window(
                     crate::setup::format_context_length(final_n)
                 )
             };
-            emit(msg, tui, true);
+            (msg, true)
         }
-        _ => {
-            emit(
-                format!("invalid value '{val}' — use e.g. 128000, 128k, 1m, or 'auto' to clear"),
-                tui,
-                false,
-            );
-        }
+        _ => (
+            format!("invalid value '{val}' — use e.g. 128000, 128k, 1m, or 'auto' to clear"),
+            false,
+        ),
     }
 }
 

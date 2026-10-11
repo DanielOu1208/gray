@@ -371,9 +371,10 @@ impl Agent {
             // Lean prompt: hooks that only inject context are skipped —
             // the system prefix stays the stored prompt alone, so lean
             // turns cost close to `--bare` per request without losing
-            // tools, plugins or compaction.
-            if self.lean_prompt {
-                break;
+            // tools, plugins or compaction. A global plugin's context
+            // (operator-installed, e.g. memory) still lands.
+            if self.lean_prompt && !hook.is_global() {
+                continue;
             }
             if let Some(text) = hook.prompt_context().await
                 && !text.trim().is_empty()
@@ -433,6 +434,7 @@ impl Agent {
             if let Some(steer) = self.steer.clone()
                 && let Some(text) = steer()
             {
+                emit!(AgentEvent::Steered { text: text.clone() });
                 self.messages.push(Message::user(text));
             }
 
@@ -449,7 +451,9 @@ impl Agent {
             // become citation stubs in place — no provider call, pairing and
             // order intact. Most pressure is handled here, so the summary
             // pass below fires far less often.
-            if needs_soft_elide(self.estimate_tokens(), self.context_window) {
+            if self.prefix_rewrite_ok
+                && needs_soft_elide(self.estimate_tokens(), self.context_window)
+            {
                 let before = self.estimate_tokens();
                 let elided = self.soft_elide();
                 if elided > 0 {
@@ -1029,6 +1033,7 @@ impl Agent {
                 if leaked_markup && leak_nudges < MAX_LEAK_NUDGES {
                     leak_nudges += 1;
                     log::info!(target: "gray_agent", "end turn leaked tool-call markup; nudging {leak_nudges}/{MAX_LEAK_NUDGES}");
+                    emit!(AgentEvent::Retract);
                     self.messages.push(Message::user_injected(
                         "your last message contained raw tool-call markup instead of a real tool call, so nothing ran — send the call again, or reply without it",
                     ));

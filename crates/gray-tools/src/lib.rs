@@ -16,7 +16,6 @@ pub mod ledger;
 pub mod ls;
 pub mod read;
 pub mod search_cmd;
-pub mod search_index;
 #[cfg(unix)]
 pub mod search_index_fs;
 pub mod shell;

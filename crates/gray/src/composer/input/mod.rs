@@ -17,6 +17,7 @@ pub(crate) use attach::{sync_attachments, try_attach_clipboard_image, try_attach
 pub(crate) use clipboard::paste_from_system_clipboard;
 
 pub(crate) fn handle_paste(tui: &mut Tui, pasted: String) -> bool {
+    keys::set_chip_sel(tui, None);
     let pasted = strip_escape_sequences(&clipboard::normalize_paste(&pasted));
     // opencode parity: some terminals surface an image-only (or otherwise
     // unreadable) clipboard as an EMPTY bracketed paste. Fall back to an
@@ -65,6 +66,7 @@ pub(crate) fn has_draft(tui: &Tui) -> bool {
 pub(crate) fn clear_draft(tui: &mut Tui) {
     tui.textarea.set_text("");
     tui.attachments.clear();
+    keys::set_chip_sel(tui, None);
     tui.pending_pastes.clear();
     tui.history_idx = None;
     tui.sel = 0;
@@ -283,6 +285,7 @@ pub(crate) fn read_line(
                         tui.textarea.set_text("");
                         let attached_with_ph: Vec<(String, PathBuf)> =
                             std::mem::take(&mut tui.attachments);
+                        keys::set_chip_sel(tui, None);
                         let attached: Vec<PathBuf> =
                             attached_with_ph.into_iter().map(|(_, p)| p).collect();
                         if tui.is_task_running {

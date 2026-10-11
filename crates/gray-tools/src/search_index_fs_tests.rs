@@ -20,7 +20,7 @@ fn write(root: &std::path::Path, name: &str, content: &str) {
     std::fs::write(p, content).unwrap();
 }
 
-/// Same fixture as the fff tests: nested files, a dotfile dir, a .gitignore
+/// The shared fixture: nested files, a dotfile dir, a .gitignore
 /// hiding `ignored.txt` — the case the index alone cannot answer and the
 /// IgnoreChain must drop.
 fn tree() -> TempDir {
@@ -311,7 +311,7 @@ async fn grep_declines_context_and_outside_root() {
 // End-to-end: the dispatch itself and the index across restarts
 // ---------------------------------------------------------------------------
 
-/// Every backend — fff, fsearch, and no index at all — answers the same
+/// Every backend — fsearch and no index at all — answers the same
 /// `find`/`grep` calls with byte-identical output. That is the whole
 /// contract: which index ran is invisible.
 #[tokio::test]
@@ -329,13 +329,9 @@ async fn e2e_all_backends_render_identically() {
         ..Default::default()
     };
 
-    let fff = Arc::new(crate::search_index::SearchPool::new(
-        dir.path().join("fff-frecency"),
-    ));
     let (fs, _idx) = pool_for(&dir);
     let fs = Arc::new(fs);
     let backends = [
-        ("fff", crate::search_cmd::IndexBackend::Fff(fff.clone())),
         ("fsearch", crate::search_cmd::IndexBackend::Fs(fs.clone())),
         ("off", crate::search_cmd::IndexBackend::Off),
     ];
@@ -361,12 +357,7 @@ async fn e2e_all_backends_render_identically() {
         "cold grep diverged: {cold_grep:?}"
     );
 
-    // Warm both indexes; content sync too — the trigram lane declines until then.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while fff.warm_picker(dir.path()).is_none() {
-        assert!(Instant::now() < deadline, "fff index never warmed");
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    // Warm the index; content sync too — the trigram lane declines until then.
     wait_warm(&fs, dir.path()).await;
     wait_content(&fs).await;
 
@@ -377,7 +368,6 @@ async fn e2e_all_backends_render_identically() {
         let g = crate::search_cmd::grep_on(&grep_args(), &ctx, b).await;
         assert_eq!(sorted_owned(&g), cold_grep[0], "grep diverged on {name}");
     }
-    assert!(fff.lane_hits() > 0, "fff never served");
     assert!(fs.lane_hits() > 0, "fsearch never served");
 }
 
@@ -433,7 +423,8 @@ fn backend_kind_from_env() {
     use crate::search_cmd::{BackendKind, backend_kind};
     assert_eq!(backend_kind(None), BackendKind::Fs);
     assert_eq!(backend_kind(Some("fsearch")), BackendKind::Fs);
-    assert_eq!(backend_kind(Some("fff")), BackendKind::Fff);
+    // A stale `fff` value reads as the default — fsearch is the only index.
+    assert_eq!(backend_kind(Some("fff")), BackendKind::Fs);
     assert_eq!(backend_kind(Some("off")), BackendKind::Off);
     assert_eq!(backend_kind(Some("none")), BackendKind::Off);
     // A typo disables nothing — the default still indexes.

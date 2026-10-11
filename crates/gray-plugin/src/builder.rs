@@ -299,6 +299,18 @@ pub fn take_builder_warnings() -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone)]
+pub struct SpawnOutcome {
+    pub name: String,
+    pub error: Option<String>,
+}
+
+static SPAWN_OUTCOMES: std::sync::Mutex<Option<Vec<SpawnOutcome>>> = std::sync::Mutex::new(None);
+
+pub fn spawn_outcomes() -> Option<Vec<SpawnOutcome>> {
+    SPAWN_OUTCOMES.lock().ok().and_then(|s| s.clone())
+}
+
 /// Resolve the spawn argv for a plugin dir: the dir itself when
 /// executable, else `plugin.sh`, else the single executable inside.
 ///
@@ -552,6 +564,7 @@ pub async fn active_plugins(
     // known argv/dir, so only user names spawn). Real installs (empty argv)
     // resolve their executable from the install dir; legacy entries spawn
     // their recorded argv. Failures warn (names only) and never abort.
+    let mut outcomes: Vec<SpawnOutcome> = Vec::new();
     for (name, entry) in user_lock.plugins.iter() {
         if !crate::lock::effective_enabled(&user_lock, &project_lock, name) {
             continue;
@@ -562,88 +575,58 @@ pub async fn active_plugins(
         if entry.runtime_role.as_deref() == Some("provider_only") {
             continue;
         }
-        let argv: Vec<String> = if !entry.argv.is_empty() {
-            entry.argv.clone()
-        } else {
-            let Some(pd) = &pdir else { continue };
-            match resolve_argv(&pd.join(name)) {
-                Ok(a) => a,
-                Err(_) => continue,
+        if let Some(p) =
+            spawn_lock_plugin(name, entry, pdir.as_deref(), &handler, &mut outcomes).await
+        {
+            plugins.push(p);
+        }
+    }
+
+    // `global` lock entries live in the real user home's lock and boot in
+    // every session: a gateway/subagent GRAY_HOME's own lock doesn't know
+    // them. When session and user home are the same the loop above already
+    // booted them; a name the session lock has always wins.
+    let global_home = gray_core::paths::gray_user_home();
+    let same_home = match (&gray_core::paths::gray_home(), &global_home) {
+        (Some(a), Some(b)) => {
+            a == b || std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok()
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    if !same_home && let Some(gh) = global_home {
+        let gpath = crate::lock::lock_path(&gh);
+        let global_lock = match crate::lock::LockFile::load(&gpath) {
+            Ok(lf) => lf,
+            Err(e) => {
+                push_builder_warning(format!("cannot load {} ({e:#}); ignoring", gpath.display()));
+                crate::lock::LockFile {
+                    schema: 1,
+                    plugins: std::collections::BTreeMap::new(),
+                }
             }
         };
-        // Lazy spawn: the install-time `<name>-manifest.json` cache answers
-        // manifest/tools/commands at boot and the child spawns on the first
-        // real wire use (see [`crate::lazy`]). Dynamic (1.3) sidecars,
-        // missing/stale caches, and `GRAY_LAZY_PLUGINS=0` keep eager spawn.
-        let lazy_manifest = if crate::lazy::lazy_enabled() {
-            pdir.as_ref().and_then(|pd| {
-                crate::lazy::cached_manifest(&pd.join(format!("{name}-manifest.json")), name)
-            })
-        } else {
-            None
-        };
-        if let Some(m) = lazy_manifest {
-            let p = crate::lazy::LazySidecarPlugin::new(argv.clone(), m);
-            if let Some(h) = &handler {
-                p.set_host_handler(h.clone()).await;
+        let gpdir = gh.join("plugins");
+        let booted: std::collections::HashSet<String> =
+            plugins.iter().map(|p| p.manifest().name.clone()).collect();
+        for (name, entry) in global_lock.plugins.iter() {
+            if !entry.global
+                || !crate::lock::effective_enabled(&global_lock, &project_lock, name)
+                || entry.runtime_role.as_deref() == Some("provider_only")
+                || booted.contains(name)
+            {
+                continue;
             }
-            // Consent decides what this sidecar may ask of the host —
-            // declared capabilities read from the cached manifest, same
-            // list the live spawn would report.
-            let declared = p.manifest().capabilities.clone();
-            p.set_capabilities(
-                crate::capabilities::granted_for(entry, &declared)
-                    .into_iter()
-                    .collect(),
-            );
-            let pending = crate::capabilities::pending_consent(entry, &declared);
-            if !pending.is_empty() {
-                push_builder_warning(format!(
-                    "plugin {name:?} declares ungranted {} ({}); grant with gray plugin capabilities {name} --all",
-                    if pending.len() == 1 {
-                        "capability".to_string()
-                    } else {
-                        "capabilities".to_string()
-                    },
-                    pending.join(", ")
-                ));
+            if let Some(p) =
+                spawn_lock_plugin(name, entry, Some(&gpdir), &handler, &mut outcomes).await
+            {
+                p.set_global(true);
+                plugins.push(p);
             }
-            plugins.push(p.arc() as Arc<dyn Plugin>);
-            continue;
         }
-        match SidecarPlugin::spawn(argv).await {
-            Ok(p) => {
-                if let Some(h) = &handler {
-                    p.set_host_handler(h.clone()).await;
-                }
-                // Consent decides what this sidecar may ask of the host.
-                // A pre-consent entry keeps what it declares (it ran with
-                // those powers before consent existed); a consented one is
-                // cut down to the intersection.
-                let declared = p.manifest().capabilities.clone();
-                p.set_capabilities(
-                    crate::capabilities::granted_for(entry, &declared)
-                        .into_iter()
-                        .collect(),
-                );
-                let pending = crate::capabilities::pending_consent(entry, &declared);
-                if !pending.is_empty() {
-                    push_builder_warning(format!(
-                        "plugin {name:?} declares ungranted {} ({}); grant with gray plugin capabilities {name} --all",
-                        if pending.len() == 1 {
-                            "capability".to_string()
-                        } else {
-                            "capabilities".to_string()
-                        },
-                        pending.join(", ")
-                    ));
-                }
-                plugins.push(Arc::new(p) as Arc<dyn Plugin>);
-            }
-            Err(e) => push_builder_warning(format!(
-                "lock plugin {name:?} failed to spawn ({e:#}); ignoring"
-            )),
-        }
+    }
+    if let Ok(mut s) = SPAWN_OUTCOMES.lock() {
+        *s = Some(outcomes);
     }
 
     if plugins.is_empty() {
@@ -665,6 +648,120 @@ pub async fn active_plugins(
     }
     let fallback = entries.is_empty() && user_lock.plugins.values().all(|entry| !entry.enabled);
     Ok((deduped, fallback))
+}
+
+/// Spawn one enabled lock entry: `pdir` is the owning home's plugins dir
+/// (manifest cache + install root). Records the outcome, warns on spawn
+/// failure, and returns the plugin on success.
+async fn spawn_lock_plugin(
+    name: &str,
+    entry: &crate::lock::LockEntry,
+    pdir: Option<&Path>,
+    handler: &Option<HostHandler>,
+    outcomes: &mut Vec<SpawnOutcome>,
+) -> Option<Arc<dyn Plugin>> {
+    let argv: Vec<String> = if !entry.argv.is_empty() {
+        entry.argv.clone()
+    } else {
+        let pd = pdir?;
+        match resolve_argv(&pd.join(name)) {
+            Ok(a) => a,
+            Err(e) => {
+                outcomes.push(SpawnOutcome {
+                    name: name.to_string(),
+                    error: Some(format!("{e:#}")),
+                });
+                return None;
+            }
+        }
+    };
+    // Lazy spawn: the install-time `<name>-manifest.json` cache answers
+    // manifest/tools/commands at boot and the child spawns on the first
+    // real wire use (see [`crate::lazy`]). Dynamic (1.3) sidecars,
+    // missing/stale caches, and `GRAY_LAZY_PLUGINS=0` keep eager spawn.
+    let lazy_manifest = if crate::lazy::lazy_enabled() {
+        pdir.and_then(|pd| {
+            crate::lazy::cached_manifest(&pd.join(format!("{name}-manifest.json")), name)
+        })
+    } else {
+        None
+    };
+    if let Some(m) = lazy_manifest {
+        let p = crate::lazy::LazySidecarPlugin::new(argv.clone(), m);
+        if let Some(h) = handler {
+            p.set_host_handler(h.clone()).await;
+        }
+        // Consent decides what this sidecar may ask of the host —
+        // declared capabilities read from the cached manifest, same
+        // list the live spawn would report.
+        let declared = p.manifest().capabilities.clone();
+        p.set_capabilities(
+            crate::capabilities::granted_for(entry, &declared)
+                .into_iter()
+                .collect(),
+        );
+        let pending = crate::capabilities::pending_consent(entry, &declared);
+        if !pending.is_empty() {
+            push_builder_warning(format!(
+                "plugin {name:?} declares ungranted {} ({}); grant with gray plugin capabilities {name} --all",
+                if pending.len() == 1 {
+                    "capability".to_string()
+                } else {
+                    "capabilities".to_string()
+                },
+                pending.join(", ")
+            ));
+        }
+        outcomes.push(SpawnOutcome {
+            name: name.to_string(),
+            error: None,
+        });
+        return Some(p.arc() as Arc<dyn Plugin>);
+    }
+    match SidecarPlugin::spawn(argv).await {
+        Ok(p) => {
+            if let Some(h) = handler {
+                p.set_host_handler(h.clone()).await;
+            }
+            // Consent decides what this sidecar may ask of the host.
+            // A pre-consent entry keeps what it declares (it ran with
+            // those powers before consent existed); a consented one is
+            // cut down to the intersection.
+            let declared = p.manifest().capabilities.clone();
+            p.set_capabilities(
+                crate::capabilities::granted_for(entry, &declared)
+                    .into_iter()
+                    .collect(),
+            );
+            let pending = crate::capabilities::pending_consent(entry, &declared);
+            if !pending.is_empty() {
+                push_builder_warning(format!(
+                    "plugin {name:?} declares ungranted {} ({}); grant with gray plugin capabilities {name} --all",
+                    if pending.len() == 1 {
+                        "capability".to_string()
+                    } else {
+                        "capabilities".to_string()
+                    },
+                    pending.join(", ")
+                ));
+            }
+            outcomes.push(SpawnOutcome {
+                name: name.to_string(),
+                error: None,
+            });
+            Some(Arc::new(p) as Arc<dyn Plugin>)
+        }
+        Err(e) => {
+            push_builder_warning(format!(
+                "lock plugin {name:?} failed to spawn ({e:#}); ignoring"
+            ));
+            outcomes.push(SpawnOutcome {
+                name: name.to_string(),
+                error: Some(format!("{e:#}")),
+            });
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +851,7 @@ pub struct BuilderOptions {
     pub dynamic_provider_profile: Option<OpenAiProviderProfile>,
     /// Agent-lifetime credential lease source for `dynamic_provider_profile`.
     pub dynamic_credential_source: Option<Arc<dyn CredentialSource>>,
+    pub prebooted_plugins: Option<Vec<Arc<dyn Plugin>>>,
 }
 
 /// Profile-aware [`Agent`] builder used by all surfaces: resolves
@@ -781,6 +879,7 @@ pub async fn build_agent(opts: BuilderOptions) -> anyhow::Result<Agent> {
         wrap_executor,
         dynamic_provider_profile,
         dynamic_credential_source,
+        prebooted_plugins,
     } = opts;
     // Catalog: any of these may be named in `gray.yml`. Fallback (no profile)
     // is `tools-minimal` — one persistent shell, gray's default surface.
@@ -789,7 +888,9 @@ pub async fn build_agent(opts: BuilderOptions) -> anyhow::Result<Agent> {
         Arc::new(ToolsBasicPlugin) as Arc<dyn Plugin>,
         Arc::new(ToolsSearchPlugin) as Arc<dyn Plugin>,
     ];
-    let mut plugins = if bare {
+    let mut plugins = if let Some(prebooted) = prebooted_plugins {
+        prebooted
+    } else if bare {
         defaults.retain(|p| p.manifest().name == "tools-minimal");
         defaults
     } else {

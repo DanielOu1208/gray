@@ -45,6 +45,9 @@ pub struct LockEntry {
     /// so `set_enabled`/`remove`/`update` never drop it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_argv: Option<Vec<String>>,
+    /// Boots in every GRAY_HOME (`gray plugin enable <name> --global`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub global: bool,
     /// Fields this crate does not own (`granted_capabilities`,
     /// `capabilities_hash`, `runtime_role`, …) — gray_plugin writes them, and a
     /// gray-pkg rewrite that dropped them would silently re-grant capabilities
@@ -66,6 +69,7 @@ impl Default for LockEntry {
             scope: String::new(),
             enabled: true,
             cli_argv: None,
+            global: false,
             extra: Default::default(),
         }
     }
@@ -230,6 +234,7 @@ fn record_install(
             scope,
             enabled,
             cli_argv,
+            global: lock.plugins.get(name).is_some_and(|e| e.global),
             extra,
         },
     );
@@ -355,7 +360,7 @@ fn replace_archive(
     anyhow::ensure!(
         !matches!(
             name,
-            "tmp" | "pi" | "lock.json" | "index-cache.json" | "hub-index-cache.json"
+            "tmp" | "lock.json" | "index-cache.json" | "hub-index-cache.json"
         ),
         "reserved plugin name"
     );
@@ -511,15 +516,9 @@ fn remove_inner(name: &str) -> anyhow::Result<()> {
     // (a stale entry the user can re-remove), never the reverse, where the
     // registry would claim a plugin whose files are gone.
     write_lock(&lock)?;
-    // Gray-native/URL installs live at `<plugins_dir>/<name>`; pi installs
-    // at `<plugins_dir>/pi/<name>` (R13: sanitized keys hold no `/`).
-    for dir in [
-        crate::plugins_dir().join(name),
-        crate::plugins_dir().join("pi").join(name),
-    ] {
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-        }
+    let dir = crate::plugins_dir().join(name);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
     }
     Ok(())
 }
@@ -540,6 +539,28 @@ fn set_enabled_inner(name: &str, on: bool) -> anyhow::Result<()> {
         anyhow::bail!("not installed: {name}");
     };
     entry.enabled = on;
+    if !on {
+        entry.global = false;
+    }
+    write_lock(&lock)?;
+    Ok(())
+}
+
+/// Flip a plugin's `global` flag (boots in every GRAY_HOME via the user lock).
+pub fn set_global(name: &str, global: bool) -> anyhow::Result<()> {
+    set_global_inner(name, global).map_err(|e| {
+        crate::errors::record(&ecosystem_of(name), name, format!("{e:#}"));
+        e
+    })
+}
+
+fn set_global_inner(name: &str, global: bool) -> anyhow::Result<()> {
+    let _guard = hold_registry_lock()?;
+    let mut lock = read_lock()?.unwrap_or_default();
+    let Some(entry) = lock.plugins.get_mut(name) else {
+        anyhow::bail!("not installed: {name}");
+    };
+    entry.global = global;
     write_lock(&lock)?;
     Ok(())
 }

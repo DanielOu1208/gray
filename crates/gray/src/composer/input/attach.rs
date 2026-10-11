@@ -49,11 +49,14 @@ pub(crate) fn attach_image(tui: &mut Tui, path: PathBuf) {
 pub(crate) fn sync_attachments(tui: &mut Tui) {
     let text = tui.textarea.text().to_string();
     tui.attachments.retain(|(ph, _)| text.contains(ph));
+    if tui.attachments.is_empty() {
+        keys::set_chip_sel(tui, None);
+    }
 }
 
-/// Max attachable file size. `repl::attachments` only caps outputs
-/// (`MAX_BASE64_BYTES`), with no input-file cap, so this
-/// local sane cap refuses multi-GB drops before ffmpeg/image decode OOMs.
+/// Max attachable file size. `repl::attachments` caps only oversized
+/// inputs, so this local sane cap refuses multi-GB drops before
+/// ffmpeg/image decode OOMs.
 pub(crate) const MAX_ATTACH_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Strip `file://` (+ optional `localhost`) and percent-decode (%20 etc.).

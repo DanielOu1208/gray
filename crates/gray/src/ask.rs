@@ -90,6 +90,10 @@ struct Service {
     /// `Some(turn_id)` when asks go over the `--json` wire (see
     /// [`install_json`]).
     json_turn: Option<String>,
+    /// The GRAY_STDIN_STEER demux owns stdin: asks emit their row and
+    /// answers arrive through [`deliver_json_answer`] instead of a
+    /// per-ask stdin reader.
+    demux: std::sync::atomic::AtomicBool,
 }
 
 static SERVICE: Mutex<Option<Arc<Service>>> = Mutex::new(None);
@@ -129,8 +133,31 @@ fn install_service(
         next: Mutex::new(0),
         cancel: tokio_util::sync::CancellationToken::new(),
         json_turn,
+        demux: std::sync::atomic::AtomicBool::new(false),
     });
     *SERVICE.lock().expect("ask service") = Some(svc);
+}
+
+/// Mark stdin as owned by the GRAY_STDIN_STEER demux: per-ask drivers must
+/// not read it (answers come through [`deliver_json_answer`]).
+pub fn set_demux() {
+    if let Some(svc) = SERVICE.lock().expect("ask service").as_ref() {
+        svc.demux.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The demux's half of `drive_json`: route one stdin answer line to its
+/// pending ask. Lines for unknown/closed ids are dropped.
+pub fn deliver_json_answer(ask_id: u64, line: &str) {
+    let svc = SERVICE.lock().expect("ask service").clone();
+    let Some(svc) = svc else { return };
+    let mut pending = svc.pending.lock().expect("ask pending");
+    if let Some(p) = pending.get(&ask_id)
+        && let Some(answers) = parse_json_answer(line, ask_id, &p.questions)
+        && let Some(p) = pending.remove(&ask_id)
+    {
+        let _ = p.tx.send(answers);
+    }
 }
 
 /// True while an ask modal owns the viewport keys (the turn key watcher
@@ -198,7 +225,27 @@ pub async fn handle_ask(params: serde_json::Value) -> serde_json::Value {
     // suspended the 300s timeout and the cancellation branch entirely.
     let drive_svc = svc.clone();
     let drive = tokio::spawn(async move {
-        if let Some(turn) = drive_svc.json_turn.clone() {
+        if drive_svc.demux.load(std::sync::atomic::Ordering::Relaxed)
+            && drive_svc.json_turn.is_some()
+        {
+            // The stdin demux owns the pipe: emit the ask row, then park —
+            // answers land via `deliver_json_answer`, TTL/cancel still win.
+            let turn = drive_svc.json_turn.clone().expect("json_turn checked");
+            let questions = {
+                let pending = drive_svc.pending.lock().expect("ask pending");
+                match pending.get(&id) {
+                    Some(p) => p.questions.clone(),
+                    None => return,
+                }
+            };
+            {
+                use std::io::Write;
+                let mut out = std::io::stdout().lock();
+                let _ = writeln!(out, "{}", json_ask_row(&turn, id, &questions));
+                let _ = out.flush();
+            }
+            std::future::pending::<()>().await;
+        } else if let Some(turn) = drive_svc.json_turn.clone() {
             drive_json(&drive_svc, id, turn).await;
         } else if drive_svc.interactive && drive_svc.tui.is_some() {
             drive_tui(&drive_svc, id).await;

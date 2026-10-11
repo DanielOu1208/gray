@@ -8,6 +8,7 @@ fn row(name: &str, on: bool) -> crate::plugin_cli::ManagedRow {
         ecosystem: "gray-native".to_string(),
         on,
         cli: true,
+        global: false,
     }
 }
 

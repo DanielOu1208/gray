@@ -57,7 +57,6 @@ percent-encoding = "2.3"
 unicode-width = "0.2"
 ignore = "0.4"
 globset = "0.4"
-fff-search = "=0.10.6"
 fsearch = { path = "crates/fsearch" }
 regex = "1"
 libc = "0.2"

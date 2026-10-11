@@ -1,17 +1,20 @@
-//! Index-vs-spawn tax: wall-time of the fff index lane against the legacy
-//! fd/rg/walk lanes on identical trees (toolrush method — alternating
-//! samples, medians + p95s, real tool dispatch, no mocks).
+//! Index-vs-spawn tax: wall-time of the fsearch index lane against the
+//! legacy fd/rg/walk lanes on identical trees (toolrush method —
+//! alternating samples, medians + p95s, real tool dispatch, no mocks).
 //!
-//! Two fixture twins: one `git init`'d (the index lane serves it), one plain
-//! (the index declines → the old lanes serve it). Run with:
+//! Two fixture twins: one inside the index's root (the index lane serves
+//! it), one outside (the index declines → the old lanes serve it). fsearch
+//! is unix-only, so the whole bench is. Run with:
 //! `cargo test -p gray-tools --test index_bench -- --nocapture`
+
+#![cfg(unix)]
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use gray_core::agent::{Tool, ToolContext};
 use gray_tools::search_cmd::{self, SearchArgs};
-use gray_tools::search_index::SearchPool;
+use gray_tools::search_index_fs::FsearchPool;
 use gray_tools::{FindTool, GrepTool};
 use serde_json::json;
 use tempfile::TempDir;
@@ -58,34 +61,22 @@ fn write_tree(root: &std::path::Path) {
     }
 }
 
-fn git_init(dir: &std::path::Path) {
-    let ok = std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(dir)
-        .status();
-    assert!(
-        ok.is_ok_and(|s| s.success()),
-        "git init failed — is git installed?"
-    );
-}
-
-/// Ignored on Windows runners: the legacy grep lane wedges there
-/// (`legacy grep sample` exceeded its 60s bound on CI with no output),
-/// and a benchmark that hangs is noise, not signal. Run it explicitly
-/// with `-- --ignored` when hunting the underlying Windows grep wedge.
-#[cfg_attr(windows, ignore = "legacy grep lane wedges on Windows runners")]
 #[tokio::test]
 async fn index_vs_spawn_tax() {
-    // Twin trees: identical content, only one is a git worktree.
+    // Twin trees: identical content, only one inside the index's root.
     let indexed_dir = TempDir::new().unwrap();
     let legacy_dir = TempDir::new().unwrap();
     write_tree(indexed_dir.path());
     write_tree(legacy_dir.path());
-    git_init(indexed_dir.path());
 
     // The indexed lane is `gray find`/`gray grep`; the legacy lane is the
     // tool the model would otherwise run, in a tree the index declines.
-    let pool = Arc::new(SearchPool::new(indexed_dir.path().join("fff-frecency")));
+    let pool = Arc::new(FsearchPool::with_options(fsearch::Options {
+        dir: indexed_dir.path().join("index"),
+        home: indexed_dir.path().to_string_lossy().into_owned(),
+        root: Some(indexed_dir.path().to_path_buf()),
+        skip: None,
+    }));
     let ictx = ctx_for(indexed_dir.path());
     let lctx = ctx_for(legacy_dir.path());
     let lfind = FindTool;
@@ -103,8 +94,8 @@ async fn index_vs_spawn_tax() {
     let t = Instant::now();
     let out = bounded(
         120,
-        "cold find_with_pool",
-        search_cmd::find_with_pool(&args("*.rs".to_string()), &ictx, pool.clone()),
+        "cold find_with_fsearch",
+        search_cmd::find_with_fsearch(&args("*.rs".to_string()), &ictx, pool.clone()),
     )
     .await;
     assert!(!out.is_empty());
@@ -126,8 +117,8 @@ async fn index_vs_spawn_tax() {
     .await;
     bounded(
         120,
-        "cold grep_with_pool",
-        search_cmd::grep_with_pool(&args("needle_0".to_string()), &ictx, pool.clone()),
+        "cold grep_with_fsearch",
+        search_cmd::grep_with_fsearch(&args("needle_0".to_string()), &ictx, pool.clone()),
     )
     .await;
     let deadline = Instant::now() + std::time::Duration::from_secs(90);
@@ -151,7 +142,7 @@ async fn index_vs_spawn_tax() {
         let out = bounded(
             60,
             "indexed find sample",
-            search_cmd::find_with_pool(&args(pat.clone()), &ictx, pool.clone()),
+            search_cmd::find_with_fsearch(&args(pat.clone()), &ictx, pool.clone()),
         )
         .await;
         assert!(!out.is_empty());
@@ -171,7 +162,7 @@ async fn index_vs_spawn_tax() {
         let out = bounded(
             60,
             "indexed grep sample",
-            search_cmd::grep_with_pool(&args(needle.clone()), &ictx, pool.clone()),
+            search_cmd::grep_with_fsearch(&args(needle.clone()), &ictx, pool.clone()),
         )
         .await;
         assert!(!out.is_empty());

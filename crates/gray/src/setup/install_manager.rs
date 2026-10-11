@@ -348,7 +348,7 @@ pub(crate) fn run_install_manager(
                     Span::styled(
                         title_str,
                         Style::default()
-                            .fg(Color::White)
+                            .fg(crate::theme::theme().text_bright)
                             .add_modifier(Modifier::BOLD)
                             .bg(box_bg),
                     ),
@@ -386,7 +386,7 @@ pub(crate) fn run_install_manager(
                         }
                         let style = if seg.active {
                             Style::default()
-                                .fg(Color::White)
+                                .fg(crate::theme::theme().text_bright)
                                 .add_modifier(Modifier::BOLD)
                                 .bg(box_bg)
                         } else {
@@ -458,7 +458,11 @@ pub(crate) fn run_install_manager(
                                     .add_modifier(Modifier::BOLD),
                             ))
                         } else {
-                            let fg = if *lit { Color::White } else { text_dim };
+                            let fg = if *lit {
+                                crate::theme::theme().text_bright
+                            } else {
+                                text_dim
+                            };
                             Line::from(vec![
                                 Span::styled(row, Style::default().fg(fg).bg(row_bg)),
                                 Span::styled(" ".repeat(fill), Style::default().bg(row_bg)),
@@ -521,7 +525,7 @@ pub(crate) fn run_install_manager(
                         Span::styled(
                             k,
                             Style::default()
-                                .fg(Color::White)
+                                .fg(crate::theme::theme().text_bright)
                                 .add_modifier(Modifier::BOLD)
                                 .bg(box_bg),
                         ),
@@ -548,7 +552,7 @@ pub(crate) fn run_install_manager(
                 let mut footer_spans = vec![Span::styled(
                     "↑↓ ",
                     Style::default()
-                        .fg(Color::White)
+                        .fg(crate::theme::theme().text_bright)
                         .add_modifier(Modifier::BOLD)
                         .bg(box_bg),
                 )];

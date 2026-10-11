@@ -116,6 +116,10 @@ impl TextArea {
     }
     pub(crate) fn shift_elements(&mut self, pos: usize, removed: usize, inserted: usize) {
         let diff = inserted as isize - removed as isize;
+        if removed > 0 {
+            self.elements
+                .retain(|el| el.range.end <= pos || el.range.start >= pos + removed);
+        }
         for el in &mut self.elements {
             if el.range.start >= pos + removed {
                 el.range.start = ((el.range.start as isize) + diff) as usize;

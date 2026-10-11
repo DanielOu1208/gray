@@ -35,6 +35,8 @@ pub(crate) struct PendingDoc {
     /// the slot selects and validates parts without refetching.
     #[serde(default)]
     pub(crate) shapes: BTreeMap<String, RowShape>,
+    #[serde(default)]
+    pub(crate) page: usize,
 }
 
 /// The model picker's server-side selection (`values`/`submit` revise it).

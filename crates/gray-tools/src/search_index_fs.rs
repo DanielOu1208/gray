@@ -1,12 +1,12 @@
-//! Resident file index (fsearch) — second backend behind the same
-//! Option-fallback contract as `search_index.rs`'s fff pool.
+//! Resident file index (fsearch) — the only index backend, behind an
+//! Option-fallback contract: anything it cannot answer exactly declines
+//! to the fd/rg lanes.
 //!
 //! One `fsearch::Engine` per process (not per root): it holds a persistent
 //! whole-disk index under `gray_home()/fsearch`, mmap'd between launches,
 //! so the first indexed search in a fresh process is as warm as the last
-//! one in the previous process. `in:` scopes stand in for fff's per-root
-//! pickers; a root the index has not covered declines to fd/rg exactly like
-//! an unbuilt picker did.
+//! one in the previous process. `in:` scopes select the indexed
+//! directories; a root the index has not covered declines to fd/rg.
 //!
 //! The model-visible contract is unchanged: `indexed_*` return `None` for
 //! anything the index cannot answer exactly — pattern forms it cannot
@@ -37,7 +37,7 @@ const FETCH_MIN: usize = 64;
 const FETCH_MAX: usize = 4096;
 
 /// File cap for a scoped content search. `GrepResult.files` beyond it flag
-/// `limit_reached`, same as an overshot page on the fff lane.
+/// `limit_reached`, same as the real grep lane's cap.
 const GREP_FILE_CAP: usize = 8192;
 
 /// The whole-disk engine: one lock, one index, started on first use.
@@ -214,7 +214,7 @@ impl FsearchPool {
             return None;
         }
         // rg -g exclusions (`!*.rs`) and depth-anchored globs aren't
-        // expressible on one basename regex — decline like the fff lane.
+        // expressible on one basename regex — decline.
         if glob.is_some_and(|g| g.starts_with('!') || g.contains('/') || g.contains('{')) {
             return None;
         }

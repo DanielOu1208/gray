@@ -41,6 +41,7 @@ fn picker_rec(models: &[(String, String)]) -> store::PendingDoc {
         },
         models: models.to_vec(),
         shapes: Default::default(),
+        page: 0,
     }
 }
 
@@ -154,6 +155,7 @@ fn ui_doc_serde_wire_shape() {
                         label: "Apply".to_string(),
                         style: ui::ButtonStyle::Primary,
                         url: None,
+                        disabled: false,
                     },
                 ],
             },
@@ -190,7 +192,7 @@ fn model_picker_doc_from_draft() {
         fast: false,
         parts: Default::default(),
     };
-    let v = serde_json::to_value(model_picker_doc(&draft, &models, &BTreeMap::new())).unwrap();
+    let v = serde_json::to_value(model_picker_doc(&draft, &models, &BTreeMap::new(), 0)).unwrap();
     assert_eq!(v["document_id"], "model-picker");
     assert_eq!(v["lifecycle"], "editable");
     assert_eq!(
@@ -385,7 +387,7 @@ async fn run_rejects_local_and_unknown() {
         .await
         .unwrap_err();
     assert_eq!(err.0, "unknown_command");
-    for name in ["theme", "quit", "context", "undo", "gateway"] {
+    for name in ["theme", "quit", "copy", "hotkeys", "restart", "hehe"] {
         let err = run_command(&mut config, home.path(), name, &[])
             .await
             .unwrap_err();
@@ -393,7 +395,7 @@ async fn run_rejects_local_and_unknown() {
         assert!(err.1.contains(name));
     }
     // Aliases resolve to the same local rejection.
-    let err = run_command(&mut config, home.path(), "compress", &[])
+    let err = run_command(&mut config, home.path(), "reboot", &[])
         .await
         .unwrap_err();
     assert_eq!(err.0, "local_only");
@@ -496,7 +498,7 @@ fn model_picker_doc_composite_row_gets_slot_selects() {
             ("sidekick".to_string(), "a".to_string()),
         ]),
     };
-    let v = serde_json::to_value(model_picker_doc(&draft, &models, &shapes)).unwrap();
+    let v = serde_json::to_value(model_picker_doc(&draft, &models, &shapes, 0)).unwrap();
     let comps = v["components"].as_array().unwrap();
     // text · model · slot:lead · slot:sidekick · effort · buttons
     assert_eq!(comps.len(), 6);

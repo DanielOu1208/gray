@@ -79,6 +79,13 @@ pub struct UiTheme {
     pub bezel_hi: Color,
     pub bezel_mid: Color,
     pub bezel_lo: Color,
+    pub hue_red: Color,
+    pub hue_orange: Color,
+    pub hue_yellow: Color,
+    pub hue_green: Color,
+    pub hue_cyan: Color,
+    pub hue_blue: Color,
+    pub hue_magenta: Color,
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -126,6 +133,13 @@ pub const GRAY_UI_THEME: UiTheme = UiTheme {
     bezel_hi: rgb(106, 106, 106),
     bezel_mid: rgb(74, 74, 74),
     bezel_lo: rgb(46, 46, 46),
+    hue_red: rgb(247, 118, 142),
+    hue_orange: rgb(255, 158, 100),
+    hue_yellow: rgb(224, 175, 104),
+    hue_green: rgb(158, 206, 106),
+    hue_cyan: rgb(125, 207, 255),
+    hue_blue: rgb(122, 162, 247),
+    hue_magenta: rgb(187, 154, 247),
 };
 /// Name of the built-in palette. Selecting it (or `default`) clears any
 /// user theme.
@@ -154,6 +168,7 @@ pub fn set_theme(theme: UiTheme, name: Option<&str>) {
     if let Ok(mut n) = ACTIVE_NAME.write() {
         *n = name.map(str::to_string);
     }
+    gray_markdown::set_palette(Some(markdown_palette(&theme)));
 }
 
 /// Every role name a theme file may set, in struct order.
@@ -196,6 +211,13 @@ pub const ROLE_NAMES: &[&str] = &[
     "bezel_hi",
     "bezel_mid",
     "bezel_lo",
+    "hue_red",
+    "hue_orange",
+    "hue_yellow",
+    "hue_green",
+    "hue_cyan",
+    "hue_blue",
+    "hue_magenta",
 ];
 
 impl UiTheme {
@@ -240,6 +262,13 @@ impl UiTheme {
             "bezel_hi" => &mut self.bezel_hi,
             "bezel_mid" => &mut self.bezel_mid,
             "bezel_lo" => &mut self.bezel_lo,
+            "hue_red" => &mut self.hue_red,
+            "hue_orange" => &mut self.hue_orange,
+            "hue_yellow" => &mut self.hue_yellow,
+            "hue_green" => &mut self.hue_green,
+            "hue_cyan" => &mut self.hue_cyan,
+            "hue_blue" => &mut self.hue_blue,
+            "hue_magenta" => &mut self.hue_magenta,
             _ => return None,
         })
     }
@@ -296,6 +325,25 @@ fn parse_color_depth(
         }
         other => Err(format!("{other} is not a color")),
     }
+}
+
+#[must_use]
+pub fn swatch_spans(theme: &UiTheme) -> Vec<ratatui::text::Span<'static>> {
+    use ratatui::style::Style;
+    use ratatui::text::Span;
+    [
+        (theme.surface_bg, theme.raised_bg),
+        (theme.text_dim, theme.text_body),
+        (theme.hue_red, theme.error_soft),
+        (theme.hue_orange, theme.hue_yellow),
+        (theme.hue_green, theme.success),
+        (theme.hue_cyan, theme.hue_blue),
+        (theme.hue_magenta, theme.rose),
+        (theme.accent, theme.accent_soft),
+    ]
+    .into_iter()
+    .map(|(top, bottom)| Span::styled("▀▀", Style::default().fg(top).bg(bottom)))
+    .collect()
 }
 
 /// A color as theme-file text (inverse of [`parse_color`]).
@@ -358,6 +406,22 @@ pub fn parse_theme(text: &str) -> Result<(UiTheme, Vec<String>), String> {
             Err(e) => warnings.push(format!("{role}: {e}")),
         }
     }
+    let hue_fallbacks = [
+        ("hue_red", theme.error),
+        ("hue_orange", theme.tool_path),
+        ("hue_yellow", theme.tool_command),
+        ("hue_green", theme.success),
+        ("hue_cyan", theme.ctx_tools),
+        ("hue_blue", theme.info),
+        ("hue_magenta", theme.rose),
+    ];
+    for (role, derived) in hue_fallbacks {
+        if !colors.contains_key(role)
+            && let Some(slot) = theme.role_mut(role)
+        {
+            *slot = derived;
+        }
+    }
     Ok((theme, warnings))
 }
 
@@ -373,6 +437,38 @@ pub fn theme_to_json(theme: &UiTheme) -> String {
     }
     let doc = serde_json::json!({ "colors": colors });
     serde_json::to_string_pretty(&doc).expect("theme JSON serializes") + "\n"
+}
+
+#[must_use]
+pub fn markdown_palette(theme: &UiTheme) -> gray_markdown::Palette {
+    let fg = |c: Color| gray_markdown::ratatui_color_to_rgb(c).unwrap_or([225, 225, 225]);
+    gray_markdown::Palette {
+        text: fg(theme.text_body),
+        strong: fg(theme.text_bright),
+        heading: fg(theme.accent),
+        heading_minor: fg(theme.accent_soft),
+        dim: fg(theme.text_dim),
+        faint: fg(theme.text_faint),
+        bullet: fg(theme.accent),
+        inline_code: fg(theme.hue_cyan),
+        link: fg(theme.hue_blue),
+        quote: fg(theme.text_muted),
+        success: fg(theme.success),
+        bg: gray_markdown::ratatui_color_to_rgb(theme.surface_bg).unwrap_or([22, 22, 22]),
+        comment: fg(theme.text_dim),
+        keyword: fg(theme.hue_magenta),
+        string: fg(theme.hue_green),
+        function: fg(theme.hue_blue),
+        type_: fg(theme.hue_yellow),
+        number: fg(theme.hue_orange),
+        constant: fg(theme.hue_cyan),
+        operator: fg(theme.text_muted),
+        tag: fg(theme.hue_red),
+        attribute: fg(theme.hue_yellow),
+        inserted: fg(theme.diff_add_fg),
+        deleted: fg(theme.diff_del_fg),
+        invalid: fg(theme.error),
+    }
 }
 
 /// `~/.gray/themes`.
@@ -428,6 +524,7 @@ pub fn load_theme_in(dir: &Path, name: &str) -> Result<(UiTheme, Vec<String>), S
 /// Startup: apply `GRAY_THEME` or the saved `"theme"`, if any. Failures
 /// keep the gray palette and are logged (the TUI is not up yet).
 pub fn init_from_saved(saved: Option<&str>) {
+    gray_markdown::set_palette(Some(markdown_palette(&theme())));
     let env = std::env::var("GRAY_THEME").ok();
     let Some(name) = env.as_deref().or(saved).map(str::trim) else {
         return;

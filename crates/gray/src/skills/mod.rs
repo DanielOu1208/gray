@@ -239,14 +239,23 @@ fn escape_xml(s: &str) -> String {
 /// (description single-lined and capped at 100 chars; the modal truncates
 /// to width, the headless list needs its own cap).
 pub fn format_discovered_skill_row(skill: &Skill) -> String {
-    const MAX_DESC: usize = 100;
+    format_skill_row(skill, 100)
+}
+
+/// The gateway render of the same row: descriptions arrive whole and the
+/// adapter paginates when the list outgrows a message.
+pub fn format_discovered_skill_row_full(skill: &Skill) -> String {
+    format_skill_row(skill, usize::MAX)
+}
+
+fn format_skill_row(skill: &Skill, max_desc: usize) -> String {
     let desc: String = skill
         .description
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let short = if desc.chars().count() > MAX_DESC {
-        format!("{}…", desc.chars().take(MAX_DESC - 1).collect::<String>())
+    let short = if desc.chars().count() > max_desc {
+        format!("{}…", desc.chars().take(max_desc - 1).collect::<String>())
     } else {
         desc
     };

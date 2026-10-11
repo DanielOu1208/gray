@@ -1,14 +1,14 @@
 //! Media attachments, opencode parity (`@opencode-ai/core` media parts +
 //! `Image.normalize`): MIME-driven kinds instead of an image-only allowlist,
-//! downscale-before-send for images. Video, PDF and audio go as native media
-//! with a fallback (contact sheet, pdftotext text, a note) that the provider
-//! swaps in when the model can't take the native part.
+//! original-bytes passthrough for images. Video, PDF and audio go as native
+//! media with a fallback (contact sheet, pdftotext text, a note) that the
+//! provider swaps in when the model can't take the native part.
 
 use std::path::{Path, PathBuf};
 
-// Image normalization lives in gray-tools (the `read` tool attaches vision
+// Image validation lives in gray-tools (the `read` tool attaches vision
 // blocks too); re-exported so existing users keep working.
-pub use gray_tools::images::{MAX_BASE64_BYTES, MediaError, normalize_image_bytes};
+pub use gray_tools::images::{MediaError, normalize_image_bytes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentKind {

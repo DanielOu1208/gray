@@ -24,6 +24,7 @@ pub mod logging;
 pub(crate) mod mascot;
 pub mod plugin_check;
 pub mod plugin_cli;
+pub(crate) mod plugin_status;
 pub mod print;
 mod print_meter;
 pub mod profile;
@@ -321,6 +322,15 @@ async fn build_agent_with(
             &provider,
         )
     };
+    let prebooted_plugins = if !config.bare && spawn_plugins {
+        match crate::plugin_status::take_boot().await {
+            Some(Ok(plugins)) => Some(plugins),
+            Some(Err(e)) => return Err(anyhow::anyhow!(e)),
+            None => None,
+        }
+    } else {
+        None
+    };
     let config_bare = config.bare;
     let agent = gray_plugin::builder::build_agent(gray_plugin::builder::BuilderOptions {
         model: wire_model.clone(),
@@ -396,11 +406,20 @@ async fn build_agent_with(
         dynamic_credential_source: dynamic
             .as_ref()
             .map(|provider| provider.credential_source()),
+        prebooted_plugins,
     })
     .await?;
     log::debug!(target: "gray_timing", "build_agent plugins+agent elapsed_ms={}", build_started.elapsed().as_millis());
     for w in gray_plugin::builder::take_builder_warnings() {
         profile::queue_profile_warning(w);
+    }
+    if let Some(t) = crate::host::registered_tui()
+        && let Ok(mut t) = t.lock()
+    {
+        t.set_plugin_stats(crate::plugin_status::stats_line());
+        if !t.modal_open {
+            let _ = t.draw();
+        }
     }
     let mut agent = agent.with_compaction_budget(config.context_reserve, config.context_keep);
     // Same rule `cache_warm_policy` applies to warming: on a relay plugin a
@@ -934,6 +953,9 @@ pub enum PluginCmd {
     Enable {
         /// Installed plugin name
         name: String,
+        /// Also boot it in every GRAY_HOME (gateways, subagents)
+        #[arg(long)]
+        global: bool,
     },
     /// Disable an installed plugin
     Disable {

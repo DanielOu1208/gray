@@ -7,6 +7,85 @@ use anstyle::{Effects, Style};
 
 use crate::colors::adapt_style;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Palette {
+    pub text: [u8; 3],
+    pub strong: [u8; 3],
+    pub heading: [u8; 3],
+    pub heading_minor: [u8; 3],
+    pub dim: [u8; 3],
+    pub faint: [u8; 3],
+    pub bullet: [u8; 3],
+    pub inline_code: [u8; 3],
+    pub link: [u8; 3],
+    pub quote: [u8; 3],
+    pub success: [u8; 3],
+    pub bg: [u8; 3],
+    pub comment: [u8; 3],
+    pub keyword: [u8; 3],
+    pub string: [u8; 3],
+    pub function: [u8; 3],
+    pub type_: [u8; 3],
+    pub number: [u8; 3],
+    pub constant: [u8; 3],
+    pub operator: [u8; 3],
+    pub tag: [u8; 3],
+    pub attribute: [u8; 3],
+    pub inserted: [u8; 3],
+    pub deleted: [u8; 3],
+    pub invalid: [u8; 3],
+}
+
+static PALETTE: std::sync::RwLock<Option<Palette>> = std::sync::RwLock::new(None);
+
+pub fn set_palette(p: Option<Palette>) {
+    if let Ok(mut slot) = PALETTE.write() {
+        *slot = p;
+    }
+}
+
+pub(crate) fn palette() -> Option<Palette> {
+    PALETTE.read().ok().and_then(|p| *p)
+}
+
+#[must_use]
+pub fn ratatui_color_to_rgb(c: ratatui::style::Color) -> Option<[u8; 3]> {
+    use ratatui::style::Color;
+    match c {
+        Color::Reset => None,
+        Color::Rgb(r, g, b) => Some([r, g, b]),
+        Color::Indexed(i) => {
+            let rgb =
+                anstyle_lossy::xterm_to_rgb(anstyle::Ansi256Color(i), anstyle_lossy::palette::VGA);
+            Some([rgb.0, rgb.1, rgb.2])
+        }
+        named => {
+            use anstyle::AnsiColor as A;
+            let ansi = match named {
+                Color::Black => A::Black,
+                Color::Red => A::Red,
+                Color::Green => A::Green,
+                Color::Yellow => A::Yellow,
+                Color::Blue => A::Blue,
+                Color::Magenta => A::Magenta,
+                Color::Cyan => A::Cyan,
+                Color::Gray => A::White,
+                Color::DarkGray => A::BrightBlack,
+                Color::LightRed => A::BrightRed,
+                Color::LightGreen => A::BrightGreen,
+                Color::LightYellow => A::BrightYellow,
+                Color::LightBlue => A::BrightBlue,
+                Color::LightMagenta => A::BrightMagenta,
+                Color::LightCyan => A::BrightCyan,
+                Color::White => A::BrightWhite,
+                _ => return None,
+            };
+            let rgb = anstyle_lossy::ansi_to_rgb(ansi, anstyle_lossy::palette::VGA);
+            Some([rgb.0, rgb.1, rgb.2])
+        }
+    }
+}
+
 /// Table border characters for rendering tables in pretty mode.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct TableBorders {

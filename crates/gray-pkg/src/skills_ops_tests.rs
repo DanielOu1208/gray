@@ -243,7 +243,6 @@ async fn install_warns_not_refuses_on_name_dir_mismatch() {
     .unwrap();
     let _home = use_skills_env();
 
-    // pi leniency: installs under the dir slug, warning on stderr.
     let report = install(bundle.to_str().unwrap()).await.unwrap();
     assert_eq!(report.name, "dir-name");
     assert!(report.path.join("SKILL.md").is_file());

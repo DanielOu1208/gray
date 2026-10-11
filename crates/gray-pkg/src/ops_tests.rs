@@ -201,28 +201,6 @@ fn install_key_confines_dotdot_and_backslash() {
 }
 
 #[test]
-fn remove_deletes_pi_subdir() {
-    let _guard = env_guard();
-    let _home = use_home_env();
-    let mut lock = LockFile::default();
-    lock.plugins.insert(
-        "scope-bar".to_string(),
-        LockEntry {
-            ecosystem: "pi-gallery".into(),
-            version: "2.0.0".into(),
-            ..LockEntry::default()
-        },
-    );
-    write_lock(&lock).unwrap();
-    let dir = crate::plugins_dir().join("pi").join("scope-bar");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("SKILL.md"), "x").unwrap();
-    remove("scope-bar").unwrap();
-    assert!(!list().unwrap().contains_key("scope-bar"));
-    assert!(!dir.exists());
-}
-
-#[test]
 fn lock_roundtrips_exact_shape() {
     let mut lock = LockFile {
         schema: 1,
@@ -241,6 +219,7 @@ fn lock_roundtrips_exact_shape() {
             scope: "user".into(),
             enabled: true,
             cli_argv: None,
+            global: false,
             extra: Default::default(),
         },
     );
@@ -544,6 +523,7 @@ fn remove_keeps_files_when_the_registry_write_fails() {
             scope: "user".to_string(),
             enabled: true,
             cli_argv: None,
+            global: false,
             extra: Default::default(),
         },
     );

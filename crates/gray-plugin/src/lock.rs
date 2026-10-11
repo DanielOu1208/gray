@@ -44,6 +44,11 @@ pub struct LockEntry {
     /// argv for `gray <name> …` forwarding and plugin slash capture; `None` = sidecar-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_argv: Option<Vec<String>>,
+    /// Boots in every GRAY_HOME (`gray plugin enable <name> --global`):
+    /// sessions under a different home still load it from the real user
+    /// lock, and its `prompt/context` survives the lean prompt.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub global: bool,
 }
 
 /// Lockfile body: schema + plugins keyed by manifest name.

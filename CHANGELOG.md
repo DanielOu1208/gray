@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Removed
+- **fff-search index removed; fsearch is the only resident file index
+  (unix).** `GRAY_SEARCH_INDEX=fff` now means the default.
+- **pi-extension leftovers removed.** `gray plugin remove` no longer
+  looks under `plugins/pi/` and `pi` is no longer a reserved install
+  name.
+
 ### Fixed
 - **Attaching a PDF, audio or video file no longer makes the context
   jump to millions of tokens.** Non-image attachments ride inline as
@@ -12,6 +19,14 @@
   per-block price images already did.
 
 ### Changed
+- **Images go to the model at original bytes, resolution and quality.**
+  Attach/read/view paths no longer decode or re-encode image files —
+  animated GIFs stay animated and EXIF metadata stays on the file.
+  Anthropic's hard caps (5MB on the wire, 8000px edge) are enforced at
+  request serialization for Anthropic-routed models only; other
+  providers receive the original file, and any still-oversized image
+  gets the provider's own error. A 20MB sanity ceiling refuses
+  guaranteed-rejected files early.
 - **Context management is staged: cheap elision before the LLM summary.**
   At 0.6 of the window, tool outputs over 8 KiB that sit outside the
   verbatim recent window (0.3 of the window, at least the last two

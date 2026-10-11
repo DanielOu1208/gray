@@ -7,6 +7,8 @@
 //! outcomes that differ by context (submit, interrupt, clear, exit, a
 //! bound slash command) go back to the caller.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::super::Tui;
@@ -37,7 +39,87 @@ pub(crate) fn dispatch(tui: &mut Tui, ev: &KeyEvent) -> KeyOutcome {
     dispatch_bindings(tui, ev, &bindings)
 }
 
+static CHIP_MODE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_chip_sel(tui: &mut Tui, sel: Option<usize>) {
+    tui.chip_sel = sel;
+    CHIP_MODE.store(sel.is_some(), Ordering::Relaxed);
+}
+
+pub(crate) fn chip_mode_hint() -> bool {
+    CHIP_MODE.load(Ordering::Relaxed)
+}
+
+fn chip_key(tui: &mut Tui, bindings: &[Binding]) -> Option<KeyOutcome> {
+    let sel = tui.chip_sel?;
+    if tui.attachments.is_empty() {
+        set_chip_sel(tui, None);
+        return None;
+    }
+    let last = tui.attachments.len() - 1;
+    let sel = sel.min(last);
+    for b in bindings {
+        let Binding::Action(a) = b else {
+            continue;
+        };
+        match a {
+            Action::CursorLeft => set_chip_sel(tui, Some(sel.saturating_sub(1))),
+            Action::CursorRight => set_chip_sel(tui, Some((sel + 1).min(last))),
+            Action::SelectUp | Action::CursorUp | Action::HistoryPrevious => {
+                set_chip_sel(tui, Some(sel))
+            }
+            Action::DeleteCharBackward | Action::DeleteCharForward => remove_chip(tui, sel),
+            Action::SelectDown
+            | Action::CursorDown
+            | Action::HistoryNext
+            | Action::SelectCancel
+            | Action::Interrupt => set_chip_sel(tui, None),
+            _ => continue,
+        }
+        return Some(KeyOutcome::Edited);
+    }
+    set_chip_sel(tui, None);
+    None
+}
+
+fn remove_chip(tui: &mut Tui, idx: usize) {
+    let (ph, _) = tui.attachments.remove(idx);
+    let text = tui.textarea.text().to_string();
+    if let Some(start) = text.find(&ph) {
+        let mut end = start + ph.len();
+        let bytes = text.as_bytes();
+        if start > 0 && bytes[start - 1] == b' ' && bytes.get(end) == Some(&b' ') {
+            end += 1;
+        }
+        tui.textarea.replace_range(start..end, "");
+    }
+    super::sync_attachments(tui);
+    if tui.attachments.is_empty() {
+        set_chip_sel(tui, None);
+    } else {
+        let next = idx.saturating_sub(1).min(tui.attachments.len() - 1);
+        set_chip_sel(tui, Some(next));
+    }
+}
+
+fn enter_chip_mode(tui: &mut Tui) -> bool {
+    if tui.attachments.is_empty() || !tui.matches.is_empty() {
+        return false;
+    }
+    let text = tui.textarea.text();
+    let cur = tui.textarea.cursor().min(text.len());
+    if text[..cur].contains('\n') {
+        return false;
+    }
+    let last = tui.attachments.len() - 1;
+    set_chip_sel(tui, Some(last));
+    true
+}
+
 pub(crate) fn dispatch_bindings(tui: &mut Tui, ev: &KeyEvent, bindings: &[Binding]) -> KeyOutcome {
+    if let Some(out) = chip_key(tui, bindings) {
+        return out;
+    }
     for b in bindings {
         match b {
             Binding::Command(cmd) => return KeyOutcome::Command(cmd.clone()),
@@ -122,7 +204,9 @@ fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
             Some(Submit)
         }
         Action::HistoryPrevious => {
-            history_prev(tui);
+            if !enter_chip_mode(tui) {
+                history_prev(tui);
+            }
             edited
         }
         Action::HistoryNext => {
@@ -130,6 +214,9 @@ fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
             edited
         }
         Action::CursorUp => {
+            if enter_chip_mode(tui) {
+                return edited;
+            }
             let has_multiline = tui.textarea.text().contains('\n');
             let at_top = tui.textarea.cursor() == 0 || !has_multiline;
             if at_top && !tui.history.is_empty() {

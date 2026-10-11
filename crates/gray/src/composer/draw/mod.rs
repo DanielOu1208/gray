@@ -60,32 +60,54 @@ pub(crate) fn latched_viewport_floor(
 /// (`Image`/`File`) plus the file's real name — repeating the `[Image #n]`
 /// placeholder would just say what the draft already says. Clipboard
 /// pastes land in `clipboard-XXXXXX.png`, which is a name too.
-fn attachment_chips(attachments: &[(String, std::path::PathBuf)]) -> Line<'static> {
+fn attachment_chips(
+    attachments: &[(String, std::path::PathBuf)],
+    selected: Option<usize>,
+) -> Line<'static> {
     let t = crate::theme::theme();
     let mut spans = vec![Span::styled("   ", Style::default().bg(t.surface_bg))];
     for (i, (ph, path)) in attachments.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled("  ", Style::default().bg(t.surface_bg)));
+            spans.push(Span::styled(" ", Style::default().bg(t.surface_bg)));
         }
         let kind = ph
             .trim_start_matches('[')
             .split(' ')
             .next()
             .unwrap_or("File");
-        spans.push(Span::styled(
-            format!(" {kind} "),
-            Style::default().fg(t.text_bright).bg(t.input_bg),
-        ));
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("clipboard");
-        spans.push(Span::styled(
-            format!(" {name}"),
-            Style::default().fg(t.text_muted).bg(t.surface_bg),
-        ));
+        let (pill, label) = if selected == Some(i) {
+            let on = Style::default()
+                .fg(t.input_bg)
+                .bg(t.text_bright)
+                .add_modifier(Modifier::BOLD);
+            (on, on)
+        } else {
+            (
+                Style::default().fg(t.text_bright).bg(t.input_bg),
+                Style::default().fg(t.text_muted).bg(t.surface_bg),
+            )
+        };
+        spans.push(Span::styled(format!(" {kind} "), pill));
+        spans.push(Span::styled(format!(" {name} "), label));
     }
     Line::from(spans)
+}
+
+fn attachment_hint(selecting: bool) -> Line<'static> {
+    let t = crate::theme::theme();
+    let hint = if selecting {
+        "←→ select · backspace delete · ↓ close"
+    } else {
+        "↑ select"
+    };
+    Line::from(vec![
+        Span::styled("   ", Style::default().bg(t.surface_bg)),
+        Span::styled(hint, Style::default().fg(t.text_dim).bg(t.surface_bg)),
+    ])
 }
 
 /// Upper bound for the inline viewport.
@@ -210,14 +232,19 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let ghost = continue_ghost(tui.allow_empty_submit, tui.is_task_running, &text);
     let home = tui.is_home().then_some(HomeRows {
         notice: tui.home_notice.as_deref(),
+        stats: tui.plugin_stats.as_deref(),
     });
+    let home_mode = home.is_some();
     let mut ibox = build_input_box(&text, cursor, w, ghost, home);
     if !tui.attachments.is_empty() {
-        // Chips ride inside the box, under the text and above its bottom
-        // pad, so they read as part of the draft they belong to.
+        // Chips ride inside the box, above the text and under its top pad,
+        // so they read as part of the draft they belong to.
+        let chip_sel = tui.chip_sel.map(|s| s.min(tui.attachments.len() - 1));
         ibox.lines
-            .insert(ibox.band_h - 1, attachment_chips(&tui.attachments));
-        ibox.band_h += 1;
+            .insert(1, attachment_chips(&tui.attachments, chip_sel));
+        ibox.lines.insert(2, attachment_hint(chip_sel.is_some()));
+        ibox.band_h += 2;
+        ibox.cur_row += 2;
     }
     if home.is_some() {
         // Fill the screen: spacer rows under the home rows center the
@@ -252,7 +279,11 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         // Header + previews + overflow row + one separator row below it.
         1 + n.min(3) as u16 + u16::from(n > 3) + 1
     };
-    let panel_est: u16 = tui.matches.len().min(PANEL_ROWS) as u16;
+    let panel_est: u16 = if home.is_some() {
+        0
+    } else {
+        tui.matches.len().min(PANEL_ROWS) as u16
+    };
     // Inline `host/ask` modal (sidecar plugin questions): measured rows.
     let ask_est: u16 = tui
         .ask_modal
@@ -497,6 +528,8 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let panel_cap = need.min(avail).max((PANEL_ROWS as u16).min(avail));
         let visible_count = if tui.matches.is_empty() {
             0
+        } else if home_mode {
+            tui.matches.len().min(PANEL_ROWS)
         } else {
             tui.matches.len().min(panel_cap as usize)
         };
@@ -507,7 +540,11 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let ask_y = live_y + live_h;
         let widget_y = ask_y + ask_h;
         let box_y = widget_y + widget_h;
-        let panel_y = box_y + box_rows;
+        let panel_y = if home_mode {
+            (area.y + area.height.saturating_sub(1)).saturating_sub(panel_h)
+        } else {
+            box_y + box_rows
+        };
         let attach_y = panel_y + panel_h;
         let footer_y = attach_y + attach_h;
 
@@ -660,7 +697,14 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 let is_sel = i == tui.sel;
                 let cmd_str = format!(" /{name} ");
                 let desc_str = format!(" {desc} ");
-                let used_len = display_width(&cmd_str) + display_width(&desc_str);
+                let swatch = theme_row_swatch(name);
+                let used_len = display_width(&cmd_str)
+                    + display_width(&desc_str)
+                    + swatch.as_ref().map_or(0, |s| {
+                        s.iter()
+                            .map(|sp| display_width(sp.content.as_ref()))
+                            .sum::<usize>()
+                    });
                 // ponytail: single-char edge arrows, no extra row or layout.
                 let marker = match (
                     i == start && hidden_above > 0,
@@ -684,12 +728,12 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
-                        .fg(Color::White)
+                        .fg(crate::theme::theme().text_bright)
                         .bg(line_bg)
                         .add_modifier(Modifier::BOLD)
                 };
                 let line = if is_sel {
-                    Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             cmd_str,
                             Style::default()
@@ -704,14 +748,18 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                                 .bg(line_bg),
                         ),
                         Span::styled(" ".repeat(pad_len), Style::default().bg(line_bg)),
-                        Span::styled(marker.to_string(), marker_style),
-                    ])
+                    ];
+                    if let Some(sw) = swatch {
+                        spans.extend(sw);
+                    }
+                    spans.push(Span::styled(marker.to_string(), marker_style));
+                    Line::from(spans)
                 } else {
-                    Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             cmd_str,
                             Style::default()
-                                .fg(Color::White)
+                                .fg(crate::theme::theme().text_bright)
                                 .add_modifier(Modifier::BOLD)
                                 .bg(line_bg),
                         ),
@@ -722,8 +770,12 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                                 .bg(line_bg),
                         ),
                         Span::styled(" ".repeat(pad_len), Style::default().bg(line_bg)),
-                        Span::styled(marker.to_string(), marker_style),
-                    ])
+                    ];
+                    if let Some(sw) = swatch {
+                        spans.extend(sw);
+                    }
+                    spans.push(Span::styled(marker.to_string(), marker_style));
+                    Line::from(spans)
                 };
                 frame.render_widget(
                     Paragraph::new(line)
@@ -1035,4 +1087,26 @@ fn live_tool_row(line: Line<'static>) -> Paragraph<'static> {
 fn chrome_row(line: Line<'static>) -> Paragraph<'static> {
     Paragraph::new(line)
         .block(Block::default().style(Style::default().bg(crate::theme::theme().surface_bg)))
+}
+
+fn theme_row_swatch(name: &str) -> Option<Vec<Span<'static>>> {
+    if !matches!(
+        crate::repl::commands::current_completer_cmd().as_str(),
+        "theme" | "themes"
+    ) {
+        return None;
+    }
+    let theme_name = name
+        .strip_prefix("theme ")
+        .or_else(|| name.strip_prefix("themes "))
+        .unwrap_or(name);
+    let t = if crate::theme::is_builtin_name(theme_name) {
+        crate::theme::GRAY_UI_THEME
+    } else {
+        let dir = crate::theme::themes_dir().ok()?;
+        crate::theme::load_theme_in(&dir, theme_name).ok()?.0
+    };
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(crate::theme::swatch_spans(&t));
+    Some(spans)
 }

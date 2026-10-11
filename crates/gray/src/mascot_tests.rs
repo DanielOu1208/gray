@@ -178,38 +178,47 @@ fn welcome_layout_is_devin_home() {
 }
 
 #[test]
-fn welcome_bloom_grows_out_from_the_centre() {
+fn welcome_sweep_draws_top_left_first() {
     use crate::composer::welcome_lines_at;
     let w = 120usize;
     let glyphs = |reveal: f32| -> usize {
-        plain(&welcome_lines_at(w, reveal))
+        plain(&welcome_lines_at(w, reveal, None))
             .iter()
             .map(|l| l.chars().filter(|c| !c.is_whitespace()).count())
             .sum()
     };
-    // The first frame pops the gem's core (INTRO_BASE_R ≈ 55% of the
-    // radius), the last is the finished banner; the reveal is monotonic.
-    let first = glyphs(0.55);
+    let last_mark_row = |reveal: f32| -> Option<usize> {
+        plain(&welcome_lines_at(w, reveal, None))
+            .iter()
+            .rposition(|l| l.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)))
+    };
+    // The front crosses top-left → bottom-right: at 20% the lower rows
+    // are still blank, at the end the whole mark is drawn; monotonic.
+    let first = glyphs(0.2);
     let full = glyphs(1.0);
     assert!(first > 0 && first < full, "first {first}, full {full}");
     assert!(
-        glyphs(0.7) >= first && glyphs(0.7) <= full,
-        "the bloom only grows"
+        glyphs(0.6) >= first && glyphs(0.6) <= full,
+        "the sweep only grows"
+    );
+    assert!(
+        last_mark_row(0.2).unwrap() < last_mark_row(1.0).unwrap(),
+        "the front must reach the bottom rows last"
     );
     assert_eq!(
-        plain(&welcome_lines_at(w, 1.0)),
+        plain(&welcome_lines_at(w, 1.0, None)),
         plain(&build_welcome_lines(w)),
         "the last frame IS the banner"
     );
-    // The title pair waits for the mark: hidden mid-bloom, shown at full.
+    // The title pair is up from the first frame — only the mark sweeps.
     assert!(
-        !plain(&welcome_lines_at(w, 0.5))
+        plain(&welcome_lines_at(w, 0.0, None))
             .iter()
             .any(|l| l.trim() == "gray"),
-        "title joined early"
+        "title must be present from the first frame"
     );
     assert!(
-        plain(&welcome_lines_at(w, 1.0))
+        plain(&welcome_lines_at(w, 1.0, None))
             .iter()
             .any(|l| l.trim() == "gray"),
         "title missing at full reveal"
@@ -217,8 +226,8 @@ fn welcome_bloom_grows_out_from_the_centre() {
     // Every frame is the banner's row count — the insert paints a fixed
     // region, so a short frame would leave stale cells under it.
     assert_eq!(
-        welcome_lines_at(w, 0.3).len(),
-        welcome_lines_at(w, 1.0).len(),
+        welcome_lines_at(w, 0.3, None).len(),
+        welcome_lines_at(w, 1.0, None).len(),
         "frames must hold the banner's height"
     );
 }

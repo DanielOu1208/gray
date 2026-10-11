@@ -48,11 +48,12 @@ fn input_box_ghost_hint_shows_only_when_empty() {
 }
 
 #[test]
-fn home_box_is_the_flat_band_with_hints_and_notice_under_it() {
+fn home_box_is_the_flat_band_with_hints_stats_tip_and_notice_under_it() {
     let home = HomeRows {
         notice: Some(
             "⚠ 3 interrupted sessions in ~/gray · /sessions to pick up · /sessions dismiss to clear",
         ),
+        stats: None,
     };
     let w = 100;
     let ibox = build_input_box("hi", 2, w, None, Some(home));
@@ -63,22 +64,24 @@ fn home_box_is_the_flat_band_with_hints_and_notice_under_it() {
     assert_eq!((ibox.x, ibox.width), (11, 78));
     assert_eq!(rows[1], " ❯ hi");
     assert_eq!((ibox.cur_row, ibox.cur_col), (1, 2));
-    // blank, hints, blank, notice headline + one row per command
-    assert_eq!(rows.len(), 10, "{rows:?}");
+    // blank, hints, blank, stats slot, blank, tip, blank, then the
+    // notice's headline + one row per command.
+    assert_eq!(rows.len(), 13, "{rows:?}");
     assert!(rows[4].contains("commands"), "{rows:?}");
     assert_eq!(
         display_width(&rows[4]),
         78,
         "hints flush with the box's right edge"
     );
-    assert_eq!(rows[7], "   ⚠ 3 interrupted sessions in ~/gray");
-    assert_eq!(rows[8], "     /sessions           pick up");
-    assert_eq!(rows[9], "     /sessions dismiss   clear");
+    assert!(rows[8].starts_with("   ● Tip"), "{rows:?}");
+    assert_eq!(rows[10], "   ⚠ 3 interrupted sessions in ~/gray");
+    assert_eq!(rows[11], "     /sessions           pick up");
+    assert_eq!(rows[12], "     /sessions dismiss   clear");
     // Off the home screen the box is the full-width band alone.
     let chat = build_input_box("hi", 2, w, None, None);
     assert_eq!((chat.lines.len(), chat.x, chat.width), (3, 0, w));
     // The band the welcome centers over: box, home rows, status bar.
-    assert_eq!(home_band_h(w), 3 + 3 + 1);
+    assert_eq!(home_band_h(w), 3 + 6 + 1);
 }
 
 #[test]

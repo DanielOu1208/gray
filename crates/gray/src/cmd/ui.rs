@@ -94,6 +94,8 @@ pub(crate) enum MessageNode {
         style: ButtonStyle,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        disabled: bool,
     },
 }
 

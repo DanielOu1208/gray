@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
-CARGO_BUILD_JOBS=4 nice -n 19 ionice -c3 flock /tmp/cargo.lock cargo build --release -p gray
+CARGO_BUILD_BUILD_DIR="$(pwd)/target/build-local" CARGO_BUILD_JOBS=4 nice -n 19 ionice -c3 flock /tmp/cargo.lock cargo build --release -p gray
 src="$(pwd)/target/release/gray"
 dst="$HOME/.local/bin/gray"
 tmp="$dst.tmp.$$"

@@ -201,15 +201,15 @@ pub(crate) mod cron;
 mod customize;
 mod dispatch;
 pub mod format;
-mod gateway_panel;
+pub(crate) mod gateway_panel;
 pub(crate) mod handlers; // subsystem toggles are crate-wide (gateway CLI, cron)
-mod jobs;
+pub(crate) mod jobs;
 mod key_watcher;
 pub(crate) mod maintenance;
-mod plugin_cmds;
+pub(crate) mod plugin_cmds;
 mod prompt_turn;
 mod session;
-mod status;
+pub(crate) mod status;
 pub(crate) mod usage_panel;
 mod user_cmds;
 
@@ -919,6 +919,20 @@ pub async fn run_repl_mode(
                 t.ensure_gap();
             }
         });
+    }
+
+    if interactive
+        && !config.bare
+        && let Some((shared, _)) = &tui
+    {
+        if agent.is_none() {
+            crate::plugin_status::kickoff(
+                shared.clone(),
+                crate::host::default_handler(cwd.to_path_buf()),
+            );
+        } else if let Ok(mut t) = shared.lock() {
+            t.set_plugin_stats(crate::plugin_status::stats_line());
+        }
     }
 
     // Cron: background tick in live sessions (workstream C). A dedicated OS

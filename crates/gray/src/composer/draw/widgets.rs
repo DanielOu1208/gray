@@ -224,11 +224,15 @@ pub(crate) fn build_input_box(
 #[derive(Default, Clone, Copy)]
 pub(crate) struct HomeRows<'a> {
     pub(crate) notice: Option<&'a str>,
+    /// The plugin counts line from the startup probe (`N plugins · M
+    /// loaded · …`); the row stays blank until it lands.
+    pub(crate) stats: Option<&'a str>,
 }
 
 /// devin's home rows under the box, on the screen bg and relative to the
-/// box's column: the hints flush with its right edge, then the startup
-/// notice as a block: its headline, then one
+/// box's column: the hints flush with its right edge, the plugin stats
+/// and the tip under the box text, then the startup notice as a block:
+/// its headline, then one
 /// `command  what it does` row per ` · `-separated `<command> to <action>`
 /// part.
 fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
@@ -236,6 +240,12 @@ fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
         Line::default(),
         crate::composer::welcome_hints_line(0, w),
         Line::default(),
+        match home.stats {
+            Some(stats) => crate::composer::plugin_stats_line(3, stats),
+            None => Line::default(),
+        },
+        Line::default(),
+        crate::composer::welcome_tip_line(3),
     ];
     if let Some(notice) = home.notice {
         let t = crate::theme::theme();
@@ -338,7 +348,8 @@ pub(crate) fn queued_preview_lines(
             preview.push('…');
         }
         if !attached.is_empty() {
-            preview.push_str(&format!(" [+{} image]", attached.len()));
+            let n = attached.len();
+            preview.push_str(&format!(" +{n} image{}", if n == 1 { "" } else { "s" }));
         }
         lines.push(Line::from(vec![
             Span::styled("  ↳ ", dim),

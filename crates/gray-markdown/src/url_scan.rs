@@ -7,11 +7,13 @@ use ratatui::text::{Line, Span};
 use crate::buffers::unicode_display_width;
 use crate::output::HyperlinkTarget;
 
-/// Style for file/web links — cyan + underlined, always. Mirrors `gray_markdown_style().link_text`.
+/// Style for file/web links — the palette `link` color + underlined when a
+/// palette is set, else the built-in cyan. Mirrors `gray_markdown_style().link_text`.
 fn link_style() -> Style {
-    Style::default()
-        .fg(Color::Rgb(125, 207, 255))
-        .add_modifier(Modifier::UNDERLINED)
+    let fg = crate::style::palette()
+        .map(|p| Color::Rgb(p.link[0], p.link[1], p.link[2]))
+        .unwrap_or(Color::Rgb(125, 207, 255));
+    Style::default().fg(fg).add_modifier(Modifier::UNDERLINED)
 }
 
 /// Scan `lines` for plain URLs and return new `HyperlinkTarget` entries

@@ -47,7 +47,7 @@ pub use colors::{ColorLevel, adapt_color, adapt_style, detect_color_level};
 pub use output::{HyperlinkTarget, MarkdownRenderOutput};
 pub use parse::{MarkdownParser, ParsedMarkdown, decode_html_entities_text};
 pub use streaming::StreamingMarkdownRenderer;
-pub use style::{MarkdownStyle, TableBorders};
+pub use style::{MarkdownStyle, Palette, TableBorders, ratatui_color_to_rgb, set_palette};
 pub use syntax::{Syntect, get_syntect, syntect_to_ratatui_fg};
 pub use syntect;
 
@@ -125,46 +125,59 @@ pub(crate) fn render_markdown_ratatui_with_link_id(
 pub fn gray_markdown_style() -> MarkdownStyle {
     use anstyle::{Color, RgbColor};
     let rgb = |r, g, b| Color::Rgb(RgbColor(r, g, b));
+    let pal = |v: [u8; 3]| rgb(v[0], v[1], v[2]);
+    let p = crate::style::palette();
     let peach = rgb(246, 173, 126);
     let cyan = rgb(125, 207, 255);
     let dim = rgb(140, 140, 140);
     let gray_text = rgb(225, 225, 225);
+    let heading = p.map_or(peach, |p| pal(p.heading));
+    let heading_minor = p.map_or(dim, |p| pal(p.heading_minor));
+    let strong = p.map_or(gray_text, |p| pal(p.strong));
+    let inline_code = p.map_or(cyan, |p| pal(p.inline_code));
+    let quote = p.map_or(dim, |p| pal(p.quote));
+    let checked = p.map_or(dim, |p| pal(p.success));
+    let dim_c = p.map_or(dim, |p| pal(p.dim));
+    let bullet = p.map_or(dim, |p| pal(p.bullet));
+    let rule = p.map_or(dim, |p| pal(p.faint));
+    let link = p.map_or(cyan, |p| pal(p.link));
+    let text = p.map_or(gray_text, |p| pal(p.text));
     // Adapt to the terminal's color level so prose colors downgrade the same
     // way syntect code colors now do (see `syntect_to_ratatui_fg`). Without
     // this, text stayed truecolor while code was adapted (or vice versa).
     MarkdownStyle {
         heading_inner: [
-            anstyle::Style::new().fg_color(Some(peach)).bold(),
-            anstyle::Style::new().fg_color(Some(peach)).bold(),
-            anstyle::Style::new().fg_color(Some(peach)).bold(),
-            anstyle::Style::new().fg_color(Some(dim)).italic(),
-            anstyle::Style::new().fg_color(Some(dim)).italic(),
-            anstyle::Style::new().fg_color(Some(dim)).italic(),
+            anstyle::Style::new().fg_color(Some(heading)).bold(),
+            anstyle::Style::new().fg_color(Some(heading)).bold(),
+            anstyle::Style::new().fg_color(Some(heading)).bold(),
+            anstyle::Style::new().fg_color(Some(heading_minor)).italic(),
+            anstyle::Style::new().fg_color(Some(heading_minor)).italic(),
+            anstyle::Style::new().fg_color(Some(heading_minor)).italic(),
         ],
         heading_outer: [anstyle::Style::new().dimmed().hidden(); 6],
-        strong_inner: anstyle::Style::new().bold().fg_color(Some(gray_text)),
+        strong_inner: anstyle::Style::new().bold().fg_color(Some(strong)),
         strong_outer: anstyle::Style::new().dimmed().hidden(),
         emphasis_inner: anstyle::Style::new().italic(),
         emphasis_outer: anstyle::Style::new().dimmed().hidden(),
         strikethrough_inner: anstyle::Style::new().strikethrough(),
         strikethrough_outer: anstyle::Style::new().dimmed().hidden(),
-        inline_code_inner: anstyle::Style::new().fg_color(Some(cyan)).bold(),
+        inline_code_inner: anstyle::Style::new().fg_color(Some(inline_code)).bold(),
         inline_code_outer: anstyle::Style::new().dimmed().hidden(),
-        blockquote_outer: anstyle::Style::new().fg_color(Some(dim)),
-        task_checked: anstyle::Style::new().fg_color(Some(dim)),
-        task_unchecked: anstyle::Style::new().fg_color(Some(dim)).dimmed(),
-        list_item: anstyle::Style::new().fg_color(Some(dim)),
-        rule: anstyle::Style::new().fg_color(Some(dim)),
-        link_outer: anstyle::Style::new().fg_color(Some(dim)),
-        link_text: anstyle::Style::new().fg_color(Some(cyan)).underline(),
-        link_url: anstyle::Style::new().fg_color(Some(dim)),
-        link_title: anstyle::Style::new().fg_color(Some(dim)),
+        blockquote_outer: anstyle::Style::new().fg_color(Some(quote)),
+        task_checked: anstyle::Style::new().fg_color(Some(checked)),
+        task_unchecked: anstyle::Style::new().fg_color(Some(dim_c)).dimmed(),
+        list_item: anstyle::Style::new().fg_color(Some(bullet)),
+        rule: anstyle::Style::new().fg_color(Some(rule)),
+        link_outer: anstyle::Style::new().fg_color(Some(dim_c)),
+        link_text: anstyle::Style::new().fg_color(Some(link)).underline(),
+        link_url: anstyle::Style::new().fg_color(Some(dim_c)),
+        link_title: anstyle::Style::new().fg_color(Some(dim_c)),
         code_outer: anstyle::Style::new().dimmed().hidden(),
         code_language: anstyle::Style::new().hidden(),
         code_untagged: anstyle::Style::new(),
         code_background: anstyle::Style::new(),
-        table_outer: anstyle::Style::new().fg_color(Some(dim)).bold(),
-        text: anstyle::Style::new().fg_color(Some(gray_text)),
+        table_outer: anstyle::Style::new().fg_color(Some(dim_c)).bold(),
+        text: anstyle::Style::new().fg_color(Some(text)),
         math: anstyle::Style::new().italic(),
     }
     .adapt()

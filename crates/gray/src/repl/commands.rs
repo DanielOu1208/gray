@@ -42,7 +42,7 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
         desc: "set context window",
         aliases: &[],
         scope: CmdScope::Conversation,
-        surface: CmdSurface::Local,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "sessions",
@@ -63,28 +63,28 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
         desc: "summarize context",
         aliases: &["compress"],
         scope: CmdScope::Conversation,
-        surface: CmdSurface::Local,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "undo",
         desc: "drop the last exchange",
         aliases: &[],
         scope: CmdScope::Conversation,
-        surface: CmdSurface::Local,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "retry",
         desc: "drop the last exchange and ask again",
         aliases: &[],
         scope: CmdScope::Conversation,
-        surface: CmdSurface::Local,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "update",
         desc: "install a new gray build",
         aliases: &["upgrade"],
         scope: CmdScope::Global,
-        surface: CmdSurface::Local,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "restart",
@@ -105,7 +105,7 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
         desc: "background jobs & scheduled wakes (u stops/removes)",
         aliases: &[],
         scope: CmdScope::Conversation,
-        surface: CmdSurface::Local,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "cron",
@@ -126,7 +126,7 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
         desc: "send feedback",
         aliases: &[],
         scope: CmdScope::Global,
-        surface: CmdSurface::Local,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "theme",
@@ -147,14 +147,14 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
         desc: "re-read theme, keybindings and prompt templates",
         aliases: &[],
         scope: CmdScope::Global,
-        surface: CmdSurface::Local,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "agentsmd",
         desc: "edit system prompt",
         aliases: &["sys"],
         scope: CmdScope::Global,
-        surface: CmdSurface::Local,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "skills",
@@ -168,14 +168,21 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
         desc: "connections: apps + daemon/cron/memory (space toggles)",
         aliases: &["gw"],
         scope: CmdScope::Global,
-        surface: CmdSurface::Local,
+        surface: CmdSurface::Text,
     },
     CmdDef {
         name: "plugin",
         desc: "manage plugins",
-        aliases: &["plugins"],
+        aliases: &[],
         scope: CmdScope::Global,
-        surface: CmdSurface::Local,
+        surface: CmdSurface::Text,
+    },
+    CmdDef {
+        name: "plugins",
+        desc: "plugin manager (list, enable, update)",
+        aliases: &[],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Interactive,
     },
     CmdDef {
         name: "hehe",
@@ -292,6 +299,15 @@ pub(crate) fn completion_matches(filter: &str) -> Vec<(&'static str, &'static st
         .collect()
 }
 
+thread_local! {
+    static COMPLETER_CMD: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
+}
+
+pub(crate) fn current_completer_cmd() -> String {
+    COMPLETER_CMD.with(|c| c.borrow().clone())
+}
+
 /// Completion for the composer prompt: static commands, skill names after
 /// `/skills ` (alias `/skill `), or per-command suffixes after `/cmd `
 /// (Minecraft-style). Owned here so every read_loop call site stays in sync.
@@ -299,9 +315,11 @@ pub(crate) fn completion_matches_dyn(
     cur_text: &str,
     cwd: &std::path::Path,
 ) -> Vec<(String, String)> {
+    COMPLETER_CMD.with(|c| c.borrow_mut().clear());
     if let Some(inner) = cur_text.strip_prefix('/') {
         if let Some(idx) = inner.find(char::is_whitespace) {
             let (cmd, _) = inner.split_at(idx);
+            COMPLETER_CMD.with(|c| *c.borrow_mut() = cmd.to_lowercase());
             if cmd.is_empty() || cmd.contains(':') {
                 return Vec::new();
             }
@@ -457,14 +475,12 @@ fn complete_skill_args(cmd: &str, arg_text: &str, cwd: &std::path::Path) -> Vec<
 /// Suffixes for `/theme`: the built-in name, user theme files, and the
 /// `new` / `reload` actions.
 fn complete_theme_args(cmd: &str, arg_text: &str) -> Vec<(String, String)> {
-    let mut rows: Vec<(String, String)> = vec![(
-        crate::theme::BUILTIN_THEME_NAME.to_string(),
-        "built-in palette".to_string(),
-    )];
+    let mut rows: Vec<(String, String)> =
+        vec![(crate::theme::BUILTIN_THEME_NAME.to_string(), String::new())];
     if let Ok(dir) = crate::theme::themes_dir() {
         for name in crate::theme::list_themes_in(&dir) {
             if !crate::theme::is_builtin_name(&name) {
-                rows.push((name, "user theme".to_string()));
+                rows.push((name, String::new()));
             }
         }
     }
@@ -652,8 +668,10 @@ pub enum ReplCommand {
     /// Unknown slash command (`/word`).
     Unknown(String),
     /// Plugin manager: /plugin <list|install|remove|update|enable|disable|check>.
-    /// `/plugins` is an alias.
     Plugin(String),
+    /// Interactive plugin manager (`/plugins`): the modal; headless runs
+    /// answer the same list as text.
+    Plugins,
     /// Skills: bare /skills lists discovered; /skills <name> [args] (alias /skill <name>) runs one
     Skill(Option<String>),
     /// Regular user prompt to feed to the agent.
@@ -774,6 +792,12 @@ pub fn parse_command(line: &str) -> ReplCommand {
             None => ReplCommand::ModelPanes,
         },
         Some("plugin") => ReplCommand::Plugin(t.to_string()),
+        // `/plugins` bare is the manager modal; with args it stays the
+        // `/plugin <sub>` text command it aliased before.
+        Some("plugins") => match opt(rest) {
+            None => ReplCommand::Plugins,
+            Some(_) => ReplCommand::Plugin(t.to_string()),
+        },
         Some("skills") => {
             if rest.is_empty() {
                 ReplCommand::Skill(None)

@@ -53,7 +53,7 @@ pub(crate) fn block_tokens(b: &ContentBlock) -> usize {
 
 /// Token price of one `Image` block from its base64 length.
 ///
-/// Bounded heuristic for normalized images (native resolution; gray-tools caps only at the 5MB byte limit).
+/// Bounded heuristic for attached images (original bytes; Anthropic's wire caps are enforced at serialization).
 /// Encoded file length is not a vision token count: cap at 4096 to avoid
 /// treating a several-MB screenshot as hundreds of thousands of text tokens.
 /// Provider-reported usage remains authoritative after the request.

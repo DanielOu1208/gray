@@ -178,18 +178,30 @@ pub fn format_live_tool_header(name: &str, args_so_far: &str, cwd: Option<&Path>
     }
 }
 
+fn tool_hue(name: &str) -> Color {
+    let t = crate::theme::theme();
+    match name {
+        "bash" | "shell" => t.hue_green,
+        "read" | "view" | "ls" | "glob" | "grep" | "find" | "search" | "file_search" => t.hue_blue,
+        "write" | "edit" | "patch" | "apply_patch" | "edit_patch" => t.hue_yellow,
+        "web_search" | "web_fetch" => t.hue_magenta,
+        "task" | "agent" | "subagent" | "todo" | "todo_write" | "task_create" | "task_list"
+        | "task_get" | "task_update" => t.hue_cyan,
+        _ => t.tool_accent,
+    }
+}
+
 /// Bare `⬡ name` line for empty/garbage partial args (pi `renderCall` with
 /// `undefined` args: `formatShellCall` shows the prompt + `...`).
 /// Wire-encoded names decode here too (`web_search` renders `Web Search`);
 /// single tokens stay raw (see `humanize_tool_name`).
 fn tool_name_line(name: &str) -> Line<'static> {
+    let hue = tool_hue(name);
     let name = humanize_tool_name(name);
     Line::from(vec![
         Span::styled(
             "\u{2b22} ",
-            Style::default()
-                .fg(crate::theme::theme().tool_accent)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(hue).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             name.to_string(),
@@ -444,7 +456,7 @@ pub fn format_tool_call_header(
     let bullet = Span::styled(
         "\u{2b22} ",
         Style::default()
-            .fg(crate::theme::theme().tool_accent)
+            .fg(tool_hue(name))
             .add_modifier(Modifier::BOLD),
     );
     let action_style = Style::default()
