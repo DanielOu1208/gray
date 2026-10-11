@@ -927,6 +927,8 @@ pub enum PluginCmd {
         /// Plugin name or `all`
         #[arg(default_value = "all")]
         target: String,
+        #[arg(long)]
+        check: bool,
     },
     /// Enable an installed plugin
     Enable {

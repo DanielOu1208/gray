@@ -143,15 +143,43 @@ pub(crate) async fn handle_plugin_command(raw: &str, tui: Option<&crate::compose
             Ok(()) => say(tui, &format!("removed {name}")),
             Err(e) => say(tui, &format!("remove failed: {e:#}")),
         },
-        PluginAction::Update(target) => match crate::plugin_cli::update_managed(&target).await {
-            Ok(reports) if reports.is_empty() => say(tui, "up to date"),
-            Ok(reports) => {
-                for r in reports {
-                    say(tui, &format!("updated {} {}", r.name, r.version));
+        PluginAction::Update(target) => {
+            let mut check = false;
+            let mut parts = Vec::new();
+            for tok in target.split_whitespace() {
+                if tok == "--check" {
+                    check = true;
+                } else {
+                    parts.push(tok);
                 }
             }
-            Err(e) => say(tui, &format!("update failed: {e:#}")),
-        },
+            let target = if parts.is_empty() {
+                "all".to_string()
+            } else {
+                parts.join(" ")
+            };
+            let res = if check {
+                crate::plugin_cli::check_managed(&target).await
+            } else {
+                crate::plugin_cli::update_managed(&target).await
+            };
+            match res {
+                Ok(reports) => {
+                    let mut said = false;
+                    for r in &reports {
+                        if matches!(r.action, gray_pkg::ops::UpdateAction::Current) {
+                            continue;
+                        }
+                        said = true;
+                        say(tui, &format!("{}: {}", r.name, r.detail()));
+                    }
+                    if !said {
+                        say(tui, "up to date");
+                    }
+                }
+                Err(e) => say(tui, &format!("update failed: {e:#}")),
+            }
+        }
         PluginAction::Enable(name) => match crate::plugin_cli::set_managed_enabled(&name, true) {
             Ok(()) => say(tui, &format!("enabled {name}")),
             Err(e) => say(tui, &format!("enable failed: {e:#}")),
