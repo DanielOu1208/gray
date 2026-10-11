@@ -241,11 +241,19 @@ pub(crate) const MAX_LIVE_TOOLS: usize = 3;
 
 /// Live tool headers for the viewport, oldest-first, capped. Free fn so
 /// tests cover the cap/marker policy without `Tui::new` (needs a TTY).
-pub(crate) fn live_tool_rows(tools: &[LiveTool], elapsed: Duration) -> Vec<Line<'static>> {
+pub(crate) fn live_tool_rows(
+    tools: &[LiveTool],
+    elapsed: Duration,
+    w: usize,
+) -> Vec<Line<'static>> {
+    // One screen row per tail line (draw wraps live rows at w-4): the
+    // 4-space indent plus the text fit inside that budget or the band
+    // height would drift with the tail.
+    let text_budget = w.saturating_sub(8).max(1);
     tools
         .iter()
         .take(MAX_LIVE_TOOLS)
-        .map(|t| {
+        .flat_map(|t| {
             let mut line = t.header.clone();
             if t.running {
                 // ponytail: reuse the status shimmer; only the live bash verb changes.
@@ -266,7 +274,20 @@ pub(crate) fn live_tool_rows(tools: &[LiveTool], elapsed: Duration) -> Vec<Line<
                     draw::shimmer_spans(live.unwrap_or("Running "), elapsed),
                 );
             }
-            line
+            std::iter::once(line).chain(t.tail.rows().into_iter().map(|text| {
+                let chars: Vec<char> = text.chars().collect();
+                let text = if crate::text_width::fit_char_count(&chars, text_budget) < chars.len() {
+                    let fit =
+                        crate::text_width::fit_char_count(&chars, text_budget.saturating_sub(1));
+                    format!("{}…", chars[..fit].iter().collect::<String>())
+                } else {
+                    text
+                };
+                Line::from(Span::styled(
+                    format!("    {text}"),
+                    Style::default().fg(crate::theme::theme().tool_dim),
+                ))
+            }))
         })
         .collect()
 }
@@ -371,6 +392,15 @@ pub struct Tui {
     pub(crate) cache: crate::cache::CacheTracker,
     markdown_renderer: gray_markdown::StreamingMarkdownRenderer,
     committed_markdown_lines: usize,
+    /// Streamed prose not yet fed to the renderer. Non-empty only while
+    /// reveal pacing is on (`enable_reveal_pacing`); `tick_reveal` drains
+    /// it into [`Tui::feed_markdown`] at the ticker cadence.
+    reveal_buf: String,
+    reveal_pacing: bool,
+    /// Set for the duration of a `feed_markdown` call: the emit funnels'
+    /// reveal drain must not fire nested inside a commit — the backlog's
+    /// rows would land ahead of the outer commit's earlier rows.
+    feeding_markdown: bool,
     pub(crate) pending_resize: Option<(u16, Instant)>,
     /// Billed output tokens from this turn's TurnEnd usage (Σ-per-round).
     /// Display-only: the `Thought for · N tokens` line. `None` (cancelled /
@@ -441,6 +471,64 @@ pub(crate) struct LiveTool {
     pub(crate) name: String,
     pub(crate) header: Line<'static>,
     pub(crate) running: bool,
+    /// Rolling tail of the tool's streamed output (see `ToolOutputHook` in
+    /// gray-core); painted under the card while it runs.
+    pub(crate) tail: LiveToolTail,
+}
+
+/// Last lines of a running tool's streamed output. Chunks arrive already
+/// redacted (the pump emits post-redaction only). `\r` rewinds the partial
+/// line for progress bars; the ring keeps the last few complete-or-partial
+/// non-empty lines.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LiveToolTail {
+    lines: std::collections::VecDeque<String>,
+    carry: String,
+}
+
+const LIVE_TAIL_LINES: usize = 5;
+const LIVE_TAIL_CARRY_MAX: usize = 4 * 1024;
+
+impl LiveToolTail {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        let text = crate::tui::strip_ansi(&String::from_utf8_lossy(bytes));
+        for ch in text.chars() {
+            match ch {
+                '\n' => {
+                    let line = std::mem::take(&mut self.carry);
+                    if !line.trim().is_empty() {
+                        self.lines.push_back(line);
+                        while self.lines.len() > LIVE_TAIL_LINES {
+                            self.lines.pop_front();
+                        }
+                    }
+                }
+                '\r' => self.carry.clear(),
+                c => {
+                    self.carry.push(c);
+                    if self.carry.len() > LIVE_TAIL_CARRY_MAX {
+                        let keep = LIVE_TAIL_CARRY_MAX / 2;
+                        let mut start = self.carry.len() - keep;
+                        while !self.carry.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        self.carry.drain(..start);
+                    }
+                }
+            }
+        }
+    }
+
+    fn rows(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.lines.iter().cloned().collect();
+        if !self.carry.trim().is_empty() {
+            out.push(self.carry.clone());
+        }
+        if out.len() > LIVE_TAIL_LINES {
+            out.drain(..out.len() - LIVE_TAIL_LINES);
+        }
+        out
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -723,6 +811,9 @@ impl Tui {
                 true,
             ),
             committed_markdown_lines: 0,
+            reveal_buf: String::new(),
+            reveal_pacing: false,
+            feeding_markdown: false,
             pending_resize: None,
             turn_billed_output: None,
             streamed_bytes: 0,
@@ -763,6 +854,9 @@ impl Tui {
     /// Finishes the live markdown renderer and commits every row past the
     /// last committed offset. Shared by the reflow drain and `flush_markdown`.
     fn commit_markdown_tail(&mut self) {
+        // Paced prose must join the render before it finalizes, or the
+        // finish would split the paragraph mid-word.
+        self.drain_reveal();
         // A held punctuation burst is a continuation of the paragraph the
         // renderer is about to finish: fold it into the source before the
         // full re-render, or `finish()` would freeze it as its own lone
@@ -1168,9 +1262,19 @@ impl Tui {
                 name: name.to_string(),
                 header,
                 running,
+                tail: LiveToolTail::default(),
             });
         }
         let _ = self.draw();
+    }
+
+    /// Incremental output for the running call `id` (chunks are redacted
+    /// upstream). Appends to the card's tail; the ticker repaints. A gone
+    /// card (result committed, handed to a background job) eats the chunk.
+    pub(crate) fn push_live_tool_output(&mut self, id: &str, bytes: &[u8]) {
+        if let Some(slot) = self.live_tools.iter_mut().find(|t| t.id == id) {
+            slot.tail.feed(bytes);
+        }
     }
 
     /// Drops a live tool card (pi `updateResult` flips the same card:
@@ -1185,15 +1289,37 @@ impl Tui {
         }
     }
 
-    /// Live tool headers for the viewport, oldest-first, capped so the
-    /// input box always stays visible.
-    pub(crate) fn live_tool_rows(&self) -> Vec<Line<'static>> {
+    /// Live tool headers + output tails for the viewport, oldest-first,
+    /// capped so the input box always stays visible. `w` is the band width.
+    pub(crate) fn live_tool_rows(&self, w: usize) -> Vec<Line<'static>> {
         let elapsed = self
             .turn_started
             .or_else(|| self.status.as_ref().map(|(started, _)| *started))
             .map(|started| started.elapsed())
             .unwrap_or_default();
-        live_tool_rows(&self.live_tools, elapsed)
+        live_tool_rows(&self.live_tools, elapsed, w)
+    }
+
+    /// The markdown renderer's unfrozen tail laid out like committed rows
+    /// (same wrap and gutter): the band paints these above the live tool
+    /// cards as the continuation of scrollback while a block is in flight.
+    pub(crate) fn stream_tail_rows(&self, w: usize) -> Vec<Line<'static>> {
+        let view = self.markdown_renderer.view();
+        // A draw can land mid-`commit_markdown_tail` — the renderer is
+        // replaced before `committed_markdown_lines` resets — so clamp.
+        let start = self.committed_markdown_lines.min(view.lines.len());
+        let lines = &view.lines[start..];
+        let max_w = transcript::prose_width(w);
+        let mut out = Vec::new();
+        for line in lines {
+            for mut row in transcript::wrap_styled_line(line.clone(), max_w) {
+                if !row.spans.is_empty() {
+                    row.spans.insert(0, transcript::left_pad());
+                }
+                out.push(row);
+            }
+        }
+        out
     }
 
     /// Overflow count past the live-tool cap (`+N more`, like the queued

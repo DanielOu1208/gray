@@ -260,7 +260,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     // Live tool cards above the input box (pi pending cards): measured,
     // not estimated — the rows are already wrapped for `w`.
     let live_est: u16 = tui
-        .live_tool_rows()
+        .live_tool_rows(w)
         .iter()
         .map(|l| {
             crate::composer::transcript::wrap_styled_line(l.clone(), w.saturating_sub(4).max(1))
@@ -269,8 +269,16 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         })
         .sum::<u16>()
         .saturating_add(u16::from(tui.live_tool_overflow() > 0));
+    // The streaming markdown tail: the renderer's unfrozen rows laid out at
+    // prose width. Painted under the queued preview, above the live cards —
+    // scrollback's live continuation — and trimmed from the top so its
+    // newest rows show.
+    let stream_tail: Vec<Line<'static>> = tui.stream_tail_rows(w);
+    let tail_est = stream_tail.len() as u16;
     let widget_budget = rows
-        .saturating_sub(box_h + status_h + queued_est + live_est + panel_est + attach_h + 2)
+        .saturating_sub(
+            box_h + status_h + queued_est + live_est + tail_est + panel_est + attach_h + 2,
+        )
         .min(12);
     let mut widget_rows = tui.plugin_widget.rows(widget_budget as usize, w);
     let max_viewport_h = viewport_cap(rows);
@@ -287,14 +295,27 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     if reserve_overflow_row {
         band_allowance -= 1;
     }
-    let mut reserved = [ask_est, queued_est, widget_rows.len() as u16, live_est];
+    // Priority order for a tight allowance: the in-flight answer text
+    // outlives cards and widgets.
+    let mut reserved = [
+        ask_est,
+        queued_est,
+        widget_rows.len() as u16,
+        live_est,
+        tail_est,
+    ];
     trim_to_allowance(&mut reserved, band_allowance);
-    let (ask_est, queued_est, widget_h, live_est) =
-        (reserved[0], reserved[1], reserved[2], reserved[3]);
+    let (ask_est, queued_est, widget_h, live_est, tail_est) = (
+        reserved[0],
+        reserved[1],
+        reserved[2],
+        reserved[3],
+        reserved[4],
+    );
     let desired = desired_viewport_h(
         status_h,
         queued_est,
-        live_est + widget_h + ask_est,
+        live_est + tail_est + widget_h + ask_est,
         box_rows_est,
         panel_est,
         attach_h,
@@ -310,7 +331,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let desired = desired.max(latched_viewport_floor(
         status_h,
         queued_est,
-        live_est + widget_h + ask_est,
+        live_est + tail_est + widget_h + ask_est,
         box_rows_est,
         attach_h,
         max_viewport_h,
@@ -338,7 +359,15 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     // Live tool headers hoisted as owned rows — `live_tool_rows` borrows
     // all of `tui`, which would collide with `terminal.draw`'s mutable
     // borrow; wrapping happens inside at the frame width.
-    let live_headers: Vec<Line<'static>> = tui.live_tool_rows();
+    let live_headers: Vec<Line<'static>> = tui.live_tool_rows(w);
+    // Tail-row count per shown card, so the allowance trim below can drop
+    // output rows before it ever drops a card's header.
+    let live_tail_counts: Vec<usize> = tui
+        .live_tools
+        .iter()
+        .take(super::MAX_LIVE_TOOLS)
+        .map(|t| t.tail.rows().len())
+        .collect();
     let live_overflow = tui.live_tool_overflow();
     let ask_modal: Option<super::AskModal> = tui.ask_modal.clone();
     let compaction_elapsed = tui.compaction_elapsed();
@@ -378,12 +407,29 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let mut queued_preview: Vec<Line<'static>> = queued_preview_lines(&tui.queued_inputs, w);
         // Live tool cards (pi pending cards): wrapped at the frame width
         // like every other viewport row; `live_h` reserves their space.
-        let mut live_rows: Vec<Line<'static>> = live_headers
-            .into_iter()
-            .flat_map(|l| {
-                crate::composer::transcript::wrap_styled_line(l, w.saturating_sub(4).max(1))
-            })
-            .collect();
+        // `live_is_tail[i]` marks card output rows so a tight allowance can
+        // drop them before any card header.
+        let mut live_rows: Vec<Line<'static>> = Vec::new();
+        let mut live_is_tail: Vec<bool> = Vec::new();
+        {
+            let mut card = 0usize;
+            let mut pos_in_card = 0usize;
+            for l in live_headers {
+                let is_tail = pos_in_card > 0;
+                for r in
+                    crate::composer::transcript::wrap_styled_line(l, w.saturating_sub(4).max(1))
+                {
+                    live_rows.push(r);
+                    live_is_tail.push(is_tail);
+                }
+                pos_in_card += 1;
+                if pos_in_card > live_tail_counts.get(card).copied().unwrap_or(0) {
+                    card += 1;
+                    pos_in_card = 0;
+                }
+            }
+        }
+        let mut tail_rows = stream_tail;
         // Ask modal rows (pre-wrapped at frame width, capped like live rows).
         let mut ask_rows: Vec<Line<'static>> = ask_modal
             .as_ref()
@@ -426,22 +472,37 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
             queued_preview.len() as u16,
             widget_rows.len() as u16,
             live_rows.len() as u16,
+            tail_rows.len() as u16,
         ];
         trim_to_allowance(&mut rows_h, band_allowance);
         ask_rows.truncate(rows_h[0] as usize);
         queued_preview.truncate(rows_h[1] as usize);
         widget_rows.truncate(rows_h[2] as usize);
-        live_rows.truncate(rows_h[3] as usize);
+        // Tail output rows drop before headers; whole cards drop last.
+        while live_rows.len() > rows_h[3] as usize {
+            if let Some(idx) = live_is_tail.iter().rposition(|&t| t) {
+                live_rows.remove(idx);
+                live_is_tail.remove(idx);
+            } else {
+                live_rows.pop();
+                live_is_tail.pop();
+            }
+        }
+        // The stream tail keeps its newest rows: it is the continuation of
+        // scrollback, so an overlong tail shows the end, not the start.
+        let tail_drop = tail_rows.len().saturating_sub(rows_h[4] as usize);
+        tail_rows.drain(..tail_drop);
         let show_live_overflow = reserve_overflow_row;
         let live_h = rows_h[3] + u16::from(show_live_overflow);
+        let tail_h = rows_h[4].min(tail_rows.len() as u16);
         let queued_h = rows_h[1];
         let ask_h = rows_h[0];
         let widget_h = rows_h[2];
         // Space left for the completion panel once the fixed rows
         // (status, queued, input, attachments, footer) are placed.
-        let avail = area
-            .height
-            .saturating_sub(status_h + queued_h + live_h + widget_h + box_h + attach_h + 1);
+        let avail = area.height.saturating_sub(
+            status_h + queued_h + tail_h + live_h + widget_h + box_h + attach_h + 1,
+        );
         let need = PANEL_ROWS as u16;
         let panel_cap = need.min(avail).max((PANEL_ROWS as u16).min(avail));
         let visible_count = if tui.matches.is_empty() {
@@ -451,7 +512,9 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         };
         let panel_h = visible_count as u16;
         let box_rows = box_h;
-        let ask_y = status_y + status_h + queued_h + live_h;
+        let tail_y = status_y + status_h + queued_h;
+        let live_y = tail_y + tail_h;
+        let ask_y = live_y + live_h;
         let widget_y = ask_y + ask_h;
         let box_y = widget_y + widget_h;
         let panel_y = box_y + box_rows;
@@ -507,7 +570,17 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 Rect::new(area.x, y, area.width, 1),
             );
         }
-        let live_y = status_y + status_h + queued_h;
+        // Scrollback's live continuation: plain rows, no card chrome.
+        for (i, line) in tail_rows.iter().enumerate() {
+            let y = tail_y + i as u16;
+            if y < area.y || y >= area.y + area.height {
+                continue;
+            }
+            frame.render_widget(
+                Paragraph::new(line.clone()),
+                Rect::new(area.x, y, area.width, 1),
+            );
+        }
         for (i, line) in live_rows.iter().enumerate() {
             let y = live_y + i as u16;
             if y < area.y || y >= area.y + area.height {

@@ -260,12 +260,15 @@ impl Tui {
     /// The funnel for logical lines (prose, notices, errors): blank rows at
     /// the block's edges become boundaries, an owed gap is paid in front, and
     /// the rows are wrapped and painted. Live commits, reflow and replay all
-    /// pass through here, so they lay out alike.
+    /// pass through here, so they lay out alike. The reveal drain at the top
+    /// keeps scrollback order: prose still buffered by pacing must land
+    /// before any row that arrived after it.
     pub(crate) fn emit_styled(
         &mut self,
         lines: Vec<Line<'static>>,
         hyperlinks: Vec<HyperlinkTarget>,
     ) {
+        self.drain_reveal();
         let shaped = margins::shape_block(lines, hyperlinks);
         let w = self.width().max(10);
         self.atomic(|t| {
@@ -283,6 +286,7 @@ impl Tui {
     /// The same funnel for rows already laid out at the current width
     /// (cards, a thinking run's rows, the mascot). `bg` paints card rows.
     pub(crate) fn emit_rows(&mut self, rows: Vec<Line<'static>>, bg: Option<Color>) {
+        self.drain_reveal();
         let shaped = margins::shape_block(rows, Vec::new());
         self.atomic(|t| {
             if margins::admit(&mut t.gap_owed, &t.transcript, &shaped) {
@@ -445,15 +449,81 @@ impl Tui {
             let held = std::mem::take(&mut self.stream_punct_hold);
             clean = format!("{held}{clean}");
         }
-        // Feed the live viewport width so tables lay out to fit (or fall back
-        // to records) instead of rendering wide and shredding downstream.
-        // Reflows first when the size actually changed (same ~75ms trailing
-        // debounce as the idle ticker), so a resize mid-table re-lays the
-        // committed rows instead of only affecting new tables.
+        self.feed_stream_text(&clean);
+        let _ = self.draw();
+    }
+
+    /// Reveal pacing on: `stream_text` buffers into `reveal_buf` and
+    /// `tick_reveal` feeds the renderer a paced slice per tick (typing feel)
+    /// instead of committing whole deltas at once. Off = feed immediately,
+    /// the historical behavior every non-interactive path keeps.
+    pub(crate) fn enable_reveal_pacing(&mut self) {
+        self.reveal_pacing = true;
+    }
+
+    /// Queue or feed one cleaned stream delta. Paced callers park the text
+    /// in `reveal_buf` and release a slice immediately, so the band paints
+    /// the start of the delta in the same frame.
+    fn feed_stream_text(&mut self, clean: &str) {
+        if self.reveal_pacing {
+            self.reveal_buf.push_str(clean);
+            self.tick_reveal();
+        } else {
+            self.feed_markdown(clean);
+        }
+    }
+
+    /// One reveal tick: release `max(3, ceil(backlog/20))` chars from the
+    /// front of `reveal_buf`, extending the cut to the end of the current
+    /// word when it lands within 8 more chars. ~190 chars/s floor, burst
+    /// catch-up within ~320ms. No-op while a modal owns the terminal.
+    pub(crate) fn tick_reveal(&mut self) {
+        if self.modal_open || self.reveal_buf.is_empty() {
+            return;
+        }
+        let chars: Vec<char> = self.reveal_buf.chars().collect();
+        let mut n = chars.len().div_ceil(20).max(3).min(chars.len());
+        if n < chars.len() && !chars[n - 1].is_whitespace() {
+            let mut end = n;
+            while end < chars.len() && !chars[end].is_whitespace() {
+                end += 1;
+            }
+            if end - n <= 8 {
+                n = end;
+            }
+        }
+        let released: String = chars[..n].iter().collect();
+        self.reveal_buf.drain(..released.len());
+        self.feed_markdown(&released);
+        let _ = self.draw();
+    }
+
+    /// Feed all remaining buffered prose now: a flush/commit boundary must
+    /// not let paced text land after rows that arrived later. Skipped while
+    /// a feed is already running — a nested drain would insert the backlog's
+    /// (later) rows ahead of the outer commit's earlier ones.
+    pub(crate) fn drain_reveal(&mut self) {
+        if self.reveal_buf.is_empty() || self.feeding_markdown {
+            return;
+        }
+        let rest = std::mem::take(&mut self.reveal_buf);
+        self.feed_markdown(&rest);
+    }
+
+    /// Feed the streaming renderer and commit newly frozen rows to
+    /// scrollback — the single feed+commit step every prose path shares.
+    /// The live viewport width is set here so tables lay out to fit (or
+    /// fall back to records) instead of rendering wide and shredding
+    /// downstream; `live_width` reflows first when the size actually
+    /// changed (same ~75ms trailing debounce as the idle ticker), so a
+    /// resize mid-table re-lays committed rows, not just new tables.
+    fn feed_markdown(&mut self, clean: &str) {
+        let was_feeding = self.feeding_markdown;
+        self.feeding_markdown = true;
         let tw = prose_width(self.live_width());
         self.markdown_renderer.set_max_table_width(Some(tw));
         self.markdown_renderer
-            .push_and_render(&clean, Some(gray_markdown::get_syntect()));
+            .push_and_render(clean, Some(gray_markdown::get_syntect()));
         let frozen_len = self.markdown_renderer.frozen_lines_len();
         if frozen_len > self.committed_markdown_lines {
             self.atomic(|t| {
@@ -469,7 +539,7 @@ impl Tui {
                 t.push_styled_lines_with_hyperlinks(new_lines, &hyperlinks, offset);
             });
         }
-        let _ = self.draw();
+        self.feeding_markdown = was_feeding;
     }
 
     /// Flushes a held punctuation burst back into the streaming renderer
@@ -483,23 +553,7 @@ impl Tui {
         }
         let held = std::mem::take(&mut self.stream_punct_hold);
         let clean = format!("{held}{following}");
-        let tw = prose_width(self.live_width());
-        self.markdown_renderer.set_max_table_width(Some(tw));
-        self.markdown_renderer
-            .push_and_render(&clean, Some(gray_markdown::get_syntect()));
-        let frozen_len = self.markdown_renderer.frozen_lines_len();
-        if frozen_len > self.committed_markdown_lines {
-            if self.committed_markdown_lines == 0 {
-                self.ensure_gap();
-            }
-            let view = self.markdown_renderer.view();
-            let new_lines: Vec<Line<'static>> =
-                view.lines[self.committed_markdown_lines..frozen_len].to_vec();
-            let hyperlinks = view.hyperlinks.to_vec();
-            let offset = self.committed_markdown_lines;
-            self.committed_markdown_lines = frozen_len;
-            self.push_styled_lines_with_hyperlinks(new_lines, &hyperlinks, offset);
-        }
+        self.feed_stream_text(&clean);
     }
 
     /// Drops a held punctuation burst without rendering it. The burst was
@@ -507,6 +561,7 @@ impl Tui {
     /// freezes as a lone `.` row in the live transcript, which is exactly
     /// what the hold exists to prevent.
     pub(crate) fn discard_held_punctuation(&mut self) {
+        self.drain_reveal();
         self.stream_punct_hold.clear();
     }
 

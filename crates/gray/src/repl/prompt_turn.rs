@@ -186,6 +186,14 @@ pub(crate) async fn run_prompt_turn(
         ag.set_steer(std::sync::Arc::new(move || {
             steer_queued_input(steer_tui.as_ref())
         }));
+        let out_tui = tui_stream.clone();
+        ag.set_tool_output_hook(Some(std::sync::Arc::new(move |id: &str, chunk: &[u8]| {
+            if let Some(shared) = out_tui.as_ref()
+                && let Ok(mut t) = shared.lock()
+            {
+                t.push_live_tool_output(id, chunk);
+            }
+        })));
     }
     let agent = agent.as_mut().expect("agent built above");
     let cancel = tokio_util::sync::CancellationToken::new();

@@ -858,15 +858,21 @@ pub async fn run_repl_mode(
         crate::host::register_tui(&shared);
         // Now that the composer exists, point the ask service at it.
         crate::ask::install(Some(shared.clone()), interactive);
+        if let Ok(mut t) = shared.lock() {
+            t.enable_reveal_pacing();
+        }
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let ticker_stop = stop.clone();
         let ticker_tui = shared.clone();
         tokio::spawn(async move {
+            let mut last_status = std::time::Instant::now();
             loop {
                 if ticker_stop.load(AtomicOrdering::Relaxed) {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // 16ms frame tick: reveal pacing runs every pass, the
+                // status repaint keeps its ~100ms cadence.
+                tokio::time::sleep(std::time::Duration::from_millis(16)).await;
                 if ticker_stop.load(AtomicOrdering::Relaxed) {
                     break;
                 }
@@ -878,7 +884,11 @@ pub async fn run_repl_mode(
                     if ticker_stop.load(AtomicOrdering::Relaxed) {
                         break;
                     }
-                    t.tick_status();
+                    t.tick_reveal();
+                    if last_status.elapsed() >= std::time::Duration::from_millis(100) {
+                        last_status = std::time::Instant::now();
+                        t.tick_status();
+                    }
                 }
             }
         });
