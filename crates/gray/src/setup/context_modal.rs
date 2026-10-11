@@ -156,7 +156,7 @@ pub fn run_context_modal(
                         Span::styled(
                             title,
                             Style::default()
-                                .fg(Color::White)
+                                .fg(crate::theme::theme().text_bright)
                                 .add_modifier(Modifier::BOLD)
                                 .bg(box_bg),
                         ),
@@ -174,7 +174,9 @@ pub fn run_context_modal(
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         head,
-                        Style::default().fg(Color::White).bg(box_bg),
+                        Style::default()
+                            .fg(crate::theme::theme().text_bright)
+                            .bg(box_bg),
                     ))),
                     Rect::new(inner.x, inner.y + 1, inner.width, 1),
                 );
@@ -207,7 +209,9 @@ pub fn run_context_modal(
                                 format_context_length(n),
                                 pct_of(n)
                             ),
-                            Style::default().fg(Color::White).bg(box_bg),
+                            Style::default()
+                                .fg(crate::theme::theme().text_bright)
+                                .bg(box_bg),
                         ),
                     ])
                 };
@@ -317,7 +321,11 @@ pub fn run_context_modal(
                             Paragraph::new(Line::from(vec![Span::styled(
                                 format!("  {text}"),
                                 Style::default()
-                                    .fg(if i == sel { Color::White } else { text_dim })
+                                    .fg(if i == sel {
+                                        crate::theme::theme().text_bright
+                                    } else {
+                                        text_dim
+                                    })
                                     .bg(box_bg),
                             )])),
                             Rect::new(inner.x, y, inner.width, 1),
@@ -331,7 +339,9 @@ pub fn run_context_modal(
                     frame.render_widget(
                         Paragraph::new(Line::from(Span::styled(
                             line,
-                            Style::default().fg(Color::White).bg(box_bg),
+                            Style::default()
+                                .fg(crate::theme::theme().text_bright)
+                                .bg(box_bg),
                         ))),
                         Rect::new(inner.x, foot_y - 1, inner.width, 1),
                     );

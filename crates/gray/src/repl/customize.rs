@@ -127,6 +127,20 @@ pub(crate) fn theme_command(
     }
 }
 
+fn picker_arg(
+    tui: Option<&crate::composer::SharedTui>,
+    dir: &Path,
+) -> Result<Option<String>, Option<String>> {
+    if tui.is_none() || theme::list_themes_in(dir).is_empty() {
+        return Err(None);
+    }
+    let bg = tui.map(|s| s.lock().expect("tui lock").snapshot());
+    match super::with_modal_sync(tui, || crate::setup::run_theme_picker(bg.as_ref())) {
+        Ok(pick) => Ok(pick),
+        Err(e) => Err(Some(format!("theme picker: {e}"))),
+    }
+}
+
 pub(crate) fn handle_theme(arg: Option<String>, tui: Option<&crate::composer::SharedTui>) {
     let (dir, config_path) = match (theme::themes_dir(), crate::setup::saved_config_path()) {
         (Ok(d), Ok(c)) => (d, c),
@@ -134,6 +148,24 @@ pub(crate) fn handle_theme(arg: Option<String>, tui: Option<&crate::composer::Sh
             say(tui, &format!("could not resolve gray home: {e}"));
             return;
         }
+    };
+    let typed = arg.as_deref().map(str::trim).unwrap_or("");
+    let arg = if typed.is_empty() {
+        match picker_arg(tui, &dir) {
+            Ok(Some(name)) => Some(name),
+            Ok(None) => {
+                say(tui, "theme picker closed");
+                return;
+            }
+            Err(msg) => {
+                if let Some(m) = msg {
+                    say(tui, &m);
+                }
+                None
+            }
+        }
+    } else {
+        Some(typed.to_string())
     };
     let active = theme::active_theme_name();
     let outcome = theme_command(arg.as_deref(), active.as_deref(), &dir, &config_path);

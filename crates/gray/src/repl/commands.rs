@@ -299,6 +299,15 @@ pub(crate) fn completion_matches(filter: &str) -> Vec<(&'static str, &'static st
         .collect()
 }
 
+thread_local! {
+    static COMPLETER_CMD: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
+}
+
+pub(crate) fn current_completer_cmd() -> String {
+    COMPLETER_CMD.with(|c| c.borrow().clone())
+}
+
 /// Completion for the composer prompt: static commands, skill names after
 /// `/skills ` (alias `/skill `), or per-command suffixes after `/cmd `
 /// (Minecraft-style). Owned here so every read_loop call site stays in sync.
@@ -306,9 +315,11 @@ pub(crate) fn completion_matches_dyn(
     cur_text: &str,
     cwd: &std::path::Path,
 ) -> Vec<(String, String)> {
+    COMPLETER_CMD.with(|c| c.borrow_mut().clear());
     if let Some(inner) = cur_text.strip_prefix('/') {
         if let Some(idx) = inner.find(char::is_whitespace) {
             let (cmd, _) = inner.split_at(idx);
+            COMPLETER_CMD.with(|c| *c.borrow_mut() = cmd.to_lowercase());
             if cmd.is_empty() || cmd.contains(':') {
                 return Vec::new();
             }
@@ -464,14 +475,12 @@ fn complete_skill_args(cmd: &str, arg_text: &str, cwd: &std::path::Path) -> Vec<
 /// Suffixes for `/theme`: the built-in name, user theme files, and the
 /// `new` / `reload` actions.
 fn complete_theme_args(cmd: &str, arg_text: &str) -> Vec<(String, String)> {
-    let mut rows: Vec<(String, String)> = vec![(
-        crate::theme::BUILTIN_THEME_NAME.to_string(),
-        "built-in palette".to_string(),
-    )];
+    let mut rows: Vec<(String, String)> =
+        vec![(crate::theme::BUILTIN_THEME_NAME.to_string(), String::new())];
     if let Ok(dir) = crate::theme::themes_dir() {
         for name in crate::theme::list_themes_in(&dir) {
             if !crate::theme::is_builtin_name(&name) {
-                rows.push((name, "user theme".to_string()));
+                rows.push((name, String::new()));
             }
         }
     }

@@ -107,6 +107,7 @@ mod install_manager;
 mod model_modal;
 mod model_panes;
 mod plugins_modal;
+mod theme_modal;
 pub(crate) mod variants;
 
 pub use context_modal::run_context_modal;
@@ -133,6 +134,7 @@ pub use provider_auth::{
     forget_plugin_connection, run_plugin_login, select_api_key_connection,
 };
 pub(crate) use provider_auth::{adopt_connection_effort, apply_connection_effort};
+pub(crate) use theme_modal::run_theme_picker;
 
 use crate::{config::Config, tui::print_wrapped};
 

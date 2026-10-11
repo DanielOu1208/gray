@@ -256,7 +256,7 @@ impl Tui {
             Span::styled(
                 text.to_string(),
                 Style::default()
-                    .fg(Color::White)
+                    .fg(crate::theme::theme().text_bright)
                     .add_modifier(Modifier::BOLD),
             ),
         ];

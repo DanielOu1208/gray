@@ -158,7 +158,7 @@ fn run_agents_panel(
 ) -> anyhow::Result<Option<PanelAction>> {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, poll, read};
     use ratatui::layout::Rect;
-    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Clear, Paragraph};
     use std::time::Duration;
@@ -253,7 +253,7 @@ fn run_agents_panel(
                         Span::styled(
                             title,
                             Style::default()
-                                .fg(Color::White)
+                                .fg(crate::theme::theme().text_bright)
                                 .add_modifier(Modifier::BOLD)
                                 .bg(box_bg),
                         ),
@@ -326,7 +326,9 @@ fn run_agents_panel(
                         } else {
                             Line::from(Span::styled(
                                 row_str,
-                                Style::default().fg(Color::White).bg(box_bg),
+                                Style::default()
+                                    .fg(crate::theme::theme().text_bright)
+                                    .bg(box_bg),
                             ))
                         };
                         put(list_y + r as u16, line);

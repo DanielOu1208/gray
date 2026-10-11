@@ -122,7 +122,7 @@ pub(crate) fn highlight_line_spans(
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if let Some(hl) = highlighter.as_mut()
-        && let Ok(ranges) = hl.highlight_line(&format!("{line}\n"), &syntect.syntax_set)
+        && let Ok(ranges) = hl.highlight_line(&format!("{line}\n"), syntect.syntax_set)
     {
         let mut wrote = false;
         for (style, segment) in ranges {
@@ -296,7 +296,7 @@ pub fn render_diff_hunks(
             Span::styled(
                 p_display,
                 Style::default()
-                    .fg(Color::White)
+                    .fg(crate::theme::theme().text_bright)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -425,7 +425,7 @@ pub fn render_diff_hunks(
                 DiffTag::Equal => {
                     let s = highlight_line_spans(&expanded, &mut new_highlighter, syntect, None);
                     if let Some(hl) = old_highlighter.as_mut() {
-                        let _ = hl.highlight_line(&format!("{expanded}\n"), &syntect.syntax_set);
+                        let _ = hl.highlight_line(&format!("{expanded}\n"), syntect.syntax_set);
                     }
                     s
                 }

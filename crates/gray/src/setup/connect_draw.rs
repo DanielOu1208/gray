@@ -5,7 +5,9 @@ use super::*;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+#[cfg(test)]
+use ratatui::style::Color;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
@@ -47,7 +49,7 @@ fn render_header_esc(frame: &mut Frame, inner: Rect, title: &str, colors: &Conne
             Span::styled(
                 title,
                 Style::default()
-                    .fg(Color::White)
+                    .fg(crate::theme::theme().text_bright)
                     .add_modifier(Modifier::BOLD)
                     .bg(colors.box_bg),
             ),
@@ -70,7 +72,7 @@ fn footer_key_spans<'a>(keys: &[(&'a str, &'a str)], colors: &ConnectColors) -> 
                 Span::styled(
                     *k,
                     Style::default()
-                        .fg(Color::White)
+                        .fg(crate::theme::theme().text_bright)
                         .add_modifier(Modifier::BOLD)
                         .bg(colors.box_bg),
                 ),
@@ -186,7 +188,7 @@ pub(crate) fn render_selecting(
             Span::styled(
                 filter,
                 Style::default()
-                    .fg(Color::White)
+                    .fg(crate::theme::theme().text_bright)
                     .add_modifier(Modifier::BOLD)
                     .bg(colors.box_bg),
             ),
@@ -283,7 +285,7 @@ pub(crate) fn render_selecting(
                 let name_span = Span::styled(
                     &item.name,
                     Style::default()
-                        .fg(Color::White)
+                        .fg(crate::theme::theme().text_bright)
                         .add_modifier(Modifier::BOLD)
                         .bg(colors.box_bg),
                 );
@@ -320,7 +322,7 @@ pub(crate) fn render_selecting(
             Span::styled(
                 "shift+enter ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(crate::theme::theme().text_bright)
                     .add_modifier(Modifier::BOLD)
                     .bg(colors.box_bg),
             ),
@@ -371,7 +373,7 @@ pub(crate) fn render_confirm_remove(
             Span::styled(
                 title_str,
                 Style::default()
-                    .fg(Color::White)
+                    .fg(crate::theme::theme().text_bright)
                     .add_modifier(Modifier::BOLD)
                     .bg(colors.box_bg),
             ),
@@ -415,7 +417,7 @@ pub(crate) fn render_confirm_remove(
             Span::styled(
                 "enter ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(crate::theme::theme().text_bright)
                     .add_modifier(Modifier::BOLD)
                     .bg(colors.box_bg),
             ),
@@ -426,7 +428,7 @@ pub(crate) fn render_confirm_remove(
             Span::styled(
                 "esc ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(crate::theme::theme().text_bright)
                     .add_modifier(Modifier::BOLD)
                     .bg(colors.box_bg),
             ),
@@ -477,7 +479,7 @@ pub(crate) fn render_entering_url(
             Span::styled(
                 format!(" {url_buf}"),
                 Style::default()
-                    .fg(Color::White)
+                    .fg(crate::theme::theme().text_bright)
                     .add_modifier(Modifier::BOLD)
                     .bg(colors.input_bg),
             ),
@@ -534,7 +536,7 @@ pub(crate) fn render_entering_url(
                 Span::styled(
                     name,
                     Style::default()
-                        .fg(Color::White)
+                        .fg(crate::theme::theme().text_bright)
                         .add_modifier(Modifier::BOLD)
                         .bg(colors.box_bg),
                 ),
@@ -680,7 +682,7 @@ pub(crate) fn render_entering_key(
         Line::from(vec![Span::styled(
             format!(" {masked}"),
             Style::default()
-                .fg(Color::White)
+                .fg(crate::theme::theme().text_bright)
                 .add_modifier(Modifier::BOLD)
                 .bg(colors.input_bg),
         )])
@@ -753,7 +755,9 @@ pub(crate) fn render_authorizing_plugin(
     let mut lines = vec![
         Line::from(vec![Span::styled(
             status,
-            Style::default().fg(Color::White).bg(colors.box_bg),
+            Style::default()
+                .fg(crate::theme::theme().text_bright)
+                .bg(colors.box_bg),
         )]),
         Line::from(""),
     ];
@@ -769,7 +773,7 @@ pub(crate) fn render_authorizing_plugin(
         Span::styled(
             "esc",
             Style::default()
-                .fg(Color::White)
+                .fg(crate::theme::theme().text_bright)
                 .add_modifier(Modifier::BOLD)
                 .bg(colors.box_bg),
         ),
