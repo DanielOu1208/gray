@@ -860,6 +860,16 @@ fn tool_detail(name: &str, args: &serde_json::Value, preview: Option<&str>) -> O
 /// consumers discard on the pid's liveness.
 struct RunningGuard(Option<std::path::PathBuf>);
 
+#[cfg(unix)]
+fn parent_id() -> u32 {
+    std::os::unix::process::parent_id()
+}
+
+#[cfg(not(unix))]
+fn parent_id() -> u32 {
+    0
+}
+
 impl RunningGuard {
     fn register(session_id: &str, task: &str, model: &str) -> Self {
         let Ok(home) = crate::setup::gray_home() else {
@@ -875,7 +885,7 @@ impl RunningGuard {
         let task: String = task.chars().take(160).collect();
         let row = serde_json::json!({
             "pid": pid,
-            "ppid": std::os::unix::process::parent_id(),
+            "ppid": parent_id(),
             "session": session_id,
             "owner": std::env::var("GRAY_SESSION_ID").unwrap_or_default(),
             "name": std::env::var("GRAY_AGENT_NAME").unwrap_or_default(),

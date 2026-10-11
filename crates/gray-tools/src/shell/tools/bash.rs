@@ -758,9 +758,11 @@ pub(crate) fn noop_family(command: &str, live_jobs: bool) -> Option<NoopFamily> 
     Some(family)
 }
 
-/// Splits a command line on top-level `;`, newlines, `&&`, `||`, `|` and a
+/// Splits a command line on top-level `;`, newlines, `&&`, `||` and a
 /// bare `&` — delimiters inside quotes or inside a `()`/`{}` group do not
-/// separate, so `f() { :; }` stays one segment.
+/// separate, so `f() { :; }` stays one segment. A single `|` does not
+/// separate either: a pipeline's stages cannot be judged independently,
+/// so it stays one segment and `search_words` refuses it.
 fn top_level_segments(command: &str) -> Vec<String> {
     let mut segs = Vec::new();
     let mut cur = String::new();
@@ -793,10 +795,14 @@ fn top_level_segments(command: &str) -> Vec<String> {
                 cur.push(c);
             }
             ';' | '\n' if depth == 0 => segs.push(std::mem::take(&mut cur)),
-            '&' | '|' if depth == 0 => {
+            '&' if depth == 0 => {
                 if chars.peek() == Some(&c) {
                     chars.next();
                 }
+                segs.push(std::mem::take(&mut cur));
+            }
+            '|' if depth == 0 && chars.peek() == Some(&'|') => {
+                chars.next();
                 segs.push(std::mem::take(&mut cur));
             }
             _ => cur.push(c),
@@ -829,11 +835,12 @@ fn noop_segment(seg: &str, live_jobs: bool) -> Option<NoopFamily> {
     let head = words[0].as_str();
     let rest = &words[1..];
     match head {
-        // Builtins whose arguments change nothing observable.
-        "true" | ":" | "false" | "exit" => Some(NoopFamily::Plain),
+        // Builtins whose arguments change nothing observable. `exit` is
+        // not here: it sets the status the result header reports.
+        "true" | ":" | "false" => Some(NoopFamily::Plain),
         // Job control sees only this shell's own (empty) job table.
         "jobs" | "wait" | "fg" | "bg" | "disown" => Some(NoopFamily::JobControl),
-        // Bare `cat` in a pipeline copies the literal it was fed.
+        // A lone `cat` copies nothing it wasn't fed.
         "cat" if rest.is_empty() => Some(NoopFamily::Plain),
         // A literal print returns exactly what the model wrote.
         "echo" | "printf" if rest.iter().all(|w| literal_word(w)) => Some(NoopFamily::Plain),

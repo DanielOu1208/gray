@@ -239,6 +239,13 @@ impl Engine {
     /// builds one.
     pub fn start(opts: Options) -> Result<Engine, String> {
         std::fs::create_dir_all(&opts.dir).map_err(|e| e.to_string())?;
+        // `home` meets canonical indexed paths in in_scope/wants, so it
+        // needs the same canonicalization `root` gets below (/var →
+        // /private/var on macOS).
+        let mut opts = opts;
+        if let Ok(c) = std::fs::canonicalize(&opts.home) {
+            opts.home = c.to_string_lossy().into_owned();
+        }
         // One writer per index: a second one would race index writes. The
         // lock dies with the process.
         let lock =
