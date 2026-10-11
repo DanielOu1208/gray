@@ -299,6 +299,18 @@ pub fn take_builder_warnings() -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone)]
+pub struct SpawnOutcome {
+    pub name: String,
+    pub error: Option<String>,
+}
+
+static SPAWN_OUTCOMES: std::sync::Mutex<Option<Vec<SpawnOutcome>>> = std::sync::Mutex::new(None);
+
+pub fn spawn_outcomes() -> Option<Vec<SpawnOutcome>> {
+    SPAWN_OUTCOMES.lock().ok().and_then(|s| s.clone())
+}
+
 /// Resolve the spawn argv for a plugin dir: the dir itself when
 /// executable, else `plugin.sh`, else the single executable inside.
 ///
@@ -552,6 +564,7 @@ pub async fn active_plugins(
     // known argv/dir, so only user names spawn). Real installs (empty argv)
     // resolve their executable from the install dir; legacy entries spawn
     // their recorded argv. Failures warn (names only) and never abort.
+    let mut outcomes: Vec<SpawnOutcome> = Vec::new();
     for (name, entry) in user_lock.plugins.iter() {
         if !crate::lock::effective_enabled(&user_lock, &project_lock, name) {
             continue;
@@ -568,7 +581,13 @@ pub async fn active_plugins(
             let Some(pd) = &pdir else { continue };
             match resolve_argv(&pd.join(name)) {
                 Ok(a) => a,
-                Err(_) => continue,
+                Err(e) => {
+                    outcomes.push(SpawnOutcome {
+                        name: name.clone(),
+                        error: Some(format!("{e:#}")),
+                    });
+                    continue;
+                }
             }
         };
         // Lazy spawn: the install-time `<name>-manifest.json` cache answers
@@ -609,6 +628,10 @@ pub async fn active_plugins(
                 ));
             }
             plugins.push(p.arc() as Arc<dyn Plugin>);
+            outcomes.push(SpawnOutcome {
+                name: name.clone(),
+                error: None,
+            });
             continue;
         }
         match SidecarPlugin::spawn(argv).await {
@@ -639,11 +662,24 @@ pub async fn active_plugins(
                     ));
                 }
                 plugins.push(Arc::new(p) as Arc<dyn Plugin>);
+                outcomes.push(SpawnOutcome {
+                    name: name.clone(),
+                    error: None,
+                });
             }
-            Err(e) => push_builder_warning(format!(
-                "lock plugin {name:?} failed to spawn ({e:#}); ignoring"
-            )),
+            Err(e) => {
+                push_builder_warning(format!(
+                    "lock plugin {name:?} failed to spawn ({e:#}); ignoring"
+                ));
+                outcomes.push(SpawnOutcome {
+                    name: name.clone(),
+                    error: Some(format!("{e:#}")),
+                });
+            }
         }
+    }
+    if let Ok(mut s) = SPAWN_OUTCOMES.lock() {
+        *s = Some(outcomes);
     }
 
     if plugins.is_empty() {
@@ -754,6 +790,7 @@ pub struct BuilderOptions {
     pub dynamic_provider_profile: Option<OpenAiProviderProfile>,
     /// Agent-lifetime credential lease source for `dynamic_provider_profile`.
     pub dynamic_credential_source: Option<Arc<dyn CredentialSource>>,
+    pub prebooted_plugins: Option<Vec<Arc<dyn Plugin>>>,
 }
 
 /// Profile-aware [`Agent`] builder used by all surfaces: resolves
@@ -781,6 +818,7 @@ pub async fn build_agent(opts: BuilderOptions) -> anyhow::Result<Agent> {
         wrap_executor,
         dynamic_provider_profile,
         dynamic_credential_source,
+        prebooted_plugins,
     } = opts;
     // Catalog: any of these may be named in `gray.yml`. Fallback (no profile)
     // is `tools-minimal` — one persistent shell, gray's default surface.
@@ -789,7 +827,9 @@ pub async fn build_agent(opts: BuilderOptions) -> anyhow::Result<Agent> {
         Arc::new(ToolsBasicPlugin) as Arc<dyn Plugin>,
         Arc::new(ToolsSearchPlugin) as Arc<dyn Plugin>,
     ];
-    let mut plugins = if bare {
+    let mut plugins = if let Some(prebooted) = prebooted_plugins {
+        prebooted
+    } else if bare {
         defaults.retain(|p| p.manifest().name == "tools-minimal");
         defaults
     } else {

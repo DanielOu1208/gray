@@ -921,22 +921,18 @@ pub async fn run_repl_mode(
         });
     }
 
-    // Plugin startup probe: boots the lock plugins off the paint path and
-    // lands the `N plugins · M loaded · …` row under the home hints.
     if interactive
         && !config.bare
         && let Some((shared, _)) = &tui
     {
-        let shared = shared.clone();
-        tokio::spawn(async move {
-            crate::plugin_status::probe().await;
-            if let Ok(mut t) = shared.lock() {
-                t.set_plugin_stats(crate::plugin_status::stats_line());
-                if !t.modal_open {
-                    let _ = t.draw();
-                }
-            }
-        });
+        if agent.is_none() {
+            crate::plugin_status::kickoff(
+                shared.clone(),
+                crate::host::default_handler(cwd.to_path_buf()),
+            );
+        } else if let Ok(mut t) = shared.lock() {
+            t.set_plugin_stats(crate::plugin_status::stats_line());
+        }
     }
 
     // Cron: background tick in live sessions (workstream C). A dedicated OS

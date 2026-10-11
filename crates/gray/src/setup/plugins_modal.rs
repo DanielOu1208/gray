@@ -284,6 +284,7 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
             }
             while let Ok((target, out)) = upd_rx.try_recv() {
                 updating = None;
+                crate::plugin_status::drop_boot();
                 match out {
                     Ok(lines) => {
                         let summary = if lines.is_empty() {
@@ -570,6 +571,7 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                             match crate::plugin_cli::set_managed_enabled(&name, now_on) {
                                 Ok(()) => {
                                     changed = true;
+                                    crate::plugin_status::drop_boot();
                                     rows[ri].enabled = now_on;
                                     op_msg = Some(format!(
                                         "{name} {} (applies next session or /restart)",

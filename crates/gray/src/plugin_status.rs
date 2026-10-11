@@ -1,113 +1,72 @@
-//! Per-session plugin startup results and the welcome stats line.
-//!
-//! [`probe`] boots the enabled lock plugins through the same
-//! `gray_plugin::builder::active_plugins` path the agent build takes
-//! (lazy manifest caches included, so most plugins cost a file read, not
-//! a process). The welcome row waits on it rather than blocking startup,
-//! and `/plugins` reports per-plugin load outcomes from the same store.
+use std::sync::{Arc, Mutex};
 
-use std::sync::Mutex;
+use futures::future::{BoxFuture, FutureExt, Shared};
+use gray_plugin::Plugin;
+use gray_plugin::builder::SpawnOutcome;
 
-/// One enabled lock plugin's startup result: `error` is `Some` when the
-/// sidecar did not come up this session.
 #[derive(Debug, Clone)]
 pub(crate) struct StartResult {
     pub name: String,
     pub error: Option<String>,
 }
 
-static RESULTS: Mutex<Option<Vec<StartResult>>> = Mutex::new(None);
+type BootOut = Result<Vec<Arc<dyn Plugin>>, String>;
+type SharedBoot = Shared<BoxFuture<'static, BootOut>>;
 
-/// The probe's outcome, `None` until it lands.
-pub(crate) fn results() -> Option<Vec<StartResult>> {
-    RESULTS.lock().ok().and_then(|r| r.clone())
-}
+static BOOT: Mutex<Option<SharedBoot>> = Mutex::new(None);
 
-fn store(results: Vec<StartResult>) {
-    if let Ok(mut r) = RESULTS.lock() {
-        *r = Some(results);
-    }
-}
-
-/// Lock entries this session expects to boot: enabled under the project
-/// overlay, minus lifecycle-owned `provider_only` sidecars.
-fn expected_names() -> Vec<String> {
-    let Ok(home) = crate::plugin_cli::home() else {
-        return Vec::new();
-    };
-    crate::plugin_cli::list_managed(&home)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|p| {
-            crate::plugin_cli::enabled(&home, &p.name, &p.entry)
-                && p.entry.runtime_role.as_deref() != Some("provider_only")
-        })
-        .map(|p| p.name)
-        .collect()
-}
-
-/// `lock plugin "name" failed to spawn (<err>); ignoring` → (name, err).
-fn parse_spawn_warning(w: &str) -> Option<(String, String)> {
-    let rest = w.strip_prefix("lock plugin ")?;
-    let (name, rest) = rest.split_once(" failed to spawn (")?;
-    let err = rest.strip_suffix("); ignoring")?.to_string();
-    Some((name.trim_matches('"').to_string(), err))
-}
-
-/// Boot pass over the lock plugins. Loaded names come back in the plugin
-/// list; spawn failures land in builder warnings, which are re-queued to
-/// the profile-warning channel so the session still surfaces them.
-pub(crate) async fn probe() {
-    let names = expected_names();
-    if names.is_empty() {
-        store(Vec::new());
-        return;
-    }
-    let _ = gray_plugin::builder::take_builder_warnings();
-    let loaded: std::collections::HashSet<String> = match gray_plugin::builder::active_plugins(
-        crate::profile::gray_defaults(),
-        &["tools-minimal", "skills"],
-        "gray.yml",
-        None,
-        false,
-    )
-    .await
-    {
-        Ok((plugins, _)) => plugins.iter().map(|p| p.manifest().name.clone()).collect(),
-        Err(_) => Default::default(),
-    };
-    let warnings = gray_plugin::builder::take_builder_warnings();
-    let mut spawn_err: std::collections::BTreeMap<String, String> = Default::default();
-    for w in &warnings {
-        if let Some((name, err)) = parse_spawn_warning(w) {
-            spawn_err.insert(name, err);
+fn ensure_boot(handler: Option<gray_plugin::HostHandler>) -> Option<SharedBoot> {
+    let mut slot = BOOT.lock().ok()?;
+    if slot.is_none() {
+        let boot: SharedBoot = async move {
+            crate::profile::active_plugins(handler)
+                .await
+                .map(|(plugins, _)| plugins)
+                .map_err(|e| format!("{e:#}"))
         }
+        .boxed()
+        .shared();
+        tokio::spawn(boot.clone());
+        *slot = Some(boot);
     }
-    for w in warnings {
-        crate::profile::queue_profile_warning(w);
-    }
-    store(
-        names
-            .into_iter()
-            .map(|name| StartResult {
-                error: if loaded.contains(&name) {
-                    None
-                } else {
-                    Some(
-                        spawn_err
-                            .get(&name)
-                            .cloned()
-                            .unwrap_or_else(|| "did not start".to_string()),
-                    )
-                },
-                name,
-            })
-            .collect(),
-    );
+    slot.clone()
 }
 
-/// Plugins updated by the last auto-update run, when it ran inside the
-/// last 24 hours.
+pub(crate) fn results() -> Option<Vec<StartResult>> {
+    Some(
+        gray_plugin::builder::spawn_outcomes()?
+            .into_iter()
+            .map(|SpawnOutcome { name, error }| StartResult { name, error })
+            .collect(),
+    )
+}
+
+pub(crate) fn kickoff(shared: crate::composer::SharedTui, handler: gray_plugin::HostHandler) {
+    let Some(boot) = ensure_boot(Some(handler)) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let _ = boot.await;
+        if let Ok(mut t) = shared.lock() {
+            t.set_plugin_stats(stats_line());
+            if !t.modal_open {
+                let _ = t.draw();
+            }
+        }
+    });
+}
+
+pub(crate) async fn take_boot() -> Option<BootOut> {
+    let boot = BOOT.lock().ok()?.take()?;
+    Some(boot.await)
+}
+
+pub(crate) fn drop_boot() {
+    if let Ok(mut slot) = BOOT.lock() {
+        slot.take();
+    }
+}
+
 fn recent_updated() -> Option<u64> {
     let path = crate::setup::gray_home().ok()?.join("auto-update.json");
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
@@ -120,9 +79,6 @@ fn recent_updated() -> Option<u64> {
     Some(p.get("updated")?.as_u64().unwrap_or(0) + p.get("rebuilt")?.as_u64().unwrap_or(0))
 }
 
-/// The dim welcome row: `64 plugins · 62 loaded · 2 failed · 53 updated`
-/// (zero parts omitted; `plugins`/`loaded` always shown). `None` until
-/// [`probe`] lands.
 pub(crate) fn stats_line() -> Option<String> {
     let results = results()?;
     let plugins = results.len();
@@ -145,11 +101,12 @@ pub(crate) fn stats_line() -> Option<String> {
     Some(parts.join(" · "))
 }
 
-/// `gray cmd run plugins` / headless `/plugins`: name, version, status.
-/// Runs [`probe`] first when no session probe has landed yet.
 pub(crate) async fn table() -> String {
-    if results().is_none() {
-        probe().await;
+    if results().is_none()
+        && let Ok(cwd) = std::env::current_dir()
+        && let Some(boot) = ensure_boot(Some(crate::host::default_handler(cwd)))
+    {
+        let _ = boot.await;
     }
     let results = results().unwrap_or_default();
     let rows = crate::plugin_cli::list_rows().unwrap_or_default();

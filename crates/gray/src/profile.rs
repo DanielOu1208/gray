@@ -69,13 +69,15 @@ fn drain_builder_warnings() {
 /// Ordered active plugins: the `gray.yml` profile order, or builtins when
 /// the profile is missing/unparseable/empty. Manifest-only boot (no host
 /// handler); a sidecar spawn failure aborts boot with entry index + argv.
-pub(crate) async fn active_plugins() -> anyhow::Result<(Vec<Arc<dyn Plugin>>, bool)> {
+pub(crate) async fn active_plugins(
+    handler: Option<gray_plugin::HostHandler>,
+) -> anyhow::Result<(Vec<Arc<dyn Plugin>>, bool)> {
     let (mut plugins, fallback) = gray_plugin::builder::active_plugins(
         gray_defaults(),
         // Fallback when no profile resolves: bash shell family + skills context.
         &["tools-minimal", "skills"],
         "gray.yml",
-        None,
+        handler,
         true,
     )
     .await?;
@@ -111,7 +113,7 @@ pub fn builtin_registry() -> gray_tools::Registry {
 /// A sidecar spawn failure is a hard `Err` naming the entry (caller aborts boot).
 pub async fn build_registry()
 -> anyhow::Result<(gray_tools::Registry, Vec<gray_plugin::Manifest>, bool)> {
-    let (plugins, fallback) = active_plugins().await?;
+    let (plugins, fallback) = active_plugins(None).await?;
     let (registry, manifests) = from_plugins(&plugins);
     Ok((registry, manifests, fallback))
 }
