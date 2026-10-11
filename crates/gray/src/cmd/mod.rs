@@ -39,6 +39,10 @@ pub(crate) enum CommandResult {
         document: ui::UiDoc,
         fallback_text: String,
     },
+    Prompt {
+        prompt: String,
+        fallback_text: String,
+    },
 }
 
 impl CommandResult {
@@ -117,33 +121,50 @@ fn gray_home() -> anyhow::Result<PathBuf> {
     crate::setup::gray_home()
 }
 
-/// `gray cmd run <name> [args]`: canonical-name dispatch. `local` surface
-/// is rejected here so a new registry entry can't leak through silently.
 async fn run_command(
     config: &mut Config,
     home: &Path,
     name: &str,
     args: &[String],
 ) -> Result<CommandResult, CmdError> {
-    let Some(def) = resolve(name) else {
-        return Err(CmdError::unknown(name));
-    };
-    if def.surface == CmdSurface::Local {
-        return Err(CmdError::local(def.name));
-    }
     let rest = args.join(" ");
-    match def.name {
-        "help" => Ok(help_result()),
-        "usage" => usage_result(config, home).await,
-        "models" => model_result(config, home, &rest),
-        "new" => new_result(home).await,
-        "sessions" => sessions_result(home, &rest).await,
-        "cron" => cron_result(home, &rest),
-        "skills" => skills_result(&rest),
-        other => Err(CmdError::unavailable(format!(
-            "'/{other}' is not implemented over cmd yet"
-        ))),
+    if let Some(def) = resolve(name) {
+        if def.surface == CmdSurface::Local {
+            return Err(CmdError::local(def.name));
+        }
+        return match def.name {
+            "help" => Ok(help_result()),
+            "usage" => usage_result(config, home).await,
+            "models" => model_result(config, home, &rest),
+            "new" => new_result(home).await,
+            "sessions" => sessions_result(home, &rest).await,
+            "cron" => cron_result(home, &rest),
+            "skills" => skills_result(&rest),
+            "context" => context_result(config, home, &rest).await,
+            "compact" => compact_result(config, home, &rest).await,
+            "undo" => undo_result(home, false).await,
+            "retry" => undo_result(home, true).await,
+            "jobs" => jobs_result(home, &rest),
+            "plugin" => plugin_result(&rest).await,
+            "update" => update_result(&rest).await,
+            "feedback" => feedback_result(config, home, &rest),
+            "agentsmd" => agentsmd_result(&rest),
+            "reload" => Ok(CommandResult::text(
+                "config reloads on the next turn in this conversation",
+            )),
+            "gateway" => gateway_result(&rest),
+            other => Err(CmdError::unavailable(format!(
+                "'/{other}' is not implemented over cmd yet"
+            ))),
+        };
     }
+    if let Some(result) = plugin_command_result(home, name, args).await? {
+        return Ok(result);
+    }
+    if let Some(result) = skill_command_result(name, &rest) {
+        return result;
+    }
+    Err(CmdError::unknown(name))
 }
 
 /// `/help`: the registry lines plus plugin commands and prompt templates —
@@ -581,13 +602,15 @@ fn cron_result(home: &Path, rest: &str) -> Result<CommandResult, CmdError> {
     Ok(CommandResult::text(text))
 }
 
-/// `/skills`: the headless list — running a skill needs a chat turn, so
-/// args are rejected rather than silently ignored.
 fn skills_result(rest: &str) -> Result<CommandResult, CmdError> {
-    if !rest.trim().is_empty() {
-        return Err(CmdError::args(
-            "skill invocation needs a chat turn — `gray cmd run skills` only lists",
-        ));
+    let rest = rest.trim();
+    if !rest.is_empty() {
+        let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        return skill_command_result(name.trim(), args).unwrap_or_else(|| {
+            Err(CmdError::args(format!(
+                "no skill '{name}' — `gray cmd run skills` lists the discovered names"
+            )))
+        });
     }
     let cwd = std::env::current_dir()
         .map_err(|e| CmdError::unavailable(format!("cannot resolve cwd: {e}")))?;
@@ -612,6 +635,485 @@ fn skills_result(rest: &str) -> Result<CommandResult, CmdError> {
         out.push('\n');
     }
     Ok(CommandResult::text(out.trim_end()))
+}
+
+async fn session_messages(home: &Path) -> Option<(SessionId, Vec<gray_core::message::Message>)> {
+    let id = pointed_session(home)?;
+    let store = JsonlSessionStore::new(home.join("sessions"));
+    let (_meta, entries) = store.load(&id).await.ok()?;
+    Some((id, entries.into_iter().map(|e| e.message).collect()))
+}
+
+async fn context_result(
+    config: &mut Config,
+    home: &Path,
+    rest: &str,
+) -> Result<CommandResult, CmdError> {
+    let val = rest.trim();
+    if val.is_empty() || val == "status" || val == "show" {
+        let cwd = std::env::current_dir()
+            .map_err(|e| CmdError::unavailable(format!("cannot resolve cwd: {e}")))?;
+        let messages = session_messages(home)
+            .await
+            .map(|(_, m)| m)
+            .unwrap_or_default();
+        let parts = crate::repl::status::collect_context_parts(&cwd, &messages, None);
+        return Ok(CommandResult::text(
+            crate::repl::status::context_breakdown_text(config, &parts),
+        ));
+    }
+    let (msg, _ok) = crate::repl::status::apply_context_arg(config, val);
+    Ok(CommandResult::text(msg))
+}
+
+async fn compact_result(
+    config: &Config,
+    home: &Path,
+    rest: &str,
+) -> Result<CommandResult, CmdError> {
+    let Some((id, messages)) = session_messages(home).await else {
+        return Ok(CommandResult::text(
+            "no active session in this conversation — nothing to compact",
+        ));
+    };
+    if messages.is_empty() {
+        return Ok(CommandResult::text(
+            "nothing to compact (conversation is empty)",
+        ));
+    }
+    let cwd = std::env::current_dir()
+        .map_err(|e| CmdError::unavailable(format!("cannot resolve cwd: {e}")))?;
+    let mut agent = crate::build_model_agent(config, &cwd, Some(id.as_str()))
+        .await
+        .map_err(|e| CmdError::unavailable(format!("{e:#}")))?
+        .with_messages(messages);
+    let replaced = agent.messages().len();
+    let summary = crate::compact::compact_with_keep(
+        &mut agent,
+        (!rest.trim().is_empty()).then(|| rest.trim()),
+        crate::setup::user_keep_recent_tokens(),
+    )
+    .await
+    .map_err(|e| CmdError::unavailable(format!("compaction failed: {e:#}")))?;
+    let Some(summary) = summary else {
+        return Ok(CommandResult::text(
+            "nothing to compact (conversation is empty)",
+        ));
+    };
+    let store = JsonlSessionStore::new(home.join("sessions"));
+    store
+        .append_compaction_replacement(&id, agent.messages())
+        .await
+        .map_err(|e| CmdError::unavailable(format!("cannot record compaction: {e:#}")))?;
+    Ok(CommandResult::text(format!(
+        "Context compacted ({replaced} messages → summary)\n{summary}"
+    )))
+}
+
+async fn undo_result(home: &Path, retry: bool) -> Result<CommandResult, CmdError> {
+    let Some((id, messages)) = session_messages(home).await else {
+        return Ok(CommandResult::text(
+            "no active session in this conversation — nothing to undo",
+        ));
+    };
+    let Some(cut) = handlers::undo_cut(&messages) else {
+        return Ok(CommandResult::text(
+            "nothing to undo (no turn of your own to drop)",
+        ));
+    };
+    let resent = messages[cut].text_content();
+    let store = JsonlSessionStore::new(home.join("sessions"));
+    store
+        .rewind(&id, cut)
+        .await
+        .map_err(|e| CmdError::unavailable(format!("undo failed: {e}")))?;
+    let dropped = messages.len() - cut;
+    let note = format!("undid the last turn · {dropped} messages out of context");
+    if !retry {
+        return Ok(CommandResult::text(note));
+    }
+    if resent.trim().is_empty() {
+        return Ok(CommandResult::text(format!(
+            "{note} — the dropped turn had no text to retry"
+        )));
+    }
+    Ok(CommandResult::Prompt {
+        prompt: resent,
+        fallback_text: format!("{note} — retrying it now"),
+    })
+}
+
+fn jobs_result(home: &Path, rest: &str) -> Result<CommandResult, CmdError> {
+    let sid = pointed_session(home).map(|s| s.as_str().to_string());
+    let mut toks = rest.split_whitespace();
+    match toks.next() {
+        None | Some("list") => {
+            let wakes = crate::repl::jobs::load_wakes(home, sid.as_deref());
+            Ok(CommandResult::text(crate::repl::jobs::dashboard(
+                &[],
+                &wakes,
+                crate::cron::now_secs(),
+            )))
+        }
+        Some("stop") | Some("rm") | Some("remove") => {
+            let target = toks.next().unwrap_or("").trim();
+            let bare = target
+                .trim_start_matches("wake:")
+                .trim_start_matches("job:");
+            if bare.is_empty() {
+                return Err(CmdError::args("usage: /jobs stop <wake id>"));
+            }
+            let store = crate::cron::CronStore::open(home.join("cron"))
+                .map_err(|e| CmdError::unavailable(format!("{e:#}")))?;
+            match store.remove(bare) {
+                Ok(true) => Ok(CommandResult::text(format!("stopped {bare}"))),
+                Ok(false) => Ok(CommandResult::text(format!(
+                    "unknown job or wake {bare:?} (in-flight jobs live in the running turn)"
+                ))),
+                Err(e) => Err(CmdError::unavailable(format!("stop failed: {e:#}"))),
+            }
+        }
+        Some(_) => Err(CmdError::args("usage: /jobs [stop <wake id>]")),
+    }
+}
+
+async fn plugin_result(rest: &str) -> Result<CommandResult, CmdError> {
+    use crate::repl::plugin_cmds::PluginAction;
+    let action = crate::repl::plugin_cmds::parse_plugin_args(&format!("plugin {rest}"))
+        .map_err(|e| CmdError::args(format!("{e:#}")))?;
+    match action {
+        PluginAction::List => match crate::plugin_cli::list_rows() {
+            Ok(rows) if rows.is_empty() => Ok(CommandResult::text("no plugins installed")),
+            Ok(rows) => {
+                let out = rows
+                    .iter()
+                    .map(|r| {
+                        let state = if r.on { "" } else { " [disabled]" };
+                        let kind = if r.cli { " [command]" } else { "" };
+                        format!("{} {} ({}){state}{kind}", r.name, r.version, r.scope)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(CommandResult::text(out))
+            }
+            Err(e) => Err(CmdError::unavailable(format!("plugin list failed: {e:#}"))),
+        },
+        PluginAction::Update(target) => {
+            let mut check = false;
+            let mut parts = Vec::new();
+            for tok in target.split_whitespace() {
+                if tok == "--check" {
+                    check = true;
+                } else {
+                    parts.push(tok);
+                }
+            }
+            let target = if parts.is_empty() {
+                "all".to_string()
+            } else {
+                parts.join(" ")
+            };
+            let res = if check {
+                crate::plugin_cli::check_managed(&target).await
+            } else {
+                crate::plugin_cli::update_managed(&target).await
+            };
+            match res {
+                Ok(reports) => {
+                    let mut lines = Vec::new();
+                    for r in &reports {
+                        if matches!(r.action, gray_pkg::ops::UpdateAction::Current) {
+                            continue;
+                        }
+                        lines.push(format!("{}: {}", r.name, r.detail()));
+                    }
+                    Ok(CommandResult::text(if lines.is_empty() {
+                        "up to date".to_string()
+                    } else {
+                        lines.join("\n")
+                    }))
+                }
+                Err(e) => Err(CmdError::unavailable(format!("update failed: {e:#}"))),
+            }
+        }
+        PluginAction::Enable(name) => match crate::plugin_cli::set_managed_enabled(&name, true) {
+            Ok(()) => Ok(CommandResult::text(format!("enabled {name}"))),
+            Err(e) => Err(CmdError::unavailable(format!("enable failed: {e:#}"))),
+        },
+        PluginAction::Disable(name) => match crate::plugin_cli::set_managed_enabled(&name, false) {
+            Ok(()) => Ok(CommandResult::text(format!("disabled {name}"))),
+            Err(e) => Err(CmdError::unavailable(format!("disable failed: {e:#}"))),
+        },
+        PluginAction::Check(dir) => {
+            let exe = std::env::current_exe()
+                .map_err(|e| CmdError::unavailable(format!("cannot self-spawn: {e}")))?;
+            let out = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                tokio::process::Command::new(exe)
+                    .args(["plugin", "check", &dir])
+                    .stdin(std::process::Stdio::null())
+                    .output(),
+            )
+            .await
+            .map_err(|_| CmdError::unavailable("plugin check timed out".to_string()))?
+            .map_err(|e| CmdError::unavailable(format!("plugin check failed to start: {e}")))?;
+            let text = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+            if out.status.success() {
+                Ok(CommandResult::text(text))
+            } else {
+                Err(CmdError::unavailable(format!(
+                    "check failed:\n{}",
+                    if text.is_empty() {
+                        String::from_utf8_lossy(&out.stderr).trim_end().to_string()
+                    } else {
+                        text
+                    }
+                )))
+            }
+        }
+        PluginAction::Install(_) | PluginAction::Remove(_) => Ok(CommandResult::text(
+            "installing or removing plugins needs a shell — run `gray plugin <install|remove> …`",
+        )),
+    }
+}
+
+async fn update_result(rest: &str) -> Result<CommandResult, CmdError> {
+    let t = rest.trim();
+    if t == "auto" || t.starts_with("auto ") {
+        let word = t.trim_start_matches("auto").trim();
+        return match word {
+            "on" | "off" => match crate::auto_update::set_enabled(word == "on") {
+                Ok(()) if word == "on" => Ok(CommandResult::text("auto-update on")),
+                Ok(()) => Ok(CommandResult::text(
+                    "auto-update off — `gray update` still installs manually",
+                )),
+                Err(e) => Err(CmdError::unavailable(format!(
+                    "auto-update toggle failed: {e:#}"
+                ))),
+            },
+            "status" | "" => Ok(CommandResult::text(crate::auto_update::status_text())),
+            other => Err(CmdError::args(format!(
+                "unknown `/update auto {other}` (on|off|status)"
+            ))),
+        };
+    }
+    match t {
+        "" | "status" | "check" => {
+            let current = env!("CARGO_PKG_VERSION");
+            let latest = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                crate::update::latest_version(),
+            )
+            .await
+            .map_err(|_| CmdError::unavailable("update check timed out".to_string()))?
+            .map_err(|e| CmdError::unavailable(format!("update check failed: {e:#}")))?;
+            if crate::update::update_available(
+                crate::update::CHANNEL,
+                &latest,
+                current,
+                env!("GRAY_BUILD_ID"),
+            ) {
+                Ok(CommandResult::text(format!(
+                    "gray {latest} available (you have {current}) — /update install to take it"
+                )))
+            } else {
+                Ok(CommandResult::text(format!("gray {current} is current")))
+            }
+        }
+        "install" | "now" | "run" => {
+            let exe = std::env::current_exe()
+                .map_err(|e| CmdError::unavailable(format!("cannot self-spawn: {e}")))?;
+            let out = tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                tokio::process::Command::new(exe)
+                    .arg("update")
+                    .stdin(std::process::Stdio::null())
+                    .output(),
+            )
+            .await
+            .map_err(|_| CmdError::unavailable("update timed out".to_string()))?
+            .map_err(|e| CmdError::unavailable(format!("update failed to start: {e}")))?;
+            let text = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+            if out.status.success() {
+                Ok(CommandResult::text(if text.is_empty() {
+                    "updated — restart gray (and this bridge) to run it".to_string()
+                } else {
+                    text
+                }))
+            } else {
+                Err(CmdError::unavailable(format!(
+                    "update failed:\n{}",
+                    if text.is_empty() {
+                        String::from_utf8_lossy(&out.stderr).trim_end().to_string()
+                    } else {
+                        text
+                    }
+                )))
+            }
+        }
+        other => Err(CmdError::args(format!(
+            "unknown `/update {other}` (status|install|auto on|off|status)"
+        ))),
+    }
+}
+
+fn feedback_result(config: &Config, home: &Path, rest: &str) -> Result<CommandResult, CmdError> {
+    let raw = rest.trim();
+    if raw.is_empty() {
+        return Err(CmdError::args(
+            "usage: /feedback <what happened> — saves locally and gives a prefilled issue link",
+        ));
+    }
+    let title = crate::feedback::build_title(raw);
+    let version = env!("CARGO_PKG_VERSION");
+    let os = format!("{} / {}", std::env::consts::OS, std::env::consts::ARCH);
+    let model = config.model.as_deref().unwrap_or("no model");
+    let session = pointed_session(home)
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let body =
+        crate::feedback::build_body(raw, version, &os, model, &session, "gateway", "gateway");
+    let url = crate::feedback::issue_url(&title, &body);
+    let dir = home.join("feedback");
+    match crate::feedback::save_feedback(&dir, &title, &body, &crate::feedback::timestamp()) {
+        Ok(path) => Ok(CommandResult::text(format!(
+            "saved {}\nfile an issue: {url}",
+            path.display()
+        ))),
+        Err(e) => Ok(CommandResult::text(format!(
+            "could not save feedback ({e}) — file manually: {url}"
+        ))),
+    }
+}
+
+fn agentsmd_result(rest: &str) -> Result<CommandResult, CmdError> {
+    match rest.trim() {
+        "" | "show" | "status" => {
+            let path =
+                crate::sys_prompt_path().map_err(|e| CmdError::unavailable(format!("{e:#}")))?;
+            match crate::load_or_create_system_prompt_at(&path) {
+                Ok(body) => Ok(CommandResult::text(format!(
+                    "system prompt: {}\n---\n{body}\n---",
+                    path.display()
+                ))),
+                Err(e) => Ok(CommandResult::text(format!(
+                    "failed to read {}: {e}",
+                    path.display()
+                ))),
+            }
+        }
+        other => Err(CmdError::args(format!(
+            "unknown `/agentsmd {other}` over cmd — `show` works; edit/reset need the TUI"
+        ))),
+    }
+}
+
+fn gateway_result(rest: &str) -> Result<CommandResult, CmdError> {
+    match rest.trim() {
+        "" | "status" | "list" => Ok(CommandResult::text(
+            crate::repl::gateway_panel::format_text(),
+        )),
+        other => Err(CmdError::args(format!(
+            "unknown `/gateway {other}` over cmd — status only here"
+        ))),
+    }
+}
+
+async fn plugin_command_result(
+    home: &Path,
+    name: &str,
+    args: &[String],
+) -> Result<Option<CommandResult>, CmdError> {
+    let Some((owner, argv)) = find_command_owner(home, name) else {
+        return Ok(None);
+    };
+    use gray_plugin::Plugin as _;
+    let sidecar = gray_plugin::sidecar::SidecarPlugin::spawn(argv)
+        .await
+        .map_err(|e| CmdError::unavailable(format!("{owner} failed to spawn: {e:#}")))?;
+    let outcome = sidecar
+        .run_command(&format!("/{name}"), args.to_vec())
+        .await;
+    sidecar.shutdown(std::time::Duration::from_secs(2)).await;
+    match outcome {
+        Some(gray_plugin::CommandOutcome::Say(text)) => Ok(Some(CommandResult::text(text))),
+        Some(gray_plugin::CommandOutcome::Prompt(prompt)) => Ok(Some(CommandResult::Prompt {
+            prompt,
+            fallback_text: format!("/{name} asked for a turn"),
+        })),
+        Some(gray_plugin::CommandOutcome::ModelPicker(_))
+        | Some(gray_plugin::CommandOutcome::AgentPicker(_)) => Err(CmdError::local(name)),
+        None => Err(CmdError::unavailable(format!(
+            "plugin '{owner}' did not answer '/{name}'"
+        ))),
+    }
+}
+
+fn find_command_owner(home: &Path, name: &str) -> Option<(String, Vec<String>)> {
+    let mut homes = vec![home.to_path_buf()];
+    if let Some(main) = gray_core::paths::user_home().map(|h| h.join(".gray"))
+        && main != home
+    {
+        homes.push(main);
+    }
+    let want = format!("/{name}");
+    for h in homes {
+        let Ok(lock) = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(&h)) else {
+            continue;
+        };
+        for (plugin, entry) in &lock.plugins {
+            if !crate::plugin_cli::enabled(&h, plugin, entry) {
+                continue;
+            }
+            let Ok(raw) = std::fs::read(h.join("plugins").join(format!("{plugin}-manifest.json")))
+            else {
+                continue;
+            };
+            let Ok(m) = serde_json::from_slice::<Value>(&raw) else {
+                continue;
+            };
+            let claims = |key: &str| {
+                m[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .any(|c| c == want)
+            };
+            if !claims("commands") && !claims("subcommands") {
+                continue;
+            }
+            let argv = if !entry.argv.is_empty() {
+                entry.argv.clone()
+            } else {
+                match gray_plugin::builder::resolve_argv(&h.join("plugins").join(plugin)) {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                }
+            };
+            return Some((plugin.clone(), argv));
+        }
+    }
+    None
+}
+
+fn skill_command_result(name: &str, args_raw: &str) -> Option<Result<CommandResult, CmdError>> {
+    let cwd = std::env::current_dir().ok()?;
+    let discovered = crate::skills::discover_skills(&cwd);
+    let skill = discovered.skills.iter().find(|s| s.name == name)?;
+    let args = (!args_raw.trim().is_empty()).then(|| args_raw.trim().to_string());
+    Some((|| {
+        crate::skills::validate_skill_args(skill, args.as_deref()).map_err(CmdError::args)?;
+        let content = std::fs::read_to_string(&skill.file_path).map_err(|e| {
+            CmdError::unavailable(format!("failed to read {}: {e}", skill.file_path.display()))
+        })?;
+        let body = crate::skills_tool::strip_frontmatter(&content);
+        let prompt = handlers::format_skill_paste(body, &skill.name, args.as_deref());
+        Ok(CommandResult::Prompt {
+            prompt,
+            fallback_text: format!("Running the \"{}\" skill.", skill.name),
+        })
+    })())
 }
 
 // ---------------------------------------------------------------------------
