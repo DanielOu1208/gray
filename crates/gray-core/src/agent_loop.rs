@@ -1208,15 +1208,22 @@ impl Agent {
                     for (idx, name, effective_args) in ready {
                         let ex = self.executor.clone();
                         let c = ctx.clone();
+                        let sink = self.tool_output_sink(&tool_uses[idx].0);
                         futs.push((
                             idx,
                             Box::pin(async move {
-                                match tokio::time::timeout(
-                                    timeout,
-                                    ex.execute(&c, &name, effective_args),
-                                )
-                                .await
-                                {
+                                let exec = ex.execute(&c, &name, effective_args);
+                                let out = match sink {
+                                    Some(sink) => {
+                                        tokio::time::timeout(
+                                            timeout,
+                                            crate::agent::scope_tool_output(sink, exec),
+                                        )
+                                        .await
+                                    }
+                                    None => tokio::time::timeout(timeout, exec).await,
+                                };
+                                match out {
                                     Ok(output) => output,
                                     Err(_) => ToolOutput::error(format!(
                                         "Tool '{name}' timed out after {}s",
@@ -1323,7 +1330,14 @@ impl Agent {
                 };
                 // Pin the tool future rather than moving it into the
                 // timeout: a cancel must be able to bound-wait on it.
-                let mut exec_fut = Box::pin(self.executor.execute(&ctx, name, effective_args));
+                let mut exec_fut: futures::future::BoxFuture<'_, ToolOutput> =
+                    match self.tool_output_sink(id) {
+                        Some(sink) => Box::pin(crate::agent::scope_tool_output(
+                            sink,
+                            self.executor.execute(&ctx, name, effective_args),
+                        )),
+                        None => Box::pin(self.executor.execute(&ctx, name, effective_args)),
+                    };
                 let output = tokio::select! {
                     out = tokio::time::timeout(self.tool_timeout, &mut exec_fut) => match out {
                         Ok(output) => output,

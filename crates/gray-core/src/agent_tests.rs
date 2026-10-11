@@ -13,6 +13,7 @@ struct FakeProvider {
     partial_failures: Mutex<VecDeque<(Vec<StreamEvent>, ProviderError)>>,
     seen_systems: std::sync::Arc<Mutex<Vec<Option<String>>>>,
     /// (system, messages) of every request served so far, in order.
+    #[allow(clippy::type_complexity)]
     seen_requests: std::sync::Arc<Mutex<Vec<(Option<String>, Vec<Message>)>>>,
     /// Tool names advertised in every request served so far, in order.
     seen_tools: std::sync::Arc<Mutex<Vec<Vec<String>>>>,
@@ -46,6 +47,7 @@ impl FakeProvider {
     }
 
     /// Full (system, messages) shape of every request served so far.
+    #[allow(clippy::type_complexity)]
     fn seen_requests(&self) -> std::sync::Arc<Mutex<Vec<(Option<String>, Vec<Message>)>>> {
         self.seen_requests.clone()
     }

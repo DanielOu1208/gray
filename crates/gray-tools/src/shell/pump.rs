@@ -107,8 +107,15 @@ impl Pump {
         stderr: Option<ChildStderr>,
         log_path: PathBuf,
         last_output: Arc<AtomicU64>,
+        output_sink: Option<gray_core::agent::ToolOutputSink>,
     ) -> JoinHandle<PumpSummary> {
-        tokio::spawn(pump_main(stdout, stderr, log_path, last_output))
+        tokio::spawn(pump_main(
+            stdout,
+            stderr,
+            log_path,
+            last_output,
+            output_sink,
+        ))
     }
 }
 
@@ -117,6 +124,7 @@ async fn pump_main(
     stderr: Option<ChildStderr>,
     log_path: PathBuf,
     last_output: Arc<AtomicU64>,
+    output_sink: Option<gray_core::agent::ToolOutputSink>,
 ) -> PumpSummary {
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(PUMP_CHANNEL_CHUNKS);
     if let Some(pipe) = stdout {
@@ -170,6 +178,9 @@ async fn pump_main(
         // byte counts stay consistent; binary chunks pass through untouched.
         let redacted = gray_core::redaction::redact_bytes_for_log(&chunk);
         mem.push(&redacted);
+        if let Some(sink) = &output_sink {
+            sink.emit(&redacted);
+        }
         // Size cap: one truncation note, then file writes stop (memory
         // view continues). Not a failure: `log_write_failed` stays false.
         if !log_truncated && log.is_some() && log_capped(log_bytes, redacted.len() as u64) {

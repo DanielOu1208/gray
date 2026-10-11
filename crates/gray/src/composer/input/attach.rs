@@ -145,7 +145,10 @@ pub(crate) fn try_attach_clipboard_image(tui: &mut Tui) -> bool {
             &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
         ) && !out.stdout.is_empty()
             && out.status.success()
-            && let Ok(mut tmp) = tempfile::Builder::new().suffix(".png").tempfile()
+            && let Ok(mut tmp) = tempfile::Builder::new()
+                .prefix("clipboard-")
+                .suffix(".png")
+                .tempfile()
             && std::io::Write::write_all(&mut tmp, &out.stdout).is_ok()
             && let Ok((_file, path)) = tmp.keep()
         {

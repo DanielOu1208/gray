@@ -228,6 +228,35 @@ pub type CheckpointHook = std::sync::Arc<
         + Sync,
 >;
 
+pub type ToolOutputHook = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct ToolOutputSink {
+    id: String,
+    hook: ToolOutputHook,
+}
+
+impl ToolOutputSink {
+    pub fn emit(&self, bytes: &[u8]) {
+        (self.hook)(&self.id, bytes);
+    }
+}
+
+tokio::task_local! {
+    static TOOL_OUTPUT: ToolOutputSink;
+}
+
+pub fn current_tool_output() -> Option<ToolOutputSink> {
+    TOOL_OUTPUT.try_with(Clone::clone).ok()
+}
+
+pub(crate) async fn scope_tool_output<T>(
+    sink: ToolOutputSink,
+    fut: impl std::future::Future<Output = T>,
+) -> T {
+    TOOL_OUTPUT.scope(sink, fut).await
+}
+
 /// A single agent-callable tool.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -559,6 +588,7 @@ pub struct Agent {
     pub(crate) steer: Option<SteerHook>,
     /// See [`CheckpointHook`]. Set per turn by the host.
     pub(crate) checkpoint: Option<CheckpointHook>,
+    pub(crate) tool_output_hook: Option<ToolOutputHook>,
     /// Session this transcript persists to, when known — woven into
     /// compaction citation stubs (arXiv:2607.25066). Captured from each
     /// run's [`ToolContext`].
@@ -641,6 +671,7 @@ impl Agent {
             history_rewrite_hook: None,
             steer: None,
             checkpoint: None,
+            tool_output_hook: None,
             session_id: None,
             contaminated: std::collections::BTreeSet::new(),
             masked_prefix: 0,
@@ -708,6 +739,17 @@ impl Agent {
     /// Install the step-boundary checkpoint hook (see [`CheckpointHook`]).
     pub fn set_checkpoint(&mut self, hook: Option<CheckpointHook>) {
         self.checkpoint = hook;
+    }
+
+    pub fn set_tool_output_hook(&mut self, hook: Option<ToolOutputHook>) {
+        self.tool_output_hook = hook;
+    }
+
+    pub(crate) fn tool_output_sink(&self, call_id: &str) -> Option<ToolOutputSink> {
+        self.tool_output_hook.as_ref().map(|hook| ToolOutputSink {
+            id: call_id.to_owned(),
+            hook: hook.clone(),
+        })
     }
 
     pub fn with_history_rewrite_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {

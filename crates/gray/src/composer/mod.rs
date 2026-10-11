@@ -241,11 +241,16 @@ pub(crate) const MAX_LIVE_TOOLS: usize = 3;
 
 /// Live tool headers for the viewport, oldest-first, capped. Free fn so
 /// tests cover the cap/marker policy without `Tui::new` (needs a TTY).
-pub(crate) fn live_tool_rows(tools: &[LiveTool], elapsed: Duration) -> Vec<Line<'static>> {
+pub(crate) fn live_tool_rows(
+    tools: &[LiveTool],
+    elapsed: Duration,
+    w: usize,
+) -> Vec<Line<'static>> {
+    let text_budget = w.saturating_sub(8).max(1);
     tools
         .iter()
         .take(MAX_LIVE_TOOLS)
-        .map(|t| {
+        .flat_map(|t| {
             let mut line = t.header.clone();
             if t.running {
                 // ponytail: reuse the status shimmer; only the live bash verb changes.
@@ -266,7 +271,20 @@ pub(crate) fn live_tool_rows(tools: &[LiveTool], elapsed: Duration) -> Vec<Line<
                     draw::shimmer_spans(live.unwrap_or("Running "), elapsed),
                 );
             }
-            line
+            std::iter::once(line).chain(t.tail.rows().into_iter().map(|text| {
+                let chars: Vec<char> = text.chars().collect();
+                let text = if crate::text_width::fit_char_count(&chars, text_budget) < chars.len() {
+                    let fit =
+                        crate::text_width::fit_char_count(&chars, text_budget.saturating_sub(1));
+                    format!("{}…", chars[..fit].iter().collect::<String>())
+                } else {
+                    text
+                };
+                Line::from(Span::styled(
+                    format!("    {text}"),
+                    Style::default().fg(crate::theme::theme().tool_dim),
+                ))
+            }))
         })
         .collect()
 }
@@ -371,6 +389,9 @@ pub struct Tui {
     pub(crate) cache: crate::cache::CacheTracker,
     markdown_renderer: gray_markdown::StreamingMarkdownRenderer,
     committed_markdown_lines: usize,
+    reveal_buf: String,
+    reveal_pacing: bool,
+    feeding_markdown: bool,
     pub(crate) pending_resize: Option<(u16, Instant)>,
     /// Billed output tokens from this turn's TurnEnd usage (Σ-per-round).
     /// Display-only: the `Thought for · N tokens` line. `None` (cancelled /
@@ -408,8 +429,11 @@ pub struct Tui {
     plugin_widget: plugin_widget::Widget,
     pub(crate) ask_modal: Option<AskModal>,
     /// The startup notice (interrupted sessions) shown under the home
-    /// tip, until the first transcript item ends the home screen.
+    /// hints, until the first real turn ends the home screen.
     pub(crate) home_notice: Option<String>,
+    /// Slash commands and their modals keep the welcome up; the first real
+    /// turn (`begin_turn`) or a replayed session ends it.
+    pub(crate) left_home: bool,
     /// Last `statusline::version()` painted; a change (plugin status,
     /// status command output, `/reload`) repaints the footer.
     status_line_seen: u64,
@@ -441,6 +465,58 @@ pub(crate) struct LiveTool {
     pub(crate) name: String,
     pub(crate) header: Line<'static>,
     pub(crate) running: bool,
+    pub(crate) tail: LiveToolTail,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LiveToolTail {
+    lines: std::collections::VecDeque<String>,
+    carry: String,
+}
+
+const LIVE_TAIL_LINES: usize = 5;
+const LIVE_TAIL_CARRY_MAX: usize = 4 * 1024;
+
+impl LiveToolTail {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        let text = crate::tui::strip_ansi(&String::from_utf8_lossy(bytes));
+        for ch in text.chars() {
+            match ch {
+                '\n' => {
+                    let line = std::mem::take(&mut self.carry);
+                    if !line.trim().is_empty() {
+                        self.lines.push_back(line);
+                        while self.lines.len() > LIVE_TAIL_LINES {
+                            self.lines.pop_front();
+                        }
+                    }
+                }
+                '\r' => self.carry.clear(),
+                c => {
+                    self.carry.push(c);
+                    if self.carry.len() > LIVE_TAIL_CARRY_MAX {
+                        let keep = LIVE_TAIL_CARRY_MAX / 2;
+                        let mut start = self.carry.len() - keep;
+                        while !self.carry.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        self.carry.drain(..start);
+                    }
+                }
+            }
+        }
+    }
+
+    fn rows(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.lines.iter().cloned().collect();
+        if !self.carry.trim().is_empty() {
+            out.push(self.carry.clone());
+        }
+        if out.len() > LIVE_TAIL_LINES {
+            out.drain(..out.len() - LIVE_TAIL_LINES);
+        }
+        out
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -472,31 +548,6 @@ pub enum TranscriptEntry {
 /// devin-tui's home hints (`shift+tab mode`, `ctrl+p commands`, …) mapped
 /// onto gray's default keymap — right-aligned under the input panel.
 const WELCOME_HINTS: &[(&str, &str)] = &[("/", "commands")];
-
-/// devin-tui's rotating `● Tip` row, gray's verbs. The scrollback banner
-/// can't tick, so one tip is picked per process and every re-emit
-/// (resize reflow, `/hehe` revert) keeps it.
-const WELCOME_TIPS: &[(&str, &str)] = &[
-    ("/", "shows every command and skill"),
-    ("/models", "picks a model"),
-    ("/help", "lists every command and key"),
-    ("/resume", "reopens an earlier session"),
-    ("alt+enter", "inserts a newline"),
-    ("ctrl+v", "pastes an image from the clipboard"),
-    ("esc", "cancels the running turn"),
-    ("ctrl+c", "clears the draft — exits when it's empty"),
-];
-
-fn welcome_tip_index() -> usize {
-    static PICK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *PICK.get_or_init(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as usize)
-            .unwrap_or(0)
-            % WELCOME_TIPS.len()
-    })
-}
 
 /// devin's home hints row, right-aligned to the `x..x + col_w` column:
 /// keys bright, labels muted; the rightmost pairs drop first when narrow.
@@ -534,18 +585,6 @@ pub(crate) fn welcome_hints_line(x: usize, col_w: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The tip row at column `x`: `● Tip  key` bright, the rest muted.
-pub(crate) fn welcome_tip_line(x: usize) -> Line<'static> {
-    let theme = crate::theme::theme();
-    let (key, text) = WELCOME_TIPS[welcome_tip_index()];
-    Line::from(vec![
-        Span::raw(" ".repeat(x)),
-        Span::styled("● Tip  ", Style::default().fg(theme.text_bright)),
-        Span::styled(key, Style::default().fg(theme.text_bright)),
-        Span::styled(format!(" {text}"), Style::default().fg(theme.text_muted)),
-    ])
-}
-
 /// The column devin centers its home block on: `(x, width)`, `min(78, w-8)`
 /// wide. The welcome logo and the home input box share it.
 pub(crate) fn home_column(w: usize) -> (usize, usize) {
@@ -558,11 +597,27 @@ pub(crate) fn home_column(w: usize) -> (usize, usize) {
 /// shimmer) and `gray` + version, centered horizontally on the
 /// `min(78, w-8)` column devin uses and vertically together with the
 /// composer's home band ([`draw::home_band_h`]). The composer is the rest
-/// of devin's home: the framed panel with the hints, tip and startup
+/// of devin's home: the framed panel with the hints and startup
 /// notice under it, and the status bar where the corner row was. Deliberately not the graychan art —
 /// that is `/hehe` only, so the startup screen is the logo and `/hehe`
 /// again puts the logo back.
-pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
+/// The bloom's first-frame radius — the SVG's gem pops in at scale 0.55
+/// and the facet lines chase out from there (`assets/logo-animated.svg`).
+const INTRO_BASE_R: f32 = 0.55;
+/// Leading-edge glow, as a radius fraction: cells the front just reached
+/// paint full-bright for a frame before settling into the gradient.
+const INTRO_FRONT_W: f32 = 0.16;
+/// Reveal where the `gray`/version pair joins.
+const INTRO_TEXT_AT: f32 = 0.9;
+/// ~0.7s: long enough to read, short enough to not tax every launch.
+const INTRO_FRAMES: usize = 20;
+const INTRO_FRAME_MS: u64 = 36;
+
+/// The welcome body at `reveal` of the radial bloom — `1.0` is the
+/// finished banner. The mark is one glyph field, so the SVG's
+/// grow-from-centre becomes a radius reveal about its middle: cells past
+/// the front render as spaces, cells on the front paint full-bright.
+fn welcome_body_lines(w: usize, reveal: f32) -> Vec<Line<'static>> {
     let theme = crate::theme::theme();
     let version = format!("v{}", env!("CARGO_PKG_VERSION"));
 
@@ -592,6 +647,19 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
         .unwrap_or(0);
     let l_cols = (max_logo_w as f32).max(1.0);
     let logo_pad = x + col_w.saturating_sub(max_logo_w) / 2;
+    // The bloom's centre and far edge, in cell units (a cell is twice as
+    // tall as it is wide, so the row axis counts double).
+    let cy = (l_rows - 1.0) / 2.0;
+    let cx = (max_logo_w as f32 - 1.0) / 2.0;
+    let cell_d = |row: usize, col: usize| {
+        ((col as f32 - cx).powi(2) + ((row as f32 - cy) * 2.0).powi(2)).sqrt()
+    };
+    let mut max_d = 1.0f32;
+    for (row, line) in logo_raw.iter().enumerate() {
+        for (col, _) in line.trim().chars().enumerate() {
+            max_d = max_d.max(cell_d(row, col));
+        }
+    }
     for (row, line) in logo_raw.iter().enumerate() {
         let trimmed = line.trim();
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -599,9 +667,18 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
             spans.push(Span::raw(" ".repeat(logo_pad)));
         }
         for (col, ch) in trimmed.chars().enumerate() {
-            let diag = (col as f32 + (l_rows - 1.0 - row as f32)) / (l_cols + l_rows);
-            let t = (0.15 + 0.85 * diag).clamp(0.0, 1.0);
-            let color = crate::tui::blend_color(base, hilite, t);
+            let d = cell_d(row, col) / max_d;
+            if d > reveal {
+                spans.push(Span::raw(" "));
+                continue;
+            }
+            let color = if reveal < 1.0 && d > reveal - INTRO_FRONT_W {
+                hilite
+            } else {
+                let diag = (col as f32 + (l_rows - 1.0 - row as f32)) / (l_cols + l_rows);
+                let t = (0.15 + 0.85 * diag).clamp(0.0, 1.0);
+                crate::tui::blend_color(base, hilite, t)
+            };
             spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
         body.push(Line::from(spans));
@@ -609,25 +686,36 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
     body.push(Line::from(""));
 
     // `gray` bold bright, then the muted version — devin's title pair.
-    body.push(centered(
-        vec![Span::styled(
-            "gray",
-            Style::default().bold().fg(theme.text_bright),
-        )],
-        4,
-    ));
-    body.push(centered(
-        vec![Span::styled(
-            version.clone(),
-            Style::default().fg(theme.text_muted),
-        )],
-        display_width(&version),
-    ));
+    // They join once the mark has landed; before that their rows stay
+    // blank so the body's line count never moves.
+    if reveal >= INTRO_TEXT_AT {
+        body.push(centered(
+            vec![Span::styled(
+                "gray",
+                Style::default().bold().fg(theme.text_bright),
+            )],
+            4,
+        ));
+        body.push(centered(
+            vec![Span::styled(
+                version.clone(),
+                Style::default().fg(theme.text_muted),
+            )],
+            display_width(&version),
+        ));
+    } else {
+        body.push(Line::from(""));
+        body.push(Line::from(""));
+    }
     body.push(Line::from(""));
+    body
+}
 
-    // Vertical centering: the block is this banner plus the composer's
-    // home band; the band's spacer rows take the other half of the free
-    // rows.
+/// `top` blank rows over the body: the block is this banner plus the
+/// composer's home band; the band's spacer rows take the other half of
+/// the free rows. `pub(crate)` so the reveal contract is testable.
+pub(crate) fn welcome_lines_at(w: usize, reveal: f32) -> Vec<Line<'static>> {
+    let body = welcome_body_lines(w, reveal);
     let rows = crossterm::terminal::size()
         .map(|(_, r)| r as usize)
         .unwrap_or(0);
@@ -638,6 +726,67 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
     }
     welcome_lines.extend(body);
     welcome_lines
+}
+
+pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
+    welcome_lines_at(w, 1.0)
+}
+
+/// The startup bloom: the welcome mark grows out from its centre in the
+/// rows the banner insert is about to fill, so the animation *becomes*
+/// the banner — the insert repaints the same cells, which is what pushes
+/// them into scrollback. Skipped under `NO_COLOR` or when the block can't
+/// fit; either way the caller still runs the plain insert.
+fn play_logo_intro(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return;
+    }
+    // The banner lands `overflow` rows above the band's anchor: that's how
+    // much the insert and the first band draw would scroll past the
+    // bottom. Scrolling first keeps the painted rows final — run the
+    // insert first and the frames would scroll into scrollback as a ghost
+    // copy above the real banner.
+    let y0 = terminal.viewport_area.y as usize;
+    let overflow = (y0 + welcome_h + draw::home_band_h(w)).saturating_sub(h);
+    if overflow > y0 {
+        return;
+    }
+    let start = y0 - overflow;
+    if overflow > 0 {
+        let mut out = std::io::stdout().lock();
+        let _ = write!(out, "\x1b[{h};1H{}", "\n".repeat(overflow));
+        let _ = out.flush();
+    }
+    terminal.set_viewport_area(ratatui::layout::Rect::new(
+        0,
+        start as u16,
+        w as u16,
+        welcome_h as u16,
+    ));
+    for f in 0..INTRO_FRAMES {
+        let p = f as f32 / (INTRO_FRAMES - 1) as f32;
+        // expo-out, the SVG's cubic-bezier(0.16, 1, 0.3, 1).
+        let ease = if p >= 1.0 {
+            1.0
+        } else {
+            1.0 - 2f32.powf(-10.0 * p)
+        };
+        let reveal = INTRO_BASE_R + (1.0 - INTRO_BASE_R) * ease;
+        let _ = terminal.draw(|frame| {
+            let area = frame.area();
+            frame.render_widget(Paragraph::new(welcome_lines_at(w, reveal)), area);
+        });
+        // poll() is the frame clock *and* the skip: a queued key cuts to
+        // the finished banner instead of being eaten.
+        if f + 1 < INTRO_FRAMES
+            && crossterm::event::poll(Duration::from_millis(INTRO_FRAME_MS)).unwrap_or(false)
+        {
+            break;
+        }
+    }
+    // Collapse the band back to a zero-height anchor at the banner's top
+    // row so the insert draws over the last frame rather than shifting it.
+    terminal.set_viewport_area(ratatui::layout::Rect::new(0, start as u16, w as u16, 0));
 }
 
 impl Tui {
@@ -665,6 +814,12 @@ impl Tui {
         // Print welcome logo into scrollback once at startup
         let welcome_lines = build_welcome_lines(cols as usize);
         let welcome_h = welcome_lines.len() as u16;
+        play_logo_intro(
+            &mut terminal,
+            cols as usize,
+            rows as usize,
+            welcome_h as usize,
+        );
         let _ = terminal.insert_before(welcome_h, |buf| {
             Paragraph::new(welcome_lines.clone()).render(buf.area, buf);
         });
@@ -723,6 +878,9 @@ impl Tui {
                 true,
             ),
             committed_markdown_lines: 0,
+            reveal_buf: String::new(),
+            reveal_pacing: false,
+            feeding_markdown: false,
             pending_resize: None,
             turn_billed_output: None,
             streamed_bytes: 0,
@@ -734,6 +892,7 @@ impl Tui {
             status_line_seen: crate::statusline::version(),
             ask_modal: None,
             home_notice: None,
+            left_home: false,
         })
     }
 
@@ -763,6 +922,7 @@ impl Tui {
     /// Finishes the live markdown renderer and commits every row past the
     /// last committed offset. Shared by the reflow drain and `flush_markdown`.
     fn commit_markdown_tail(&mut self) {
+        self.drain_reveal();
         // A held punctuation burst is a continuation of the paragraph the
         // renderer is about to finish: fold it into the source before the
         // full re-render, or `finish()` would freeze it as its own lone
@@ -1001,12 +1161,20 @@ impl Tui {
         self.home_notice = notice;
     }
 
-    /// devin's home screen: until the first transcript item, scrollback
-    /// holds only the welcome banner.
+    /// devin's home screen: it stays up through slash commands — their
+    /// `❯` echo card, `say()` lines and `/hehe` art hang in scrollback —
+    /// and ends only when a real turn starts (`begin_turn` flips
+    /// `left_home`) or a resumed session replays real messages.
     pub(crate) fn is_home(&self) -> bool {
-        self.history_entries
-            .iter()
-            .all(|e| matches!(e, TranscriptEntry::Welcome | TranscriptEntry::Gap(_)))
+        !self.left_home
+            && self.history_entries.iter().all(|e| match e {
+                TranscriptEntry::Welcome
+                | TranscriptEntry::Gap(_)
+                | TranscriptEntry::Mascot
+                | TranscriptEntry::StyledLines { .. } => true,
+                TranscriptEntry::UserPrompt(text, _) => text.starts_with('/'),
+                TranscriptEntry::ToolBox { .. } | TranscriptEntry::ThinkingRun(_) => false,
+            })
     }
 
     pub fn set_model_label(&mut self, label: Option<String>) {
@@ -1168,9 +1336,16 @@ impl Tui {
                 name: name.to_string(),
                 header,
                 running,
+                tail: LiveToolTail::default(),
             });
         }
         let _ = self.draw();
+    }
+
+    pub(crate) fn push_live_tool_output(&mut self, id: &str, bytes: &[u8]) {
+        if let Some(slot) = self.live_tools.iter_mut().find(|t| t.id == id) {
+            slot.tail.feed(bytes);
+        }
     }
 
     /// Drops a live tool card (pi `updateResult` flips the same card:
@@ -1185,15 +1360,30 @@ impl Tui {
         }
     }
 
-    /// Live tool headers for the viewport, oldest-first, capped so the
-    /// input box always stays visible.
-    pub(crate) fn live_tool_rows(&self) -> Vec<Line<'static>> {
+    pub(crate) fn live_tool_rows(&self, w: usize) -> Vec<Line<'static>> {
         let elapsed = self
             .turn_started
             .or_else(|| self.status.as_ref().map(|(started, _)| *started))
             .map(|started| started.elapsed())
             .unwrap_or_default();
-        live_tool_rows(&self.live_tools, elapsed)
+        live_tool_rows(&self.live_tools, elapsed, w)
+    }
+
+    pub(crate) fn stream_tail_rows(&self, w: usize) -> Vec<Line<'static>> {
+        let view = self.markdown_renderer.view();
+        let start = self.committed_markdown_lines.min(view.lines.len());
+        let lines = &view.lines[start..];
+        let max_w = transcript::prose_width(w);
+        let mut out = Vec::new();
+        for line in lines {
+            for mut row in transcript::wrap_styled_line(line.clone(), max_w) {
+                if !row.spans.is_empty() {
+                    row.spans.insert(0, transcript::left_pad());
+                }
+                out.push(row);
+            }
+        }
+        out
     }
 
     /// Overflow count past the live-tool cap (`+N more`, like the queued
@@ -1274,6 +1464,9 @@ impl Tui {
     }
 
     pub fn begin_turn(&mut self, label: &str) {
+        // The first real turn ends the home screen — slash commands and
+        // their modals never reach here.
+        self.left_home = true;
         let now = Instant::now();
         // The pending resume is now in flight: drop the flag so neither the
         // ghost nor a bare (empty) Enter mid-turn re-submits it.

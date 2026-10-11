@@ -321,7 +321,7 @@ fn awaiting_rows_show_the_prompt_with_hidden_chars_spelled_out() {
         prompt: "check\u{200b} bench".into(),
         ..job("asked", None)
     };
-    let row = &items(&[job.clone()], None, 0)[0].row;
+    let row = &items(std::slice::from_ref(&job), None, 0)[0].row;
     assert!(
         row.contains("\"check\u{27e8}U+200B\u{27e9} bench\""),
         "{row}"

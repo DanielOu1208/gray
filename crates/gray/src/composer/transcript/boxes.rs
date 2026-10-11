@@ -297,6 +297,7 @@ impl Tui {
         entries: &[crate::session_store::SessionEntry],
         cwd: &std::path::Path,
     ) {
+        self.left_home = true;
         let mut tool_calls: HashMap<String, (String, serde_json::Value)> = HashMap::new();
         for entry in entries {
             match entry.message.role {

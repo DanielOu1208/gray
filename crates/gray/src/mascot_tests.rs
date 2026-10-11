@@ -176,3 +176,49 @@ fn welcome_layout_is_devin_home() {
     assert_eq!(ver_line + 2, text.len(), "{text:?}");
     assert!(text.last().unwrap().trim().is_empty());
 }
+
+#[test]
+fn welcome_bloom_grows_out_from_the_centre() {
+    use crate::composer::welcome_lines_at;
+    let w = 120usize;
+    let glyphs = |reveal: f32| -> usize {
+        plain(&welcome_lines_at(w, reveal))
+            .iter()
+            .map(|l| l.chars().filter(|c| !c.is_whitespace()).count())
+            .sum()
+    };
+    // The first frame pops the gem's core (INTRO_BASE_R ≈ 55% of the
+    // radius), the last is the finished banner; the reveal is monotonic.
+    let first = glyphs(0.55);
+    let full = glyphs(1.0);
+    assert!(first > 0 && first < full, "first {first}, full {full}");
+    assert!(
+        glyphs(0.7) >= first && glyphs(0.7) <= full,
+        "the bloom only grows"
+    );
+    assert_eq!(
+        plain(&welcome_lines_at(w, 1.0)),
+        plain(&build_welcome_lines(w)),
+        "the last frame IS the banner"
+    );
+    // The title pair waits for the mark: hidden mid-bloom, shown at full.
+    assert!(
+        !plain(&welcome_lines_at(w, 0.5))
+            .iter()
+            .any(|l| l.trim() == "gray"),
+        "title joined early"
+    );
+    assert!(
+        plain(&welcome_lines_at(w, 1.0))
+            .iter()
+            .any(|l| l.trim() == "gray"),
+        "title missing at full reveal"
+    );
+    // Every frame is the banner's row count — the insert paints a fixed
+    // region, so a short frame would leave stale cells under it.
+    assert_eq!(
+        welcome_lines_at(w, 0.3).len(),
+        welcome_lines_at(w, 1.0).len(),
+        "frames must hold the banner's height"
+    );
+}

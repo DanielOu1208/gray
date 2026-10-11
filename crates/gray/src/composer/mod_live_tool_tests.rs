@@ -7,6 +7,7 @@ fn live(id: &str, text: &str, running: bool) -> LiveTool {
         name: id.to_string(),
         header: Line::from(vec![Span::raw(text.to_string())]),
         running,
+        tail: LiveToolTail::default(),
     }
 }
 
@@ -19,7 +20,7 @@ fn live_rows_preserve_order_and_cap_at_three() {
     let tools: Vec<LiveTool> = (0..5)
         .map(|i| live(&format!("t{i}"), &format!("tool {i}"), false))
         .collect();
-    let rows = live_tool_rows(&tools, Duration::ZERO);
+    let rows = live_tool_rows(&tools, Duration::ZERO, 80);
     assert_eq!(rows.len(), 3, "cap mirrors the queued preview");
     assert_eq!(row_text(&rows[0]), "tool 0");
     assert_eq!(row_text(&rows[2]), "tool 2");
@@ -39,6 +40,7 @@ fn bash_live(command: &str, running: bool) -> LiveTool {
             None,
         ),
         running,
+        tail: LiveToolTail::default(),
     }
 }
 
@@ -46,11 +48,11 @@ fn bash_live(command: &str, running: bool) -> LiveTool {
 fn live_rows_mark_running_cards() {
     let tool = bash_live("cargo test", true);
     let original = tool.header.clone();
-    let rows = live_tool_rows(std::slice::from_ref(&tool), Duration::ZERO);
+    let rows = live_tool_rows(std::slice::from_ref(&tool), Duration::ZERO, 80);
     assert_eq!(row_text(&rows[0]), "⬡ Running cargo test");
     assert_eq!(row_text(&tool.header), row_text(&original));
     assert_eq!(rows[0].spans.last(), original.spans.last());
-    let later = live_tool_rows(&[tool], Duration::from_secs(1));
+    let later = live_tool_rows(&[tool], Duration::from_secs(1), 80);
     assert_eq!(row_text(&rows[0]), row_text(&later[0]));
     assert_ne!(
         rows[0], later[0],
@@ -58,7 +60,7 @@ fn live_rows_mark_running_cards() {
     );
     let preparing = bash_live("cargo test", false);
     assert_eq!(
-        live_tool_rows(std::slice::from_ref(&preparing), Duration::ZERO)[0],
+        live_tool_rows(std::slice::from_ref(&preparing), Duration::ZERO, 80)[0],
         preparing.header
     );
 }
@@ -72,7 +74,7 @@ fn live_rows_update_in_place_without_reorder() {
         slot.header = Line::from(vec![Span::raw("new".to_string())]);
         slot.running = true;
     }
-    let rows = live_tool_rows(&tools, Duration::ZERO);
+    let rows = live_tool_rows(&tools, Duration::ZERO, 80);
     assert_eq!(row_text(&rows[0]), "Running new");
     assert_eq!(row_text(&rows[1]), "bee");
 }
@@ -83,7 +85,7 @@ fn running_label_does_not_orphan_a_trailing_status() {
         let tool = bash_live(command, true);
         // The replacement verb needs four more cells than "Ran", not a tail row.
         let width = tool.header.width() + 4;
-        let rows = live_tool_rows(&[tool], Duration::ZERO);
+        let rows = live_tool_rows(&[tool], Duration::ZERO, 80);
         let wrapped = crate::composer::transcript::wrap_styled_line(rows[0].clone(), width);
         assert_eq!(wrapped.len(), 1, "{wrapped:?}");
         for width in [12, 40, 80] {
@@ -109,11 +111,12 @@ fn other_tools_keep_their_identity_and_empty_headers_are_safe() {
             None,
         ),
         running: true,
+        tail: LiveToolTail::default(),
     };
-    let rows = live_tool_rows(&[tool], Duration::ZERO);
+    let rows = live_tool_rows(&[tool], Duration::ZERO, 80);
     assert!(row_text(&rows[0]).starts_with("⬡ Running custom"));
     assert_eq!(
-        row_text(&live_tool_rows(&[live("empty", "", true)], Duration::ZERO)[0]),
+        row_text(&live_tool_rows(&[live("empty", "", true)], Duration::ZERO, 80)[0]),
         "Running "
     );
 }

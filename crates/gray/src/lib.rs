@@ -3,6 +3,7 @@
 pub mod ask;
 pub mod auth;
 pub mod auto_title;
+pub mod auto_update;
 pub mod cache;
 pub mod cmd;
 pub mod compact;
@@ -13,6 +14,7 @@ pub mod cron_fire;
 pub mod cron_serve;
 pub mod cron_status;
 pub(crate) mod cron_tool;
+pub(crate) mod exe_watch;
 pub mod feedback;
 pub(crate) mod fusion;
 pub mod gateway;
@@ -627,7 +629,10 @@ pub enum Commands {
     },
     /// Update gray to the latest release
     #[command(visible_alias = "upgrade")]
-    Update,
+    Update {
+        #[arg(long, value_name = "on|off|status")]
+        auto: Option<String>,
+    },
     /// Cron jobs: list/add/remove/show (file-only over $GRAY_HOME/cron, no daemon needed)
     Cron {
         #[command(subcommand)]
@@ -922,6 +927,8 @@ pub enum PluginCmd {
         /// Plugin name or `all`
         #[arg(default_value = "all")]
         target: String,
+        #[arg(long)]
+        check: bool,
     },
     /// Enable an installed plugin
     Enable {

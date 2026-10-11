@@ -544,18 +544,65 @@ fn set_enabled_inner(name: &str, on: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Update one plugin (`target` = name) or all (`target` = `"all"`).
-/// Only lock entries the index lists under the same ecosystem (gray-native
-/// tarballs) are considered; anything else is skipped with a warning.
-/// Returns per-plugin reports for the plugins that actually changed.
-pub async fn update(target: &str) -> anyhow::Result<Vec<Report>> {
-    update_inner(target).await.map_err(|e| {
+#[derive(Debug)]
+pub enum UpdateAction {
+    Installed(String),
+    Rebuilt,
+    Stale(String),
+    Current,
+    Skipped(String),
+    Failed(String),
+}
+
+pub struct UpdateRow {
+    pub name: String,
+    pub action: UpdateAction,
+    pub path: Option<PathBuf>,
+}
+
+impl UpdateRow {
+    fn new(name: &str, action: UpdateAction) -> Self {
+        Self {
+            name: name.to_string(),
+            action,
+            path: None,
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match &self.action {
+            UpdateAction::Installed(v) => format!("updated to {v}"),
+            UpdateAction::Rebuilt => "rebuilt from repo HEAD".to_string(),
+            UpdateAction::Stale(why) => format!("stale: {why}"),
+            UpdateAction::Current => "up to date".to_string(),
+            UpdateAction::Skipped(why) => format!("skipped: {why}"),
+            UpdateAction::Failed(e) => format!("failed: {e}"),
+        }
+    }
+
+    pub fn changed(&self) -> bool {
+        matches!(
+            self.action,
+            UpdateAction::Installed(_) | UpdateAction::Rebuilt
+        )
+    }
+}
+
+pub async fn update(target: &str) -> anyhow::Result<Vec<UpdateRow>> {
+    update_inner(target, false).await.map_err(|e| {
         crate::errors::record(&ecosystem_of(target), target, format!("{e:#}"));
         e
     })
 }
 
-async fn update_inner(target: &str) -> anyhow::Result<Vec<Report>> {
+pub async fn check_update(target: &str) -> anyhow::Result<Vec<UpdateRow>> {
+    update_inner(target, true).await.map_err(|e| {
+        crate::errors::record(&ecosystem_of(target), target, format!("{e:#}"));
+        e
+    })
+}
+
+async fn update_inner(target: &str, check: bool) -> anyhow::Result<Vec<UpdateRow>> {
     let lock = read_lock()?.unwrap_or_default();
     let names: Vec<String> = if target == "all" {
         lock.plugins.keys().cloned().collect()
@@ -566,39 +613,263 @@ async fn update_inner(target: &str) -> anyhow::Result<Vec<Report>> {
         vec![target.to_string()]
     };
     let client = crate::fetch::client()?;
-    let index = crate::index::fetch_index(&client).await?;
+    let mut index: Option<crate::index::Index> = None;
     let mut out = Vec::new();
     for name in &names {
         let installed = &lock.plugins[name];
-        // Registered executables (cli_argv with no index hash) are
-        // user-owned, not index installs — never let a same-named index
-        // entry replace one. Index installs that adopted a cli_argv keep
-        // their hash and update normally.
         if is_registered_executable(installed) {
-            eprintln!("warning: skipping update of {name} (registered executable)");
+            out.push(registered_exe_row(name, installed, check).await);
             continue;
         }
-        let entry = match crate::index::lookup(&index, name) {
+        if index.is_none() {
+            index = Some(crate::index::fetch_index(&client).await?);
+        }
+        let entry = match crate::index::lookup(index.as_ref().unwrap(), name) {
             Ok(e) => e,
             Err(_) => {
-                eprintln!("warning: skipping update of {name} (not in index)");
+                out.push(UpdateRow::new(
+                    name,
+                    UpdateAction::Skipped("not in index".into()),
+                ));
                 continue;
             }
         };
-        // Update only rows install_index would write itself: a foreign row
-        // the index never listed keeps its source (never rewritten).
         if installed.ecosystem != entry.ecosystem || !supported_index_entry(entry) {
-            eprintln!("warning: skipping update of {name} (non-index source)");
+            out.push(UpdateRow::new(
+                name,
+                UpdateAction::Skipped("non-index source".into()),
+            ));
             continue;
         }
-        if entry.version == installed.version {
+        let index_hash = entry.hash.primary().unwrap_or_default();
+        let drift = entry.version != installed.version || index_hash != installed.hash.as_str();
+        if !drift {
+            out.push(UpdateRow::new(name, UpdateAction::Current));
+            continue;
+        }
+        if check {
+            out.push(UpdateRow::new(
+                name,
+                UpdateAction::Stale(format!(
+                    "{} -> {} (index)",
+                    installed.version, entry.version
+                )),
+            ));
             continue;
         }
         let argv = installed.argv.clone();
         let scope = Some(installed.scope.clone());
-        out.push(install_index(&client, name, InstallOpts { argv, scope }).await?);
+        match install_index(&client, name, InstallOpts { argv, scope }).await {
+            Ok(r) => {
+                let v = r.version.clone();
+                out.push(UpdateRow {
+                    name: r.name,
+                    action: UpdateAction::Installed(v),
+                    path: Some(r.path),
+                });
+            }
+            Err(e) => out.push(UpdateRow::new(name, UpdateAction::Failed(format!("{e:#}")))),
+        }
     }
     Ok(out)
+}
+
+fn registered_exe_path(e: &LockEntry) -> Option<PathBuf> {
+    e.cli_argv
+        .as_ref()
+        .and_then(|a| a.first())
+        .or_else(|| e.argv.first())
+        .map(PathBuf::from)
+}
+
+fn target_repo(exe: &Path) -> Option<PathBuf> {
+    let profile = exe.parent()?;
+    let name = profile.file_name()?.to_str()?;
+    if name != "release" && name != "debug" {
+        return None;
+    }
+    let target = profile.parent()?;
+    if target.file_name()?.to_str()? != "target" {
+        return None;
+    }
+    let repo = target.parent()?;
+    repo.join(".git").exists().then(|| repo.to_path_buf())
+}
+
+fn head_commit_secs(repo: &Path) -> Result<u64, String> {
+    let out = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(repo)
+        .args(["log", "-1", "--format=%ct"])
+        .output()
+        .map_err(|e| format!("git log: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("git log failed in {}", repo.display()));
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .map_err(|e| format!("git log %ct parse: {e}"))
+}
+
+const REBUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+fn reconcile_mtime(exe: &Path, head_secs: u64) {
+    let still_old = std::fs::metadata(exe)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() < head_secs)
+        .unwrap_or(false);
+    if !still_old {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("touch").arg(exe).status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::File::options()
+            .write(true)
+            .open(exe)
+            .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    }
+}
+
+fn rebuild_log(name: &str) -> Option<PathBuf> {
+    let dir = crate::gray_home().join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(format!("plugin-build-{name}.log")))
+}
+
+fn rebuild_registered(name: &str, repo: &Path) -> Result<(), String> {
+    use std::io::Write as _;
+    let log_path = rebuild_log(name);
+    let log_file = log_path.as_ref().and_then(|p| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .ok()
+    });
+    let mut cmd = rebuild_command();
+    cmd.current_dir(repo)
+        .env("CARGO_BUILD_JOBS", "4")
+        .stdin(std::process::Stdio::null());
+    match &log_file {
+        Some(f) => {
+            let f2 = f.try_clone().map_err(|e| format!("log clone: {e}"))?;
+            cmd.stdout(std::process::Stdio::from(f2))
+                .stderr(std::process::Stdio::from(
+                    f.try_clone().map_err(|e| format!("{e}"))?,
+                ));
+        }
+        None => {
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+    }
+    if let Some(mut f) = log_file {
+        let _ = writeln!(f, "=== {} cargo build --release ===", crate::now_secs());
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("spawn build: {e}"))?;
+    let deadline = std::time::Instant::now() + REBUILD_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(match &log_path {
+                    Some(p) => format!("cargo build failed ({status}); log: {}", p.display()),
+                    None => format!("cargo build failed ({status})"),
+                });
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("build timed out (30m)".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => return Err(format!("wait: {e}")),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn rebuild_command() -> std::process::Command {
+    let mut c = std::process::Command::new("nice");
+    c.args([
+        "-n",
+        "19",
+        "ionice",
+        "-c3",
+        "flock",
+        "/tmp/cargo.lock",
+        "cargo",
+        "build",
+        "--release",
+    ]);
+    c
+}
+
+#[cfg(not(unix))]
+fn rebuild_command() -> std::process::Command {
+    let mut c = std::process::Command::new("cargo");
+    c.args(["build", "--release"]);
+    c
+}
+
+async fn registered_exe_row(name: &str, installed: &LockEntry, check: bool) -> UpdateRow {
+    let Some(exe) = registered_exe_path(installed) else {
+        return UpdateRow::new(
+            name,
+            UpdateAction::Skipped("registered without argv".into()),
+        );
+    };
+    let Some(repo) = target_repo(&exe) else {
+        return UpdateRow::new(
+            name,
+            UpdateAction::Skipped("registered executable is not a repo target/ build".into()),
+        );
+    };
+    let head = match head_commit_secs(&repo) {
+        Ok(t) => t,
+        Err(e) => return UpdateRow::new(name, UpdateAction::Failed(e)),
+    };
+    let mtime = match std::fs::metadata(&exe).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(e) => return UpdateRow::new(name, UpdateAction::Failed(format!("stat {exe:?}: {e}"))),
+    };
+    let mtime_secs = mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if head <= mtime_secs {
+        return UpdateRow::new(name, UpdateAction::Current);
+    }
+    if check {
+        return UpdateRow::new(
+            name,
+            UpdateAction::Stale(format!("repo HEAD newer than binary ({})", repo.display())),
+        );
+    }
+    let repo2 = repo.clone();
+    let name2 = name.to_string();
+    let built = tokio::task::spawn_blocking(move || rebuild_registered(&name2, &repo2)).await;
+    match built {
+        Ok(Ok(())) => {
+            reconcile_mtime(&exe, head);
+            UpdateRow {
+                name: name.to_string(),
+                action: UpdateAction::Rebuilt,
+                path: Some(exe),
+            }
+        }
+        Ok(Err(e)) => UpdateRow::new(name, UpdateAction::Failed(e)),
+        Err(e) => UpdateRow::new(name, UpdateAction::Failed(format!("{e}"))),
+    }
 }
 
 #[path = "ops_tests.rs"]

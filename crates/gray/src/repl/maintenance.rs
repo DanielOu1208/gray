@@ -32,8 +32,30 @@ const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500
 /// script, so `/update` asks the way `gray update` does and reports exactly
 /// what happened, including the PATH-shadowing warning that bites right after
 /// a self-update.
-pub(crate) async fn handle_update(tui: &TuiOpt) {
+pub(crate) async fn handle_update(tui: &TuiOpt, arg: Option<String>) {
     let shared = tui.as_ref().map(|(s, _)| s);
+    if let Some(rest) = arg.as_deref().map(str::trim)
+        && let Some(sub) = rest.strip_prefix("auto")
+    {
+        let word = sub.trim();
+        match word {
+            "on" | "off" => {
+                let on = word == "on";
+                let text = match crate::auto_update::set_enabled(on) {
+                    Ok(()) if on => "auto-update on".to_string(),
+                    Ok(()) => "auto-update off — `gray update` still installs manually".to_string(),
+                    Err(e) => format!("auto-update toggle failed: {e:#}"),
+                };
+                super::say(shared, &text);
+            }
+            "status" | "" => super::say(shared, &crate::auto_update::status_text()),
+            other => super::say(
+                shared,
+                &format!("unknown `/update auto {other}` (on|off|status)"),
+            ),
+        }
+        return;
+    }
     let current = env!("CARGO_PKG_VERSION");
     super::say(
         shared,

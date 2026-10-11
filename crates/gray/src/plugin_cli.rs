@@ -659,21 +659,13 @@ pub fn set_managed_enabled(name: &str, on: bool) -> anyhow::Result<()> {
     gray_pkg::ops::set_enabled(name, on)
 }
 
-/// `gray plugin update [name|all]` — index-installed entries only;
-/// registered executables carry no index source and are skipped with a
-/// warning before any index fetch.
-pub async fn update_managed(target: &str) -> anyhow::Result<Vec<gray_pkg::ops::Report>> {
-    if target != "all" && is_local_command(&home()?, target) {
-        eprintln!("warning: skipping update of {target} (non-index source)");
-        return Ok(Vec::new());
-    }
+pub async fn update_managed(target: &str) -> anyhow::Result<Vec<gray_pkg::ops::UpdateRow>> {
     let reports = gray_pkg::ops::update(target).await?;
-    // Re-probe each updated plugin: the new version's executable may have
-    // moved, gained, or lost CLI support. Best-effort — the update stands
-    // even when adoption can't run.
     let home = home()?;
     for r in &reports {
-        if let Err(e) = adopt_cli(&home, &r.name, &r.path).await {
+        if let (Some(path), gray_pkg::ops::UpdateAction::Installed(_)) = (&r.path, &r.action)
+            && let Err(e) = adopt_cli(&home, &r.name, path).await
+        {
             eprintln!(
                 "warning: could not set up `gray {}` forwarding: {e:#}",
                 r.name
@@ -683,10 +675,15 @@ pub async fn update_managed(target: &str) -> anyhow::Result<Vec<gray_pkg::ops::R
     Ok(reports)
 }
 
+pub async fn check_managed(target: &str) -> anyhow::Result<Vec<gray_pkg::ops::UpdateRow>> {
+    gray_pkg::ops::check_update(target).await
+}
+
 /// A lock row with `cli_argv` and no index hash is a registered executable,
 /// not an index-installed package (index rows keep their hash even after
 /// adopting a `cli_argv`). Lock load errors answer false (the index path
 /// then reports whatever went wrong itself).
+#[allow(dead_code)]
 fn is_local_command(home: &Path, name: &str) -> bool {
     migrate_commands_json(home);
     load_lock(home)

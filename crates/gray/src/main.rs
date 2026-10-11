@@ -163,7 +163,10 @@ async fn run() -> anyhow::Result<()> {
             } => {
                 return run_resume_subcommand(&mut config, session_id.as_deref(), last, all).await;
             }
-            gray::Commands::Update => {
+            gray::Commands::Update { auto } => {
+                if let Some(v) = auto.as_deref() {
+                    return gray::auto_update::auto_cli(v);
+                }
                 return gray::update::update_now().await;
             }
             gray::Commands::Plugin { cmd } => {
@@ -383,13 +386,22 @@ async fn run_plugin_inner(cmd: gray::PluginCmd) -> anyhow::Result<()> {
             println!("removed {name}");
             Ok(())
         }
-        PluginCmd::Update { target } => {
-            let reports = gray::plugin_cli::update_managed(&target).await?;
-            if reports.is_empty() {
-                println!("up to date");
+        PluginCmd::Update { target, check } => {
+            let reports = if check {
+                gray::plugin_cli::check_managed(&target).await?
+            } else {
+                gray::plugin_cli::update_managed(&target).await?
+            };
+            let mut printed = false;
+            for r in &reports {
+                if matches!(r.action, gray_pkg::ops::UpdateAction::Current) {
+                    continue;
+                }
+                printed = true;
+                println!("{}: {}", r.name, r.detail());
             }
-            for r in reports {
-                println!("updated {} {}", r.name, r.version);
+            if !printed {
+                println!("up to date");
             }
             Ok(())
         }

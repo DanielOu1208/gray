@@ -540,7 +540,7 @@ fn update_and_restart_parse_and_register() {
     ] {
         let cmd = parse_command(typed);
         let right = match name {
-            "update" => matches!(cmd, ReplCommand::Update),
+            "update" => matches!(cmd, ReplCommand::Update(_)),
             _ => matches!(cmd, ReplCommand::Restart),
         };
         assert!(right, "{typed} must parse as /{name}");
