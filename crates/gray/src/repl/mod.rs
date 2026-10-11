@@ -870,8 +870,6 @@ pub async fn run_repl_mode(
                 if ticker_stop.load(AtomicOrdering::Relaxed) {
                     break;
                 }
-                // 16ms frame tick: reveal pacing runs every pass, the
-                // status repaint keeps its ~100ms cadence.
                 tokio::time::sleep(std::time::Duration::from_millis(16)).await;
                 if ticker_stop.load(AtomicOrdering::Relaxed) {
                     break;

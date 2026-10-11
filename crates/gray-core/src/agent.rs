@@ -228,11 +228,8 @@ pub type CheckpointHook = std::sync::Arc<
         + Sync,
 >;
 
-/// Host callback for incremental tool output: `(call_id, chunk)` where chunk
-/// is already redacted by the producer.
 pub type ToolOutputHook = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
 
-/// The tool currently running on this task may stream output chunks here.
 #[derive(Clone)]
 pub struct ToolOutputSink {
     id: String,
@@ -249,9 +246,6 @@ tokio::task_local! {
     static TOOL_OUTPUT: ToolOutputSink;
 }
 
-/// The output sink for the tool call this task is executing, if the host
-/// installed a [`ToolOutputHook`]. Task-locals do not cross `tokio::spawn`,
-/// so capture it on the task that runs `Tool::execute`.
 pub fn current_tool_output() -> Option<ToolOutputSink> {
     TOOL_OUTPUT.try_with(Clone::clone).ok()
 }
@@ -594,8 +588,6 @@ pub struct Agent {
     pub(crate) steer: Option<SteerHook>,
     /// See [`CheckpointHook`]. Set per turn by the host.
     pub(crate) checkpoint: Option<CheckpointHook>,
-    /// See [`ToolOutputHook`]: tool executions stream incremental output
-    /// through it while they run.
     pub(crate) tool_output_hook: Option<ToolOutputHook>,
     /// Session this transcript persists to, when known — woven into
     /// compaction citation stubs (arXiv:2607.25066). Captured from each
@@ -749,7 +741,6 @@ impl Agent {
         self.checkpoint = hook;
     }
 
-    /// Install the per-call tool-output hook (see [`ToolOutputHook`]).
     pub fn set_tool_output_hook(&mut self, hook: Option<ToolOutputHook>) {
         self.tool_output_hook = hook;
     }

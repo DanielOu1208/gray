@@ -246,9 +246,6 @@ pub(crate) fn live_tool_rows(
     elapsed: Duration,
     w: usize,
 ) -> Vec<Line<'static>> {
-    // One screen row per tail line (draw wraps live rows at w-4): the
-    // 4-space indent plus the text fit inside that budget or the band
-    // height would drift with the tail.
     let text_budget = w.saturating_sub(8).max(1);
     tools
         .iter()
@@ -392,14 +389,8 @@ pub struct Tui {
     pub(crate) cache: crate::cache::CacheTracker,
     markdown_renderer: gray_markdown::StreamingMarkdownRenderer,
     committed_markdown_lines: usize,
-    /// Streamed prose not yet fed to the renderer. Non-empty only while
-    /// reveal pacing is on (`enable_reveal_pacing`); `tick_reveal` drains
-    /// it into [`Tui::feed_markdown`] at the ticker cadence.
     reveal_buf: String,
     reveal_pacing: bool,
-    /// Set for the duration of a `feed_markdown` call: the emit funnels'
-    /// reveal drain must not fire nested inside a commit — the backlog's
-    /// rows would land ahead of the outer commit's earlier rows.
     feeding_markdown: bool,
     pub(crate) pending_resize: Option<(u16, Instant)>,
     /// Billed output tokens from this turn's TurnEnd usage (Σ-per-round).
@@ -471,15 +462,9 @@ pub(crate) struct LiveTool {
     pub(crate) name: String,
     pub(crate) header: Line<'static>,
     pub(crate) running: bool,
-    /// Rolling tail of the tool's streamed output (see `ToolOutputHook` in
-    /// gray-core); painted under the card while it runs.
     pub(crate) tail: LiveToolTail,
 }
 
-/// Last lines of a running tool's streamed output. Chunks arrive already
-/// redacted (the pump emits post-redaction only). `\r` rewinds the partial
-/// line for progress bars; the ring keeps the last few complete-or-partial
-/// non-empty lines.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LiveToolTail {
     lines: std::collections::VecDeque<String>,
@@ -854,8 +839,6 @@ impl Tui {
     /// Finishes the live markdown renderer and commits every row past the
     /// last committed offset. Shared by the reflow drain and `flush_markdown`.
     fn commit_markdown_tail(&mut self) {
-        // Paced prose must join the render before it finalizes, or the
-        // finish would split the paragraph mid-word.
         self.drain_reveal();
         // A held punctuation burst is a continuation of the paragraph the
         // renderer is about to finish: fold it into the source before the
@@ -1268,9 +1251,6 @@ impl Tui {
         let _ = self.draw();
     }
 
-    /// Incremental output for the running call `id` (chunks are redacted
-    /// upstream). Appends to the card's tail; the ticker repaints. A gone
-    /// card (result committed, handed to a background job) eats the chunk.
     pub(crate) fn push_live_tool_output(&mut self, id: &str, bytes: &[u8]) {
         if let Some(slot) = self.live_tools.iter_mut().find(|t| t.id == id) {
             slot.tail.feed(bytes);
@@ -1289,8 +1269,6 @@ impl Tui {
         }
     }
 
-    /// Live tool headers + output tails for the viewport, oldest-first,
-    /// capped so the input box always stays visible. `w` is the band width.
     pub(crate) fn live_tool_rows(&self, w: usize) -> Vec<Line<'static>> {
         let elapsed = self
             .turn_started
@@ -1300,13 +1278,8 @@ impl Tui {
         live_tool_rows(&self.live_tools, elapsed, w)
     }
 
-    /// The markdown renderer's unfrozen tail laid out like committed rows
-    /// (same wrap and gutter): the band paints these above the live tool
-    /// cards as the continuation of scrollback while a block is in flight.
     pub(crate) fn stream_tail_rows(&self, w: usize) -> Vec<Line<'static>> {
         let view = self.markdown_renderer.view();
-        // A draw can land mid-`commit_markdown_tail` — the renderer is
-        // replaced before `committed_markdown_lines` resets — so clamp.
         let start = self.committed_markdown_lines.min(view.lines.len());
         let lines = &view.lines[start..];
         let max_w = transcript::prose_width(w);

@@ -260,9 +260,6 @@ impl Tui {
     /// The funnel for logical lines (prose, notices, errors): blank rows at
     /// the block's edges become boundaries, an owed gap is paid in front, and
     /// the rows are wrapped and painted. Live commits, reflow and replay all
-    /// pass through here, so they lay out alike. The reveal drain at the top
-    /// keeps scrollback order: prose still buffered by pacing must land
-    /// before any row that arrived after it.
     pub(crate) fn emit_styled(
         &mut self,
         lines: Vec<Line<'static>>,
@@ -453,17 +450,10 @@ impl Tui {
         let _ = self.draw();
     }
 
-    /// Reveal pacing on: `stream_text` buffers into `reveal_buf` and
-    /// `tick_reveal` feeds the renderer a paced slice per tick (typing feel)
-    /// instead of committing whole deltas at once. Off = feed immediately,
-    /// the historical behavior every non-interactive path keeps.
     pub(crate) fn enable_reveal_pacing(&mut self) {
         self.reveal_pacing = true;
     }
 
-    /// Queue or feed one cleaned stream delta. Paced callers park the text
-    /// in `reveal_buf` and release a slice immediately, so the band paints
-    /// the start of the delta in the same frame.
     fn feed_stream_text(&mut self, clean: &str) {
         if self.reveal_pacing {
             self.reveal_buf.push_str(clean);
@@ -473,10 +463,6 @@ impl Tui {
         }
     }
 
-    /// One reveal tick: release `max(3, ceil(backlog/20))` chars from the
-    /// front of `reveal_buf`, extending the cut to the end of the current
-    /// word when it lands within 8 more chars. ~190 chars/s floor, burst
-    /// catch-up within ~320ms. No-op while a modal owns the terminal.
     pub(crate) fn tick_reveal(&mut self) {
         if self.modal_open || self.reveal_buf.is_empty() {
             return;
@@ -498,10 +484,6 @@ impl Tui {
         let _ = self.draw();
     }
 
-    /// Feed all remaining buffered prose now: a flush/commit boundary must
-    /// not let paced text land after rows that arrived later. Skipped while
-    /// a feed is already running — a nested drain would insert the backlog's
-    /// (later) rows ahead of the outer commit's earlier ones.
     pub(crate) fn drain_reveal(&mut self) {
         if self.reveal_buf.is_empty() || self.feeding_markdown {
             return;
@@ -510,13 +492,6 @@ impl Tui {
         self.feed_markdown(&rest);
     }
 
-    /// Feed the streaming renderer and commit newly frozen rows to
-    /// scrollback — the single feed+commit step every prose path shares.
-    /// The live viewport width is set here so tables lay out to fit (or
-    /// fall back to records) instead of rendering wide and shredding
-    /// downstream; `live_width` reflows first when the size actually
-    /// changed (same ~75ms trailing debounce as the idle ticker), so a
-    /// resize mid-table re-lays committed rows, not just new tables.
     fn feed_markdown(&mut self, clean: &str) {
         let was_feeding = self.feeding_markdown;
         self.feeding_markdown = true;

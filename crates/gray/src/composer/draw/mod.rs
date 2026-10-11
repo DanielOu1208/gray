@@ -269,10 +269,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         })
         .sum::<u16>()
         .saturating_add(u16::from(tui.live_tool_overflow() > 0));
-    // The streaming markdown tail: the renderer's unfrozen rows laid out at
-    // prose width. Painted under the queued preview, above the live cards —
-    // scrollback's live continuation — and trimmed from the top so its
-    // newest rows show.
     let stream_tail: Vec<Line<'static>> = tui.stream_tail_rows(w);
     let tail_est = stream_tail.len() as u16;
     let widget_budget = rows
@@ -295,8 +291,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     if reserve_overflow_row {
         band_allowance -= 1;
     }
-    // Priority order for a tight allowance: the in-flight answer text
-    // outlives cards and widgets.
     let mut reserved = [
         ask_est,
         queued_est,
@@ -360,8 +354,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     // all of `tui`, which would collide with `terminal.draw`'s mutable
     // borrow; wrapping happens inside at the frame width.
     let live_headers: Vec<Line<'static>> = tui.live_tool_rows(w);
-    // Tail-row count per shown card, so the allowance trim below can drop
-    // output rows before it ever drops a card's header.
     let live_tail_counts: Vec<usize> = tui
         .live_tools
         .iter()
@@ -407,8 +399,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let mut queued_preview: Vec<Line<'static>> = queued_preview_lines(&tui.queued_inputs, w);
         // Live tool cards (pi pending cards): wrapped at the frame width
         // like every other viewport row; `live_h` reserves their space.
-        // `live_is_tail[i]` marks card output rows so a tight allowance can
-        // drop them before any card header.
         let mut live_rows: Vec<Line<'static>> = Vec::new();
         let mut live_is_tail: Vec<bool> = Vec::new();
         {
@@ -478,7 +468,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         ask_rows.truncate(rows_h[0] as usize);
         queued_preview.truncate(rows_h[1] as usize);
         widget_rows.truncate(rows_h[2] as usize);
-        // Tail output rows drop before headers; whole cards drop last.
         while live_rows.len() > rows_h[3] as usize {
             if let Some(idx) = live_is_tail.iter().rposition(|&t| t) {
                 live_rows.remove(idx);
@@ -488,8 +477,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 live_is_tail.pop();
             }
         }
-        // The stream tail keeps its newest rows: it is the continuation of
-        // scrollback, so an overlong tail shows the end, not the start.
         let tail_drop = tail_rows.len().saturating_sub(rows_h[4] as usize);
         tail_rows.drain(..tail_drop);
         let show_live_overflow = reserve_overflow_row;
@@ -570,7 +557,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 Rect::new(area.x, y, area.width, 1),
             );
         }
-        // Scrollback's live continuation: plain rows, no card chrome.
         for (i, line) in tail_rows.iter().enumerate() {
             let y = tail_y + i as u16;
             if y < area.y || y >= area.y + area.height {
