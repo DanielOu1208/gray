@@ -43,6 +43,16 @@ impl ToolExecutor for LiveRegistry {
         self.static_.drain_notifications(ctx)
     }
 
+    /// The build-time session pin reaches live plugins again when the
+    /// host session materializes after the agent was built (first turn,
+    /// `/new`): without this every wire point but `tool/call` reports
+    /// `session.id` as empty for the session's whole life.
+    fn repin_session(&self, id: &str) {
+        for p in &self.live {
+            p.set_session_id(id);
+        }
+    }
+
     fn wait_for_notification(
         &self,
         ctx: &ToolContext,

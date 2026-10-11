@@ -54,6 +54,9 @@ pub struct OpenAiProvider {
     session_id: Option<String>,
     /// Declared dynamic profile; `None` preserves the built-in provider path.
     profile: Option<OpenAiProviderProfile>,
+    /// Resolved once at construction — request building reads fields here
+    /// instead of re-deriving model×host quirks per call.
+    caps: ModelCaps,
     /// Lease source for dynamic profiles. The agent keeps it alive for the
     /// whole sidecar lifecycle.
     credential_source: Option<Arc<dyn CredentialSource>>,
@@ -90,11 +93,13 @@ impl OpenAiProvider {
         // (finish_reason then silence, hung proxy) can't freeze a turn
         // forever. Total timeout stays off: long generations are legal.
         let http = Self::http_client(true);
+        let model = model.into();
 
         Ok(Self {
+            caps: ModelCaps::for_model(&model).with_host(&base_url),
             base_url,
             api_key: api_key.into(),
-            model: model.into(),
+            model,
             http,
             reasoning_effort,
             temperature: None,
@@ -129,10 +134,12 @@ impl OpenAiProvider {
     ) -> Result<Self, String> {
         let base_url = profile.base_url.clone();
         let http = Self::http_client(profile.follow_redirects);
+        let model = model.into();
         Ok(Self {
+            caps: ModelCaps::for_model(&model).with_host(&base_url),
             base_url,
             api_key: String::new(),
-            model: model.into(),
+            model,
             http,
             reasoning_effort,
             temperature: None,
@@ -367,6 +374,113 @@ fn is_deepseek_model(model: &str) -> bool {
     model.to_lowercase().contains("deepseek")
 }
 
+/// The output-cap field name a host accepts: OpenAI's own API takes the
+/// reasoning-era `max_completion_tokens` (its reasoning models reject
+/// `max_tokens`); compatible servers keep the older name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CapField {
+    #[default]
+    MaxTokens,
+    MaxCompletionTokens,
+}
+
+/// The wire-level capabilities of one model, resolved once from the model
+/// id (and, where host dialect matters, the base URL). This table is the
+/// declared replacement for the old per-site `contains("claude")` name
+/// sniffing: every model×host quirk the request builders need is a field
+/// here, and the family keys live in one function instead of eight.
+///
+/// Reasoning-field diversity is deliberately not a field: the wire stamps
+/// `reasoning_effort`/`reasoning`/`thinking` together and the
+/// response-driven retry ([`should_retry_without_reasoning`]) handles
+/// providers that reject them — that path keys off the server's error
+/// body, not the model name.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ModelCaps {
+    /// Anthropic prompt caching: `cache_control` breakpoints on the system
+    /// prompt, last tool def, and last text-bearing message — plus
+    /// `thinking.budget_tokens` and the warm-output-cap bump for
+    /// claude-via-OpenAI-wire.
+    pub anthropic_cache: bool,
+    /// Replay `reasoning_content` (empty when absent) on every assistant
+    /// message — DeepSeek rejects assistant turns without the field.
+    pub replay_reasoning_content: bool,
+    /// Native video input parts (the gemini/gemma lines only).
+    pub accepts_video: bool,
+    /// `input_audio` on the chat wire for every supported format (gemini).
+    pub chat_audio_all: bool,
+    /// `input_audio` restricted to wav/mp3 (OpenAI `*audio*` models).
+    pub chat_audio_wav_mp3: bool,
+    /// `input_file` PDF parts on the Responses wire (vision-era OpenAI).
+    pub responses_pdf: bool,
+    /// Prefer the Responses wire over chat completions — muse models on
+    /// the zen/commandcode relays, whose chat dialect rejects their
+    /// payloads.
+    pub prefer_responses: bool,
+    /// The chat output-cap field this host accepts.
+    pub cap_field: CapField,
+}
+
+impl ModelCaps {
+    /// Resolve the model-derived fields. An unlisted model gets the
+    /// conservative defaults — no caching markers, no media parts, chat
+    /// wire — which is what the old name-sniff answered too.
+    pub(crate) fn for_model(model: &str) -> Self {
+        let id = model.to_ascii_lowercase();
+        let leaf = id.rsplit('/').next().unwrap_or(&id);
+        Self {
+            anthropic_cache: is_anthropic_model(model),
+            replay_reasoning_content: is_deepseek_model(model),
+            accepts_video: id.contains("gemini") || id.contains("gemma"),
+            chat_audio_all: id.contains("gemini"),
+            chat_audio_wav_mp3: id.contains("audio"),
+            responses_pdf: ["gpt-4o", "gpt-4.1", "gpt-5"]
+                .iter()
+                .any(|m| leaf.contains(m))
+                || ["o1", "o3", "o4"].iter().any(|m| leaf.starts_with(m)),
+            prefer_responses: is_muse_model(model),
+            cap_field: CapField::MaxTokens,
+        }
+    }
+
+    /// Apply the host-derived fields: muse's Responses preference only
+    /// holds on the relays that serve it, and the cap field name is a
+    /// property of the endpoint dialect, not the model.
+    pub(crate) fn with_host(mut self, base_url: &Url) -> Self {
+        self.prefer_responses = self.prefer_responses
+            && (base_url.as_str().contains("opencode.ai/zen")
+                || base_url.as_str().contains("commandcode.ai"));
+        if names_cap_max_completion_tokens(base_url) {
+            self.cap_field = CapField::MaxCompletionTokens;
+        }
+        self
+    }
+
+    /// Which media a chat-completions body takes natively under these
+    /// capabilities: video where declared, `input_audio` per the format
+    /// table. PDFs have no base64 part on this wire — extracted text only.
+    pub(crate) fn chat_accepts(&self, media_type: &str) -> bool {
+        if media_type.starts_with("video/") {
+            return self.accepts_video;
+        }
+        match input_audio_format(media_type) {
+            Some(_) if self.chat_audio_all => true,
+            Some(fmt) => self.chat_audio_wav_mp3 && matches!(fmt, "wav" | "mp3"),
+            None => false,
+        }
+    }
+
+    /// Which media a Responses-API body takes natively: `input_file` PDFs
+    /// where declared, and video where declared.
+    pub(crate) fn responses_accepts(&self, media_type: &str) -> bool {
+        match media_type {
+            "application/pdf" => self.responses_pdf,
+            mt if mt.starts_with("video/") => self.accepts_video,
+            _ => false,
+        }
+    }
+}
+
 /// Wire encoding for a tool result: neither the chat `tool` message nor the
 /// Responses `function_call_output` item has an `is_error` slot, so an error
 /// result is prefixed (model-visible, strict-provider-safe — no unknown
@@ -451,13 +565,12 @@ fn image_data_url(media_type: &str, data: &str) -> String {
     format!("data:{media_type};base64,{data}")
 }
 
-/// Does this model take a native video part? Deliberately a name check, not
-/// a capability table: only the Gemini line documents video input, and a
-/// wrong answer here either 400s at the provider or burns a huge prompt, so
-/// an unlisted model gets the media block's fallback instead.
+/// Does this model take a native video part? Only the Gemini line
+/// documents video input, and a wrong answer either 400s at the provider or
+/// burns a huge prompt — an unlisted model gets the media block's fallback.
+/// (The capability itself is declared in [`ModelCaps`].)
 pub fn model_accepts_video(model: &str) -> bool {
-    let id = model.to_ascii_lowercase();
-    id.contains("gemini") || id.contains("gemma")
+    ModelCaps::for_model(model).accepts_video
 }
 
 /// `input_audio.format` for a media type, when the chat wire has one.
@@ -471,39 +584,6 @@ fn input_audio_format(media_type: &str) -> Option<&'static str> {
         "audio/flac" | "audio/x-flac" => "flac",
         _ => return None,
     })
-}
-
-/// Which media a chat-completions model takes natively: video and every
-/// listed audio format on Gemini, wav/mp3 on OpenAI's `*audio*` models. PDFs
-/// have no base64 part on this wire (Gemini compat has no `file` type), so
-/// they always go as their extracted text.
-fn chat_accepts_media(model: &str, media_type: &str) -> bool {
-    let id = model.to_ascii_lowercase();
-    if media_type.starts_with("video/") {
-        return model_accepts_video(model);
-    }
-    match input_audio_format(media_type) {
-        Some(_) if id.contains("gemini") => true,
-        Some(fmt) => id.contains("audio") && matches!(fmt, "wav" | "mp3"),
-        None => false,
-    }
-}
-
-/// Which media a Responses-API model takes natively: `input_file` PDFs on
-/// the vision-era OpenAI lines, and video where [`model_accepts_video`].
-fn responses_accepts_media(model: &str, media_type: &str) -> bool {
-    let id = model.to_ascii_lowercase();
-    let id = id.rsplit('/').next().unwrap_or(&id);
-    match media_type {
-        "application/pdf" => {
-            ["gpt-4o", "gpt-4.1", "gpt-5"]
-                .iter()
-                .any(|m| id.contains(m))
-                || ["o1", "o3", "o4"].iter().any(|m| id.starts_with(m))
-        }
-        mt if mt.starts_with("video/") => model_accepts_video(model),
-        _ => false,
-    }
 }
 
 pub(crate) fn filter_valid_tools(
@@ -547,6 +627,7 @@ fn map_chat_request(
     model: &str,
     reasoning_effort: Option<&str>,
 ) -> Result<OpenAiChatRequest, ProviderError> {
+    let caps = ModelCaps::for_model(model);
     let max_tokens = req.max_tokens;
     let mut messages = Vec::new();
 
@@ -625,9 +706,8 @@ fn map_chat_request(
 
                 let reasoning_content = if thinking_parts.is_empty() {
                     // DeepSeek expects the reasoning field on every assistant
-                    // message: send it (possibly empty) for deepseek models,
-                    // omit it elsewhere.
-                    is_deepseek_model(model).then(String::new)
+                    // message: send it (possibly empty) where declared.
+                    caps.replay_reasoning_content.then(String::new)
                 } else {
                     Some(thinking_parts.join("\n"))
                 };
@@ -669,7 +749,7 @@ fn map_chat_request(
                 let mut media_parts = Vec::new();
                 let mut tool_results = Vec::new();
 
-                let content = resolve_media(msg.content, |mt| chat_accepts_media(model, mt));
+                let content = resolve_media(msg.content, |mt| caps.chat_accepts(mt));
                 for block in content {
                     match block {
                         ContentBlock::Text { text } => {
@@ -839,7 +919,7 @@ fn map_chat_request(
 
     // Anthropic prompt caching (pi): marked after the orphan guard so the
     // "last message" breakpoint lands on what is actually sent last.
-    if is_anthropic_model(model) {
+    if caps.anthropic_cache {
         apply_anthropic_cache_control(&mut messages, &mut tools);
     }
 
@@ -1050,7 +1130,9 @@ fn map_chat_to_responses(
                     _ => "user",
                 };
                 let mut text_parts: Vec<String> = Vec::new();
-                let content = resolve_media(msg.content, |mt| responses_accepts_media(model, mt));
+                let content = resolve_media(msg.content, |mt| {
+                    ModelCaps::for_model(model).responses_accepts(mt)
+                });
                 for block in content {
                     match block {
                         ContentBlock::Text { text } => {
@@ -1432,7 +1514,42 @@ const QUOTA_EXHAUSTED_HINTS: [&str; 10] = [
     "available balance",
 ];
 
+/// `error.code` or `error.type` from a JSON error body, as text.
+fn error_body_code(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body.trim()).ok()?;
+    v.pointer("/error/code")
+        .or_else(|| v.pointer("/error/type"))
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// Classify a failed response into the provider taxonomy, carrying the
+/// parsed fields on [`ProviderError::Detailed`]: status, vendor code and
+/// message, cf-ray and request id — everything format.rs used to scrape
+/// back out of the formatted string.
 pub(crate) fn classify_http_error(
+    status: reqwest::StatusCode,
+    snippet: &str,
+    cf_ray: Option<&str>,
+    req_id: Option<&str>,
+) -> ProviderError {
+    ProviderError::Detailed {
+        class: Box::new(classify_http_error_inner(status, snippet, cf_ray, req_id)),
+        detail: gray_core::error::ProviderDetail {
+            status: Some(status.as_u16()),
+            vendor_code: error_body_code(snippet),
+            vendor_message: error_body_message(snippet),
+            cf_ray: cf_ray.map(str::to_string),
+            request_id: req_id.map(str::to_string),
+        },
+    }
+}
+
+fn classify_http_error_inner(
     status: reqwest::StatusCode,
     snippet: &str,
     cf_ray: Option<&str>,
@@ -1453,6 +1570,16 @@ pub(crate) fn classify_http_error(
         msg.push_str(&format!(", request-id: {rid}"));
     }
     let lower = snippet.to_lowercase();
+    // A Cloudflare edge error page ("error code: 1010" — the owner banned this
+    // client signature) means the request never reached the provider; the key
+    // was never evaluated. It flaps request-to-request, so it's retryable —
+    // classifying it Auth would send the user to rotate a working key.
+    if status == reqwest::StatusCode::FORBIDDEN
+        && cf_ray.is_some()
+        && lower.trim_start().starts_with("error code: 1")
+    {
+        return ProviderError::ServerError(format!("provider edge blocked the request ({msg})"));
+    }
     // Taxonomy lite: context exhaustion compacts + retries once (never retried
     // blindly); content filters are terminal bad requests. Narrowed to avoid
     // false positives: `max_tokens` needs a context qualifier, bare
@@ -1506,14 +1633,8 @@ pub(crate) fn classify_http_error(
 }
 
 pub(crate) fn is_retryable_error(err: &ProviderError) -> bool {
-    matches!(
-        err,
-        ProviderError::RateLimited(_)
-            | ProviderError::ServerError(_)
-            | ProviderError::Stream(_)
-            | ProviderError::Timeout(_)
-            | ProviderError::Connection(_)
-    )
+    // Delegates to the method so `Detailed` wraps classify the same.
+    err.retryable()
 }
 
 /// A bare 403 gets exactly one same-key re-POST: gateway edges emit transient
@@ -1523,7 +1644,7 @@ fn should_retry_request(err: &ProviderError, http_status: u16, attempt: usize) -
     if is_retryable_error(err) {
         return true;
     }
-    let ProviderError::Auth(msg) = err else {
+    let ProviderError::Auth(msg) = err.class() else {
         return false;
     };
     let lower = msg.to_lowercase();
@@ -1668,7 +1789,7 @@ fn retry_floor(
     floor: Option<Duration>,
     failed_attempt: usize,
 ) -> Option<Duration> {
-    if floor.is_none() && matches!(err, ProviderError::RateLimited(_)) {
+    if floor.is_none() && matches!(err.class(), ProviderError::RateLimited(_)) {
         return Some(rate_limit_floor(failed_attempt));
     }
     floor
@@ -3709,7 +3830,7 @@ impl Provider for OpenAiProvider {
     /// when it no longer fits under the cap).
     fn warm_output_cap(&self, _req: &ChatRequest) -> u32 {
         match self.reasoning_effort.as_deref() {
-            Some(eff) if eff != "off" && is_anthropic_model(&self.model) => {
+            Some(eff) if eff != "off" && self.caps.anthropic_cache => {
                 chat_thinking_budget(eff) + 1
             }
             _ => 1,
@@ -3730,10 +3851,7 @@ impl Provider for OpenAiProvider {
             }
             return self.dynamic_stream(req, profile, credential_source);
         }
-        if is_muse_model(&self.model)
-            && (self.base_url.as_str().contains("opencode.ai/zen")
-                || self.base_url.as_str().contains("commandcode.ai"))
-        {
+        if self.caps.prefer_responses {
             let url = match responses_url(&self.base_url) {
                 Ok(u) => u,
                 Err(e) => return stream::once(async move { Err(e) }).boxed(),
@@ -3773,7 +3891,7 @@ impl Provider for OpenAiProvider {
         body.prompt_cache_key = self.session_id.clone().filter(|s| !s.is_empty());
         body.temperature = self.temperature;
         body.top_p = self.top_p;
-        if names_cap_max_completion_tokens(&self.base_url) {
+        if self.caps.cap_field == CapField::MaxCompletionTokens {
             body.max_completion_tokens = body.max_tokens.take();
         }
         let init_state = StreamState::Init {

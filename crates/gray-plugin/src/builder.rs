@@ -571,6 +571,46 @@ pub async fn active_plugins(
                 Err(_) => continue,
             }
         };
+        // Lazy spawn: the install-time `<name>-manifest.json` cache answers
+        // manifest/tools/commands at boot and the child spawns on the first
+        // real wire use (see [`crate::lazy`]). Dynamic (1.3) sidecars,
+        // missing/stale caches, and `GRAY_LAZY_PLUGINS=0` keep eager spawn.
+        let lazy_manifest = if crate::lazy::lazy_enabled() {
+            pdir.as_ref().and_then(|pd| {
+                crate::lazy::cached_manifest(&pd.join(format!("{name}-manifest.json")), name)
+            })
+        } else {
+            None
+        };
+        if let Some(m) = lazy_manifest {
+            let p = crate::lazy::LazySidecarPlugin::new(argv.clone(), m);
+            if let Some(h) = &handler {
+                p.set_host_handler(h.clone()).await;
+            }
+            // Consent decides what this sidecar may ask of the host —
+            // declared capabilities read from the cached manifest, same
+            // list the live spawn would report.
+            let declared = p.manifest().capabilities.clone();
+            p.set_capabilities(
+                crate::capabilities::granted_for(entry, &declared)
+                    .into_iter()
+                    .collect(),
+            );
+            let pending = crate::capabilities::pending_consent(entry, &declared);
+            if !pending.is_empty() {
+                push_builder_warning(format!(
+                    "plugin {name:?} declares ungranted {} ({}); grant with gray plugin capabilities {name} --all",
+                    if pending.len() == 1 {
+                        "capability".to_string()
+                    } else {
+                        "capabilities".to_string()
+                    },
+                    pending.join(", ")
+                ));
+            }
+            plugins.push(p.arc() as Arc<dyn Plugin>);
+            continue;
+        }
         match SidecarPlugin::spawn(argv).await {
             Ok(p) => {
                 if let Some(h) = &handler {

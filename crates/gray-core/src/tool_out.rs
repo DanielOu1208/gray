@@ -55,7 +55,6 @@ pub fn unknown_tool(name: &str, available: &[String]) -> String {
     msg
 }
 
-
 /// Truncates a successful output: 2000-line / 12 KiB cap, head + tail kept,
 /// with a `[truncated N lines / M bytes]` annotation in the middle.
 pub fn truncate_output(text: &str) -> String {

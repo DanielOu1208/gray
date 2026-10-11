@@ -34,12 +34,40 @@ pub enum ProviderError {
     ServerError(String),
     #[error("stream broken: {0}")]
     Stream(String),
+
+    /// A failure carrying the response's structured fields — same
+    /// taxonomy wrap as [`crate::error::CoreError::Detailed`]: `class` is
+    /// one of the flat variants (message text unchanged), `detail` is the
+    /// parsed response fields. See through it with [`ProviderError::class`].
+    #[error("{class}")]
+    Detailed {
+        class: Box<ProviderError>,
+        detail: crate::error::ProviderDetail,
+    },
 }
 
 impl ProviderError {
+    /// The innermost failure class — `Detailed` unwraps to a flat variant.
+    pub fn class(&self) -> &ProviderError {
+        let mut cur = self;
+        while let Self::Detailed { class, .. } = cur {
+            cur = class;
+        }
+        cur
+    }
+
+    /// Structured fields when this failure carries them.
+    pub fn detail(&self) -> Option<&crate::error::ProviderDetail> {
+        if let Self::Detailed { detail, .. } = self {
+            Some(detail)
+        } else {
+            None
+        }
+    }
+
     /// True when the transcript should be compacted before retrying.
     pub fn should_compress(&self) -> bool {
-        matches!(self, Self::ContextOverflow(_))
+        matches!(self.class(), Self::ContextOverflow(_))
     }
 
     /// True when re-running the same request can plausibly succeed: the
@@ -48,7 +76,7 @@ impl ProviderError {
     /// agent loop can decide on the raw provider class before conversion.
     pub fn retryable(&self) -> bool {
         matches!(
-            self,
+            self.class(),
             Self::RateLimited(_)
                 | Self::ServerError(_)
                 | Self::Stream(_)
@@ -257,6 +285,12 @@ pub trait ToolExecutor: Send + Sync {
         false
     }
 
+    /// Re-pin the owning session id on session-aware tools (plugin
+    /// sidecars pin it at build time; a session ensured after the build —
+    /// first turn, `/new` — must reach them too). No-op for executors
+    /// without live plugins.
+    fn repin_session(&self, _id: &str) {}
+
     /// This session's still-running background jobs, oldest first, for a
     /// host that shows them (footer count, `/jobs`). Default: none.
     fn background_jobs(&self, _ctx: &ToolContext) -> Vec<BackgroundJob> {
@@ -453,6 +487,10 @@ impl From<ProviderError> for CoreError {
             ProviderError::Timeout(msg) => CoreError::Timeout(msg),
             ProviderError::ServerError(msg) => CoreError::ServerError(msg),
             ProviderError::Stream(msg) => CoreError::Stream(msg),
+            ProviderError::Detailed { class, detail } => CoreError::Detailed {
+                class: Box::new((*class).into()),
+                detail,
+            },
         }
     }
 }
@@ -506,6 +544,9 @@ pub struct Agent {
     /// (`GRAY_CONTEXT_RESERVE` / `GRAY_CONTEXT_KEEP`); `None` = core defaults.
     pub(crate) compact_reserve: Option<usize>,
     pub(crate) compact_keep: Option<usize>,
+    /// Estimate at which the soft elision stage re-arms after a pass that
+    /// changed history (hysteresis; see `Agent::soft_elide`). Zero = armed.
+    pub(crate) soft_elide_rearm: usize,
     /// Latest provider-reported context size and the history length it
     /// covered (pi `getLastAssistantUsage`). Cleared on every history
     /// rewrite: a pre-rewrite report describes a context that no longer exists.
@@ -538,6 +579,10 @@ pub struct Agent {
     pub(crate) masked_prefix: usize,
     /// Prompt-cache warming during long rounds; `None` = off.
     pub(crate) cache_warm: Option<crate::cache_warm::CacheWarmPolicy>,
+    /// Detects outbound prefixes that changed instead of grew — every
+    /// announced rewrite goes through `history_rewritten` or the stale
+    /// mask; anything else is a cache miss nobody asked for.
+    pub(crate) prefix_guard: crate::prefix_guard::PrefixGuard,
     /// Sticky: some request this session reported cache activity. Feeds
     /// `worth_refreshing`'s no-prices path — a provider that never reports
     /// caching gains nothing from a replay. The warmer needs the flag
@@ -590,6 +635,7 @@ impl Agent {
             context_window: None,
             compact_reserve: None,
             compact_keep: None,
+            soft_elide_rearm: 0,
             context_usage: None,
             history_revision: 0,
             history_rewrite_hook: None,
@@ -599,6 +645,7 @@ impl Agent {
             contaminated: std::collections::BTreeSet::new(),
             masked_prefix: 0,
             cache_warm: None,
+            prefix_guard: crate::prefix_guard::PrefixGuard::default(),
             warm_cache_reported: false,
             prefix_rewrite_ok: true,
             lean_prompt: false,
@@ -670,11 +717,15 @@ impl Agent {
 
     pub(crate) fn history_rewritten(&mut self) {
         self.context_usage = None;
+        // A rewrite (compaction, soft elision, host edit) changes what is
+        // stale; the soft stage measures afresh from here.
+        self.soft_elide_rearm = 0;
         // A rewrite subsumes whatever the contaminated partials were part
         // of; the indices would point at the wrong messages anyway.
         self.contaminated.clear();
         // Indices into the old history are meaningless after a rewrite.
         self.masked_prefix = 0;
+        self.prefix_guard.expect_change("history rewrite");
         self.history_revision = self.history_revision.wrapping_add(1);
         if let Some(hook) = &self.history_rewrite_hook {
             hook();
@@ -707,6 +758,13 @@ impl Agent {
         if let Some(defs) = self.executor.live_defs() {
             self.tools = defs;
         }
+    }
+
+    /// Push the session id to live plugin tools that pin it for their wire
+    /// calls (see [`ToolExecutor::repin_session`]). Cheap — call it
+    /// whenever the owning session is established or switched.
+    pub fn repin_session_id(&self, id: &str) {
+        self.executor.repin_session(id);
     }
 
     /// Display-only headlines per tool name (plugin `label` support).
@@ -968,7 +1026,7 @@ impl Agent {
             tools,
             max_tokens: None,
         };
-        drain_reply_text(self.provider.stream(req)).await
+        drain_reply_text(self.provider.stream(req), self.session_id.as_deref()).await
     }
 }
 
@@ -976,7 +1034,10 @@ impl Agent {
 /// `Text`/`Thinking` prose only and drops tool calls — the compaction trigger
 /// reply must never execute tools (codex v2 likewise collects only the
 /// compaction output item).
-async fn drain_reply_text(mut stream: ProviderStream) -> Result<String, CoreError> {
+async fn drain_reply_text(
+    mut stream: ProviderStream,
+    session: Option<&str>,
+) -> Result<String, CoreError> {
     let mut result = String::new();
     while let Some(event) = stream.next().await {
         match event? {
@@ -987,7 +1048,7 @@ async fn drain_reply_text(mut stream: ProviderStream) -> Result<String, CoreErro
                 append_thinking_chunk(&mut result, &delta);
             }
             StreamEvent::MessageComplete { usage, .. } => {
-                usage.unwrap_or_default().log_request("compaction");
+                usage.unwrap_or_default().log_request("compaction", session);
                 break;
             }
             _ => {}

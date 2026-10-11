@@ -78,12 +78,17 @@ impl Usage {
 
     /// One `request usage` log line per provider request, so per-request
     /// context and billing survive runs killed before the final accounting.
-    pub fn log_request(&self, kind: &str) {
+    /// Tagged with the agent's own session (not `GRAY_SESSION_ID`: a nested
+    /// `-p` run keeps that pointing at its owner) so cache misses in a
+    /// shared log can be traced to one conversation without timestamp
+    /// heuristics.
+    pub fn log_request(&self, kind: &str, session: Option<&str>) {
         let mut u = *self;
         u.normalize();
         log::info!(
             target: "gray_agent",
-            "request usage: kind={kind} in={} cache_read={} cache_write={} out={} reasoning={}",
+            "request usage: kind={kind} session={} in={} cache_read={} cache_write={} out={} reasoning={}",
+            session.filter(|s| !s.is_empty()).unwrap_or("-"),
             u.input_tokens,
             u.cache_read_input_tokens,
             u.cache_write_input_tokens,
