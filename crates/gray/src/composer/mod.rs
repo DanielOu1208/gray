@@ -818,13 +818,9 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
 /// The startup sweep: a 45° front draws the welcome mark top-left to
 /// bottom-right in the rows the banner insert is about to fill, so the
 /// animation *becomes* the banner — the insert repaints the same cells,
-/// which is what pushes them into scrollback. Skipped under `NO_COLOR`
-/// or when the block can't fit; either way the caller still runs the
-/// plain insert.
+/// which is what pushes them into scrollback. Skipped when the block
+/// can't fit; either way the caller still runs the plain insert.
 fn play_logo_intro(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) {
-    if std::env::var_os("NO_COLOR").is_some() {
-        return;
-    }
     // The banner lands `overflow` rows above the band's anchor: that's how
     // much the insert and the first band draw would scroll past the
     // bottom. Scrolling first keeps the painted rows final — run the

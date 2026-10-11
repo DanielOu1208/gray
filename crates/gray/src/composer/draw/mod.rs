@@ -234,6 +234,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         notice: tui.home_notice.as_deref(),
         stats: tui.plugin_stats.as_deref(),
     });
+    let home_mode = home.is_some();
     let mut ibox = build_input_box(&text, cursor, w, ghost, home);
     if !tui.attachments.is_empty() {
         // Chips ride inside the box, above the text and under its top pad,
@@ -278,7 +279,11 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         // Header + previews + overflow row + one separator row below it.
         1 + n.min(3) as u16 + u16::from(n > 3) + 1
     };
-    let panel_est: u16 = tui.matches.len().min(PANEL_ROWS) as u16;
+    let panel_est: u16 = if home.is_some() {
+        0
+    } else {
+        tui.matches.len().min(PANEL_ROWS) as u16
+    };
     // Inline `host/ask` modal (sidecar plugin questions): measured rows.
     let ask_est: u16 = tui
         .ask_modal
@@ -523,6 +528,8 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let panel_cap = need.min(avail).max((PANEL_ROWS as u16).min(avail));
         let visible_count = if tui.matches.is_empty() {
             0
+        } else if home_mode {
+            tui.matches.len().min(PANEL_ROWS)
         } else {
             tui.matches.len().min(panel_cap as usize)
         };
@@ -533,7 +540,11 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let ask_y = live_y + live_h;
         let widget_y = ask_y + ask_h;
         let box_y = widget_y + widget_h;
-        let panel_y = box_y + box_rows;
+        let panel_y = if home_mode {
+            (area.y + area.height.saturating_sub(1)).saturating_sub(panel_h)
+        } else {
+            box_y + box_rows
+        };
         let attach_y = panel_y + panel_h;
         let footer_y = attach_y + attach_h;
 
@@ -686,7 +697,14 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 let is_sel = i == tui.sel;
                 let cmd_str = format!(" /{name} ");
                 let desc_str = format!(" {desc} ");
-                let used_len = display_width(&cmd_str) + display_width(&desc_str);
+                let swatch = theme_row_swatch(name);
+                let used_len = display_width(&cmd_str)
+                    + display_width(&desc_str)
+                    + swatch.as_ref().map_or(0, |s| {
+                        s.iter()
+                            .map(|sp| display_width(sp.content.as_ref()))
+                            .sum::<usize>()
+                    });
                 // ponytail: single-char edge arrows, no extra row or layout.
                 let marker = match (
                     i == start && hidden_above > 0,
@@ -710,12 +728,12 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
-                        .fg(Color::White)
+                        .fg(crate::theme::theme().text_bright)
                         .bg(line_bg)
                         .add_modifier(Modifier::BOLD)
                 };
                 let line = if is_sel {
-                    Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             cmd_str,
                             Style::default()
@@ -730,14 +748,18 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                                 .bg(line_bg),
                         ),
                         Span::styled(" ".repeat(pad_len), Style::default().bg(line_bg)),
-                        Span::styled(marker.to_string(), marker_style),
-                    ])
+                    ];
+                    if let Some(sw) = swatch {
+                        spans.extend(sw);
+                    }
+                    spans.push(Span::styled(marker.to_string(), marker_style));
+                    Line::from(spans)
                 } else {
-                    Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             cmd_str,
                             Style::default()
-                                .fg(Color::White)
+                                .fg(crate::theme::theme().text_bright)
                                 .add_modifier(Modifier::BOLD)
                                 .bg(line_bg),
                         ),
@@ -748,8 +770,12 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                                 .bg(line_bg),
                         ),
                         Span::styled(" ".repeat(pad_len), Style::default().bg(line_bg)),
-                        Span::styled(marker.to_string(), marker_style),
-                    ])
+                    ];
+                    if let Some(sw) = swatch {
+                        spans.extend(sw);
+                    }
+                    spans.push(Span::styled(marker.to_string(), marker_style));
+                    Line::from(spans)
                 };
                 frame.render_widget(
                     Paragraph::new(line)
@@ -1061,4 +1087,26 @@ fn live_tool_row(line: Line<'static>) -> Paragraph<'static> {
 fn chrome_row(line: Line<'static>) -> Paragraph<'static> {
     Paragraph::new(line)
         .block(Block::default().style(Style::default().bg(crate::theme::theme().surface_bg)))
+}
+
+fn theme_row_swatch(name: &str) -> Option<Vec<Span<'static>>> {
+    if !matches!(
+        crate::repl::commands::current_completer_cmd().as_str(),
+        "theme" | "themes"
+    ) {
+        return None;
+    }
+    let theme_name = name
+        .strip_prefix("theme ")
+        .or_else(|| name.strip_prefix("themes "))
+        .unwrap_or(name);
+    let t = if crate::theme::is_builtin_name(theme_name) {
+        crate::theme::GRAY_UI_THEME
+    } else {
+        let dir = crate::theme::themes_dir().ok()?;
+        crate::theme::load_theme_in(&dir, theme_name).ok()?.0
+    };
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(crate::theme::swatch_spans(&t));
+    Some(spans)
 }
