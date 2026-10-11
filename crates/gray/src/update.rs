@@ -231,6 +231,23 @@ fn acquire_update_lock() -> std::io::Result<UpdateLock> {
     acquire_update_lock_at(&update_lock_path())
 }
 
+pub(crate) fn try_acquire_update_lock() -> Option<UpdateLock> {
+    let path = update_lock_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .ok()?;
+    match f.try_lock() {
+        Ok(()) => Some(UpdateLock(f)),
+        Err(_) => None,
+    }
+}
+
 /// Installer run under mutual exclusion.
 pub(crate) fn run_installer_locked() -> anyhow::Result<()> {
     let _lock = acquire_update_lock()?;
@@ -425,6 +442,14 @@ pub async fn update_now() -> anyhow::Result<()> {
     println!("✓ updated. restart gray to use the new version.");
     warn_on_shadow();
     Ok(())
+}
+
+pub(crate) fn install_unlocked() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !cfg!(windows),
+        "self-update is not supported on native Windows: close Gray and rerun install-native.ps1 with the verified preview ZIP and checksum"
+    );
+    run_installer()
 }
 
 /// Install the newest build, refusing only where it cannot work. Shared by

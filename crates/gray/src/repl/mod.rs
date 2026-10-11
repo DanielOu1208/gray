@@ -866,6 +866,9 @@ pub async fn run_repl_mode(
         let ticker_tui = shared.clone();
         tokio::spawn(async move {
             let mut last_status = std::time::Instant::now();
+            let exe_watch = crate::exe_watch::ExeWatch::capture();
+            let mut last_exe_check = std::time::Instant::now();
+            let mut exe_notified = false;
             loop {
                 if ticker_stop.load(AtomicOrdering::Relaxed) {
                     break;
@@ -887,6 +890,15 @@ pub async fn run_repl_mode(
                         last_status = std::time::Instant::now();
                         t.tick_status();
                     }
+                    if !exe_notified
+                        && last_exe_check.elapsed() >= std::time::Duration::from_secs(30)
+                    {
+                        last_exe_check = std::time::Instant::now();
+                        if exe_watch.as_ref().is_some_and(|w| w.replaced()) {
+                            exe_notified = true;
+                            t.push_dim("gray was updated — /restart to load it".to_string());
+                        }
+                    }
                 }
             }
         });
@@ -894,6 +906,20 @@ pub async fn run_repl_mode(
     } else {
         None
     };
+
+    if let Some((shared, _)) = &tui {
+        let shared = shared.clone();
+        let bare = config.bare;
+        tokio::spawn(async move {
+            if let Some(outcome) = crate::auto_update::maybe_run(bare).await
+                && let Some(line) = outcome.notice()
+                && let Ok(mut t) = shared.lock()
+            {
+                t.push_dim(line);
+                t.ensure_gap();
+            }
+        });
+    }
 
     // Cron: background tick in live sessions (workstream C). A dedicated OS
     // thread + current-thread runtime — the agent future is `!Send`, so it

@@ -109,11 +109,31 @@ pub async fn run_foreground(config: &Config) -> anyhow::Result<()> {
     let mut done = brain.take_done();
     let mut poll = tokio::time::interval(Duration::from_secs(POLL_SECS));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let exe_watch = crate::exe_watch::ExeWatch::capture();
+    let bare = config.bare;
+    let mut last_probe = std::time::Instant::now() - Duration::from_secs(30);
+    let mut auto_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut stop_signal = stop_signal();
     let exit_reason: &'static str;
     loop {
         tokio::select! {
-            _ = poll.tick() => brain.step(crate::cron::now_secs()),
+            _ = poll.tick() => {
+                brain.step(crate::cron::now_secs());
+                if last_probe.elapsed() >= Duration::from_secs(30) {
+                    last_probe = std::time::Instant::now();
+                    if let Some(w) = &exe_watch
+                        && w.replaced()
+                        && brain.busy_keys() == 0
+                    {
+                        log::info!("gateway: binary replaced; exiting for restart");
+                        exit_reason = "binary replaced";
+                        break;
+                    }
+                    if auto_task.as_ref().is_none_or(|t| t.is_finished()) {
+                        auto_task = Some(tokio::spawn(auto_update_pass(bare)));
+                    }
+                }
+            }
             Some(finished) = done.recv() => {
                 brain.finish(finished);
                 brain.step(crate::cron::now_secs());
@@ -156,6 +176,15 @@ pub async fn run_foreground(config: &Config) -> anyhow::Result<()> {
 /// Seconds between brain polls (trigger files, waiting
 /// events written by other processes). Socket requests nudge it at once.
 const POLL_SECS: u64 = 2;
+
+async fn auto_update_pass(bare: bool) {
+    if let Some(outcome) = crate::auto_update::maybe_run(bare).await {
+        match outcome.notice() {
+            Some(line) => log::info!("gateway: {line}"),
+            None => log::debug!("gateway: auto-update pass ran, nothing changed"),
+        }
+    }
+}
 
 /// The 60s cron ticker, on its own current-thread runtime. A stop request
 /// lets an in-flight fire drain (bounded) before the thread ends.

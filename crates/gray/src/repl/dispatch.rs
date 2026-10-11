@@ -368,8 +368,8 @@ pub(crate) async fn dispatch_command(
             }
         }
 
-        ReplCommand::Update => {
-            super::maintenance::handle_update(tui).await;
+        ReplCommand::Update(arg) => {
+            super::maintenance::handle_update(tui, arg).await;
             Flow::Continue
         }
 

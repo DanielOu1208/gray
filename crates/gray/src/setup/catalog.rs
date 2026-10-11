@@ -138,6 +138,8 @@ pub struct SavedConfig {
     /// `status`/`stop` still work so a running one stays inspectable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gw_auto: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
     /// Lean prompt (`Some(true)` = on): no per-turn injected context — the
     /// skills list, project rules and plugin docs stay out of the system
     /// prompt. Tools, plugins and compaction keep working; missing/`false`
@@ -228,6 +230,14 @@ pub fn gw_auto_enabled_at(path: &Path) -> bool {
     subsystem_enabled_at(path, |s| s.gw_auto)
 }
 
+pub fn auto_update_enabled() -> bool {
+    subsystem_enabled(|s| s.auto_update)
+}
+
+pub fn auto_update_enabled_at(path: &Path) -> bool {
+    subsystem_enabled_at(path, |s| s.auto_update)
+}
+
 /// Shared reader body: resolve the live config path, read the field, default
 /// on when missing/unresolvable/corrupt.
 fn subsystem_enabled(get: impl Fn(&SavedConfig) -> Option<bool>) -> bool {
@@ -307,6 +317,7 @@ fn partial_saved_config(obj: &serde_json::Map<String, serde_json::Value>) -> Sav
         memory_auto: opt_field(obj, "memory_auto"),
         cron_auto: opt_field(obj, "cron_auto"),
         gw_auto: opt_field(obj, "gw_auto"),
+        auto_update: opt_field(obj, "auto_update"),
         lean: opt_field(obj, "lean"),
         theme: opt_field(obj, "theme"),
         status_line: opt_field(obj, "status_line"),

@@ -621,7 +621,7 @@ pub enum ReplCommand {
     ContextWindow(Option<String>),
     /// Session token + cost totals (`/usage` or `/cost`).
     /// Check the channel and install a newer build when there is one.
-    Update,
+    Update(Option<String>),
     /// Put the running gray on the binary that is on disk: restart the
     /// gateway, then re-exec this session into the new build.
     Restart,
@@ -756,7 +756,7 @@ pub fn parse_command(line: &str) -> ReplCommand {
         Some("undo") => ReplCommand::Undo,
         Some("retry") => ReplCommand::Retry,
         Some("context") => ReplCommand::ContextWindow(opt(rest)),
-        Some("update") => ReplCommand::Update,
+        Some("update") => ReplCommand::Update(opt(rest)),
         Some("restart") => ReplCommand::Restart,
         Some("usage") => ReplCommand::Usage,
         Some("cron") => ReplCommand::CronJobs(opt(rest)),
