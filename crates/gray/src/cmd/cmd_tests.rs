@@ -192,8 +192,7 @@ fn model_picker_doc_from_draft() {
         fast: false,
         parts: Default::default(),
     };
-    let v =
-        serde_json::to_value(model_picker_doc(&draft, &models, &BTreeMap::new(), 0)).unwrap();
+    let v = serde_json::to_value(model_picker_doc(&draft, &models, &BTreeMap::new(), 0)).unwrap();
     assert_eq!(v["document_id"], "model-picker");
     assert_eq!(v["lifecycle"], "editable");
     assert_eq!(

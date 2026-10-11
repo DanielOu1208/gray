@@ -55,7 +55,10 @@ pub(crate) fn fit_anthropic(media_type: &str, data_b64: &str) -> Option<(String,
     };
     for attempt in 0..4 {
         let mut buf = Vec::new();
-        if img.write_to(&mut Cursor::new(&mut buf), out_format).is_err() {
+        if img
+            .write_to(&mut Cursor::new(&mut buf), out_format)
+            .is_err()
+        {
             return None;
         }
         let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
