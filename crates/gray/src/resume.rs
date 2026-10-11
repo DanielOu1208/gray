@@ -1192,22 +1192,37 @@ fn try_take_over(
 fn terminate_holder(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        match std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
-            Ok(cmdline) => {
-                let exe = cmdline.split('\0').next().unwrap_or_default();
-                let is_gray = exe.rsplit('/').next().unwrap_or(exe).starts_with("gray");
+        // /proc cmdline is empty through a process's exec transition —
+        // poll briefly so a mid-exec gray isn't read as a foreign pid.
+        let mut exe = String::new();
+        for _ in 0..5 {
+            if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
+                exe = cmdline.split('\0').next().unwrap_or_default().to_string();
+                if !exe.is_empty() {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        match exe.is_empty() {
+            false => {
+                let is_gray = exe.rsplit('/').next().unwrap_or(&exe).starts_with("gray");
                 if !is_gray {
                     return Err(format!(
                         "pid {pid} doesn't look like a gray process ({exe}) — refusing to signal it"
                     ));
                 }
             }
-            Err(_) => {
-                // Unreadable /proc entry: dead or foreign. Probe liveness.
+            true => {
+                // Unreadable or still-empty /proc entry: dead, foreign, or
+                // kernel thread. Probe liveness before deciding anything.
                 let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
                 if !alive {
                     return Err(format!("pid {pid} is already gone — pick it again"));
                 }
+                return Err(format!(
+                    "pid {pid} is alive but its cmdline is unreadable — refusing to signal it"
+                ));
             }
         }
     }
