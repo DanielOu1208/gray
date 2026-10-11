@@ -983,7 +983,7 @@ fn release_memory() {
     unsafe {
         malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
     unsafe {
         libc::malloc_trim(0);
     }
