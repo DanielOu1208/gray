@@ -8,15 +8,15 @@
 //! or another operator in the peeled part stops the peel, so a label never
 //! hides a command that does something.
 
-/// Whole-command no-ops: `true`, `:`, or a lone `echo`/`printf` with no
-/// pipe, redirect, separator or substitution. Their only effect is stdout,
-/// so the `bash` tool answers them with a steer instead of spawning a shell,
-/// and the transcript labels them `Skipped`, not `Ran`.
+/// Whole-command no-ops — `true`, `:`, lone literal `echo`/`printf`, dead
+/// function defs, job-control builtins that can only see the one-shot
+/// shell's empty table, and compounds of those. Their only effect is stdout
+/// (or nothing), so the `bash` tool answers them with a steer instead of
+/// spawning a shell, and the transcript labels them `Skipped`, not `Ran`.
+/// Delegates to the tool's own classifier so the label and the steer can
+/// never disagree.
 pub fn is_noop(full: &str) -> bool {
-    let trimmed = full.trim();
-    matches!(trimmed, "true" | ":")
-        || crate::shell::tools::bash::search_words(trimmed)
-            .is_some_and(|w| matches!(w.first().map(String::as_str), Some("echo" | "printf")))
+    crate::shell::tools::bash::noop_family(full.trim(), false).is_some()
 }
 
 /// The command a person would recognise, plus the directory a leading
