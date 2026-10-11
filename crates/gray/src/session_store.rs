@@ -930,6 +930,13 @@ impl JsonlSessionStore {
     /// never creates the file, and a filesystem without flock answers
     /// false like the writer path does.
     pub async fn open_lock_held(&self, id: &SessionId) -> bool {
+        self.open_lock_held_sync(id)
+    }
+
+    /// Sync [`Self::open_lock_held`] for callers outside an async context
+    /// (the resume picker's draw loop, which polls after a takeover
+    /// SIGTERM). Same advisory semantics: never creates the file.
+    pub(crate) fn open_lock_held_sync(&self, id: &SessionId) -> bool {
         let Ok(open_path) = self.session_open_path(id) else {
             return false;
         };
@@ -949,8 +956,8 @@ impl JsonlSessionStore {
     }
 
     /// The holder PID recorded in `<id>.open`, for `Locked` detail on
-    /// paths that refuse rather than claim (`delete`).
-    fn open_holder_pid(&self, id: &SessionId) -> Option<u32> {
+    /// paths that refuse rather than claim (`delete`, picker takeover).
+    pub(crate) fn open_holder_pid(&self, id: &SessionId) -> Option<u32> {
         read_open_holder(&self.session_open_path(id).ok()?)
     }
 

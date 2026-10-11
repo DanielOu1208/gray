@@ -572,13 +572,14 @@ pub async fn run_resume_picker(
             running.insert(s.id.as_str().to_string());
         }
     }
-    run_picker_sync(summaries, show_all, running, bg)
+    run_picker_sync(summaries, show_all, running, &store, bg)
 }
 
 fn run_picker_sync(
     mut summaries: Vec<SessionSummary>,
     mut show_all: bool,
     running: std::collections::HashSet<String>,
+    store: &JsonlSessionStore,
     bg: Option<&crate::setup::BackgroundSnapshot>,
 ) -> anyhow::Result<Option<SessionId>> {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read};
@@ -606,6 +607,11 @@ fn run_picker_sync(
     let mut scroll_top: usize = 0;
     // `ctrl-r`: the row being renamed and the title typed so far.
     let mut rename: Option<(SessionId, String)> = None;
+    // `enter` on a running row: take-over confirmation plus the holder pid
+    // read at keypress time (re-read on confirm inside `try_take_over`).
+    let mut takeover: Option<(SessionId, Option<u32>)> = None;
+    // One-line picker notice (failed takeover); cleared on Enter/Esc.
+    let mut notice: Option<String> = None;
 
     let result: anyhow::Result<Option<SessionId>> = (|| {
         loop {
@@ -686,7 +692,35 @@ fn run_picker_sync(
                     Rect::new(inner.x, inner.y, inner.width, 1),
                 );
 
-                let search_line = if let Some((_, text)) = &rename {
+                let search_line = if let Some((id, pid)) = &takeover {
+                    let who = match pid {
+                        Some(p) => format!("pid {p}"),
+                        None => "another process".to_string(),
+                    };
+                    Line::from(vec![
+                        Span::styled(
+                            "Take over: ",
+                            Style::default()
+                                .fg(accent_peach)
+                                .add_modifier(Modifier::BOLD)
+                                .bg(box_bg),
+                        ),
+                        Span::styled(
+                            format!(
+                                "'{}' is open in {who} — enter ends it, esc keeps it",
+                                short_id(id)
+                            ),
+                            Style::default()
+                                .fg(crate::theme::theme().text_bright)
+                                .bg(box_bg),
+                        ),
+                    ])
+                } else if let Some(n) = &notice {
+                    Line::from(Span::styled(
+                        n.clone(),
+                        Style::default().fg(accent_peach).bg(box_bg),
+                    ))
+                } else if let Some((_, text)) = &rename {
                     Line::from(vec![
                         Span::styled(
                             "Rename: ",
@@ -878,8 +912,21 @@ fn run_picker_sync(
                     }
                 }
 
-                let hints: &[(&str, &str)] = if rename.is_some() {
+                let sel_running = filtered
+                    .get(sel)
+                    .is_some_and(|s| session_state(s, &running) == SessionState::Running);
+                let hints: &[(&str, &str)] = if takeover.is_some() {
+                    &[("enter", "take over"), ("esc", "back")]
+                } else if rename.is_some() {
                     &[("enter", "save"), ("esc", "cancel")]
+                } else if sel_running {
+                    &[
+                        ("↑↓", "navigate"),
+                        ("enter", "take over"),
+                        ("ctrl-r", "rename"),
+                        ("ctrl-d", "dismiss"),
+                        ("esc", "cancel"),
+                    ]
                 } else {
                     &[
                         ("↑↓", "navigate"),
@@ -925,6 +972,22 @@ fn run_picker_sync(
                 }
                 Event::Key(KeyEvent {
                     code,
+                    kind: KeyEventKind::Press,
+                    ..
+                }) if takeover.is_some() => match code {
+                    KeyCode::Esc => takeover = None,
+                    KeyCode::Enter => {
+                        if let Some((id, pid)) = takeover.take() {
+                            match try_take_over(store, &id, pid) {
+                                Ok(()) => return Ok(Some(id)),
+                                Err(n) => notice = Some(n),
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                Event::Key(KeyEvent {
+                    code,
                     modifiers,
                     kind: KeyEventKind::Press,
                     ..
@@ -961,6 +1024,7 @@ fn run_picker_sync(
                     ..
                 }) => match code {
                     KeyCode::Esc => {
+                        notice = None;
                         if !query.is_empty() {
                             query.clear();
                             sel = 0;
@@ -1037,6 +1101,7 @@ fn run_picker_sync(
                         }
                     }
                     KeyCode::Enter => {
+                        notice = None;
                         let cwd_filter: Option<&Path> = if show_all { None } else { Some(&cwd) };
                         let filtered = visible_sessions(
                             &summaries,
@@ -1047,7 +1112,14 @@ fn run_picker_sync(
                             &running,
                         );
                         if let Some(s) = filtered.get(sel) {
-                            return Ok(Some(s.id.clone()));
+                            let pid = store.open_holder_pid(&s.id);
+                            if session_state(s, &running) == SessionState::Running
+                                && pid != Some(std::process::id())
+                            {
+                                takeover = Some((s.id.clone(), pid));
+                            } else {
+                                return Ok(Some(s.id.clone()));
+                            }
                         }
                     }
                     KeyCode::Backspace => {
@@ -1071,6 +1143,86 @@ fn run_picker_sync(
 
     let _ = terminal.clear();
     result
+}
+
+/// Take-over attempt behind `enter` on a running picker row: SIGTERM the
+/// recorded holder, then poll the open lock until the OS releases it
+/// (process death drops the flock). `Ok` means the caller may resume —
+/// our own pid counts as immediate success (the shared registry guard
+/// already owns it; signaling ourselves would kill this REPL).
+fn try_take_over(
+    store: &JsonlSessionStore,
+    id: &SessionId,
+    pid: Option<u32>,
+) -> Result<(), String> {
+    // The `running` set was read when the picker opened: a holder that
+    // exited since leaves nothing to take — resume straight away.
+    if !store.open_lock_held_sync(id) {
+        return Ok(());
+    }
+    let Some(pid) = pid else {
+        return Err(format!(
+            "'{}' is locked but the holder pid is unreadable — close the other instance yourself",
+            short_id(id)
+        ));
+    };
+    if pid == std::process::id() {
+        return Ok(());
+    }
+    terminate_holder(pid)?;
+    // The flock drops when the holder exits; a healthy gray answers
+    // SIGTERM in milliseconds, a wedged one never does.
+    for _ in 0..30 {
+        if !store.open_lock_held_sync(id) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(format!(
+        "pid {pid} still holds '{}' — it may be ignoring SIGTERM; close it there or pick another",
+        short_id(id)
+    ))
+}
+
+/// SIGTERM the recorded holder of a locked session. On Linux refuses a
+/// pid whose `/proc` cmdline isn't gray — a recycled pid could belong to
+/// anything. No-ops elsewhere under `cfg(unix)`; non-unix gets no kill
+/// and an explanatory error instead.
+#[cfg(unix)]
+fn terminate_holder(pid: u32) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        match std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
+            Ok(cmdline) => {
+                let exe = cmdline.split('\0').next().unwrap_or_default();
+                let is_gray = exe.rsplit('/').next().unwrap_or(exe).starts_with("gray");
+                if !is_gray {
+                    return Err(format!(
+                        "pid {pid} doesn't look like a gray process ({exe}) — refusing to signal it"
+                    ));
+                }
+            }
+            Err(_) => {
+                // Unreadable /proc entry: dead or foreign. Probe liveness.
+                let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+                if !alive {
+                    return Err(format!("pid {pid} is already gone — pick it again"));
+                }
+            }
+        }
+    }
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0 {
+        Ok(())
+    } else {
+        Err(format!("couldn't signal pid {pid} — close it yourself"))
+    }
+}
+
+/// Non-unix has no signal path here; the picker reports the refusal.
+#[cfg(not(unix))]
+fn terminate_holder(pid: u32) -> Result<(), String> {
+    let _ = pid;
+    Err("take over isn't supported on this platform — close the other instance yourself".into())
 }
 
 #[path = "resume_tests.rs"]
