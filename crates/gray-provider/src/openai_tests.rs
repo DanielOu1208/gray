@@ -2783,7 +2783,7 @@ async fn plan_usage_limit_429_is_single_attempt() {
     let received = server.received_requests().await.expect("requests recorded");
     assert_eq!(received.len(), 1, "usage limit must not retry: {events:?}");
     assert!(
-        matches!(events.last(), Some(Err(ProviderError::Auth(_)))),
+        matches!(events.last(), Some(Err(e)) if matches!(e.class(), ProviderError::Auth(_))),
         "ends with terminal Auth: {events:?}"
     );
 }
@@ -2814,7 +2814,7 @@ async fn plan_usage_limit_mid_stream_is_single_attempt() {
     let received = server.received_requests().await.expect("requests recorded");
     assert_eq!(received.len(), 1, "usage limit must not retry: {events:?}");
     assert!(
-        matches!(events.last(), Some(Err(ProviderError::Auth(_)))),
+        matches!(events.last(), Some(Err(e)) if matches!(e.class(), ProviderError::Auth(_))),
         "ends with terminal Auth: {events:?}"
     );
 }
