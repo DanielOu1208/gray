@@ -68,7 +68,7 @@ fn home_box_is_the_flat_band_with_hints_stats_tip_and_notice_under_it() {
     // Row under the box: tip left, hints flush right on the same row.
     // Then the notice's headline with the stats at the right edge, then
     // one row per command.
-    assert_eq!(rows.len(), 7, "{rows:?}");
+    assert_eq!(rows.len(), 8, "{rows:?}");
     assert!(rows[3].starts_with("● Tip"), "{rows:?}");
     assert!(rows[3].ends_with("/ commands"), "{rows:?}");
     assert_eq!(
@@ -77,17 +77,18 @@ fn home_box_is_the_flat_band_with_hints_stats_tip_and_notice_under_it() {
         "tip + hints span the box's width"
     );
     assert!(
-        rows[4].starts_with("⚠ 3 interrupted sessions in ~/gray"),
+        rows[5].starts_with("⚠ 3 interrupted sessions in ~/gray"),
         "{rows:?}"
     );
-    assert!(rows[4].ends_with("65 plugins · 65 loaded"), "{rows:?}");
+    assert!(rows[5].ends_with("65 plugins · 65 loaded"), "{rows:?}");
     assert_eq!(
-        display_width(&rows[4]),
+        display_width(&rows[5]),
         78,
         "headline + stats span the box's width"
     );
-    assert_eq!(rows[5], "  /sessions           pick up");
-    assert_eq!(rows[6], "  /sessions dismiss   clear");
+    assert_eq!(rows[4], "");
+    assert_eq!(rows[6], "  /sessions           pick up");
+    assert_eq!(rows[7], "  /sessions dismiss   clear");
     // Without the notice the stats take the left of row 2.
     let quiet = build_input_box(
         "",
@@ -100,8 +101,8 @@ fn home_box_is_the_flat_band_with_hints_stats_tip_and_notice_under_it() {
         }),
     );
     let quiet_rows = row_texts(&quiet);
-    assert_eq!(quiet_rows.len(), 5, "{quiet_rows:?}");
-    assert_eq!(quiet_rows[4], "65 plugins · 65 loaded");
+    assert_eq!(quiet_rows.len(), 6, "{quiet_rows:?}");
+    assert_eq!(quiet_rows[5], "65 plugins · 65 loaded");
     // Off the home screen the box is the full-width band alone.
     let chat = build_input_box("hi", 2, w, None, None);
     assert_eq!((chat.lines.len(), chat.x, chat.width), (3, 0, w));

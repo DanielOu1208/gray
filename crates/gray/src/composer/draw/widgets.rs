@@ -298,6 +298,9 @@ fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
     let tip = crate::composer::tip_spans();
     let hints = crate::composer::hint_spans(w.saturating_sub(spans_width(&tip) + 2).max(1));
     rows.extend(left_right_rows(w, tip, hints));
+    if home.notice.is_some() || home.stats.is_some() {
+        rows.push(Line::default());
+    }
     match (home.notice, home.stats) {
         (Some(notice), stats) => {
             let t = crate::theme::theme();
