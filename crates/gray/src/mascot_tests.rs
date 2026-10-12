@@ -78,7 +78,7 @@ fn welcome_is_the_ascii_logo_by_default() {
         welcome.iter().any(|l| l.trim() == "gray"),
         "title line missing from the welcome: {welcome:?}"
     );
-    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let version = env!("CARGO_PKG_VERSION").to_string();
     assert_eq!(
         welcome.iter().filter(|l| l.contains(&version)).count(),
         1,
@@ -157,7 +157,7 @@ fn welcome_layout_is_devin_home() {
     let title_pad = text[title].len() - text[title].trim_start().len();
     assert_eq!(title_pad, x + (col_w - 4) / 2, "title not centered");
 
-    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let version = env!("CARGO_PKG_VERSION").to_string();
     let ver_line = text.iter().position(|l| l.trim() == version).unwrap();
     let ver_pad = text[ver_line].len() - text[ver_line].trim_start().len();
     assert_eq!(

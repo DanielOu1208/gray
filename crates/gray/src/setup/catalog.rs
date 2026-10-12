@@ -146,6 +146,11 @@ pub struct SavedConfig {
     /// reads as off. `--lean` / `GRAY_LEAN=1` override per run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lean: Option<bool>,
+    /// Master switch for the startup logo intro (`/intro on` | `/intro
+    /// off`, default on). `Some(false)` shows the settled banner with no
+    /// animation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intro: Option<bool>,
     /// User theme name (`~/.gray/themes/<name>.json`), set by `/theme`.
     /// Missing = the built-in gray palette. `GRAY_THEME` overrides per run.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -228,6 +233,11 @@ pub fn gw_auto_enabled() -> bool {
 /// Explicit-config-path seam for [`gw_auto_enabled`] (tests).
 pub fn gw_auto_enabled_at(path: &Path) -> bool {
     subsystem_enabled_at(path, |s| s.gw_auto)
+}
+
+/// Master switch for the startup logo intro (`/intro on` | `/intro off`).
+pub fn intro_enabled() -> bool {
+    subsystem_enabled(|s| s.intro)
 }
 
 pub fn auto_update_enabled() -> bool {
@@ -319,6 +329,7 @@ fn partial_saved_config(obj: &serde_json::Map<String, serde_json::Value>) -> Sav
         gw_auto: opt_field(obj, "gw_auto"),
         auto_update: opt_field(obj, "auto_update"),
         lean: opt_field(obj, "lean"),
+        intro: opt_field(obj, "intro"),
         theme: opt_field(obj, "theme"),
         status_line: opt_field(obj, "status_line"),
         provider_id: string_field(obj, "provider_id"),

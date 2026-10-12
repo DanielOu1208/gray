@@ -52,14 +52,17 @@ fn help_text(
     hooks: &[std::sync::Arc<dyn gray_core::agent::PluginHooks>],
 ) -> String {
     let mut out = String::new();
-    for d in super::REGISTRY {
+    for d in super::REGISTRY.iter().chain(super::commands::TUI_COMMANDS) {
         out.push_str(&super::commands::format_help_line(d));
         out.push('\n');
     }
     let mut entries = crate::plugin_cli::completions("");
     entries.extend(super::plugin_help_entries(hooks));
-    let mut seen: std::collections::HashSet<String> =
-        super::REGISTRY.iter().map(|d| d.name.to_string()).collect();
+    let mut seen: std::collections::HashSet<String> = super::REGISTRY
+        .iter()
+        .chain(super::commands::TUI_COMMANDS)
+        .map(|d| d.name.to_string())
+        .collect();
     for (name, description) in entries {
         if seen.insert(name.clone()) {
             out.push_str(&format!("  /{name:<10} {description}\n"));
