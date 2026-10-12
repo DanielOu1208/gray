@@ -775,21 +775,17 @@ fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<L
     // `gray` bold bright, then the muted version — devin's title pair.
     // Both are up from the first frame (everything starts at once);
     // while the intro runs the wordmark rides the status-line shimmer.
-    let wordmark = match intro {
+    let mut title = match intro {
         Some(elapsed) => draw::shimmer_spans("gray", elapsed),
         None => vec![Span::styled(
             "gray",
             Style::default().bold().fg(theme.text_bright),
         )],
     };
-    body.push(centered(wordmark, 4));
-    body.push(centered(
-        vec![Span::styled(
-            version.clone(),
-            Style::default().fg(theme.text_muted),
-        )],
-        display_width(&version),
-    ));
+    title.push(Span::raw(" "));
+    let title_w = 5 + display_width(&version);
+    title.push(Span::styled(version, Style::default().fg(theme.text_muted)));
+    body.push(centered(title, title_w));
     body.push(Line::from(""));
     body
 }

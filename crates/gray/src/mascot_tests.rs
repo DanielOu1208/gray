@@ -75,7 +75,9 @@ fn welcome_is_the_ascii_logo_by_default() {
     // The devin-tui home banner under the logo: `gray` + version once; the
     // hints, tip and corner row moved into the composer's home band.
     assert!(
-        welcome.iter().any(|l| l.trim() == "gray"),
+        welcome
+            .iter()
+            .any(|l| l.trim() == format!("gray {}", env!("CARGO_PKG_VERSION"))),
         "title line missing from the welcome: {welcome:?}"
     );
     let version = env!("CARGO_PKG_VERSION").to_string();
@@ -153,27 +155,17 @@ fn welcome_layout_is_devin_home() {
     let col_w = (w - 8).min(78);
     let x = (w - col_w) / 2;
 
-    let title = text.iter().position(|l| l.trim() == "gray").unwrap();
-    let title_pad = text[title].len() - text[title].trim_start().len();
-    assert_eq!(title_pad, x + (col_w - 4) / 2, "title not centered");
-
     let version = env!("CARGO_PKG_VERSION").to_string();
-    let ver_line = text.iter().position(|l| l.trim() == version).unwrap();
-    let ver_pad = text[ver_line].len() - text[ver_line].trim_start().len();
+    let label = format!("gray {version}");
+    let title = text.iter().position(|l| l.trim() == label).unwrap();
+    let title_pad = text[title].len() - text[title].trim_start().len();
     assert_eq!(
-        ver_pad,
-        x + (col_w - version.len()) / 2,
-        "version not centered"
-    );
-    assert_eq!(
-        ver_line,
-        title + 1,
-        "version must sit directly under the title"
+        title_pad,
+        x + (col_w - label.len()) / 2,
+        "title not centered"
     );
 
-    // No corner row: the banner ends on the version and its blank tail,
-    // the gap above the composer's panel.
-    assert_eq!(ver_line + 2, text.len(), "{text:?}");
+    assert_eq!(title + 2, text.len(), "{text:?}");
     assert!(text.last().unwrap().trim().is_empty());
 }
 
@@ -209,13 +201,13 @@ fn welcome_sweep_draws_to_the_full_mark() {
     assert!(
         plain(&welcome_lines_at(w, 0.0, None))
             .iter()
-            .any(|l| l.trim() == "gray"),
+            .any(|l| l.trim().starts_with("gray ")),
         "title must be present from the first frame"
     );
     assert!(
         plain(&welcome_lines_at(w, 1.0, None))
             .iter()
-            .any(|l| l.trim() == "gray"),
+            .any(|l| l.trim().starts_with("gray ")),
         "title missing at full reveal"
     );
     // Every frame is the banner's row count — the insert paints a fixed
