@@ -253,7 +253,7 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
     use ratatui::layout::Rect;
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+    use ratatui::widgets::{Block, Clear, Paragraph};
     use std::time::Duration;
 
     let mut rows = load_rows();
@@ -330,26 +330,18 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                 let modal_y = (area.height.saturating_sub(modal_h)) / 3;
                 let modal = Rect::new(modal_x, modal_y, modal_w, modal_h);
                 frame.render_widget(Clear, modal);
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(th.text_faint))
-                    .style(Style::default().bg(th.surface_bg))
-                    .title(Span::styled(" plugins ", Style::default().fg(th.text_muted)))
-                    .title_bottom(
-                        Line::from(Span::styled(
-                            if detail { " esc back " } else { " esc close " },
-                            Style::default().fg(th.text_muted),
-                        ))
-                        .right_aligned(),
-                    );
-                let inner = block.inner(modal);
-                frame.render_widget(block, modal);
-                let footer_y = inner.y + inner.height.saturating_sub(2);
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(th.surface_bg)),
+                    modal,
+                );
+                let (ix, iw) = (modal.x + 1, modal.width.saturating_sub(2));
+                let w = iw as usize;
+                let at = |y: u16| Rect::new(ix, y, iw, 1);
+                let top = modal.y + 1;
+                let note_y = modal.y + modal.height.saturating_sub(4);
+                let keys_y = note_y + 1;
 
-                if detail
-                    && let Some(&ri) = filtered.get(sel)
-                {
+                if detail && let Some(&ri) = filtered.get(sel) {
                     let row = &rows[ri];
                     let head = Line::from(vec![
                         Span::styled(
@@ -363,15 +355,12 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                             Style::default().fg(th.text_dim),
                         ),
                     ]);
-                    frame.render_widget(
-                        Paragraph::new(head),
-                        Rect::new(inner.x, inner.y, inner.width, 1),
-                    );
+                    frame.render_widget(Paragraph::new(head), at(top));
                     let lines = detail_lines(row);
                     let key_w = lines.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
                     for (i, (k, v)) in lines.iter().enumerate() {
-                        let y = inner.y + 2 + i as u16;
-                        if y >= footer_y {
+                        let y = top + 2 + i as u16;
+                        if y >= note_y {
                             break;
                         }
                         frame.render_widget(
@@ -382,7 +371,7 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                                 ),
                                 Span::styled(v.clone(), Style::default().fg(th.text_body)),
                             ])),
-                            Rect::new(inner.x, y, inner.width, 1),
+                            at(y),
                         );
                     }
                 } else {
@@ -398,10 +387,10 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                             query_line,
                             Style::default().fg(if filtering { th.text_body } else { th.text_dim }),
                         ))),
-                        Rect::new(inner.x, inner.y, inner.width, 1),
+                        at(top),
                     );
-                    let list_y = inner.y + 2;
-                    let list_h = (footer_y.saturating_sub(list_y)) as usize;
+                    let list_y = top + 2;
+                    let list_h = (note_y.saturating_sub(list_y)) as usize;
                     let start = sel
                         .saturating_sub(list_h.saturating_sub(1))
                         .min(filtered.len().saturating_sub(list_h));
@@ -411,7 +400,7 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                                 "  no match",
                                 Style::default().fg(th.text_dim),
                             ))),
-                            Rect::new(inner.x, list_y, inner.width, 1),
+                            at(list_y),
                         );
                     }
                     for (vi, &ri) in filtered.iter().enumerate().skip(start).take(list_h) {
@@ -425,11 +414,7 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                         } else {
                             "✓"
                         };
-                        let stale = row
-                            .stale
-                            .as_ref()
-                            .map(|_| "  [update]")
-                            .unwrap_or_default();
+                        let stale = row.stale.as_ref().map(|_| "  [update]").unwrap_or_default();
                         let text = format!(
                             "{} {:<26} {:<10} {:<32} {}{}",
                             mark,
@@ -439,8 +424,8 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                             row.kind,
                             stale,
                         );
-                        let text: String = text.chars().take(inner.width as usize).collect();
-                        let fill = (inner.width as usize).saturating_sub(text.chars().count());
+                        let text: String = text.chars().take(w).collect();
+                        let fill = w.saturating_sub(text.chars().count());
                         let line = if is_sel {
                             Line::from(Span::styled(
                                 format!("{text}{}", " ".repeat(fill)),
@@ -450,19 +435,17 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                                     .add_modifier(Modifier::BOLD),
                             ))
                         } else {
-                            let fg = if row.enabled { th.text_bright } else { th.text_dim };
+                            let fg = if row.enabled {
+                                th.text_bright
+                            } else {
+                                th.text_dim
+                            };
                             Line::from(vec![
                                 Span::styled(text, Style::default().fg(fg).bg(th.surface_bg)),
-                                Span::styled(
-                                    " ".repeat(fill),
-                                    Style::default().bg(th.surface_bg),
-                                ),
+                                Span::styled(" ".repeat(fill), Style::default().bg(th.surface_bg)),
                             ])
                         };
-                        frame.render_widget(
-                            Paragraph::new(line),
-                            Rect::new(inner.x, y, inner.width, 1),
-                        );
+                        frame.render_widget(Paragraph::new(line), at(y));
                     }
                 }
 
@@ -476,20 +459,53 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                         note,
                         Style::default().fg(th.text_dim).bg(th.surface_bg),
                     ))),
-                    Rect::new(inner.x, footer_y, inner.width, 1),
+                    at(note_y),
                 );
-                let keys = if detail {
-                    "esc back"
+                let hint_segs: &[&str] = if detail {
+                    &["esc back"]
                 } else {
-                    "↑↓ move · / filter · space toggle · u update · U update all · enter details · enable/disable applies next session or /restart"
+                    &[
+                        "↑↓ move",
+                        "/ filter",
+                        "space toggle",
+                        "u update",
+                        "U update all",
+                        "enter details",
+                        "esc close",
+                        "toggles apply next session or /restart",
+                    ]
                 };
-                frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled(
-                        keys,
-                        Style::default().fg(th.text_faint).bg(th.surface_bg),
-                    ))),
-                    Rect::new(inner.x, footer_y + 1, inner.width, 1),
-                );
+                let mut hint_rows: Vec<String> = vec![String::new()];
+                for seg in hint_segs {
+                    let last = hint_rows.len() - 1;
+                    let joined = if hint_rows[last].is_empty() {
+                        seg.to_string()
+                    } else {
+                        format!("{} · {seg}", hint_rows[last])
+                    };
+                    if joined.chars().count() <= w || hint_rows[last].is_empty() {
+                        hint_rows[last] = joined;
+                    } else if hint_rows.len() < 2 {
+                        hint_rows.push(seg.to_string());
+                    }
+                }
+                for (i, line) in hint_rows.iter().enumerate() {
+                    let line = if line.chars().count() > w {
+                        let cut: String = line.chars().take(w).collect();
+                        cut[..cut.rfind(' ').unwrap_or(0)]
+                            .trim_end_matches(['·', ' '])
+                            .to_string()
+                    } else {
+                        line.clone()
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            line,
+                            Style::default().fg(th.text_faint).bg(th.surface_bg),
+                        ))),
+                        at(keys_y + i as u16),
+                    );
+                }
             })?;
 
             if !poll(Duration::from_millis(100))? {

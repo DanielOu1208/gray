@@ -542,7 +542,15 @@ pub(crate) async fn dispatch_command(
                 });
                 match changed {
                     Ok(true) => say(tui_shared, "plugins updated"),
-                    Ok(false) => {}
+                    Ok(false) => {
+                        if let Some(shared) = tui_shared {
+                            let mut t = shared.lock().expect("tui lock");
+                            t.clear_draft();
+                            if !t.retract_slash_echo("/plugins") {
+                                let _ = t.draw();
+                            }
+                        }
+                    }
                     Err(e) => say(tui_shared, &format!("plugins manager failed: {e}")),
                 }
             }
