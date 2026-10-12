@@ -11,6 +11,12 @@ pub(crate) struct ToolDef {
     pub rules: Option<&'static str>,
     pub skills: Option<&'static str>,
     pub plugin: Option<&'static str>,
+    pub mcp: Option<McpSource>,
+}
+
+pub(crate) enum McpSource {
+    ClaudeJson(&'static str),
+    Opencode(&'static str),
 }
 
 pub(crate) const TOOLS: &[ToolDef] = &[
@@ -23,6 +29,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         rules: Some(".claude/CLAUDE.md"),
         skills: Some(".claude/skills"),
         plugin: Some("claude-sub"),
+        mcp: Some(McpSource::ClaudeJson(".claude.json")),
     },
     ToolDef {
         id: "codex",
@@ -33,6 +40,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         rules: Some(".codex/AGENTS.md"),
         skills: Some(".codex/skills"),
         plugin: Some("codex-sub"),
+        mcp: None,
     },
     ToolDef {
         id: "opencode",
@@ -43,6 +51,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         rules: Some(".config/opencode/AGENTS.md"),
         skills: Some(".config/opencode/skills"),
         plugin: Some("opencode-sub"),
+        mcp: Some(McpSource::Opencode(".config/opencode/opencode.json")),
     },
     ToolDef {
         id: "devin",
@@ -53,6 +62,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         rules: None,
         skills: Some(".config/devin/skills"),
         plugin: Some("devin-sub"),
+        mcp: None,
     },
     ToolDef {
         id: "cursor",
@@ -63,6 +73,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         rules: None,
         skills: Some(".cursor/skills"),
         plugin: None,
+        mcp: None,
     },
     ToolDef {
         id: "windsurf",
@@ -73,6 +84,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         rules: None,
         skills: None,
         plugin: None,
+        mcp: None,
     },
     ToolDef {
         id: "aider",
@@ -83,6 +95,7 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         rules: None,
         skills: None,
         plugin: None,
+        mcp: None,
     },
 ];
 

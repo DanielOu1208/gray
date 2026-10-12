@@ -24,6 +24,8 @@ pub(crate) struct ToolStamp {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ImportEntry {
+    #[serde(default)]
+    pub run: String,
     pub at: u64,
     pub tool: String,
     pub kind: String,
