@@ -708,7 +708,7 @@ fn intro_frames() -> &'static [(Vec<String>, Vec<String>)] {
 /// frame; the wordmark shimmers while `intro` runs.
 fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<Line<'static>> {
     let theme = crate::theme::theme();
-    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let version = env!("CARGO_PKG_VERSION").to_string();
 
     let (x, col_w) = home_column(w);
 
