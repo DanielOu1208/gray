@@ -48,7 +48,8 @@ jobs:
 
   test:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    env:
+      CODE: ${{ needs.changes.outputs.code }}
     permissions:
       contents: read
       checks: write
@@ -59,19 +60,24 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - if: env.CODE == 'true'
+        uses: actions/checkout@v4
+      - if: env.CODE == 'true'
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: taiki-e/install-action@v2
+      - if: env.CODE == 'true'
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - uses: Swatinem/rust-cache@v2
+      - if: env.CODE == 'true'
+        uses: Swatinem/rust-cache@v2
         with:
           # PRs restore main's cache; only main writes it, so PR runs skip the
           # upload and never evict the cache every other branch starts from.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: install ripgrep (grep tool + parity tests shell out to rg)
+      - if: env.CODE == 'true'
+        name: install ripgrep (grep tool + parity tests shell out to rg)
         shell: bash
         run: |
           if command -v rg >/dev/null; then rg --version; exit 0; fi
@@ -82,14 +88,16 @@ jobs:
             || { sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep; }
           fi
           rg --version
-      - if: matrix.os == 'ubuntu-latest'
+      - if: env.CODE == 'true' && matrix.os == 'ubuntu-latest'
         run: cargo fmt --check
-      - run: cargo clippy --locked --workspace -- -D warnings
+      - if: env.CODE == 'true'
+        run: cargo clippy --locked --workspace -- -D warnings
       # nextest runs every test in its own process, all binaries at once, and
       # --no-fail-fast reports each failure by name: a failure elsewhere cannot
       # hide the macOS cancellation regression evidence, which is why that
       # suite no longer needs a separate step ahead of this one.
-      - name: Build the standalone memory plugin integration fixture
+      - if: env.CODE == 'true'
+        name: Build the standalone memory plugin integration fixture
         shell: bash
         run: |
           git init "$RUNNER_TEMP/gray-memory"
@@ -97,7 +105,8 @@ jobs:
           git -C "$RUNNER_TEMP/gray-memory" checkout --detach FETCH_HEAD
           CARGO_BUILD_JOBS=4 cargo build --locked --manifest-path "$RUNNER_TEMP/gray-memory/Cargo.toml" --bin gray-memory
           echo "GRAY_MEMORY_TEST_BIN=$RUNNER_TEMP/gray-memory/target/debug/gray-memory" >> "$GITHUB_ENV"
-      - name: Run workspace tests
+      - if: env.CODE == 'true'
+        name: Run workspace tests
         env:
           RUST_BACKTRACE: 1
         run: cargo nextest run --locked --workspace --profile ci
@@ -106,17 +115,17 @@ jobs:
       # the same `--workspace` feature set as that build; `-p gray-tools` (or a
       # release run in perf-floor) resolves different features and recompiles,
       # which cost perf-floor four minutes.
-      - if: matrix.os == 'ubuntu-latest'
+      - if: env.CODE == 'true' && matrix.os == 'ubuntu-latest'
         name: Tool-call latency baseline
         run: >-
           cargo nextest run --locked --workspace --profile ci --run-ignored only
           --no-capture -E 'binary(tool_bench) and test(=baseline_tool_bench)'
       # nextest does not run doctests. They are platform-neutral, so one OS is
       # enough.
-      - if: matrix.os == 'ubuntu-latest'
+      - if: env.CODE == 'true' && matrix.os == 'ubuntu-latest'
         name: Run doctests
         run: cargo test --locked --workspace --doc
-      - if: matrix.os == 'ubuntu-latest'
+      - if: env.CODE == 'true' && matrix.os == 'ubuntu-latest'
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
