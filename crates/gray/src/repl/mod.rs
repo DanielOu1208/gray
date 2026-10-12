@@ -802,8 +802,14 @@ pub async fn run_repl_mode(
     // here exits 101 via the panic hook in main.rs (kept as-is for real
     // bugs); a clean error exits non-zero with a readable message instead.
     // Resuming already shows its own line; otherwise nudge toward cut-off work.
+    // The sessions scan is slow (thousands of files), so it runs beside the
+    // boot path — the composer comes up now and the notice lands in the home
+    // rows when the scan answers, like plugin stats.
     let startup_hint = if interactive && resumed_session_info.is_none() {
-        crate::resume::startup_interrupted_hint(&cwd).await
+        let cwd2 = cwd.clone();
+        Some(tokio::spawn(async move {
+            crate::resume::startup_interrupted_hint(&cwd2).await
+        }))
     } else {
         None
     };
@@ -845,17 +851,24 @@ pub async fn run_repl_mode(
                 ));
                 t.ensure_gap();
             }
-            if let Some(h) = &startup_hint {
-                if t.is_home() {
-                    t.set_home_notice(Some(h.clone()));
-                } else {
-                    t.push_dim(h.clone());
-                    t.ensure_gap();
-                }
-            }
             t
         }));
         crate::host::register_tui(&shared);
+        if let Some(task) = startup_hint {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Ok(Some(h)) = task.await
+                    && let Ok(mut t) = shared.lock()
+                {
+                    if t.is_home() {
+                        t.set_home_notice(Some(h));
+                    } else {
+                        t.push_dim(h);
+                        t.ensure_gap();
+                    }
+                }
+            });
+        }
         // Now that the composer exists, point the ask service at it.
         crate::ask::install(Some(shared.clone()), interactive);
         if let Ok(mut t) = shared.lock() {

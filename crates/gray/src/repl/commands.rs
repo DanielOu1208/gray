@@ -229,7 +229,7 @@ const HIDDEN_ALIASES: &[(&str, &str)] = &[("plugin", "plugins")];
 /// builtin but stay out of the gateway registry, which iterates REGISTRY.
 pub(crate) const TUI_COMMANDS: &[CmdDef] = &[CmdDef {
     name: "intro",
-    desc: "logo intro on|off",
+    desc: "logo intro enable|disable",
     aliases: &[],
     scope: CmdScope::Global,
     surface: CmdSurface::Local,
@@ -443,8 +443,10 @@ pub(crate) fn complete_command_args(
             cmd,
             arg_text,
             &[
-                ("on", "animate the logo at startup"),
-                ("off", "settle instantly"),
+                ("enable", "animate the logo at startup"),
+                ("disable", "settle instantly"),
+                ("on", "alias of enable"),
+                ("off", "alias of disable"),
             ],
         ),
         "hotkeys" | "keybindings" | "bindings" => {

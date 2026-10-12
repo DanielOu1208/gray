@@ -637,7 +637,7 @@ pub(crate) fn tip_spans() -> Vec<Span<'static>> {
     let theme = crate::theme::theme();
     let (key, text) = WELCOME_TIPS[welcome_tip_index()];
     vec![
-        Span::styled("● Tip  ", Style::default().fg(theme.text_bright)),
+        Span::styled("● Tip ", Style::default().fg(theme.text_bright)),
         Span::styled(key, Style::default().fg(theme.text_bright)),
         Span::styled(format!(" {text}"), Style::default().fg(theme.text_muted)),
     ]
@@ -674,7 +674,7 @@ pub(crate) fn home_column(w: usize) -> (usize, usize) {
 /// 30fps. The last frame is `logo.txt`, so the intro ends exactly on the
 /// static banner.
 const INTRO_FRAME_MS: u64 = 33;
-const INTRO_FPS: f64 = 30.0;
+const INTRO_TOTAL_MS: u64 = 1000;
 const INTRO_FRAMES_TXT: &str = include_str!("../../assets/logo-intro-frames.txt");
 
 /// `(mark rows, edge flags)` per frame, parsed once.
@@ -730,7 +730,9 @@ fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<L
     let frames = intro_frames();
     let last = frames.len().saturating_sub(1);
     let frame_idx = match intro {
-        Some(elapsed) => (elapsed.as_secs_f64() * INTRO_FPS) as usize,
+        Some(elapsed) => {
+            (elapsed.as_secs_f64() * 1000.0 / INTRO_TOTAL_MS as f64 * last as f64) as usize
+        }
         None => (progress.clamp(0.0, 1.0) * last as f32).round() as usize,
     }
     .min(last);
@@ -846,11 +848,14 @@ fn play_logo_intro(
         let _ = write!(out, "\x1b[{h};1H{}", "\n".repeat(overflow));
         let _ = out.flush();
     }
+    // The viewport covers down to the screen's last row so the skip hints
+    // can sit in the bottom corners; they die with the animation — the
+    // later insert only pushes the welcome rows into scrollback.
     terminal.set_viewport_area(ratatui::layout::Rect::new(
         0,
         start as u16,
         w as u16,
-        welcome_h as u16,
+        (h - start) as u16,
     ));
     // Drain the startup-probe answers before the loop: the terminal's
     // replies to `with_options` CPR / keyboard-mode queries sit in the
@@ -865,26 +870,35 @@ fn play_logo_intro(
         }
     }
     let intro_start = std::time::Instant::now();
-    let frame_count = intro_frames().len();
-    for f in 0..frame_count {
-        let progress = f as f32 / (frame_count - 1) as f32;
+    let dim = Style::default().fg(crate::theme::theme().text_dim);
+    let mut skipped = None;
+    loop {
         let elapsed = intro_start.elapsed();
+        if elapsed >= Duration::from_millis(INTRO_TOTAL_MS) {
+            break;
+        }
+        let progress = (elapsed.as_secs_f64() * 1000.0 / INTRO_TOTAL_MS as f64) as f32;
         let _ = terminal.draw(|frame| {
             let area = frame.area();
             frame.render_widget(
                 Paragraph::new(welcome_lines_at(w, progress, Some(elapsed))),
                 area,
             );
+            let row = ratatui::layout::Rect::new(0, area.height.saturating_sub(1), area.width, 1);
+            frame.render_widget(Paragraph::new(Line::styled("enter to skip", dim)), row);
+            frame.render_widget(
+                Paragraph::new(Line::styled("/intro disable to disable", dim))
+                    .alignment(ratatui::layout::Alignment::Right),
+                row,
+            );
         });
         // poll() is the frame clock *and* the skip: queued input cuts to
         // the finished banner. Enter/Esc/Space and Ctrl-keys are eaten
-        // here (Enter must not submit); any other key or a paste is
-        // returned so `read_line` dispatches it as normal input. The
+        // here (Enter must not submit); any other key or a paste comes
+        // back so `read_line` dispatches it as normal input. The
         // terminal's CPR/focus responses to the startup probes sit in
         // the same queue and must not cancel the sweep.
-        if f + 1 < frame_count
-            && crossterm::event::poll(Duration::from_millis(INTRO_FRAME_MS)).unwrap_or(false)
-        {
+        if crossterm::event::poll(Duration::from_millis(INTRO_FRAME_MS)).unwrap_or(false) {
             match crossterm::event::read() {
                 Ok(crossterm::event::Event::Key(key)) => {
                     let swallow = matches!(
@@ -895,20 +909,26 @@ fn play_logo_intro(
                     ) || key
                         .modifiers
                         .contains(crossterm::event::KeyModifiers::CONTROL);
-                    if swallow {
-                        return None;
+                    if !swallow {
+                        skipped = Some(crossterm::event::Event::Key(key));
                     }
-                    return Some(crossterm::event::Event::Key(key));
+                    break;
                 }
-                Ok(ev @ crossterm::event::Event::Paste(_)) => return Some(ev),
+                Ok(ev @ crossterm::event::Event::Paste(_)) => {
+                    skipped = Some(ev);
+                    break;
+                }
                 Ok(_) | Err(_) => {}
             }
         }
     }
     // Collapse the band back to a zero-height anchor at the banner's top
-    // row so the insert draws over the last frame rather than shifting it.
+    // row — on every exit, skip included. A viewport still reaching the
+    // screen bottom would make the insert scroll the whole screen: the
+    // last frame and the hint row would land in scrollback instead of
+    // the settled banner overwriting them in place.
     terminal.set_viewport_area(ratatui::layout::Rect::new(0, start as u16, w as u16, 0));
-    None
+    skipped
 }
 
 impl Tui {
