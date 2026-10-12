@@ -1303,6 +1303,22 @@ impl Tui {
         true
     }
 
+    pub(crate) fn retract_slash_echo(&mut self, cmd: &str) -> bool {
+        let echoed = matches!(
+            self.history_entries.last(),
+            Some(TranscriptEntry::UserPrompt(text, _)) if text.trim() == cmd
+        );
+        if !echoed {
+            return false;
+        }
+        self.history_entries.pop();
+        while matches!(self.history_entries.last(), Some(TranscriptEntry::Gap(_))) {
+            self.history_entries.pop();
+        }
+        self.reflow_on_resize(self.last_width);
+        true
+    }
+
     pub fn set_model(&mut self, model: String) {
         self.model_name = model;
     }
