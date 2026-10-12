@@ -8,6 +8,9 @@ pub(crate) struct ToolDef {
     pub dirs: &'static [&'static str],
     pub files: &'static [&'static str],
     pub bins: &'static [&'static str],
+    pub rules: Option<&'static str>,
+    pub skills: Option<&'static str>,
+    pub plugin: Option<&'static str>,
 }
 
 pub(crate) const TOOLS: &[ToolDef] = &[
@@ -17,6 +20,9 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         dirs: &[".claude"],
         files: &[".claude.json"],
         bins: &["claude"],
+        rules: Some(".claude/CLAUDE.md"),
+        skills: Some(".claude/skills"),
+        plugin: Some("claude-sub"),
     },
     ToolDef {
         id: "codex",
@@ -24,6 +30,9 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         dirs: &[".codex"],
         files: &[],
         bins: &["codex"],
+        rules: Some(".codex/AGENTS.md"),
+        skills: Some(".codex/skills"),
+        plugin: Some("codex-sub"),
     },
     ToolDef {
         id: "opencode",
@@ -31,6 +40,9 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         dirs: &[".config/opencode"],
         files: &[],
         bins: &["opencode"],
+        rules: Some(".config/opencode/AGENTS.md"),
+        skills: Some(".config/opencode/skills"),
+        plugin: Some("opencode-sub"),
     },
     ToolDef {
         id: "devin",
@@ -38,6 +50,9 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         dirs: &[".config/devin", ".local/share/devin"],
         files: &[],
         bins: &["devin"],
+        rules: None,
+        skills: Some(".config/devin/skills"),
+        plugin: Some("devin-sub"),
     },
     ToolDef {
         id: "cursor",
@@ -45,6 +60,9 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         dirs: &[".cursor"],
         files: &[],
         bins: &["cursor-agent"],
+        rules: None,
+        skills: Some(".cursor/skills"),
+        plugin: None,
     },
     ToolDef {
         id: "windsurf",
@@ -52,6 +70,9 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         dirs: &[".windsurf"],
         files: &[],
         bins: &[],
+        rules: None,
+        skills: None,
+        plugin: None,
     },
     ToolDef {
         id: "aider",
@@ -59,6 +80,9 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         dirs: &[],
         files: &[],
         bins: &["aider"],
+        rules: None,
+        skills: None,
+        plugin: None,
     },
 ];
 
@@ -175,3 +199,52 @@ pub(crate) async fn run_for_home(tui: crate::composer::SharedTui) {
     }
 }
 
+
+pub(crate) fn scanned_report() -> String {
+    let mut out = String::from("declared scan set:\n");
+    let home = home().unwrap_or_else(|| PathBuf::from("~"));
+    for def in TOOLS {
+        out.push_str(&format!("  {} ({})\n", def.name, def.id));
+        for rel in def.dirs.iter().chain(def.files.iter()) {
+            let p = home.join(rel);
+            let found = p.symlink_metadata().is_ok();
+            let suffix = if *rel == ".claude.json" && found {
+                let keys = std::fs::read_to_string(&p)
+                    .ok()
+                    .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+                    .and_then(|v| {
+                        v.as_object()
+                            .map(|o| o.keys().cloned().collect::<Vec<_>>())
+                    })
+                    .unwrap_or_default();
+                format!(
+                    "  (keys: {})",
+                    if keys.is_empty() { "?".to_string() } else { keys.join(", ") }
+                )
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "    {} {}{}\n",
+                if found { "+" } else { "-" },
+                rel,
+                suffix
+            ));
+        }
+        for b in def.bins {
+            out.push_str(&format!(
+                "    {} {} on PATH\n",
+                if on_path(b) { "+" } else { "-" },
+                b
+            ));
+        }
+    }
+    let state = super::load_state();
+    if !state.dismissed.is_empty() {
+        out.push_str(&format!(
+            "dismissed: {}\n",
+            state.dismissed.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    out
+}
