@@ -182,13 +182,18 @@ pub async fn run_onboarding(config: &mut Config) -> anyhow::Result<bool> {
             "\x1b[2m[i] import setup via /setup · any other key skips\x1b[0m",
             2,
         );
-        use crossterm::event::{Event, KeyCode, read};
+        use crossterm::event::{Event, KeyCode, KeyEventKind, read};
         let _ = crossterm::terminal::enable_raw_mode();
-        let key = read().ok();
+        let key = loop {
+            match read() {
+                Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => break Some(k),
+                Ok(_) => continue,
+                Err(_) => break None,
+            }
+        };
         let _ = crossterm::terminal::disable_raw_mode();
         print!("\r\n");
-        if matches!(key, Some(Event::Key(k)) if matches!(k.code, KeyCode::Char('i') | KeyCode::Char('I')))
-        {
+        if matches!(key, Some(k) if matches!(k.code, KeyCode::Char('i') | KeyCode::Char('I'))) {
             crate::qol::detect::set_pending_setup(true);
         }
     }

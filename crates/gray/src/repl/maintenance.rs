@@ -151,8 +151,8 @@ pub(crate) async fn restart_with(tui: &TuiOpt, resume: bool) {
         }
     };
     let original: Vec<String> = std::env::args().skip(1).collect();
-    let args = if original.is_empty() && !resume {
-        Vec::new()
+    let args = if !resume {
+        strip_resume_args(&original)
     } else {
         restart_argv(original)
     };
@@ -308,6 +308,43 @@ pub(crate) fn restart_argv(original: Vec<String>) -> Vec<String> {
     } else {
         original
     }
+}
+
+fn strip_resume_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = args.iter().peekable();
+    if it.peek().map(|a| a.as_str()) == Some("resume") {
+        it.next();
+        while let Some(a) = it.peek() {
+            match a.as_str() {
+                "--last" | "--all" => {
+                    it.next();
+                }
+                s if !s.starts_with('-') => {
+                    it.next();
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-c" | "--continue" | "--session" | "-r" | "--resume" => {
+                if matches!(a.as_str(), "--session" | "-r" | "--resume")
+                    && let Some(v) = it.peek()
+                    && !v.starts_with('-')
+                {
+                    it.next();
+                }
+            }
+            s if s.starts_with("--session=")
+                || s.starts_with("--resume=")
+                || s.starts_with("-r") && s.len() > 2 => {}
+            _ => out.push(a.clone()),
+        }
+    }
+    out
 }
 
 /// One keypress, y/N, read the way the TUI reads keys.

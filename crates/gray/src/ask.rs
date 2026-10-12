@@ -545,7 +545,7 @@ async fn drive_tui(svc: &Arc<Service>, id: u64) {
         // Park the live turn status; restore it on exit.
         let saved_status = t_lock(&tui).take_status();
         t_lock(&tui).set_status(Some("Question"));
-        let answers = run_ask_modal(&tui, &mut state, &svc.cancel);
+        let answers = run_ask_modal(&tui, &mut state, &svc.cancel).unwrap_or_default();
         {
             let mut t = t_lock(&tui);
             // Transcript summary (the deleted stacked Q&A replay, verbatim shape).
@@ -724,17 +724,17 @@ fn run_ask_modal(
     tui: &crate::composer::SharedTui,
     state: &mut AskModalState,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Vec<AskAnswer> {
+) -> Option<Vec<AskAnswer>> {
     use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, poll, read};
     if state.questions.is_empty() {
         clear_ask_modal(tui);
-        return Vec::new();
+        return Some(Vec::new());
     }
     draw_ask_modal(tui, state);
     loop {
         if cancel.is_cancelled() {
             clear_ask_modal(tui);
-            return Vec::new();
+            return None;
         }
         match poll(std::time::Duration::from_millis(100)) {
             Ok(true) => {}
@@ -747,11 +747,11 @@ fn run_ask_modal(
         }
         if key.code == KeyCode::Esc {
             clear_ask_modal(tui);
-            return Vec::new(); // Esc always cancels (decline/skip downstream)
+            return None; // Esc always cancels (decline/skip downstream)
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             clear_ask_modal(tui);
-            return Vec::new();
+            return None;
         }
         let mut submit = false;
         {
@@ -845,7 +845,7 @@ fn run_ask_modal(
             draw_ask_modal(tui, state);
             if let Some(answers) = answers {
                 clear_ask_modal(tui);
-                return answers;
+                return Some(answers);
             }
         }
     }
@@ -854,14 +854,16 @@ fn run_ask_modal(
 pub(crate) fn ask_questions_modal(
     tui: &crate::composer::SharedTui,
     questions: Vec<AskQuestion>,
-) -> Vec<AskAnswer> {
+) -> Option<Vec<AskAnswer>> {
     let mut state = AskModalState::new(0);
     state.load(questions);
     let cancel = tokio_util::sync::CancellationToken::new();
     let answers = run_ask_modal(tui, &mut state, &cancel);
     {
         let mut t = t_lock(tui);
-        push_ask_summary(&mut t, &state.questions, &answers);
+        if let Some(answers) = &answers {
+            push_ask_summary(&mut t, &state.questions, answers);
+        }
         let _ = t.draw();
     }
     answers

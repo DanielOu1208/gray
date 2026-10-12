@@ -379,10 +379,17 @@ fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, body)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?
+            .write_all(body.as_bytes())?;
         let mode = std::fs::metadata(path)
             .map(|m| m.permissions().mode() & 0o777)
             .ok()
@@ -390,6 +397,8 @@ fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
             .unwrap_or(0o600);
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, path)
 }
 
@@ -488,12 +497,12 @@ async fn apply_plugin(name: &str) -> anyhow::Result<String> {
     Ok(lines.join(" · "))
 }
 
-fn undo_entry(entry: &super::ImportEntry) -> String {
+fn undo_entry(entry: &super::ImportEntry) -> (bool, String) {
     match entry.kind.as_str() {
         "rules" => {
             let path = Path::new(&entry.target);
             let Ok(body) = std::fs::read_to_string(path) else {
-                return "AGENTS.md missing — skipped".into();
+                return (true, "AGENTS.md missing — skipped".into());
             };
             let begin = format!("<!-- gray-setup:{} BEGIN -->", entry.detail);
             let end = format!("<!-- gray-setup:{} END -->", entry.detail);
@@ -510,27 +519,30 @@ fn undo_entry(entry: &super::ImportEntry) -> String {
                         }
                     );
                     match std::fs::write(path, merged) {
-                        Ok(()) => "marked section removed".into(),
-                        Err(e) => format!("write failed: {e}"),
+                        Ok(()) => (true, "marked section removed".into()),
+                        Err(e) => (false, format!("write failed: {e}")),
                     }
                 }
-                _ => "marked section not found — skipped".into(),
+                _ => (true, "marked section not found — skipped".into()),
             }
         }
         "skill" => {
             let link = Path::new(&entry.target);
             match link.symlink_metadata() {
                 Ok(m) if m.file_type().is_symlink() => match std::fs::remove_file(link) {
-                    Ok(()) => format!("symlink {} removed", link.display()),
-                    Err(e) => format!("remove failed: {e}"),
+                    Ok(()) => (true, format!("symlink {} removed", link.display())),
+                    Err(e) => (false, format!("remove failed: {e}")),
                 },
-                _ => format!("{} not a symlink — left in place", link.display()),
+                _ => (
+                    true,
+                    format!("{} not a symlink — left in place", link.display()),
+                ),
             }
         }
         "mcp" => {
             let path = Path::new(&entry.detail);
             let Some(mut root) = read_json(path).filter(|v| v.is_object()) else {
-                return format!("{} unreadable — skipped", path.display());
+                return (true, format!("{} unreadable — skipped", path.display()));
             };
             let removed = root
                 .get_mut("mcpServers")
@@ -538,21 +550,24 @@ fn undo_entry(entry: &super::ImportEntry) -> String {
                 .map(|m| m.remove(&entry.target).is_some())
                 .unwrap_or(false);
             if !removed {
-                return format!("mcp '{}' not present — skipped", entry.target);
+                return (
+                    true,
+                    format!("mcp '{}' not present — skipped", entry.target),
+                );
             }
             match write_atomic(
                 path,
                 &serde_json::to_string_pretty(&root).unwrap_or_default(),
             ) {
-                Ok(()) => format!("mcp '{}' removed", entry.target),
-                Err(e) => format!("write failed: {e}"),
+                Ok(()) => (true, format!("mcp '{}' removed", entry.target)),
+                Err(e) => (false, format!("write failed: {e}")),
             }
         }
         "plugin" => match gray_pkg::ops::remove(&entry.target) {
-            Ok(()) => format!("plugin {} removed", entry.target),
-            Err(e) => format!("remove failed: {e}"),
+            Ok(()) => (true, format!("plugin {} removed", entry.target)),
+            Err(e) => (false, format!("remove failed: {e}")),
         },
-        other => format!("unknown kind {other} — skipped"),
+        other => (true, format!("unknown kind {other} — skipped")),
     }
 }
 
@@ -618,8 +633,11 @@ pub(crate) async fn handle(tui: &TuiOpt, arg: Option<String>) {
                 if state.imports[i].run != *run {
                     continue;
                 }
-                let entry = state.imports.remove(i);
-                let res = undo_entry(&entry);
+                let entry = state.imports[i].clone();
+                let (done, res) = undo_entry(&entry);
+                if done {
+                    state.imports.remove(i);
+                }
                 out.push_str(&format!("undo {} {}: {}\n", entry.kind, entry.target, res));
             }
         }
@@ -697,7 +715,10 @@ pub(crate) async fn handle(tui: &TuiOpt, arg: Option<String>) {
             default_all: true,
         })
         .collect();
-    let answers = crate::ask::ask_questions_modal(shared, questions);
+    let Some(answers) = crate::ask::ask_questions_modal(shared, questions) else {
+        say(tui, "cancelled — nothing changed");
+        return;
+    };
     let mut state = super::load_state();
     let run = run_id();
     let mut out = String::new();

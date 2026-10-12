@@ -201,6 +201,7 @@ fn live_sessions() -> usize {
     let Ok(rd) = std::fs::read_dir(home.join("sessions")) else {
         return 0;
     };
+    let me = std::process::id();
     let mut n = 0;
     for e in rd.flatten() {
         let p = e.path();
@@ -208,7 +209,7 @@ fn live_sessions() -> usize {
             continue;
         }
         match open_holder_pid(&p) {
-            Some(pid) if pid_alive(pid) => n += 1,
+            Some(pid) if pid != me && pid_alive(pid) => n += 1,
             Some(_) => {}
             None if open_lock_held(&p) => n += 1,
             None => {}
@@ -410,7 +411,7 @@ pub(crate) async fn handle(tui: &TuiOpt) {
         return;
     }
     let shared = tui.as_ref().map(|(s, _)| s).expect("checked above");
-    let answers = crate::ask::ask_questions_modal(
+    let Some(answers) = crate::ask::ask_questions_modal(
         shared,
         vec![crate::ask::AskQuestion {
             id: "update-everything".into(),
@@ -423,11 +424,10 @@ pub(crate) async fn handle(tui: &TuiOpt) {
             multi: true,
             default_all: true,
         }],
-    );
-    if answers.is_empty() {
+    ) else {
         say(tui, "cancelled — nothing changed");
         return;
-    }
+    };
     let resume = answers
         .iter()
         .any(|a| a.answers.iter().any(|x| x == RESUME_OPTION));
