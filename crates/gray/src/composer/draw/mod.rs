@@ -233,6 +233,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let home = tui.is_home().then_some(HomeRows {
         notice: tui.home_notice.as_deref(),
         stats: tui.plugin_stats.as_deref(),
+        above: tui.home_update.as_deref(),
     });
     let home_mode = home.is_some();
     let mut ibox = build_input_box(&text, cursor, w, ghost, home);
@@ -656,12 +657,13 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         }
         let rendered_box_h = box_h.min(area.bottom().saturating_sub(box_y));
         if rendered_box_h > 0 {
-            let band_h = (ibox.band_h as u16).min(rendered_box_h);
+            let lead = (ibox.lead_h as u16).min(rendered_box_h);
+            let band_h = (ibox.band_h as u16).min(rendered_box_h.saturating_sub(lead));
             let box_x = area.x + (ibox.x as u16).min(area.width);
             let box_w = (ibox.width as u16).min(area.right().saturating_sub(box_x));
             frame.render_widget(
                 Block::default().style(Style::default().bg(crate::theme::theme().surface_bg)),
-                Rect::new(box_x, box_y, box_w, band_h),
+                Rect::new(box_x, box_y + lead, box_w, band_h),
             );
             // The home rows under the box may run past its right edge (a
             // long notice on a narrow column); only the box text is wrapped.

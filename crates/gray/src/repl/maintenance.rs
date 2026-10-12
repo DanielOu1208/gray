@@ -132,7 +132,7 @@ pub(crate) async fn handle_restart(tui: &TuiOpt) {
     // the last exchange is the one thing this command must not do.
     super::drain_in_flight_turn(std::time::Duration::from_millis(1500)).await;
 
-    let exe = match std::env::current_exe() {
+    let exe = match crate::exe_watch::on_disk_exe() {
         Ok(p) => p,
         Err(e) => {
             super::say(
@@ -159,17 +159,24 @@ pub(crate) async fn handle_restart(tui: &TuiOpt) {
     use std::io::Write as _;
     let _ = std::io::stdout().flush();
 
-    match std::process::Command::new(&exe).args(&args).spawn() {
+    #[cfg(unix)]
+    let spawned: std::io::Result<()> = {
+        use std::os::unix::process::CommandExt as _;
+        Err(std::process::Command::new(&exe).args(&args).exec())
+    };
+    #[cfg(not(unix))]
+    let spawned: std::io::Result<()> = match std::process::Command::new(&exe).args(&args).spawn() {
         Ok(_) => std::process::exit(0),
-        Err(e) => {
-            // The spawn failed, so this process is still the one running and
-            // still usable: say so rather than exiting into a dead shell.
-            let _ = crossterm::terminal::enable_raw_mode();
-            super::say(
-                shared,
-                &format!("restart failed to spawn ({e}) — still on the old build"),
-            );
-        }
+        Err(e) => Err(e),
+    };
+    if let Err(e) = spawned {
+        // The spawn failed, so this process is still the one running and
+        // still usable: say so rather than exiting into a dead shell.
+        let _ = crossterm::terminal::enable_raw_mode();
+        super::say(
+            shared,
+            &format!("restart failed to spawn ({e}) — still on the old build"),
+        );
     }
 }
 
@@ -237,7 +244,7 @@ async fn restart_gateway() -> GatewayRestart {
 /// `gateway run` the user had launched by hand.
 fn relaunch(home: &std::path::Path, old_pid: u32) -> anyhow::Result<String> {
     use std::process::Stdio;
-    let exe = std::env::current_exe()?;
+    let exe = crate::exe_watch::on_disk_exe()?;
     let log = home.join("logs").join("gateway.log");
     std::fs::create_dir_all(
         log.parent()

@@ -99,7 +99,7 @@ fn empty_prompt_hides_slash_popup_like_codex() {
 fn registry_resolve_canonical_and_aliases() {
     for name in [
         "models", "context", "sessions", "new", "compact", "usage", "feedback", "agentsmd",
-        "skills", "plugin", "plugins", "help", "quit",
+        "skills", "plugins", "help", "quit",
     ] {
         let d = super::resolve(name).unwrap_or_else(|| panic!("resolve {name}"));
         assert_eq!(d.name, name);
@@ -142,13 +142,13 @@ fn registry_completion_covers_aliases() {
             "completion {alias} -> {target}"
         );
     }
-    // `/plug` surfaces `plugin`; bare `/plugin ` leads with itself + all 7 subcommands.
+    // `/plug` surfaces `plugins`; bare `/plugin ` leads with itself + all 7 subcommands.
     use std::path::Path;
     let cwd = Path::new(".");
     assert!(
         super::completion_matches_dyn("/plug", cwd)
             .iter()
-            .any(|(n, _)| n == "plugin")
+            .any(|(n, _)| n == "plugins")
     );
     let plugin_all = super::complete_command_args("plugin", "", cwd);
     assert_eq!(plugin_all.len(), 8);

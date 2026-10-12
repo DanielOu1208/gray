@@ -178,32 +178,27 @@ fn welcome_layout_is_devin_home() {
 }
 
 #[test]
-fn welcome_sweep_draws_top_left_first() {
+fn welcome_sweep_draws_to_the_full_mark() {
     use crate::composer::welcome_lines_at;
     let w = 120usize;
     let glyphs = |reveal: f32| -> usize {
         plain(&welcome_lines_at(w, reveal, None))
             .iter()
-            .map(|l| l.chars().filter(|c| !c.is_whitespace()).count())
+            .map(|l| {
+                l.chars()
+                    .filter(|c| !c.is_whitespace() && *c != '\u{2800}')
+                    .count()
+            })
             .sum()
     };
-    let last_mark_row = |reveal: f32| -> Option<usize> {
-        plain(&welcome_lines_at(w, reveal, None))
-            .iter()
-            .rposition(|l| l.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)))
-    };
-    // The front crosses top-left → bottom-right: at 20% the lower rows
-    // are still blank, at the end the whole mark is drawn; monotonic.
-    let first = glyphs(0.2);
+    // The pens intro draws the mark progressively: blank at the start,
+    // more ink as progress advances, the complete mark at the end.
+    let first = glyphs(0.4);
     let full = glyphs(1.0);
-    assert!(first > 0 && first < full, "first {first}, full {full}");
+    assert!(first < full, "first {first}, full {full}");
     assert!(
-        glyphs(0.6) >= first && glyphs(0.6) <= full,
+        glyphs(0.8) >= first && glyphs(0.8) <= full,
         "the sweep only grows"
-    );
-    assert!(
-        last_mark_row(0.2).unwrap() < last_mark_row(1.0).unwrap(),
-        "the front must reach the bottom rows last"
     );
     assert_eq!(
         plain(&welcome_lines_at(w, 1.0, None)),

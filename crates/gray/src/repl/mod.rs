@@ -896,7 +896,12 @@ pub async fn run_repl_mode(
                         last_exe_check = std::time::Instant::now();
                         if exe_watch.as_ref().is_some_and(|w| w.replaced()) {
                             exe_notified = true;
-                            t.push_dim("gray was updated — /restart to load it".to_string());
+                            let notice = "gray was updated — /restart to load it".to_string();
+                            if t.is_home() {
+                                t.set_home_update(Some(notice));
+                            } else {
+                                t.push_dim(notice);
+                            }
                         }
                     }
                 }

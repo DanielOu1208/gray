@@ -48,6 +48,9 @@ pub(crate) struct InputBox {
     /// Leading rows that are the box itself (painted on `surface_bg`);
     /// any rows after them are the home rows under it.
     pub(crate) band_h: usize,
+    /// Rows before the box rows that are home chrome on the screen bg
+    /// (the update notice above the box), so `lines` keeps one vector.
+    pub(crate) lead_h: usize,
     /// The box's column: `x` cells in from the left, `width` wide. Full
     /// width in chat; on the home screen the welcome's centered column.
     pub(crate) x: usize,
@@ -204,18 +207,30 @@ pub(crate) fn build_input_box(
     // Bottom padding inside the box
     box_lines.push(Line::from(""));
 
-    let band_h = box_lines.len();
+    let mut lead_h = 0usize;
+    if let Some(above) = home.and_then(|h| h.above) {
+        box_lines.insert(
+            0,
+            Line::from(Span::styled(
+                above.to_string(),
+                Style::default().fg(text_dim),
+            )),
+        );
+        lead_h = 1;
+    }
+    let band_h = box_lines.len() - lead_h;
     if let Some(home) = home {
         box_lines.extend(home_rows(home, w));
     }
     InputBox {
         lines: box_lines,
         band_h,
+        lead_h,
         x,
         width: w,
-        // Content rows were counted from the `❯` row; the top pad shifts
-        // every one of them down a row.
-        cur_row: cur_row + 1,
+        // Content rows were counted from the `❯` row; the lead and top
+        // pad shift every one of them down.
+        cur_row: cur_row + 1 + lead_h,
         cur_col,
     }
 }
@@ -225,57 +240,98 @@ pub(crate) fn build_input_box(
 pub(crate) struct HomeRows<'a> {
     pub(crate) notice: Option<&'a str>,
     /// The plugin counts line from the startup probe (`N plugins · M
-    /// loaded · …`); the row stays blank until it lands.
+    /// loaded · …`); its slot stays empty until it lands.
     pub(crate) stats: Option<&'a str>,
+    /// A dim row directly above the box (the update notice), flush with
+    /// the box's left edge.
+    pub(crate) above: Option<&'a str>,
 }
 
-/// devin's home rows under the box, on the screen bg and relative to the
-/// box's column: the hints flush with its right edge, the plugin stats
-/// and the tip under the box text, then the startup notice as a block:
-/// its headline, then one
-/// `command  what it does` row per ` · `-separated `<command> to <action>`
-/// part.
+fn spans_width(spans: &[Span<'static>]) -> usize {
+    spans
+        .iter()
+        .map(|s| display_width(s.content.as_ref()))
+        .sum()
+}
+
+fn right_aligned_line(w: usize, spans: Vec<Span<'static>>) -> Line<'static> {
+    let pad = w.saturating_sub(spans_width(&spans));
+    let mut out = Vec::with_capacity(spans.len() + 1);
+    if pad > 0 {
+        out.push(Span::raw(" ".repeat(pad)));
+    }
+    out.extend(spans);
+    Line::from(out)
+}
+
+/// One row with `left` at the box edge and `right` flush to `w`, or —
+/// when they can't share it with two cells of gap — the left row, then
+/// the right item right-aligned on its own row under it.
+fn left_right_rows(
+    w: usize,
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+) -> Vec<Line<'static>> {
+    if right.is_empty() {
+        return vec![Line::from(left)];
+    }
+    let lw = spans_width(&left);
+    let rw = spans_width(&right);
+    if lw + 2 + rw <= w {
+        let mut spans = left;
+        spans.push(Span::raw(" ".repeat(w - lw - rw)));
+        spans.extend(right);
+        vec![Line::from(spans)]
+    } else {
+        vec![Line::from(left), right_aligned_line(w, right)]
+    }
+}
+
+/// devin's home rows under the box, on the screen bg and inside the
+/// box's column: row 1 pairs the tip (left edge) with the hints (right
+/// edge); row 2 pairs the startup notice's headline with the plugin
+/// stats, the notice's command rows continuing under it — or the stats
+/// alone on the left when there is no notice. Pairs that can't share a
+/// row stack, the right item on its own row under.
 fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
-    let mut rows = vec![
-        Line::default(),
-        crate::composer::welcome_hints_line(0, w),
-        Line::default(),
-        match home.stats {
-            Some(stats) => crate::composer::plugin_stats_line(3, stats),
-            None => Line::default(),
-        },
-        Line::default(),
-        crate::composer::welcome_tip_line(3),
-    ];
-    if let Some(notice) = home.notice {
-        let t = crate::theme::theme();
-        let mut parts = notice.split(" · ");
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let tip = crate::composer::tip_spans();
+    let hints = crate::composer::hint_spans(w.saturating_sub(spans_width(&tip) + 2).max(1));
+    rows.extend(left_right_rows(w, tip, hints));
+    if home.notice.is_some() || home.stats.is_some() {
         rows.push(Line::default());
-        rows.push(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(
+    }
+    match (home.notice, home.stats) {
+        (Some(notice), stats) => {
+            let t = crate::theme::theme();
+            let mut parts = notice.split(" · ");
+            let headline = vec![Span::styled(
                 parts.next().unwrap_or_default().to_string(),
                 Style::default().fg(t.text_bright),
-            ),
-        ]));
-        let cmds: Vec<(&str, &str)> = parts
-            .map(|p| p.split_once(" to ").unwrap_or((p, "")))
-            .collect();
-        let key_w = cmds
-            .iter()
-            .map(|(k, _)| display_width(k))
-            .max()
-            .unwrap_or(0);
-        for (key, action) in cmds {
-            rows.push(Line::from(vec![
-                Span::raw("     "),
-                Span::styled(
-                    format!("{key:<key_w$}   "),
-                    Style::default().fg(t.text_body),
-                ),
-                Span::styled(action.to_string(), Style::default().fg(t.text_muted)),
-            ]));
+            )];
+            let right = stats.map(crate::composer::stats_spans).unwrap_or_default();
+            rows.extend(left_right_rows(w, headline, right));
+            let cmds: Vec<(&str, &str)> = parts
+                .map(|p| p.split_once(" to ").unwrap_or((p, "")))
+                .collect();
+            let key_w = cmds
+                .iter()
+                .map(|(k, _)| display_width(k))
+                .max()
+                .unwrap_or(0);
+            for (key, action) in cmds {
+                rows.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("{key:<key_w$}   "),
+                        Style::default().fg(t.text_body),
+                    ),
+                    Span::styled(action.to_string(), Style::default().fg(t.text_muted)),
+                ]));
+            }
         }
+        (None, Some(stats)) => rows.push(Line::from(crate::composer::stats_spans(stats))),
+        (None, None) => {}
     }
     rows
 }

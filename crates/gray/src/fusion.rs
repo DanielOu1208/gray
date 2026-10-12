@@ -342,7 +342,7 @@ impl Plugin for FusionPlugin {
         };
         let bin = std::env::var_os("GRAY_BIN")
             .map(PathBuf::from)
-            .or_else(|| std::env::current_exe().ok())
+            .or_else(|| crate::exe_watch::on_disk_exe().ok())
             .unwrap_or_else(|| PathBuf::from("gray"));
         ["handoff", "native__handoff"]
             .into_iter()
