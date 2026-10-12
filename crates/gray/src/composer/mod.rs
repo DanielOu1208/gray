@@ -439,6 +439,7 @@ pub struct Tui {
     /// it`): a home row directly above the input box while the home
     /// screen is up.
     pub(crate) home_update: Option<String>,
+    pub(crate) home_qol: Option<String>,
     /// Slash commands and their modals keep the welcome up; the first real
     /// turn (`begin_turn`) or a replayed session ends it.
     pub(crate) left_home: bool,
@@ -1041,6 +1042,7 @@ impl Tui {
             home_notice: None,
             plugin_stats: None,
             home_update: None,
+            home_qol: None,
             left_home: false,
             pending_input,
         })
@@ -1331,6 +1333,10 @@ impl Tui {
     /// probe's counts land.
     pub fn set_plugin_stats(&mut self, stats: Option<String>) {
         self.plugin_stats = stats;
+    }
+
+    pub fn set_home_qol(&mut self, line: Option<String>) {
+        self.home_qol = line;
     }
 
     /// The exe-replaced notice rendered above the input box while the

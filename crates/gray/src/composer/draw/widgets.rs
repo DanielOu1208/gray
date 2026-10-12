@@ -242,6 +242,7 @@ pub(crate) struct HomeRows<'a> {
     /// The plugin counts line from the startup probe (`N plugins · M
     /// loaded · …`); its slot stays empty until it lands.
     pub(crate) stats: Option<&'a str>,
+    pub(crate) qol: Option<&'a str>,
     /// A dim row directly above the box (the update notice), flush with
     /// the box's left edge.
     pub(crate) above: Option<&'a str>,
@@ -332,6 +333,16 @@ fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
         }
         (None, Some(stats)) => rows.push(Line::from(crate::composer::stats_spans(stats))),
         (None, None) => {}
+    }
+    if let Some(qol) = home.qol {
+        let t = crate::theme::theme();
+        if home.notice.is_none() && home.stats.is_none() {
+            rows.push(Line::default());
+        }
+        rows.push(Line::from(Span::styled(
+            qol.to_string(),
+            Style::default().fg(t.text_muted),
+        )));
     }
     rows
 }

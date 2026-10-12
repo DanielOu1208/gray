@@ -234,6 +234,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         notice: tui.home_notice.as_deref(),
         stats: tui.plugin_stats.as_deref(),
         above: tui.home_update.as_deref(),
+        qol: tui.home_qol.as_deref(),
     });
     let home_mode = home.is_some();
     let mut ibox = build_input_box(&text, cursor, w, ghost, home);

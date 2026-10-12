@@ -31,6 +31,7 @@ pub mod profile;
 pub mod project_trust;
 pub mod prompt_templates;
 pub mod providers;
+pub(crate) mod qol;
 pub mod repl;
 pub mod resume;
 mod rotation;
