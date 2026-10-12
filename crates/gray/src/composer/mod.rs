@@ -784,11 +784,11 @@ fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<L
     };
     title.push(Span::raw(" "));
     title.push(Span::styled(
-        "\u{2b21}",
+        "\u{25c6}",
         Style::default().fg(theme.text_muted),
     ));
     title.push(Span::raw(" "));
-    let title_w = display_width("gray \u{2b21} ") + display_width(&version);
+    let title_w = display_width("gray \u{25c6} ") + display_width(&version);
     title.push(Span::styled(version, Style::default().fg(theme.text_muted)));
     body.push(centered(title, title_w));
     body.push(Line::from(""));

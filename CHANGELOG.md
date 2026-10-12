@@ -80,8 +80,28 @@
   in `auth.json`), model picker, and Shift+Enter removal. The legacy
   single `custom` key migrates on the next `/connect` open. Endpoints
   persist in `~/.gray/custom_endpoints.json`.
+- **Skippable intro.** Any keypress skips the logo intro into the
+  composer; `/intro enable|disable` persists the toggle.
+- **Setup import from other agent tools.** At start gray stat-checks a
+  declared set (Claude Code, Codex, opencode, Devin, Cursor, Windsurf,
+  aider) and shows one dim home row for newly seen tools. `/setup [tool]`
+  opens a checklist with previews: global rules appended as a marked
+  AGENTS.md section, skill dirs symlinked into `$GRAY_HOME/skills`, MCP
+  servers merged into `mcp.json` (written 0600; previews show env key
+  names only). `/setup undo [n]` reverses whole runs, `/setup dismiss
+  <tool>` silences a tool for good, `/setup scanned` lists the scan set.
+  First run offers the same import. `"qol": false` turns it all off.
+- **`/update everything`** (and `gray update --everything`): one confirm
+  screen for the gray build, stale plugins and provider CLIs (npm/brew,
+  skipping ones that are running), with a "Continue sessions after
+  restart" checkbox and per-item results.
 
 ### Changed
+- **Startup is instant again.** The intro no longer sits on the startup
+  path, and the interrupted-sessions notice scans only the current
+  directory's sessions (~530 ms → ~60 ms on a 1.5k-session store), so it
+  lands with the first frame.
+- The welcome row reads `gray ◆ <version>` on one line.
 - **Images go to the model at original bytes, resolution and quality.**
   Attach/read/view paths no longer decode or re-encode image files —
   animated GIFs stay animated and EXIF metadata stays on the file.
@@ -124,6 +144,9 @@
   name.
 
 ### Fixed
+- **Streamed text draws above the `⬡ Working…` line**, not under it.
+- Closing `/plugins` without changes no longer leaves a stale `❯ /plugins`
+  echo in the transcript.
 - **Attaching a PDF, audio or video file no longer makes the context
   jump to millions of tokens.** Non-image attachments ride inline as
   base64 `Media` blocks, and every estimator priced them at bytes/4 of

@@ -77,7 +77,7 @@ fn welcome_is_the_ascii_logo_by_default() {
     assert!(
         welcome
             .iter()
-            .any(|l| l.trim() == format!("gray \u{2b21} {}", env!("CARGO_PKG_VERSION"))),
+            .any(|l| l.trim() == format!("gray \u{25c6} {}", env!("CARGO_PKG_VERSION"))),
         "title line missing from the welcome: {welcome:?}"
     );
     let version = env!("CARGO_PKG_VERSION").to_string();
@@ -156,7 +156,7 @@ fn welcome_layout_is_devin_home() {
     let x = (w - col_w) / 2;
 
     let version = env!("CARGO_PKG_VERSION").to_string();
-    let label = format!("gray \u{2b21} {version}");
+    let label = format!("gray \u{25c6} {version}");
     let title = text.iter().position(|l| l.trim() == label).unwrap();
     let title_pad = text[title].len() - text[title].trim_start().len();
     assert_eq!(
