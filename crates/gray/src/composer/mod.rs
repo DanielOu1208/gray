@@ -435,6 +435,10 @@ pub struct Tui {
     /// The plugin counts row (`N plugins · M loaded · …`) under the home
     /// hints, filled when the startup probe lands.
     pub(crate) plugin_stats: Option<String>,
+    /// The exe-replaced notice (`gray was updated — /restart to load
+    /// it`): a home row directly above the input box while the home
+    /// screen is up.
+    pub(crate) home_update: Option<String>,
     /// Slash commands and their modals keep the welcome up; the first real
     /// turn (`begin_turn`) or a replayed session ends it.
     pub(crate) left_home: bool,
@@ -592,9 +596,10 @@ fn welcome_tip_index() -> usize {
     })
 }
 
-/// devin's home hints row, right-aligned to the `x..x + col_w` column:
-/// keys bright, labels muted; the rightmost pairs drop first when narrow.
-pub(crate) fn welcome_hints_line(x: usize, col_w: usize) -> Line<'static> {
+/// The home hint pairs (`/` commands) as right-edge spans for a
+/// `col_w`-wide column: keys bright, labels muted; the rightmost pairs
+/// drop first when narrow.
+pub(crate) fn hint_spans(col_w: usize) -> Vec<Span<'static>> {
     let theme = crate::theme::theme();
     let hint_w = |hints: &[(&str, &str)]| -> usize {
         hints
@@ -608,10 +613,6 @@ pub(crate) fn welcome_hints_line(x: usize, col_w: usize) -> Line<'static> {
         hints.pop();
     }
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let pad = x + col_w.saturating_sub(hint_w(&hints));
-    if pad > 0 {
-        spans.push(Span::raw(" ".repeat(pad)));
-    }
     for (i, (key, label)) in hints.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw("   "));
@@ -625,28 +626,26 @@ pub(crate) fn welcome_hints_line(x: usize, col_w: usize) -> Line<'static> {
             Style::default().fg(theme.text_muted),
         ));
     }
-    Line::from(spans)
+    spans
 }
 
-/// The tip row at column `x`: `● Tip  key` bright, the rest muted.
-pub(crate) fn welcome_tip_line(x: usize) -> Line<'static> {
+/// The `● Tip` spans: prefix and key bright, the rest muted.
+pub(crate) fn tip_spans() -> Vec<Span<'static>> {
     let theme = crate::theme::theme();
     let (key, text) = WELCOME_TIPS[welcome_tip_index()];
-    Line::from(vec![
-        Span::raw(" ".repeat(x)),
+    vec![
         Span::styled("● Tip  ", Style::default().fg(theme.text_bright)),
         Span::styled(key, Style::default().fg(theme.text_bright)),
         Span::styled(format!(" {text}"), Style::default().fg(theme.text_muted)),
-    ])
+    ]
 }
 
-/// The plugin stats row at column `x`: one dim line under the hints.
-pub(crate) fn plugin_stats_line(x: usize, stats: &str) -> Line<'static> {
-    let theme = crate::theme::theme();
-    Line::from(vec![
-        Span::raw(" ".repeat(x)),
-        Span::styled(stats.to_string(), Style::default().fg(theme.text_dim)),
-    ])
+/// The plugin counts (`N plugins · M loaded · …`), dim.
+pub(crate) fn stats_spans(stats: &str) -> Vec<Span<'static>> {
+    vec![Span::styled(
+        stats.to_string(),
+        Style::default().fg(crate::theme::theme().text_dim),
+    )]
 }
 
 /// The column devin centers its home block on: `(x, width)`, `min(78, w-8)`
@@ -988,6 +987,7 @@ impl Tui {
             ask_modal: None,
             home_notice: None,
             plugin_stats: None,
+            home_update: None,
             left_home: false,
         })
     }
@@ -1261,6 +1261,12 @@ impl Tui {
     /// probe's counts land.
     pub fn set_plugin_stats(&mut self, stats: Option<String>) {
         self.plugin_stats = stats;
+    }
+
+    /// The exe-replaced notice rendered above the input box while the
+    /// home screen is up.
+    pub fn set_home_update(&mut self, notice: Option<String>) {
+        self.home_update = notice;
     }
 
     /// devin's home screen: it stays up through slash commands — their
