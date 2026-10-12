@@ -80,10 +80,7 @@ fn items_for(def: &ToolDef) -> Vec<SetupItem> {
             items.push(SetupItem {
                 label: format!("global rules ({rel})"),
                 desc: clip(
-                    format!(
-                        "{lines} lines / {} B → AGENTS.md · {first}",
-                        body.len()
-                    ),
+                    format!("{lines} lines / {} B → AGENTS.md · {first}", body.len()),
                     90,
                 ),
                 apply: SetupApply::Rules { src },
@@ -194,7 +191,11 @@ fn apply_skills_logged(
     }
     Ok(format!(
         "{linked} linked{}{}",
-        if skipped.is_empty() { "" } else { ", skipped existing: " },
+        if skipped.is_empty() {
+            ""
+        } else {
+            ", skipped existing: "
+        },
         skipped.join(", ")
     ))
 }
@@ -279,7 +280,10 @@ pub(crate) async fn handle(tui: &TuiOpt, arg: Option<String>) {
                     Err(e) => say(tui, &format!("dismiss failed: {e}")),
                 }
             }
-            None => say(tui, &format!("unknown tool '{id}' — /setup scanned lists ids")),
+            None => say(
+                tui,
+                &format!("unknown tool '{id}' — /setup scanned lists ids"),
+            ),
         }
         return;
     }

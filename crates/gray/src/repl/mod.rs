@@ -1067,6 +1067,10 @@ pub async fn run_repl_mode(
         jobs::spawn_footer_poller();
     }
 
+    if interactive && tui.is_some() && crate::qol::detect::take_pending_setup() {
+        crate::qol::setup::handle(&tui, None).await;
+    }
+
     loop {
         // Cleared before anything is drained: a wake raised after this point
         // survives to the next pass instead of being swallowed.

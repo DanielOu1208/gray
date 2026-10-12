@@ -32,7 +32,9 @@ pub(crate) struct ImportEntry {
 }
 
 pub(crate) fn state_path() -> Option<PathBuf> {
-    crate::setup::gray_home().ok().map(|h| h.join("qol").join("state.json"))
+    crate::setup::gray_home()
+        .ok()
+        .map(|h| h.join("qol").join("state.json"))
 }
 
 pub(crate) fn load_state() -> QolState {
@@ -46,8 +48,8 @@ pub(crate) fn load_state() -> QolState {
 }
 
 pub(crate) fn save_state(state: &QolState) -> anyhow::Result<()> {
-    let p = state_path()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve $GRAY_HOME/qol/state.json"))?;
+    let p =
+        state_path().ok_or_else(|| anyhow::anyhow!("cannot resolve $GRAY_HOME/qol/state.json"))?;
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }

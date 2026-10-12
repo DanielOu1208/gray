@@ -11,6 +11,8 @@ fn q(id: &str, options: usize) -> AskQuestion {
                 description: "d".into(),
             })
             .collect(),
+        multi: false,
+        default_all: false,
     }
 }
 
@@ -137,6 +139,8 @@ fn json_wire_asks_with_a_row_and_reads_answers_by_id() {
             label: "main".into(),
             description: "production".into(),
         }],
+        multi: false,
+        default_all: false,
     }];
     let row = json_ask_row("t1", 7, &questions);
     assert_eq!(row["protocol"], 1);

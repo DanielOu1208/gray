@@ -199,6 +199,31 @@ pub(crate) async fn run_for_home(tui: crate::composer::SharedTui) {
     }
 }
 
+static PENDING_SETUP: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+pub(crate) fn set_pending_setup(on: bool) {
+    *PENDING_SETUP.lock().expect("qol pending") = Some(on);
+}
+
+pub(crate) fn take_pending_setup() -> bool {
+    PENDING_SETUP
+        .lock()
+        .expect("qol pending")
+        .take()
+        .unwrap_or(false)
+}
+
+pub(crate) fn first_run_detected() -> Vec<&'static ToolDef> {
+    if !super::enabled() {
+        return Vec::new();
+    }
+    let state = super::load_state();
+    scan()
+        .into_iter()
+        .filter(|d| !state.tools.contains_key(d.def.id) && !state.dismissed.contains(d.def.id))
+        .map(|d| d.def)
+        .collect()
+}
 
 pub(crate) fn scanned_report() -> String {
     let mut out = String::from("declared scan set:\n");
@@ -212,14 +237,15 @@ pub(crate) fn scanned_report() -> String {
                 let keys = std::fs::read_to_string(&p)
                     .ok()
                     .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
-                    .and_then(|v| {
-                        v.as_object()
-                            .map(|o| o.keys().cloned().collect::<Vec<_>>())
-                    })
+                    .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()))
                     .unwrap_or_default();
                 format!(
                     "  (keys: {})",
-                    if keys.is_empty() { "?".to_string() } else { keys.join(", ") }
+                    if keys.is_empty() {
+                        "?".to_string()
+                    } else {
+                        keys.join(", ")
+                    }
                 )
             } else {
                 String::new()
@@ -243,7 +269,12 @@ pub(crate) fn scanned_report() -> String {
     if !state.dismissed.is_empty() {
         out.push_str(&format!(
             "dismissed: {}\n",
-            state.dismissed.iter().cloned().collect::<Vec<_>>().join(", ")
+            state
+                .dismissed
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     out
