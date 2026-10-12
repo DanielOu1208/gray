@@ -317,7 +317,8 @@ fn tool_def(jobs: bool) -> ToolDef {
     ToolDef::new(
         "bash",
         format!(
-            "Run a shell command. It blocks until the command exits or `timeout` passes; then it is \
+            "Run a shell command. Independent commands can go as separate bash calls in the same turn \
+             (read-only ones run concurrently). It blocks until the command exits or `timeout` passes; then it is \
              NOT killed but keeps running as a background job, and you get its log and a stop command. \
              To wait for it, end your turn: a finished job wakes you, no polling needed. Peek with \
              `tail <log>`. If a command sleeps, pass a `timeout` longer than the sleep. For a hard \
