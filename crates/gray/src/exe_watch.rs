@@ -20,6 +20,19 @@ fn dev_ino(_m: &std::fs::Metadata) -> (u64, u64) {
     (0, 0)
 }
 
+pub(crate) fn on_disk_exe() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    if let Some(live) = exe
+        .to_str()
+        .and_then(|s| s.strip_suffix(" (deleted)"))
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
+        return Ok(live);
+    }
+    Ok(exe)
+}
+
 impl ExeWatch {
     pub(crate) fn capture() -> Option<Self> {
         let path = std::env::current_exe().ok()?.canonicalize().ok()?;

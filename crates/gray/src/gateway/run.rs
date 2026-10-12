@@ -99,7 +99,7 @@ pub async fn run_foreground(config: &Config) -> anyhow::Result<()> {
     };
 
     // The brain: events → lanes → child turns → outbox.
-    let gray_bin = std::env::current_exe().unwrap_or_else(|_| "gray".into());
+    let gray_bin = crate::exe_watch::on_disk_exe().unwrap_or_else(|_| "gray".into());
     let runner = std::sync::Arc::new(crate::gateway::turn::ChildRunner {
         gray_bin,
         home: home.clone(),

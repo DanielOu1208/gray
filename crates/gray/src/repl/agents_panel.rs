@@ -63,7 +63,7 @@ fn spawn_raw(argv: &[String], args: &[&str]) -> Option<String> {
         .args(args)
         .env(
             "GRAY_BIN",
-            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("gray")),
+            crate::exe_watch::on_disk_exe().unwrap_or_else(|_| PathBuf::from("gray")),
         )
         .output()
         .ok()?;

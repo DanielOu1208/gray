@@ -171,7 +171,7 @@ pub async fn run_cli(cmd: crate::GatewayCmd, config: &crate::config::Config) -> 
         }
         GatewayCmd::Install { no_start, print } => {
             let home = crate::setup::gray_home()?;
-            let exe = std::env::current_exe()?;
+            let exe = crate::exe_watch::on_disk_exe()?;
             println!("{}", service::install(&home, &exe, no_start, print)?);
             Ok(())
         }

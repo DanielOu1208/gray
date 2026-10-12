@@ -750,7 +750,7 @@ pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
     command
         .args(args)
         .args(rest)
-        .env("GRAY_BIN", std::env::current_exe()?);
+        .env("GRAY_BIN", crate::exe_watch::on_disk_exe()?);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1040,7 +1040,7 @@ pub async fn capture_slash(name: &str, args: &[String]) -> anyhow::Result<Option
     command
         .args(base)
         .args(args)
-        .env("GRAY_BIN", std::env::current_exe()?);
+        .env("GRAY_BIN", crate::exe_watch::on_disk_exe()?);
     let bytes = capture(command, std::time::Duration::from_secs(10)).await?;
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }

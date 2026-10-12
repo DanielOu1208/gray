@@ -878,7 +878,7 @@ async fn plugin_result(rest: &str) -> Result<CommandResult, CmdError> {
             Err(e) => Err(CmdError::unavailable(format!("disable failed: {e:#}"))),
         },
         PluginAction::Check(dir) => {
-            let exe = std::env::current_exe()
+            let exe = crate::exe_watch::on_disk_exe()
                 .map_err(|e| CmdError::unavailable(format!("cannot self-spawn: {e}")))?;
             let out = tokio::time::timeout(
                 std::time::Duration::from_secs(60),
@@ -954,7 +954,7 @@ async fn update_result(rest: &str) -> Result<CommandResult, CmdError> {
             }
         }
         "install" | "now" | "run" => {
-            let exe = std::env::current_exe()
+            let exe = crate::exe_watch::on_disk_exe()
                 .map_err(|e| CmdError::unavailable(format!("cannot self-spawn: {e}")))?;
             let out = tokio::time::timeout(
                 std::time::Duration::from_secs(120),
