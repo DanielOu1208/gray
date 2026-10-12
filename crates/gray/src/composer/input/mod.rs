@@ -164,7 +164,7 @@ pub(crate) fn read_line(
         // Phase 1 (locked): resize deadlines, completion recompute, draw.
         // The guard drops at the end of this block, freeing the lock while
         // we wait for input below so background painters can draw.
-        let (timeout, empty_draft) = {
+        let (timeout, empty_draft, pending_ev) = {
             let mut guard = shared.lock().expect("tui lock");
             let tui: &mut super::Tui = &mut guard;
             if let Some((cols, deadline)) = tui.pending_resize
@@ -203,11 +203,12 @@ pub(crate) fn read_line(
             let empty_draft = tui.textarea.is_empty()
                 && tui.attachments.is_empty()
                 && tui.pending_pastes.is_empty();
-            (timeout, empty_draft)
+            (timeout, empty_draft, tui.pending_input.take())
         };
-        // Phase 2 (unlocked): wait. Keystrokes queue in the pty and nothing
-        // else reads stdin, so no event is lost before the locked read below.
-        if !poll(timeout)? {
+        // Phase 2 (unlocked): wait — skipped when the intro's skip already
+        // consumed a key for us. Keystrokes queue in the pty and nothing
+        // else reads stdin, so no event is lost before the locked read.
+        if pending_ev.is_none() && !poll(timeout)? {
             // Idle wake (cron delivery, finished background job, say line):
             // hand the empty prompt back so the REPL can act. Never while the
             // user has a draft — their typing wins, the wake waits.
@@ -220,7 +221,10 @@ pub(crate) fn read_line(
         // Phase 3 (locked): consume + handle exactly one event.
         let mut guard = shared.lock().expect("tui lock");
         let tui: &mut super::Tui = &mut guard;
-        let ev = read()?;
+        let ev = match pending_ev {
+            Some(ev) => ev,
+            None => read()?,
+        };
         match ev {
             Event::Resize(cols, rows) => {
                 if cols != tui.last_width || rows != tui.last_height {

@@ -102,7 +102,7 @@ pub(crate) async fn dispatch_command(
             // Build the registry lines once; the branches differ only in how
             // they render (scrollback dim block vs stdout).
             let mut out = String::new();
-            for d in REGISTRY {
+            for d in REGISTRY.iter().chain(commands::TUI_COMMANDS) {
                 out.push_str(&commands::format_help_line(d));
                 out.push('\n');
             }
@@ -110,8 +110,11 @@ pub(crate) async fn dispatch_command(
             if let Some(a) = agent.as_ref() {
                 entries.extend(plugin_help_entries(a.hooks()));
             }
-            let mut seen: std::collections::HashSet<String> =
-                REGISTRY.iter().map(|d| d.name.to_string()).collect();
+            let mut seen: std::collections::HashSet<String> = REGISTRY
+                .iter()
+                .chain(commands::TUI_COMMANDS)
+                .map(|d| d.name.to_string())
+                .collect();
             for (name, description) in entries {
                 if seen.insert(name.clone()) {
                     out.push_str(&format!("  /{name:<10} {description}\n"));
@@ -410,6 +413,23 @@ pub(crate) async fn dispatch_command(
         }
         ReplCommand::Theme(arg) => {
             super::customize::handle_theme(arg, tui.as_ref().map(|(s, _)| s));
+            Flow::Continue
+        }
+        ReplCommand::Intro(arg) => {
+            let tui_shared = tui.as_ref().map(|(s, _)| s);
+            let text = match arg.as_deref().and_then(handlers::parse_on_off) {
+                Some(on) => handlers::toggle_subsystem(handlers::Subsystem::Intro, on),
+                None if arg.is_none() => format!(
+                    "logo intro is {}",
+                    if crate::setup::intro_enabled() {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+                None => "usage: /intro [on|off]".to_string(),
+            };
+            say(tui_shared, &text);
             Flow::Continue
         }
         ReplCommand::Keys(arg) => {

@@ -442,6 +442,9 @@ pub struct Tui {
     /// Slash commands and their modals keep the welcome up; the first real
     /// turn (`begin_turn`) or a replayed session ends it.
     pub(crate) left_home: bool,
+    /// The key or paste that skipped the logo intro before the composer
+    /// existed — `read_line` dispatches it as its first event.
+    pub(crate) pending_input: Option<crossterm::event::Event>,
     /// Last `statusline::version()` painted; a change (plugin status,
     /// status command output, `/reload`) repaints the footer.
     status_line_seen: u64,
@@ -817,8 +820,16 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
 /// right in the rows the banner insert is about to fill, so the
 /// animation *becomes* the banner — the insert repaints the same cells,
 /// which is what pushes them into scrollback. Skipped when the block
-/// can't fit; either way the caller still runs the plain insert.
-fn play_logo_intro(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) {
+/// can't fit; either way the caller still runs the plain insert. A key
+/// or paste queued mid-sweep cuts to the settled frame; the swallowed
+/// keys (Enter, Esc, Space, Ctrl-anything) end it as `None`, everything
+/// else comes back for the composer's first read as normal input.
+fn play_logo_intro(
+    terminal: &mut Term,
+    w: usize,
+    h: usize,
+    welcome_h: usize,
+) -> Option<crossterm::event::Event> {
     // The banner lands `overflow` rows above the band's anchor: that's how
     // much the insert and the first band draw would scroll past the
     // bottom. Scrolling first keeps the painted rows final — run the
@@ -827,7 +838,7 @@ fn play_logo_intro(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) {
     let y0 = terminal.viewport_area.y as usize;
     let overflow = (y0 + welcome_h + draw::home_band_h(w)).saturating_sub(h);
     if overflow > y0 {
-        return;
+        return None;
     }
     let start = y0 - overflow;
     if overflow > 0 {
@@ -865,20 +876,39 @@ fn play_logo_intro(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) {
                 area,
             );
         });
-        // poll() is the frame clock *and* the skip: a queued key cuts to
-        // the finished banner instead of being eaten. Only keys — the
-        // terminal's CPR/focus responses to the startup probes sit in the
-        // same queue and must not cancel the sweep.
+        // poll() is the frame clock *and* the skip: queued input cuts to
+        // the finished banner. Enter/Esc/Space and Ctrl-keys are eaten
+        // here (Enter must not submit); any other key or a paste is
+        // returned so `read_line` dispatches it as normal input. The
+        // terminal's CPR/focus responses to the startup probes sit in
+        // the same queue and must not cancel the sweep.
         if f + 1 < frame_count
             && crossterm::event::poll(Duration::from_millis(INTRO_FRAME_MS)).unwrap_or(false)
-            && let Ok(crossterm::event::Event::Key(_)) = crossterm::event::read()
         {
-            break;
+            match crossterm::event::read() {
+                Ok(crossterm::event::Event::Key(key)) => {
+                    let swallow = matches!(
+                        key.code,
+                        crossterm::event::KeyCode::Enter
+                            | crossterm::event::KeyCode::Esc
+                            | crossterm::event::KeyCode::Char(' ')
+                    ) || key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL);
+                    if swallow {
+                        return None;
+                    }
+                    return Some(crossterm::event::Event::Key(key));
+                }
+                Ok(ev @ crossterm::event::Event::Paste(_)) => return Some(ev),
+                Ok(_) | Err(_) => {}
+            }
         }
     }
     // Collapse the band back to a zero-height anchor at the banner's top
     // row so the insert draws over the last frame rather than shifting it.
     terminal.set_viewport_area(ratatui::layout::Rect::new(0, start as u16, w as u16, 0));
+    None
 }
 
 impl Tui {
@@ -906,12 +936,16 @@ impl Tui {
         // Print welcome logo into scrollback once at startup
         let welcome_lines = build_welcome_lines(cols as usize);
         let welcome_h = welcome_lines.len() as u16;
-        play_logo_intro(
-            &mut terminal,
-            cols as usize,
-            rows as usize,
-            welcome_h as usize,
-        );
+        let pending_input = if crate::setup::intro_enabled() {
+            play_logo_intro(
+                &mut terminal,
+                cols as usize,
+                rows as usize,
+                welcome_h as usize,
+            )
+        } else {
+            None
+        };
         let _ = terminal.insert_before(welcome_h, |buf| {
             Paragraph::new(welcome_lines.clone()).render(buf.area, buf);
         });
@@ -988,6 +1022,7 @@ impl Tui {
             plugin_stats: None,
             home_update: None,
             left_home: false,
+            pending_input,
         })
     }
 

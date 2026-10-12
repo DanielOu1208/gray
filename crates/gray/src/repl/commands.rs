@@ -225,17 +225,30 @@ pub(crate) fn format_help_line(d: &CmdDef) -> String {
 /// row of their own — not in the popup, `/help`, or `gray cmd list`.
 const HIDDEN_ALIASES: &[(&str, &str)] = &[("plugin", "plugins")];
 
+/// TUI-only commands: they resolve, complete and list in `/help` like any
+/// builtin but stay out of the gateway registry, which iterates REGISTRY.
+pub(crate) const TUI_COMMANDS: &[CmdDef] = &[CmdDef {
+    name: "intro",
+    desc: "logo intro on|off",
+    aliases: &[],
+    scope: CmdScope::Global,
+    surface: CmdSurface::Local,
+}];
+
 /// Canonical lookup: strip one leading `/`, lowercase, exact wins then
 /// hidden aliases, then listed aliases.
 pub(crate) fn resolve(name: &str) -> Option<&'static CmdDef> {
     let n = name.strip_prefix('/').unwrap_or(name).to_lowercase();
-    if let Some(d) = REGISTRY.iter().find(|d| d.name == n) {
+    if let Some(d) = REGISTRY.iter().chain(TUI_COMMANDS).find(|d| d.name == n) {
         return Some(d);
     }
     if let Some(&(_, target)) = HIDDEN_ALIASES.iter().find(|(a, _)| *a == n) {
         return REGISTRY.iter().find(|d| d.name == target);
     }
-    REGISTRY.iter().find(|d| d.aliases.iter().any(|a| *a == n))
+    REGISTRY
+        .iter()
+        .chain(TUI_COMMANDS)
+        .find(|d| d.aliases.iter().any(|a| *a == n))
 }
 
 /// True when `name` (with or without `/`) is a built-in command or alias.
@@ -271,7 +284,7 @@ pub(crate) fn provider_shortcuts() -> Vec<(String, String, String)> {
 pub(crate) fn completion_matches(filter: &str) -> Vec<(&'static str, &'static str)> {
     let f = filter.to_lowercase();
     let mut matches: Vec<(u8, &'static str, &'static str)> = Vec::new();
-    for d in REGISTRY {
+    for d in REGISTRY.iter().chain(TUI_COMMANDS) {
         let is_match = f.is_empty()
             || d.name.to_lowercase().contains(&f)
             || d.desc.to_lowercase().contains(&f)
@@ -426,6 +439,14 @@ pub(crate) fn complete_command_args(
         "agentsmd" | "sys" => complete_agentsmd_args(cmd, arg_text),
         "models" => complete_model_args(cmd, arg_text),
         "theme" | "themes" => complete_theme_args(cmd, arg_text),
+        "intro" => complete_from_table(
+            cmd,
+            arg_text,
+            &[
+                ("on", "animate the logo at startup"),
+                ("off", "settle instantly"),
+            ],
+        ),
         "hotkeys" | "keybindings" | "bindings" => {
             complete_from_table(cmd, arg_text, &[("reload", "re-read keybindings.json")])
         }
@@ -662,6 +683,9 @@ pub enum ReplCommand {
     /// Color theme: bare lists, `<name>` applies and saves, `new <name>`
     /// writes the current palette as an editable file, `reload` re-reads.
     Theme(Option<String>),
+    /// The startup logo intro (`/intro [on|off]`): bare reports the state,
+    /// a switch word persists the toggle. TUI-only.
+    Intro(Option<String>),
     /// Keybindings: bare lists, `reload` re-reads `keybindings.json`.
     Keys(Option<String>),
     /// Re-read file customizations (theme, keybindings, templates).
@@ -786,6 +810,7 @@ pub fn parse_command(line: &str) -> ReplCommand {
         Some("help") => ReplCommand::Help,
         Some("hehe") => ReplCommand::Hehe,
         Some("theme") => ReplCommand::Theme(opt(rest)),
+        Some("intro") => ReplCommand::Intro(opt(rest)),
         Some("hotkeys") => ReplCommand::Keys(opt(rest)),
         Some("reload") => ReplCommand::Reload,
         Some("models") => match opt(rest) {

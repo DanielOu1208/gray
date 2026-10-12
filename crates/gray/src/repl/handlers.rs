@@ -159,6 +159,7 @@ pub(crate) fn apply_skill_toggle(
 pub(crate) enum Subsystem {
     Cron,
     Gateway,
+    Intro,
 }
 
 impl Subsystem {
@@ -167,6 +168,7 @@ impl Subsystem {
         match self {
             Subsystem::Cron => "cron",
             Subsystem::Gateway => "gateway",
+            Subsystem::Intro => "intro",
         }
     }
 
@@ -183,6 +185,11 @@ impl Subsystem {
                 "run/start will refuse to start",
                 "status/stop still work",
             ),
+            Subsystem::Intro => (
+                "intro on — the logo animates at startup",
+                "the settled banner shows instead",
+                "/intro on restores it",
+            ),
         }
     }
 
@@ -191,6 +198,7 @@ impl Subsystem {
         match self {
             Subsystem::Cron => &mut saved.cron_auto,
             Subsystem::Gateway => &mut saved.gw_auto,
+            Subsystem::Intro => &mut saved.intro,
         }
     }
 }
