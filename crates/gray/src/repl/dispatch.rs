@@ -415,6 +415,10 @@ pub(crate) async fn dispatch_command(
             super::customize::handle_theme(arg, tui.as_ref().map(|(s, _)| s));
             Flow::Continue
         }
+        ReplCommand::Setup(arg) => {
+            crate::qol::setup::handle(tui, arg).await;
+            Flow::Continue
+        }
         ReplCommand::Intro(arg) => {
             let tui_shared = tui.as_ref().map(|(s, _)| s);
             let text = match arg.as_deref().and_then(handlers::parse_on_off) {

@@ -175,6 +175,8 @@ pub struct SavedConfig {
     /// not ride onto SWE 2 Max just because it matches no family table).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub effort_memory: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qol: Option<bool>,
 }
 
 /// Canonical `SavedConfig.auth_mode` values (kept as strings on disk).
@@ -242,6 +244,14 @@ pub fn intro_enabled() -> bool {
 
 pub fn auto_update_enabled() -> bool {
     subsystem_enabled(|s| s.auto_update)
+}
+
+pub fn qol_enabled() -> bool {
+    subsystem_enabled(|s| s.qol)
+}
+
+pub fn qol_enabled_at(path: &Path) -> bool {
+    subsystem_enabled_at(path, |s| s.qol)
 }
 
 pub fn auto_update_enabled_at(path: &Path) -> bool {
@@ -336,6 +346,7 @@ fn partial_saved_config(obj: &serde_json::Map<String, serde_json::Value>) -> Sav
         credential_source: string_field(obj, "credential_source"),
         auth_ref: string_field(obj, "auth_ref"),
         effort_memory: opt_field(obj, "effort_memory").unwrap_or_default(),
+        qol: opt_field(obj, "qol"),
     }
 }
 

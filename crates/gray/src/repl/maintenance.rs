@@ -34,6 +34,10 @@ const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500
 /// a self-update.
 pub(crate) async fn handle_update(tui: &TuiOpt, arg: Option<String>) {
     let shared = tui.as_ref().map(|(s, _)| s);
+    if arg.as_deref().map(str::trim) == Some("everything") {
+        crate::qol::update::handle(tui).await;
+        return;
+    }
     if let Some(rest) = arg.as_deref().map(str::trim)
         && let Some(sub) = rest.strip_prefix("auto")
     {
@@ -118,6 +122,10 @@ pub(crate) async fn handle_update(tui: &TuiOpt, arg: Option<String>) {
 /// (it is a separate process on the old build), then this REPL re-exec'd on
 /// the new one. The conversation survives via `resume --last`.
 pub(crate) async fn handle_restart(tui: &TuiOpt) {
+    restart_with(tui, true).await;
+}
+
+pub(crate) async fn restart_with(tui: &TuiOpt, resume: bool) {
     let shared = tui.as_ref().map(|(s, _)| s);
 
     match restart_gateway().await {
@@ -142,7 +150,12 @@ pub(crate) async fn handle_restart(tui: &TuiOpt) {
             return;
         }
     };
-    let args = restart_argv(std::env::args().skip(1).collect());
+    let original: Vec<String> = std::env::args().skip(1).collect();
+    let args = if !resume {
+        strip_resume_args(&original)
+    } else {
+        restart_argv(original)
+    };
     let resumed = args.first().map(|a| a == "resume").unwrap_or(false);
 
     // Hand the terminal back before the child takes it: raw mode off, cursor
@@ -297,6 +310,43 @@ pub(crate) fn restart_argv(original: Vec<String>) -> Vec<String> {
     }
 }
 
+fn strip_resume_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = args.iter().peekable();
+    if it.peek().map(|a| a.as_str()) == Some("resume") {
+        it.next();
+        while let Some(a) = it.peek() {
+            match a.as_str() {
+                "--last" | "--all" => {
+                    it.next();
+                }
+                s if !s.starts_with('-') => {
+                    it.next();
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-c" | "--continue" | "--session" | "-r" | "--resume" => {
+                if matches!(a.as_str(), "--session" | "-r" | "--resume")
+                    && let Some(v) = it.peek()
+                    && !v.starts_with('-')
+                {
+                    it.next();
+                }
+            }
+            s if s.starts_with("--session=")
+                || s.starts_with("--resume=")
+                || s.starts_with("-r") && s.len() > 2 => {}
+            _ => out.push(a.clone()),
+        }
+    }
+    out
+}
+
 /// One keypress, y/N, read the way the TUI reads keys.
 ///
 /// Not `update::confirm()`: that helper switches raw mode off when it is
@@ -319,7 +369,10 @@ async fn confirm_yn() -> bool {
 
 /// Run a blocking child-process flow with the terminal in cooked mode, then
 /// put the composer back. Same contract as the account commands.
-fn with_terminal<T>(shared: Option<&crate::composer::SharedTui>, f: impl FnOnce() -> T) -> T {
+pub(crate) fn with_terminal<T>(
+    shared: Option<&crate::composer::SharedTui>,
+    f: impl FnOnce() -> T,
+) -> T {
     let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
     let _ = crossterm::terminal::disable_raw_mode();
     let out = f();

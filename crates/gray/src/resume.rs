@@ -538,7 +538,7 @@ pub(crate) async fn dismiss_interrupted(cwd: Option<&Path>) -> usize {
 /// Reads the store and builds [`interrupted_hint`] for the startup screen.
 pub(crate) async fn startup_interrupted_hint(cwd: &std::path::Path) -> Option<String> {
     let store = JsonlSessionStore::new(crate::session_store::default_root()?);
-    let summaries = store.list().await;
+    let summaries = store.list_in(cwd).await;
     let mut running = std::collections::HashSet::new();
     for s in summaries.iter().filter(|s| s.cwd == cwd) {
         if store.open_lock_held(&s.id).await {

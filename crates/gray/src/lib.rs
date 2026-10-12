@@ -31,6 +31,7 @@ pub mod profile;
 pub mod project_trust;
 pub mod prompt_templates;
 pub mod providers;
+pub mod qol;
 pub mod repl;
 pub mod resume;
 mod rotation;
@@ -651,6 +652,9 @@ pub enum Commands {
     Update {
         #[arg(long, value_name = "on|off|status")]
         auto: Option<String>,
+        /// Update gray, plugins and provider CLIs together
+        #[arg(long)]
+        everything: bool,
     },
     /// Cron jobs: list/add/remove/show (file-only over $GRAY_HOME/cron, no daemon needed)
     Cron {

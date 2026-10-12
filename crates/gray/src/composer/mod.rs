@@ -439,6 +439,7 @@ pub struct Tui {
     /// it`): a home row directly above the input box while the home
     /// screen is up.
     pub(crate) home_update: Option<String>,
+    pub(crate) home_qol: Option<String>,
     /// Slash commands and their modals keep the welcome up; the first real
     /// turn (`begin_turn`) or a replayed session ends it.
     pub(crate) left_home: bool,
@@ -774,21 +775,22 @@ fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<L
     // `gray` bold bright, then the muted version — devin's title pair.
     // Both are up from the first frame (everything starts at once);
     // while the intro runs the wordmark rides the status-line shimmer.
-    let wordmark = match intro {
+    let mut title = match intro {
         Some(elapsed) => draw::shimmer_spans("gray", elapsed),
         None => vec![Span::styled(
             "gray",
             Style::default().bold().fg(theme.text_bright),
         )],
     };
-    body.push(centered(wordmark, 4));
-    body.push(centered(
-        vec![Span::styled(
-            version.clone(),
-            Style::default().fg(theme.text_muted),
-        )],
-        display_width(&version),
+    title.push(Span::raw(" "));
+    title.push(Span::styled(
+        "\u{2b21}",
+        Style::default().fg(theme.text_muted),
     ));
+    title.push(Span::raw(" "));
+    let title_w = display_width("gray \u{2b21} ") + display_width(&version);
+    title.push(Span::styled(version, Style::default().fg(theme.text_muted)));
+    body.push(centered(title, title_w));
     body.push(Line::from(""));
     body
 }
@@ -1041,6 +1043,7 @@ impl Tui {
             home_notice: None,
             plugin_stats: None,
             home_update: None,
+            home_qol: None,
             left_home: false,
             pending_input,
         })
@@ -1331,6 +1334,10 @@ impl Tui {
     /// probe's counts land.
     pub fn set_plugin_stats(&mut self, stats: Option<String>) {
         self.plugin_stats = stats;
+    }
+
+    pub fn set_home_qol(&mut self, line: Option<String>) {
+        self.home_qol = line;
     }
 
     /// The exe-replaced notice rendered above the input box while the

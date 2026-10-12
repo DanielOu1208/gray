@@ -234,6 +234,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         notice: tui.home_notice.as_deref(),
         stats: tui.plugin_stats.as_deref(),
         above: tui.home_update.as_deref(),
+        qol: tui.home_qol.as_deref(),
     });
     let home_mode = home.is_some();
     let mut ibox = build_input_box(&text, cursor, w, ghost, home);
@@ -536,8 +537,9 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         };
         let panel_h = visible_count as u16;
         let box_rows = box_h;
-        let tail_y = status_y + status_h + queued_h;
-        let live_y = tail_y + tail_h;
+        let tail_y = status_y + seam_h;
+        let queued_y = status_y + status_h + tail_h;
+        let live_y = queued_y + queued_h;
         let ask_y = live_y + live_h;
         let widget_y = ask_y + ask_h;
         let box_y = widget_y + widget_h;
@@ -584,12 +586,12 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
             ));
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
-                Rect::new(area.x, status_y + seam_h, area.width, 1),
+                Rect::new(area.x, status_y + seam_h + tail_h, area.width, 1),
             );
         }
 
         for (i, line) in queued_preview.iter().enumerate() {
-            let y = status_y + status_h + i as u16;
+            let y = queued_y + i as u16;
             if y < area.y || y >= area.y + area.height {
                 continue;
             }

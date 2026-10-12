@@ -167,6 +167,12 @@ pub(crate) fn read_line(
         let (timeout, empty_draft, pending_ev) = {
             let mut guard = shared.lock().expect("tui lock");
             let tui: &mut super::Tui = &mut guard;
+            if tui.ask_modal.is_some() || tui.modal_open {
+                drop(guard);
+                std::thread::sleep(Duration::from_millis(30));
+                needs_draw = true;
+                continue;
+            }
             if let Some((cols, deadline)) = tui.pending_resize
                 && std::time::Instant::now() >= deadline
             {

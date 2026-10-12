@@ -943,6 +943,13 @@ pub async fn run_repl_mode(
         && !config.bare
         && let Some((shared, _)) = &tui
     {
+        tokio::spawn(crate::qol::detect::run_for_home(shared.clone()));
+    }
+
+    if interactive
+        && !config.bare
+        && let Some((shared, _)) = &tui
+    {
         if agent.is_none() {
             crate::plugin_status::kickoff(
                 shared.clone(),
@@ -1058,6 +1065,10 @@ pub async fn run_repl_mode(
     // Footer segment for running jobs and scheduled wakes.
     if interactive {
         jobs::spawn_footer_poller();
+    }
+
+    if interactive && tui.is_some() && crate::qol::detect::take_pending_setup() {
+        crate::qol::setup::handle(&tui, None).await;
     }
 
     loop {

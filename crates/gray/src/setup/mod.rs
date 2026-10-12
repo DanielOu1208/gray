@@ -68,8 +68,8 @@ pub use catalog::{
     PROVIDERS_JSON, SavedConfig, auto_update_enabled, auto_update_enabled_at, build_connect_items,
     cron_auto_enabled, cron_auto_enabled_at, disabled_skill_names, gray_home, gw_auto_enabled,
     gw_auto_enabled_at, intro_enabled, load_auth_keys, load_catalog, load_saved_config_at,
-    lock_saved_config_at, mask_key_pretty, normalize_custom_base_url, save_saved_config_at,
-    saved_config_path, skills_auto_enabled, skills_auto_enabled_at,
+    lock_saved_config_at, mask_key_pretty, normalize_custom_base_url, qol_enabled, qol_enabled_at,
+    save_saved_config_at, saved_config_path, skills_auto_enabled, skills_auto_enabled_at,
 };
 
 /// The OS user's home, where app configs live (`~/.config/<app>/…`) —
@@ -170,6 +170,33 @@ pub async fn run_onboarding(config: &mut Config) -> anyhow::Result<bool> {
         2,
     );
     print!("\r\n");
+    let detected = crate::qol::detect::first_run_detected();
+    if !detected.is_empty() {
+        let names = detected
+            .iter()
+            .map(|d| d.name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        print_wrapped(&format!("\x1b[2m{names} detected\x1b[0m"), 2);
+        print_wrapped(
+            "\x1b[2m[i] import setup via /setup · any other key skips\x1b[0m",
+            2,
+        );
+        use crossterm::event::{Event, KeyCode, KeyEventKind, read};
+        let _ = crossterm::terminal::enable_raw_mode();
+        let key = loop {
+            match read() {
+                Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => break Some(k),
+                Ok(_) => continue,
+                Err(_) => break None,
+            }
+        };
+        let _ = crossterm::terminal::disable_raw_mode();
+        print!("\r\n");
+        if matches!(key, Some(k) if matches!(k.code, KeyCode::Char('i') | KeyCode::Char('I'))) {
+            crate::qol::detect::set_pending_setup(true);
+        }
+    }
     // Returning users with a saved model + key skip the picker entirely:
     // the modal only earns its interruption on first run.
     let model_ok = config

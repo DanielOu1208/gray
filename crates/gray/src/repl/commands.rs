@@ -81,7 +81,7 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
     },
     CmdDef {
         name: "update",
-        desc: "install a new gray build",
+        desc: "install a new gray build (everything: + plugins & provider CLIs)",
         aliases: &["upgrade"],
         scope: CmdScope::Global,
         surface: CmdSurface::Text,
@@ -227,13 +227,22 @@ const HIDDEN_ALIASES: &[(&str, &str)] = &[("plugin", "plugins")];
 
 /// TUI-only commands: they resolve, complete and list in `/help` like any
 /// builtin but stay out of the gateway registry, which iterates REGISTRY.
-pub(crate) const TUI_COMMANDS: &[CmdDef] = &[CmdDef {
-    name: "intro",
-    desc: "logo intro enable|disable",
-    aliases: &[],
-    scope: CmdScope::Global,
-    surface: CmdSurface::Local,
-}];
+pub(crate) const TUI_COMMANDS: &[CmdDef] = &[
+    CmdDef {
+        name: "intro",
+        desc: "logo intro enable|disable",
+        aliases: &[],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Local,
+    },
+    CmdDef {
+        name: "setup",
+        desc: "import detected agent tool setups (rules, skills, plugins)",
+        aliases: &[],
+        scope: CmdScope::Global,
+        surface: CmdSurface::Local,
+    },
+];
 
 /// Canonical lookup: strip one leading `/`, lowercase, exact wins then
 /// hidden aliases, then listed aliases.
@@ -439,6 +448,19 @@ pub(crate) fn complete_command_args(
         "agentsmd" | "sys" => complete_agentsmd_args(cmd, arg_text),
         "models" => complete_model_args(cmd, arg_text),
         "theme" | "themes" => complete_theme_args(cmd, arg_text),
+        "setup" => {
+            let mut table: Vec<(&str, &str)> = vec![
+                ("undo", "reverse the last import(s)"),
+                ("dismiss", "stop flagging a tool (/setup dismiss <tool>)"),
+                ("scanned", "show the declared scan set"),
+            ];
+            table.extend(
+                crate::qol::detect::TOOLS
+                    .iter()
+                    .map(|t| (t.id, "import this tool's setup")),
+            );
+            complete_from_table(cmd, arg_text, &table)
+        }
         "intro" => complete_from_table(
             cmd,
             arg_text,
@@ -688,6 +710,7 @@ pub enum ReplCommand {
     /// The startup logo intro (`/intro [on|off]`): bare reports the state,
     /// a switch word persists the toggle. TUI-only.
     Intro(Option<String>),
+    Setup(Option<String>),
     /// Keybindings: bare lists, `reload` re-reads `keybindings.json`.
     Keys(Option<String>),
     /// Re-read file customizations (theme, keybindings, templates).
@@ -813,6 +836,7 @@ pub fn parse_command(line: &str) -> ReplCommand {
         Some("hehe") => ReplCommand::Hehe,
         Some("theme") => ReplCommand::Theme(opt(rest)),
         Some("intro") => ReplCommand::Intro(opt(rest)),
+        Some("setup") => ReplCommand::Setup(opt(rest)),
         Some("hotkeys") => ReplCommand::Keys(opt(rest)),
         Some("reload") => ReplCommand::Reload,
         Some("models") => match opt(rest) {
