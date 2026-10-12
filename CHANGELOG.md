@@ -101,7 +101,7 @@
   path, and the interrupted-sessions notice scans only the current
   directory's sessions (~530 ms → ~60 ms on a 1.5k-session store), so it
   lands with the first frame.
-- The welcome row reads `gray ⬡ <version>` on one line.
+- The welcome row reads `gray ◆ <version>` on one line.
 - **Images go to the model at original bytes, resolution and quality.**
   Attach/read/view paths no longer decode or re-encode image files —
   animated GIFs stay animated and EXIF metadata stays on the file.
