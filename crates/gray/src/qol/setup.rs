@@ -380,6 +380,16 @@ fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     }
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, body)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o777)
+            .ok()
+            .filter(|m| *m < 0o600)
+            .unwrap_or(0o600);
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+    }
     std::fs::rename(&tmp, path)
 }
 
