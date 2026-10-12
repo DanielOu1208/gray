@@ -664,41 +664,45 @@ pub(crate) fn home_column(w: usize) -> (usize, usize) {
 /// notice under it, and the status bar where the corner row was. Deliberately not the graychan art —
 /// that is `/hehe` only, so the startup screen is the logo and `/hehe`
 /// again puts the logo back.
-/// Leading-edge glow, as a projection fraction: cells the front just
-/// reached paint full-bright for a frame before settling into the
-/// gradient.
-const INTRO_FRONT_W: f32 = 0.16;
-/// ~1.4s at ~36ms a frame — the sweep's DRAW window in
-/// `assets/logo-intro.py` (its 0.15s lead-in is dropped: everything
-/// starts at once).
-const INTRO_FRAMES: usize = 40;
-const INTRO_FRAME_MS: u64 = 36;
+/// The intro's baked frames: `assets/logo-intro-ascii.py` rasterizes
+/// `logo-intro-pens.py` (v1 — two pens trace the rim from the top-left
+/// corner, each diagonal setting off as a pen passes) into six braille
+/// rows plus an edge plane flagging the cells at each live pen tip, at
+/// 30fps. The last frame is `logo.txt`, so the intro ends exactly on the
+/// static banner.
+const INTRO_FRAME_MS: u64 = 33;
+const INTRO_FPS: f64 = 30.0;
+const INTRO_FRAMES_TXT: &str = include_str!("../../assets/logo-intro-frames.txt");
 
-/// The front's eased position at frame fraction `x`: the SVG's
-/// `cubic-bezier(0.65, 0, 0.35, 1)`, solved for y at x by bisection.
-fn intro_front(x: f32) -> f32 {
-    let bex =
-        |s: f32| 3.0 * s * (1.0 - s).powi(2) * 0.65 + 3.0 * s * s * (1.0 - s) * 0.35 + s.powi(3);
-    let bey = |s: f32| 3.0 * s * s * (1.0 - s) + s.powi(3);
-    let (mut lo, mut hi) = (0.0f32, 1.0f32);
-    for _ in 0..24 {
-        let m = (lo + hi) / 2.0;
-        if bex(m) < x {
-            lo = m;
-        } else {
-            hi = m;
-        }
-    }
-    bey((lo + hi) / 2.0).clamp(0.0, 1.0)
+/// `(mark rows, edge flags)` per frame, parsed once.
+fn intro_frames() -> &'static [(Vec<String>, Vec<String>)] {
+    static FRAMES: std::sync::OnceLock<Vec<(Vec<String>, Vec<String>)>> =
+        std::sync::OnceLock::new();
+    FRAMES.get_or_init(|| {
+        INTRO_FRAMES_TXT
+            .split("\n---\n")
+            .filter_map(|block| {
+                let rows: Vec<String> = block
+                    .lines()
+                    .filter(|l| !l.starts_with('#'))
+                    .map(str::to_string)
+                    .collect();
+                (rows.len() == 12).then(|| {
+                    let (mark, edge) = rows.split_at(6);
+                    (mark.to_vec(), edge.to_vec())
+                })
+            })
+            .collect()
+    })
 }
 
-/// The welcome body at `reveal` of the diagonal sweep — `1.0` is the
-/// finished banner. A straight front crosses the mark at 45° top-left to
-/// bottom-right (`assets/logo-intro.svg`): a cell is drawn once the front
-/// passes it, and cells on the front paint full-bright. `gray` and the
-/// version are present from the first frame; the wordmark shimmers while
-/// `intro` is running (its elapsed time drives the shimmer).
-fn welcome_body_lines(w: usize, reveal: f32, intro: Option<Duration>) -> Vec<Line<'static>> {
+/// The welcome body at `progress` through the baked intro — `1.0` is
+/// the finished banner. With `intro` running, its elapsed time picks
+/// the frame (30fps); otherwise `progress` maps onto the frame count.
+/// Cells a live pen tip sits on paint full-bright; the rest ride the
+/// diagonal gradient. `gray` and the version are present from the first
+/// frame; the wordmark shimmers while `intro` runs.
+fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<Line<'static>> {
     let theme = crate::theme::theme();
     let version = format!("v{}", env!("CARGO_PKG_VERSION"));
 
@@ -719,42 +723,35 @@ fn welcome_body_lines(w: usize, reveal: f32, intro: Option<Duration>) -> Vec<Lin
     // The mark — the diagonal gradient stands in for the shimmer sweep.
     let base = theme.text_dim;
     let hilite = theme.text_bright;
-    let logo_raw = crate::tui::logo_lines();
-    let l_rows = logo_raw.len().max(1) as f32;
-    let max_logo_w = logo_raw
+    let frames = intro_frames();
+    let last = frames.len().saturating_sub(1);
+    let frame_idx = match intro {
+        Some(elapsed) => (elapsed.as_secs_f64() * INTRO_FPS) as usize,
+        None => (progress.clamp(0.0, 1.0) * last as f32).round() as usize,
+    }
+    .min(last);
+    let (mark_rows, edge_rows) = &frames[frame_idx];
+    let l_rows = mark_rows.len().max(1) as f32;
+    let max_logo_w = mark_rows
         .iter()
         .map(|l| display_width(l.trim()))
         .max()
         .unwrap_or(0);
     let l_cols = (max_logo_w as f32).max(1.0);
     let logo_pad = x + col_w.saturating_sub(max_logo_w) / 2;
-    // The front's axis, in cell units (a cell is twice as tall as it is
-    // wide, so the row axis counts double): `col + 2*row` is 0 at the
-    // mark's top-left and `max_p` at its bottom-right — a 45° front is a
-    // level set of that sum.
-    let cell_p = |row: usize, col: usize| col as f32 + 2.0 * row as f32;
-    let mut min_p = f32::MAX;
-    let mut max_p = 0.0f32;
-    for (row, line) in logo_raw.iter().enumerate() {
-        for (col, _) in line.trim().chars().enumerate() {
-            min_p = min_p.min(cell_p(row, col));
-            max_p = max_p.max(cell_p(row, col));
-        }
-    }
-    let span_p = (max_p - min_p).max(1.0);
-    for (row, line) in logo_raw.iter().enumerate() {
-        let trimmed = line.trim();
+
+    for (row, line) in mark_rows.iter().enumerate() {
+        let edge = edge_rows.get(row).map(String::as_str).unwrap_or("");
         let mut spans: Vec<Span<'static>> = Vec::new();
         if logo_pad > 0 {
             spans.push(Span::raw(" ".repeat(logo_pad)));
         }
-        for (col, ch) in trimmed.chars().enumerate() {
-            let p = (cell_p(row, col) - min_p) / span_p;
-            if p > reveal {
+        for (col, ch) in line.chars().enumerate() {
+            if ch.is_whitespace() {
                 spans.push(Span::raw(" "));
                 continue;
             }
-            let color = if reveal < 1.0 && p > reveal - INTRO_FRONT_W {
+            let color = if edge.chars().nth(col) == Some('1') {
                 hilite
             } else {
                 let diag = (col as f32 + (l_rows - 1.0 - row as f32)) / (l_cols + l_rows);
@@ -794,10 +791,10 @@ fn welcome_body_lines(w: usize, reveal: f32, intro: Option<Duration>) -> Vec<Lin
 /// the free rows. `pub(crate)` so the reveal contract is testable.
 pub(crate) fn welcome_lines_at(
     w: usize,
-    reveal: f32,
+    progress: f32,
     intro: Option<Duration>,
 ) -> Vec<Line<'static>> {
-    let body = welcome_body_lines(w, reveal, intro);
+    let body = welcome_body_lines(w, progress, intro);
     let rows = crossterm::terminal::size()
         .map(|(_, r)| r as usize)
         .unwrap_or(0);
@@ -814,8 +811,8 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
     welcome_lines_at(w, 1.0, None)
 }
 
-/// The startup sweep: a 45° front draws the welcome mark top-left to
-/// bottom-right in the rows the banner insert is about to fill, so the
+/// The startup sweep: a vertical front draws the welcome mark left to
+/// right in the rows the banner insert is about to fill, so the
 /// animation *becomes* the banner — the insert repaints the same cells,
 /// which is what pushes them into scrollback. Skipped when the block
 /// can't fit; either way the caller still runs the plain insert.
@@ -855,14 +852,14 @@ fn play_logo_intro(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) {
         }
     }
     let intro_start = std::time::Instant::now();
-    for f in 0..INTRO_FRAMES {
-        let p = f as f32 / (INTRO_FRAMES - 1) as f32;
-        let reveal = intro_front(p);
+    let frame_count = intro_frames().len();
+    for f in 0..frame_count {
+        let progress = f as f32 / (frame_count - 1) as f32;
         let elapsed = intro_start.elapsed();
         let _ = terminal.draw(|frame| {
             let area = frame.area();
             frame.render_widget(
-                Paragraph::new(welcome_lines_at(w, reveal, Some(elapsed))),
+                Paragraph::new(welcome_lines_at(w, progress, Some(elapsed))),
                 area,
             );
         });
@@ -870,7 +867,7 @@ fn play_logo_intro(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) {
         // the finished banner instead of being eaten. Only keys — the
         // terminal's CPR/focus responses to the startup probes sit in the
         // same queue and must not cancel the sweep.
-        if f + 1 < INTRO_FRAMES
+        if f + 1 < frame_count
             && crossterm::event::poll(Duration::from_millis(INTRO_FRAME_MS)).unwrap_or(false)
             && let Ok(crossterm::event::Event::Key(_)) = crossterm::event::read()
         {
