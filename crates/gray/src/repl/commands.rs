@@ -171,13 +171,6 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
         surface: CmdSurface::Text,
     },
     CmdDef {
-        name: "plugin",
-        desc: "manage plugins",
-        aliases: &[],
-        scope: CmdScope::Global,
-        surface: CmdSurface::Text,
-    },
-    CmdDef {
         name: "plugins",
         desc: "plugin manager (list, enable, update)",
         aliases: &[],
@@ -228,11 +221,19 @@ pub(crate) fn format_help_line(d: &CmdDef) -> String {
     }
 }
 
-/// Canonical lookup: strip one leading `/`, lowercase, exact wins then aliases.
+/// Spellings that resolve to a canonical command but never appear as a
+/// row of their own — not in the popup, `/help`, or `gray cmd list`.
+const HIDDEN_ALIASES: &[(&str, &str)] = &[("plugin", "plugins")];
+
+/// Canonical lookup: strip one leading `/`, lowercase, exact wins then
+/// hidden aliases, then listed aliases.
 pub(crate) fn resolve(name: &str) -> Option<&'static CmdDef> {
     let n = name.strip_prefix('/').unwrap_or(name).to_lowercase();
     if let Some(d) = REGISTRY.iter().find(|d| d.name == n) {
         return Some(d);
+    }
+    if let Some(&(_, target)) = HIDDEN_ALIASES.iter().find(|(a, _)| *a == n) {
+        return REGISTRY.iter().find(|d| d.name == target);
     }
     REGISTRY.iter().find(|d| d.aliases.iter().any(|a| *a == n))
 }
@@ -791,9 +792,9 @@ pub fn parse_command(line: &str) -> ReplCommand {
             Some(id) => ReplCommand::Model(Some(id)),
             None => ReplCommand::ModelPanes,
         },
-        Some("plugin") => ReplCommand::Plugin(t.to_string()),
-        // `/plugins` bare is the manager modal; with args it stays the
-        // `/plugin <sub>` text command it aliased before.
+        // `/plugins` bare is the manager modal; with args (or spelled
+        // `/plugin`, its hidden alias) it stays the `/plugin <sub>` text
+        // command it aliased before.
         Some("plugins") => match opt(rest) {
             None => ReplCommand::Plugins,
             Some(_) => ReplCommand::Plugin(t.to_string()),

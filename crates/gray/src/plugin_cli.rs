@@ -1069,6 +1069,9 @@ pub(crate) fn completions(query: &str) -> Vec<(String, String)> {
         };
         for command in commands.iter().filter_map(|v| v.as_str()) {
             let command = command.trim_start_matches('/');
+            if crate::repl::is_builtin_command(command) {
+                continue;
+            }
             if !query.contains(' ') && command.starts_with(query) {
                 out.push((command.to_string(), format!("{name} plugin")));
             }

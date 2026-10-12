@@ -24,7 +24,7 @@ fn args_hint(name: &str) -> Option<&'static str> {
         "theme" => Some("[name|new <name>|reload]"),
         "hotkeys" => Some("[reload]"),
         "agentsmd" => Some("[show|reset]"),
-        "plugin" => Some("[list|update|enable|disable|check]"),
+        "plugins" => Some("[list|update|enable|disable|check]"),
         "gateway" => Some("[status]"),
         "jobs" => Some("[stop <job|wake id>]"),
         "update" => Some("[status|install|auto on|off|status]"),
@@ -32,7 +32,7 @@ fn args_hint(name: &str) -> Option<&'static str> {
     }
 }
 
-const SLOW: &[&str] = &["compact", "update", "plugin", "plugins"];
+const SLOW: &[&str] = &["compact", "update", "plugins"];
 
 fn hint_arg(hint: impl Into<String>) -> Vec<Value> {
     vec![json!({"name": "args", "required": false, "hint": hint.into()})]
