@@ -63,6 +63,7 @@ async fn failed_compaction_save_retries_full_history_before_appending() {
         max_wall_secs: None,
         bare: false,
         lean: false,
+        compact_at: None,
     };
     // No provider request is made: these tests exercise persistence only.
     struct NoRequests;
@@ -208,4 +209,40 @@ fn stream_clock_bills_batch_delivery_its_generation_window() {
         clock.streamed_ms().unwrap() < ms + 60,
         "back-to-back batch events add ~nothing on top"
     );
+}
+
+// The REPL's card header (live and final share `tool_header`) for a plugin
+// tool with a label and a two-line template preview: both rows reach the card.
+#[test]
+fn repl_tool_header_renders_label_and_template_second_line() {
+    let labels =
+        std::collections::HashMap::from([("rlm_spawn".to_string(), "Started agent".to_string())]);
+    let previews = std::collections::HashMap::from([(
+        "rlm_spawn".to_string(),
+        "{name} · {model|model} · {effort}\n{prompt|firstline}".to_string(),
+    )]);
+    let args = serde_json::json!({
+        "name": "e2e-theme",
+        "model": "claude-haiku-5-5",
+        "effort": "max",
+        "prompt": "verify the theme fixes\nmore",
+    });
+    let display = crate::tool_fmt::ToolDisplay {
+        labels: Some(&labels),
+        previews: Some(&previews),
+    };
+    let rows = super::tool_header(display, "rlm_spawn", &args, None);
+    let texts: Vec<String> = rows
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(texts[0].contains("Started agent e2e-theme · "), "{texts:?}");
+    assert!(texts[0].ends_with(" · max"), "{texts:?}");
+    assert!(texts[1].contains("verify the theme fixes"), "{texts:?}");
 }

@@ -33,11 +33,21 @@ fn subagents_view_args(text: &str) -> Option<Vec<String>> {
     .then_some(args)
 }
 
-/// Slash commands that are pure local readouts. Everything else keeps the
-/// existing behavior: queue it as a follow-up or cancel on Esc.
+/// Slash commands that are pure local operations — readouts, pickers, and
+/// config tweaks that never touch the running turn. Everything else keeps
+/// the existing behavior: queue it as a follow-up or cancel on Esc.
 fn is_turn_local_command(text: &str) -> bool {
     match super::parse_command(text) {
         super::ReplCommand::Usage | super::ReplCommand::Jobs | super::ReplCommand::Help => true,
+        // Local UI: pickers and toggles own the screen (via with_modal_sync)
+        // or write config; the running turn's snapshot is unaffected.
+        super::ReplCommand::Theme(_)
+        | super::ReplCommand::Plugins
+        | super::ReplCommand::Keys(_)
+        | super::ReplCommand::Reload
+        | super::ReplCommand::Intro(_)
+        | super::ReplCommand::Gateway(_)
+        | super::ReplCommand::Hehe => true,
         super::ReplCommand::CronJobs(arg) => arg
             .as_deref()
             .and_then(super::handlers::parse_on_off)
@@ -125,6 +135,79 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
             let mut t = ctx.tui.lock().expect("tui lock");
             t.push_dim(help_text(&ctx.cwd, &ctx.hooks));
             t.ensure_gap();
+        }
+        super::ReplCommand::Theme(arg) => {
+            super::customize::handle_theme(arg, Some(&ctx.tui));
+        }
+        super::ReplCommand::Plugins => {
+            let tui = Some(&ctx.tui);
+            let bg = ctx.tui.lock().expect("tui lock").snapshot();
+            match super::with_modal_sync(tui, || crate::setup::run_plugins_manager(Some(&bg))) {
+                Ok(true) => super::say(tui, "plugins updated"),
+                // No card was echoed for a turn-local command, so an
+                // unchanged pick just repaints the composer.
+                Ok(false) => {
+                    let _ = ctx.tui.lock().expect("tui lock").draw();
+                }
+                Err(e) => super::say(tui, &format!("plugins manager failed: {e}")),
+            }
+        }
+        super::ReplCommand::Keys(arg) => {
+            super::customize::handle_keys(arg, Some(&ctx.tui));
+        }
+        super::ReplCommand::Reload => {
+            super::customize::handle_reload(Some(&ctx.tui));
+        }
+        super::ReplCommand::Intro(arg) => {
+            let text = match arg.as_deref().and_then(super::handlers::parse_on_off) {
+                Some(on) => {
+                    super::handlers::toggle_subsystem(super::handlers::Subsystem::Intro, on)
+                }
+                None if arg.is_none() => format!(
+                    "logo intro is {}",
+                    if crate::setup::intro_enabled() {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+                None => "usage: /intro [on|off]".to_string(),
+            };
+            super::say(Some(&ctx.tui), &text);
+        }
+        super::ReplCommand::Gateway(arg) => {
+            let tui = Some(&ctx.tui);
+            if let Some(on) = arg.as_deref().and_then(super::handlers::parse_on_off) {
+                let text =
+                    super::handlers::toggle_subsystem(super::handlers::Subsystem::Gateway, on);
+                super::say(tui, &text);
+            } else {
+                let bg = ctx.tui.lock().expect("tui lock").snapshot();
+                match super::with_modal_sync(tui, || {
+                    super::gateway_panel::run_gateway_modal(Some(&bg))
+                }) {
+                    Ok(true) => super::say(tui, "connections updated"),
+                    Ok(false) => super::say(tui, &super::gateway_panel::format_text()),
+                    Err(e) => super::say(tui, &format!("connections picker failed: {e}")),
+                }
+            }
+        }
+        super::ReplCommand::Hehe => {
+            let reverting = crate::mascot::mascot_shown();
+            let shown = {
+                let mut t = ctx.tui.lock().expect("tui lock");
+                if reverting {
+                    t.pop_mascot()
+                } else {
+                    t.push_mascot()
+                }
+            };
+            if !shown && !reverting {
+                super::say(
+                    Some(&ctx.tui),
+                    "graychan needs a truecolor terminal and at least 20x10 cells",
+                );
+            }
         }
         super::ReplCommand::Unknown(_) => {
             let Some(args) = subagents_view_args(text) else {
@@ -296,8 +379,9 @@ pub(crate) fn spawn_key_watcher_with_typing(
                         }
                         KeyOutcome::Interrupt => {
                             // A slash-command draft: cancel the turn and run
-                            // it locally (echoed as a sent message, never fed
-                            // to the AI); else plain cancel.
+                            // it locally, never fed to the AI (a local
+                            // command's echo is later retracted); else plain
+                            // cancel.
                             let mut text = t.textarea.text().to_string();
                             for (ph, full) in &t.pending_pastes {
                                 text = text.replace(ph, full);
@@ -313,6 +397,28 @@ pub(crate) fn spawn_key_watcher_with_typing(
                             return;
                         }
                         KeyOutcome::Command(cmd) => {
+                            // A completion-picked slash command is the same
+                            // kind of submit: run turn-local ones now instead
+                            // of queueing them behind the turn.
+                            if t.attachments.is_empty()
+                                && turn_locals.is_some()
+                                && is_turn_local_command(&cmd)
+                            {
+                                t.flush_markdown();
+                                t.end_thinking();
+                                t.textarea.set_text("");
+                                t.pending_pastes.clear();
+                                t.history_idx = None;
+                                t.matches.clear();
+                                t.sel = 0;
+                                let _ = t.draw();
+                                drop(t);
+                                run_turn_local_command(
+                                    turn_locals.as_ref().expect("checked above"),
+                                    &cmd,
+                                );
+                                continue;
+                            }
                             t.queued_inputs.push_back((cmd, Vec::new()));
                             t.matches.clear();
                             t.sel = 0;
@@ -331,11 +437,11 @@ pub(crate) fn spawn_key_watcher_with_typing(
                                 && is_turn_local_command(&text)
                                 && turn_locals.is_some();
                             if local {
-                                // Echo the command card now, clear the draft,
-                                // then drop the TUI lock before running it.
+                                // Clear the draft, then drop the TUI lock
+                                // before running it. Local readouts get no
+                                // command card — only their output lands.
                                 t.flush_markdown();
                                 t.end_thinking();
-                                t.push_user_prompt(&text, &[], false);
                                 t.textarea.set_text("");
                                 t.pending_pastes.clear();
                                 t.history_idx = None;

@@ -21,74 +21,10 @@ use crate::profile::{PluginEntry, load_entries};
 use crate::{HostHandler, Manifest, Plugin, PluginHookAdapter, SidecarPlugin, merge_manifests};
 
 // ---------------------------------------------------------------------------
-// Builtin plugins (single definition; callers add surface extras via options)
+// Builtin surface: a single in-process `bash` tool owned by the registry
+// itself — not a plugin, so manifests and `plugin list` show real installs
+// only. `from_plugins` registers it on the session ledger.
 // ---------------------------------------------------------------------------
-
-/// `tools-basic` file/shell set.
-pub struct ToolsBasicPlugin;
-
-/// One manifest body for the builtin tool plugins (name + live tool defs).
-fn builtin_manifest(name: &str, tools: &[Arc<dyn Tool>]) -> Manifest {
-    Manifest {
-        name: name.to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        tools: tools.iter().map(|t| t.def()).collect(),
-        ..Manifest::default()
-    }
-}
-
-impl Plugin for ToolsBasicPlugin {
-    fn manifest(&self) -> Manifest {
-        builtin_manifest("tools-basic", &self.tools())
-    }
-
-    fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        // T3.2/T3.3 wiring: read/write/edit share one ledger per tools() call
-        // (from_plugins calls once per build, so the session tools agree).
-        // `bash` shares it too: the same file read through either surface
-        // dedups against the other one.
-        let ledger = Arc::new(gray_tools::FileLedger::new());
-        vec![
-            Arc::new(gray_tools::ReadTool::new(ledger.clone())),
-            Arc::new(gray_tools::WriteTool::new(ledger.clone())),
-            Arc::new(gray_tools::EditTool::new(ledger.clone())),
-            Arc::new(gray_tools::BashTool::default().with_ledger(ledger.clone())),
-        ]
-    }
-}
-
-/// `tools-minimal`: the default surface — the single `bash` tool (including
-/// managed jobs). Everything — read, search, edit, run, and seeing an image
-/// (`cat img.png` returns it as a vision block) — goes through `bash`.
-pub struct ToolsMinimalPlugin;
-
-impl Plugin for ToolsMinimalPlugin {
-    fn manifest(&self) -> Manifest {
-        builtin_manifest("tools-minimal", &self.tools())
-    }
-
-    fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        vec![Arc::new(
-            gray_tools::BashTool::default().with_ledger(Arc::new(gray_tools::FileLedger::new())),
-        )]
-    }
-}
-
-pub struct ToolsSearchPlugin;
-
-impl Plugin for ToolsSearchPlugin {
-    fn manifest(&self) -> Manifest {
-        builtin_manifest("tools-search", &self.tools())
-    }
-
-    fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        vec![
-            Arc::new(gray_tools::GrepTool),
-            Arc::new(gray_tools::FindTool),
-            Arc::new(gray_tools::LsTool),
-        ]
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Registry assembly (moved from `gray::profile`; same later-wins semantics)
@@ -104,13 +40,7 @@ fn is_live_plugin(p: &dyn Plugin) -> bool {
 pub fn dynamic_plugins(plugins: &[Arc<dyn Plugin>]) -> Vec<Arc<dyn Plugin>> {
     plugins
         .iter()
-        .filter(|p| {
-            is_live_plugin(p.as_ref())
-                && !matches!(
-                    p.manifest().name.as_str(),
-                    "tools-minimal" | "tools-basic" | "tools-search"
-                )
-        })
+        .filter(|p| is_live_plugin(p.as_ref()))
         .cloned()
         .collect()
 }
@@ -121,51 +51,21 @@ pub fn dynamic_plugins(plugins: &[Arc<dyn Plugin>]) -> Vec<Arc<dyn Plugin>> {
 /// registry so `--dump-manifest` can't drift from what's registered.
 pub fn from_plugins(plugins: &[Arc<dyn Plugin>]) -> (Registry, Vec<Manifest>) {
     let manifests: Vec<Manifest> = plugins.iter().map(|p| p.manifest()).collect();
-    let mut owners = merge_manifests(manifests.clone());
-    // Reserved builtin names: tools owned by tools-basic/tools-search carry
-    // name-based trust (approval Allow, parallel lane). A sidecar claiming
-    // one must not inherit it — drop the claim with a warning, and always
-    // backfill the real builtin so a hostile manifest can't remove it.
-    let is_builtin_owner = |name: &str| name == "tools-basic" || name == "tools-search";
-    let mut builtin_tools: std::collections::HashMap<String, Arc<dyn Tool>> =
-        std::collections::HashMap::new();
-    for p in plugins {
-        if is_builtin_owner(&p.manifest().name) {
-            for t in p.tools() {
-                builtin_tools.insert(t.def().name.clone(), t.clone());
-            }
-        }
-    }
-    let builtin_names: std::collections::HashSet<String> = builtin_tools.keys().cloned().collect();
-    // Every builtin surface a sidecar could try to sit on top of. The
-    // name-based-trust set above (`tools-basic`/`tools-search`) stays
-    // reserve-only; these add the default `tools-minimal` surface, so a
-    // sidecar cannot quietly become `bash`.
-    let is_builtin_plugin =
-        |name: &str| matches!(name, "tools-minimal" | "tools-basic" | "tools-search");
-    // Builtins win manifests: a hostile claim must not displace the owner
-    // either (the ledger rebuild below keys off ownership).
-    for plugin in plugins {
-        let owner = plugin.manifest().name;
-        if is_builtin_owner(&owner) {
-            for tool in plugin.tools() {
-                owners.insert(tool.def().name.clone(), owner.clone());
-            }
-        }
-    }
-    // Tool names the builtin surface owns, for the override gate below.
-    let builtin_owned: std::collections::HashSet<String> = plugins
-        .iter()
-        .filter(|p| is_builtin_plugin(&p.manifest().name))
-        .flat_map(|p| p.tools().into_iter().map(|t| t.def().name))
-        .collect();
-    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+    let owners = merge_manifests(manifests.clone());
+    // The builtin surface is not a plugin: one `bash` tool built here, on
+    // the session ledger the binary's /new + compaction lifecycle acts on
+    // via `current_file_ledger`. Fresh per build on purpose: a reused
+    // ledger would leak reads across sessions in multi-session hosts.
+    let ledger = Arc::new(gray_tools::FileLedger::new());
+    let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(
+        gray_tools::BashTool::default().with_ledger(ledger.clone()),
+    )];
     for p in plugins {
         let owner_name = p.manifest().name;
         // Protocol-1.3 plugins change their tool set while the session
         // runs; `LiveRegistry` resolves those per call instead of
-        // snapshotting them here. Builtins never qualify.
-        if is_live_plugin(p.as_ref()) && !is_builtin_plugin(&owner_name) {
+        // snapshotting them here.
+        if is_live_plugin(p.as_ref()) {
             continue;
         }
         let may_override = p
@@ -173,25 +73,13 @@ pub fn from_plugins(plugins: &[Arc<dyn Plugin>]) -> (Registry, Vec<Manifest>) {
             .iter()
             .any(|c| c == crate::capabilities::TOOL_OVERRIDE);
         for t in p.tools() {
-            if builtin_names.contains(&t.def().name) && !is_builtin_owner(&owner_name) {
+            // Replacing the built-in `bash` needs the capability, and the
+            // capability needs consent: a silently winning sidecar would
+            // intercept everything routed through that tool.
+            if t.def().name == "bash" && !may_override {
                 push_builder_warning(format!(
-                    "plugin `{}` claims reserved builtin tool `{}`; ignoring",
+                    "plugin `{}` claims built-in tool `bash`; grant `{}` to let it (gray plugin capabilities {})",
                     owner_name,
-                    t.def().name
-                ));
-                continue;
-            }
-            // Replacing a built-in surface tool needs the capability, and
-            // the capability needs consent: a silently winning sidecar
-            // would intercept everything routed through that tool.
-            if builtin_owned.contains(&t.def().name)
-                && !is_builtin_plugin(&owner_name)
-                && !may_override
-            {
-                push_builder_warning(format!(
-                    "plugin `{}` claims built-in tool `{}`; grant `{}` to let it (gray plugin capabilities {})",
-                    owner_name,
-                    t.def().name,
                     crate::capabilities::TOOL_OVERRIDE,
                     owner_name
                 ));
@@ -208,42 +96,6 @@ pub fn from_plugins(plugins: &[Arc<dyn Plugin>]) -> (Registry, Vec<Manifest>) {
                     tools.push(t.clone());
                 }
             }
-        }
-    }
-    // Backfill any reserved name a hostile manifest displaced: builtins win.
-    for (name, tool) in &builtin_tools {
-        if !tools.iter().any(|e| &e.def().name == name) {
-            tools.push(tool.clone());
-        }
-    }
-    // Lifecycle adoption: one ledger shared by the session tools; the
-    // binary's /new + compaction lifecycle acts on the same state via
-    // `current_file_ledger`. The builtin plugins already share one ledger per
-    // build, but that Arc dies with the plugin — rebuild the builtin read/
-    // write/edit/bash on the tracked one instead (a sidecar-owned name is left
-    // alone; `bash` is the default surface, so its dedup state has to be the
-    // state /new clears and compaction disarms). Fresh per build on purpose: a
-    // reused ledger would leak reads across sessions in multi-session hosts.
-    let ledger = Arc::new(gray_tools::FileLedger::new());
-    for t in tools.iter_mut() {
-        let name = t.def().name.clone();
-        if !matches!(
-            owners.get(&name).map(|o| o.as_str()),
-            Some("tools-basic") | Some("tools-minimal")
-        ) {
-            continue;
-        }
-        let fresh: Option<Arc<dyn Tool>> = match name.as_str() {
-            "read" => Some(Arc::new(gray_tools::ReadTool::new(ledger.clone()))),
-            "write" => Some(Arc::new(gray_tools::WriteTool::new(ledger.clone()))),
-            "edit" => Some(Arc::new(gray_tools::EditTool::new(ledger.clone()))),
-            "bash" => Some(Arc::new(
-                gray_tools::BashTool::default().with_ledger(ledger.clone()),
-            )),
-            _ => None,
-        };
-        if let Some(f) = fresh {
-            *t = f;
         }
     }
     let registry = Registry::new(tools);
@@ -420,8 +272,8 @@ fn load_lock_files(cwd: &Path) -> (crate::lock::LockFile, crate::lock::LockFile,
 /// as a test-only harness) for the legacy split.
 /// `defaults` is the catalog of builtin plugins a `gray.yml` may name;
 /// `default_names` selects which of them is the no-profile fallback (the
-/// default surface). Decoupled so the catalog can offer opt-in plugins
-/// (`tools-basic`, `tools-search`) while booting `tools-minimal`.
+/// default surface). Decoupled so a catalog can offer opt-in builtins while
+/// booting only a subset.
 pub async fn active_plugins(
     defaults: Vec<Arc<dyn Plugin>>,
     default_names: &[&str],
@@ -842,7 +694,7 @@ pub struct BuilderOptions {
     pub extra_plugins: Vec<Arc<dyn Plugin>>,
     pub host_handler: Option<HostHandler>,
     pub profile_path: String,
-    /// Bare run: `tools-minimal` only; no gray.yml profile, no lock sidecars.
+    /// Bare run: the implicit `bash` surface only; no gray.yml profile, no lock sidecars.
     pub bare: bool,
     pub abort_on_spawn_failure: bool,
     pub wrap_executor: Option<ExecutorWrap>,
@@ -881,22 +733,18 @@ pub async fn build_agent(opts: BuilderOptions) -> anyhow::Result<Agent> {
         dynamic_credential_source,
         prebooted_plugins,
     } = opts;
-    // Catalog: any of these may be named in `gray.yml`. Fallback (no profile)
-    // is `tools-minimal` — one persistent shell, gray's default surface.
-    let mut defaults: Vec<Arc<dyn Plugin>> = vec![
-        Arc::new(ToolsMinimalPlugin) as Arc<dyn Plugin>,
-        Arc::new(ToolsBasicPlugin) as Arc<dyn Plugin>,
-        Arc::new(ToolsSearchPlugin) as Arc<dyn Plugin>,
-    ];
+    // No builtin plugins in this crate's catalog: the `bash` surface is not
+    // a plugin — `from_plugins` registers it directly — so a `gray.yml`
+    // `builtin:` entry (a retired tier name, or anything else unknown)
+    // just warns and skips.
     let mut plugins = if let Some(prebooted) = prebooted_plugins {
         prebooted
     } else if bare {
-        defaults.retain(|p| p.manifest().name == "tools-minimal");
-        defaults
+        Vec::new()
     } else {
         active_plugins(
-            defaults,
-            &["tools-minimal"],
+            Vec::new(),
+            &[],
             &profile_path,
             host_handler,
             abort_on_spawn_failure,
@@ -905,7 +753,7 @@ pub async fn build_agent(opts: BuilderOptions) -> anyhow::Result<Agent> {
         .0
     };
     // Always-on surface plugins (see `extra_plugins`): appended after the
-    // profile + lock set so they survive `tools-minimal`-only profiles.
+    // profile + lock set so they survive a profile that names nothing.
     // Same-name dedupe as `active_plugins` (later wins) keeps a profile
     // entry with the same name from doubling up.
     for p in extra_plugins {

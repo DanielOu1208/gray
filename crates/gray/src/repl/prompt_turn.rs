@@ -592,21 +592,21 @@ pub(crate) async fn run_prompt_turn(
         if let Some(text) = t.local_command.take() {
             // Esc mid-turn: command already echoed; run locally, never to the AI
             drop(t);
-            *pending_command = Some(expand_skill_command(
-                parse_command(&text),
-                cwd,
-                Some(shared),
-                true,
-            ));
+            // `local: true` collapses every Skill to Empty too — a `/skill`
+            // draft canceled mid-turn can never reach the model.
+            let parsed = parse_command(&text);
+            if parsed.runs_local() || matches!(parsed, ReplCommand::Skill(_)) {
+                shared.lock().expect("tui lock").retract_slash_echo(&text);
+            }
+            *pending_command = Some(expand_skill_command(parsed, cwd, Some(shared), true));
         } else if let Some((qtext, qimages)) = t.queued_inputs.pop_front() {
             t.push_user_prompt(&qtext, &qimages, !qtext.starts_with('/'));
             drop(t);
-            *pending_command = Some(expand_skill_command(
-                parse_command(&qtext),
-                cwd,
-                Some(shared),
-                false,
-            ));
+            let parsed = parse_command(&qtext);
+            if parsed.runs_local() {
+                shared.lock().expect("tui lock").retract_slash_echo(&qtext);
+            }
+            *pending_command = Some(expand_skill_command(parsed, cwd, Some(shared), false));
             *pending_images = qimages;
         }
     }

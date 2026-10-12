@@ -44,20 +44,6 @@ pub(crate) fn session_wakes(jobs: &[crate::cron::CronJob], sid: &str) -> Vec<Wak
     wakes
 }
 
-/// Jobs this session asked for that still wait on `gray cron approve`:
-/// invisible to [`session_wakes`] (no `next_run_at` yet), but the footer
-/// must still say something is queued.
-pub(crate) fn session_pending(jobs: &[crate::cron::CronJob], sid: &str) -> usize {
-    jobs.iter()
-        .filter(|j| {
-            j.state == crate::cron::store::JobState::AwaitingApproval
-                && j.origin.as_ref().is_some_and(|o| {
-                    o.platform == crate::cron_serve::SESSION_PLATFORM && o.chat == sid
-                })
-        })
-        .count()
-}
-
 /// `45s`, `28m`, `2h 5m`, `3d 4h`; `now` once due.
 fn until(secs: i64) -> String {
     match secs {
@@ -94,12 +80,7 @@ fn in_or_now(secs: i64) -> String {
 
 /// The footer segment, or `None` when nothing is pending:
 /// `1 job`, `2 jobs · wake in 28m`, `3 wakes · next in 5m`.
-pub(crate) fn footer_label(
-    jobs: usize,
-    wakes: &[Wake],
-    pending: usize,
-    now: i64,
-) -> Option<String> {
+pub(crate) fn footer_label(jobs: usize, wakes: &[Wake], now: i64) -> Option<String> {
     let mut parts = Vec::new();
     match jobs {
         0 => {}
@@ -112,9 +93,6 @@ pub(crate) fn footer_label(
             1 => format!("wake {when}"),
             n => format!("{n} wakes \u{b7} next {when}"),
         });
-    }
-    if pending > 0 {
-        parts.push(format!("{pending} awaiting approval"));
     }
     (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
 }
@@ -184,17 +162,18 @@ const JOBS_SPEC: ManagerSpec = ManagerSpec {
 
 /// This session's wakes from the cron store; empty when it can't be read.
 pub(crate) fn load_wakes(home: &Path, sid: Option<&str>) -> Vec<Wake> {
-    load_session_cron(home, sid).0
+    load_session_cron(home, sid)
 }
 
-/// This session's wakes plus its count of jobs awaiting approval.
-fn load_session_cron(home: &Path, sid: Option<&str>) -> (Vec<Wake>, usize) {
+/// This session's wakes from the cron store; `(empty)` when it can't be
+/// read or there's no live session.
+fn load_session_cron(home: &Path, sid: Option<&str>) -> Vec<Wake> {
     let Some(sid) = sid else {
-        return (Vec::new(), 0);
+        return Vec::new();
     };
     crate::cron::CronStore::open(home.join("cron"))
         .and_then(|store| store.list())
-        .map(|jobs| (session_wakes(&jobs, sid), session_pending(&jobs, sid)))
+        .map(|jobs| session_wakes(&jobs, sid))
         .unwrap_or_default()
 }
 
@@ -254,7 +233,6 @@ pub(crate) fn spawn_footer_poller() {
         let home = crate::setup::gray_home().ok();
         let mut shown: Option<String> = None;
         let mut wakes: Vec<Wake> = Vec::new();
-        let mut pending = 0usize;
         let mut wakes_for: Option<String> = None;
         let mut tick = 0u64;
         loop {
@@ -268,13 +246,13 @@ pub(crate) fn spawn_footer_poller() {
             // session switch) is plenty, the countdown runs off the cache.
             let sid = crate::host::live_session();
             if tick.is_multiple_of(5) || sid != wakes_for {
-                (wakes, pending) = home
+                wakes = home
                     .as_deref()
                     .map(|h| load_session_cron(h, sid.as_deref()))
                     .unwrap_or_default();
                 wakes_for = sid;
             }
-            let label = footer_label(jobs, &wakes, pending, crate::cron::now_secs());
+            let label = footer_label(jobs, &wakes, crate::cron::now_secs());
             if label == shown {
                 continue;
             }

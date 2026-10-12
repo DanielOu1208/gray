@@ -39,6 +39,7 @@ fn composite(id: &str) -> CachedRow {
             }],
         }],
         declared: true,
+        price_cliff_tokens: None,
     })
 }
 

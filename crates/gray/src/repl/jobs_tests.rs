@@ -82,22 +82,22 @@ fn footer_label_shapes() {
         name: id.into(),
         at,
     };
-    assert_eq!(footer_label(0, &[], 0, NOW), None);
-    assert_eq!(footer_label(1, &[], 0, NOW).as_deref(), Some("1 job"));
+    assert_eq!(footer_label(0, &[], NOW), None);
+    assert_eq!(footer_label(1, &[], NOW).as_deref(), Some("1 job"));
     assert_eq!(
-        footer_label(2, &[wake("a", NOW + 28 * 60)], 0, NOW).as_deref(),
+        footer_label(2, &[wake("a", NOW + 28 * 60)], NOW).as_deref(),
         Some("2 jobs \u{b7} wake in 28m")
     );
     assert_eq!(
-        footer_label(0, &[wake("a", NOW + 45), wake("b", NOW + 7200)], 0, NOW).as_deref(),
+        footer_label(0, &[wake("a", NOW + 45), wake("b", NOW + 7200)], NOW).as_deref(),
         Some("2 wakes \u{b7} next in 45s")
     );
     assert_eq!(
-        footer_label(0, &[wake("a", NOW - 3)], 0, NOW).as_deref(),
+        footer_label(0, &[wake("a", NOW - 3)], NOW).as_deref(),
         Some("wake now")
     );
     assert_eq!(
-        footer_label(0, &[wake("a", NOW + 2 * 86_400 + 3 * 3600)], 0, NOW).as_deref(),
+        footer_label(0, &[wake("a", NOW + 2 * 86_400 + 3 * 3600)], NOW).as_deref(),
         Some("wake in 2d 3h")
     );
 }
@@ -204,31 +204,4 @@ fn quit_warns_once_while_jobs_run() {
         None,
         "a standing warning means this quit is the confirmation"
     );
-}
-
-#[test]
-fn footer_counts_this_sessions_jobs_awaiting_approval() {
-    assert_eq!(
-        footer_label(0, &[], 1, NOW).as_deref(),
-        Some("1 awaiting approval")
-    );
-    assert_eq!(
-        footer_label(1, &[], 2, NOW).as_deref(),
-        Some("1 job \u{b7} 2 awaiting approval")
-    );
-    let mine = crate::cron::CronJob {
-        state: crate::cron::store::JobState::AwaitingApproval,
-        next_run_at: None,
-        ..cron("a", None, Some("s1"))
-    };
-    let other = crate::cron::CronJob {
-        id: "b".into(),
-        ..mine.clone()
-    };
-    let other = crate::cron::CronJob {
-        origin: cron("b", None, Some("s2")).origin,
-        ..other
-    };
-    assert_eq!(session_pending(&[mine.clone(), other], "s1"), 1);
-    assert!(session_wakes(&[mine], "s1").is_empty());
 }

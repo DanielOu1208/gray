@@ -153,28 +153,34 @@ fn truncate_cmd(cmd: &str) -> &str {
 }
 
 /// Live header for a still-streaming tool call (pi `renderCall` on partial
-/// args): renders the same header as [`format_tool_call_header`] once
+/// args): renders the same lines as [`format_tool_card_lines`] once
 /// `args_so_far` parses as JSON, else streams the in-progress scalar
 /// (`command` / `path` / `pattern` / …) raw. Char-safe throughout: partial
 /// tails decode `char`-wise (a multibyte split mid-chunk can never panic)
 /// and the 9000-char cap falls back to the name-only line, so `truncate_cmd`
 /// never byte-slices attacker-shaped partial text (it cuts on a char
 /// boundary at 80 cells — see its doc comment).
-pub fn format_live_tool_header(name: &str, args_so_far: &str, cwd: Option<&Path>) -> Line<'static> {
+pub fn format_live_tool_header(
+    name: &str,
+    args_so_far: &str,
+    cwd: Option<&Path>,
+    label: Option<&str>,
+    preview: Option<&str>,
+) -> Vec<Line<'static>> {
     const RAW_CAP: usize = 9000;
     let trimmed = args_so_far.trim();
     if trimmed.is_empty() {
-        return tool_name_line(name);
+        return vec![tool_name_line(name, label)];
     }
-    // Fast path: complete JSON renders exactly like the final header.
+    // Fast path: complete JSON renders exactly like the final card.
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        return format_tool_call_header(name, &v, cwd, None);
+        return format_tool_card_lines(name, &v, cwd, label, preview);
     }
     // Slow path: stream the in-progress scalar, tolerating unclosed quotes
     // and trailing escapes. Stays a dumb string scan (no new deps).
     match extract_partial_scalar(name, trimmed, RAW_CAP) {
-        Some(partial) => format_tool_call_header(name, &partial, cwd, None),
-        None => tool_name_line(name),
+        Some(partial) => format_tool_card_lines(name, &partial, cwd, label, preview),
+        None => vec![tool_name_line(name, label)],
     }
 }
 
@@ -193,11 +199,15 @@ fn tool_hue(name: &str) -> Color {
 
 /// Bare `⬡ name` line for empty/garbage partial args (pi `renderCall` with
 /// `undefined` args: `formatShellCall` shows the prompt + `...`).
-/// Wire-encoded names decode here too (`web_search` renders `Web Search`);
-/// single tokens stay raw (see `humanize_tool_name`).
-fn tool_name_line(name: &str) -> Line<'static> {
+/// The name-only headline: the plugin's declared `label` when there is one,
+/// else the wire name humanized (`web_search` renders `Web Search`; single
+/// tokens stay raw, see `humanize_tool_name`).
+fn tool_name_line(name: &str, label: Option<&str>) -> Line<'static> {
     let hue = tool_hue(name);
-    let name = humanize_tool_name(name);
+    let name = match label.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(label) => label.to_string(),
+        None => humanize_tool_name(name),
+    };
     Line::from(vec![
         Span::styled(
             "\u{2b22} ",
@@ -408,12 +418,29 @@ fn skill_display_name(args: &serde_json::Value) -> String {
     "skill".to_string()
 }
 
-/// First non-empty string at a plugin-declared dot path (`"document.title"`).
-/// Core walks object keys only: no array indices, no wildcards, no schema
-/// knowledge. Anything missing, non-string, or whitespace-only is `None`,
-/// so a surface that declares a path for a shape it never sends degrades
-/// to the built-in preview instead of an error.
-pub fn preview_at(args: &serde_json::Value, path: &str) -> Option<String> {
+/// Resolves a plugin-declared `preview` against one call's args, flattened
+/// onto one line: the headline suffix, then the second line, joined with
+/// ` · `. A spec without `{` is a dot path (`"document.title"`), the original
+/// contract. A template renders through `render_template`. Surfaces that keep
+/// the two lines apart use [`format_tool_call_lines`].
+pub fn preview_at(args: &serde_json::Value, spec: &str) -> Option<String> {
+    if !is_template(spec) {
+        return dot_path_at(args, spec);
+    }
+    let (head, detail) = render_template(args, spec);
+    let parts: Vec<String> = std::iter::once(head)
+        .chain(detail)
+        .filter(|s| !s.is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(PREVIEW_SEP))
+}
+
+/// First non-empty string at a dot path. Core walks object keys only: no
+/// array indices, no wildcards, no schema knowledge. Anything missing,
+/// non-string, or whitespace-only is `None`, so a surface that declares a path
+/// for a shape it never sends degrades to the built-in preview instead of an
+/// error.
+fn dot_path_at(args: &serde_json::Value, path: &str) -> Option<String> {
     let mut cur = args;
     for key in path.split('.').map(str::trim).filter(|k| !k.is_empty()) {
         cur = cur.as_object()?.get(key)?;
@@ -424,9 +451,208 @@ pub fn preview_at(args: &serde_json::Value, path: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Separator between template segments, and between a rendered line's segments.
+const PREVIEW_SEP: &str = " \u{b7} ";
+
+/// A `preview` containing `{` is a template; anything else is a dot path.
+fn is_template(spec: &str) -> bool {
+    spec.contains('{')
+}
+
+/// Renders a template into `(headline suffix, second line)`.
+///
+/// The first line break (a real newline or the two characters `\n`) splits
+/// the template in two. A later break reads as a space. Each line splits into
+/// segments on ` · `. A segment survives unless it has placeholders and every
+/// one came out empty, which takes its literal text with it. The second line
+/// is `None` when it comes out empty.
+fn render_template(args: &serde_json::Value, spec: &str) -> (String, Option<String>) {
+    let (first, second) = split_template_lines(spec);
+    let head = render_segments(args, first);
+    let detail = second
+        .map(|line| render_segments(args, &line))
+        .filter(|s| !s.is_empty());
+    (head, detail)
+}
+
+/// Splits at the first line break. Returns the first line and the rest, with
+/// any later breaks turned into spaces.
+fn split_template_lines(spec: &str) -> (&str, Option<String>) {
+    let real = spec.find('\n').map(|at| (at, 1));
+    let escaped = spec.find("\\n").map(|at| (at, 2));
+    let cut = match (real, escaped) {
+        (Some(r), Some(e)) => Some(if r.0 < e.0 { r } else { e }),
+        (r, e) => r.or(e),
+    };
+    match cut {
+        None => (spec, None),
+        Some((at, len)) => {
+            let rest = spec[at + len..].replace("\\n", " ").replace('\n', " ");
+            (&spec[..at], Some(rest))
+        }
+    }
+}
+
+/// One template line: its surviving segments joined with ` · `.
+fn render_segments(args: &serde_json::Value, line: &str) -> String {
+    line.split(PREVIEW_SEP)
+        .filter_map(|segment| render_segment(args, segment))
+        .collect::<Vec<_>>()
+        .join(PREVIEW_SEP)
+}
+
+/// One segment rendered, or `None` when it has placeholders and all of them
+/// came out empty. A segment with no placeholders survives unless it is blank.
+fn render_segment(args: &serde_json::Value, segment: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut placeholders = 0usize;
+    let mut filled = false;
+    let mut rest = segment;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open + 1..].find('}').map(|c| open + 1 + c) else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        let text = placeholder_text(args, &rest[open + 1..close]);
+        filled |= !text.is_empty();
+        out.push_str(&text);
+        placeholders += 1;
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    if placeholders > 0 && !filled {
+        return None;
+    }
+    let out = out.trim();
+    (!out.is_empty()).then(|| out.to_string())
+}
+
+/// One `path` or `path|filter` placeholder, rendered (empty when missing).
+/// An unknown filter reads as no filter.
+fn placeholder_text(args: &serde_json::Value, inner: &str) -> String {
+    let (path, filter) = match inner.split_once('|') {
+        Some((path, filter)) => (path, filter.trim()),
+        None => (inner, ""),
+    };
+    let raw = value_text(args, path);
+    match filter {
+        "model" => model_display_name(&one_line(&raw)),
+        "firstline" => raw
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(ellipsize_cells)
+            .unwrap_or_default(),
+        _ => one_line(&raw),
+    }
+}
+
+/// Raw text of the value at a dot path. Strings keep their line breaks (for
+/// `firstline`), numbers and booleans print as text, and arrays join their
+/// scalar items with `, `. Objects, null, and missing paths are empty.
+fn value_text(args: &serde_json::Value, path: &str) -> String {
+    let mut cur = args;
+    for key in path.split('.').map(str::trim).filter(|k| !k.is_empty()) {
+        match cur.as_object().and_then(|obj| obj.get(key)) {
+            Some(next) => cur = next,
+            None => return String::new(),
+        }
+    }
+    match cur {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(scalar_item_text)
+            .collect::<Vec<_>>()
+            .join(", "),
+        serde_json::Value::Null | serde_json::Value::Object(_) => String::new(),
+    }
+}
+
+/// One array item as a line of text. Nested arrays, objects, and null skip.
+fn scalar_item_text(item: &serde_json::Value) -> Option<String> {
+    let text = match item {
+        serde_json::Value::String(s) => one_line(s),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+/// Trimmed and single-line: each line trimmed, the non-empty ones joined with
+/// spaces, so a value's own line breaks never split the headline.
+fn one_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Caps one line of preview text at the header budget: 80 cells, cut on a
+/// char boundary, with `…` when cut. The same cap every other preview uses.
+fn ellipsize_cells(text: &str) -> String {
+    let cut = truncate_cmd(text);
+    if cut.len() < text.len() {
+        format!("{}\u{2026}", cut.trim_end())
+    } else {
+        cut.to_string()
+    }
+}
+
+/// The footer's display name for a model id: `crate::setup::friendly_model_name`
+/// with the vendor word dropped, like the picker's short labels
+/// (`claude-haiku-5-5` → `Haiku 5.5`). The formatter names every non-empty id,
+/// so the raw id shows only when it names nothing.
+fn model_display_name(id: &str) -> String {
+    let id = id.trim();
+    let friendly = crate::setup::friendly_model_name(id);
+    let short = friendly
+        .strip_prefix("Claude ")
+        .unwrap_or(friendly.as_str())
+        .trim();
+    if short.is_empty() {
+        id.to_string()
+    } else {
+        short.to_string()
+    }
+}
+
+/// The lines of a template header: the headline with its muted suffix, then
+/// the second line, if any, indented to the headline text.
+fn template_header_lines(
+    bullet: Span<'static>,
+    headline: String,
+    args: &serde_json::Value,
+    template: &str,
+    action_style: Style,
+    dim_style: Style,
+) -> Vec<Line<'static>> {
+    let indent = " ".repeat(crate::text_width::display_width(&bullet.content));
+    let (head, detail) = render_template(args, template);
+    let mut first = vec![bullet, Span::styled(headline, action_style)];
+    if !head.is_empty() {
+        first.push(Span::raw(" "));
+        first.push(Span::styled(ellipsize_cells(&head), dim_style));
+    }
+    let mut lines = vec![Line::from(first)];
+    if let Some(detail) = detail {
+        lines.push(Line::from(vec![
+            Span::raw(indent),
+            Span::styled(ellipsize_cells(&detail), dim_style),
+        ]));
+    }
+    lines
+}
+
 /// Args with a display-only `label` injected (plugin `label` support).
 /// Renderers read `label` in the `other` arm; sub-renderers
 /// (`arg_path`, previews) ignore unknown keys, so injection is safe.
+/// The manifest label wins over a wire arg named `label`: this copy is for
+/// display only, so the wire args are never changed.
 /// Callers pass the wire args; this stays a pure view helper.
 pub fn with_tool_label(args: &serde_json::Value, label: Option<&str>) -> serde_json::Value {
     let Some(label) = label.map(str::trim).filter(|t| !t.is_empty()) else {
@@ -435,24 +661,64 @@ pub fn with_tool_label(args: &serde_json::Value, label: Option<&str>) -> serde_j
     match args {
         serde_json::Value::Object(map) => {
             let mut map = map.clone();
-            map.entry("label".to_string())
-                .or_insert(serde_json::Value::String(label.to_string()));
+            map.insert(
+                "label".to_string(),
+                serde_json::Value::String(label.to_string()),
+            );
             serde_json::Value::Object(map)
         }
         _ => args.clone(),
     }
 }
 
-/// Formats a tool invocation header line matching Grok CLI styling for Ratatui.
+/// The agent's display metadata per wire tool name: each tool's `label` and
+/// `preview` (from its `ToolDef`). Borrowed; every card surface reads both
+/// lookups through this one type.
+#[derive(Clone, Copy, Default)]
+pub struct ToolDisplay<'a> {
+    pub labels: Option<&'a std::collections::HashMap<String, String>>,
+    pub previews: Option<&'a std::collections::HashMap<String, String>>,
+}
+
+impl<'a> ToolDisplay<'a> {
+    /// The declared headline for `name`, if any.
+    pub fn label(self, name: &str) -> Option<&'a str> {
+        self.labels.and_then(|m| m.get(name)).map(String::as_str)
+    }
+
+    /// The declared preview (dot path or template) for `name`, if any.
+    pub fn preview(self, name: &str) -> Option<&'a str> {
+        self.previews.and_then(|m| m.get(name)).map(String::as_str)
+    }
+}
+
+/// The card header for one call, with the agent's display `label` and
+/// `preview` for its tool. Every surface that draws a tool card (live, final,
+/// replayed) goes through this, so they agree.
+pub fn format_tool_card_lines(
+    name: &str,
+    args: &serde_json::Value,
+    cwd: Option<&Path>,
+    label: Option<&str>,
+    preview: Option<&str>,
+) -> Vec<Line<'static>> {
+    format_tool_call_lines(name, &with_tool_label(args, label), cwd, preview)
+}
+
+/// Every line of a tool's transcript header, in Grok CLI styling for Ratatui.
+/// Line one is the headline and its suffix. A template `preview` with a line
+/// break adds a second line, muted and indented under the headline text.
+/// [`format_tool_call_header`] is line one alone.
 ///
-/// `preview_path` is the plugin-declared dot path into `args` (display
-/// metadata, never a wire argument — a real `preview` arg stays opaque).
-pub fn format_tool_call_header(
+/// `preview_path` is the plugin's declared `preview`: a dot path into `args`,
+/// or a template (see `render_template`). It is display metadata, never a
+/// wire argument, so a real `preview` arg stays opaque.
+pub fn format_tool_call_lines(
     name: &str,
     args: &serde_json::Value,
     cwd: Option<&Path>,
     preview_path: Option<&str>,
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
     let bullet = Span::styled(
         "\u{2b22} ",
         Style::default()
@@ -470,7 +736,7 @@ pub fn format_tool_call_header(
         .add_modifier(Modifier::BOLD);
     let dim_style = Style::default().fg(crate::theme::theme().tool_dim);
 
-    match name {
+    let head = match name {
         "bash" => bash_header(args, cwd, bullet, action_style, cmd_style, dim_style),
         "write" => {
             let path = shorten_path(arg_path(args), cwd);
@@ -640,7 +906,20 @@ pub fn format_tool_call_header(
                 .filter(|t| !t.is_empty())
                 .map(str::to_string)
                 .unwrap_or_else(|| humanize_tool_name(other));
-            if let Some(preview_path) = preview_path.map(str::trim).filter(|t| !t.is_empty())
+            // A template owns the whole suffix: muted, optionally a second
+            // line, and never the raw `k=v` dump below.
+            let declared = preview_path.map(str::trim).filter(|t| !t.is_empty());
+            if let Some(template) = declared.filter(|t| is_template(t)) {
+                return template_header_lines(
+                    bullet,
+                    headline,
+                    args,
+                    template,
+                    action_style,
+                    dim_style,
+                );
+            }
+            if let Some(preview_path) = declared
                 && let Some(text) = preview_at(args, preview_path)
             {
                 let cut = truncate_cmd(&text);
@@ -649,12 +928,12 @@ pub fn format_tool_call_header(
                 } else {
                     cut.to_string()
                 };
-                return Line::from(vec![
+                return vec![Line::from(vec![
                     bullet,
                     Span::styled(headline.clone(), action_style),
                     Span::raw(" "),
                     Span::styled(format!("\"{shown}\""), cmd_style),
-                ]);
+                ])];
             }
             let path = shorten_path(arg_path(args), cwd);
             if !path.is_empty() {
@@ -717,7 +996,22 @@ pub fn format_tool_call_header(
                 Line::from(spans)
             }
         }
-    }
+    };
+    vec![head]
+}
+
+/// The headline line of [`format_tool_call_lines`], for single-line callers.
+/// Same `preview_path` contract.
+pub fn format_tool_call_header(
+    name: &str,
+    args: &serde_json::Value,
+    cwd: Option<&Path>,
+    preview_path: Option<&str>,
+) -> Line<'static> {
+    format_tool_call_lines(name, args, cwd, preview_path)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 /// The `bash` header names what the call did, not just "Ran": one tool runs
@@ -1388,7 +1682,10 @@ fn drop_view_echo<'a>(args: Option<&serde_json::Value>, output: &'a str) -> &'a 
 mod plain;
 mod web;
 
-pub use plain::{format_tool_call_header_plain, format_tool_result_plain_with_context};
+pub use plain::{
+    format_tool_call_header_plain, format_tool_call_lines_plain,
+    format_tool_result_plain_with_context,
+};
 
 #[path = "mod_tests.rs"]
 #[cfg(test)]

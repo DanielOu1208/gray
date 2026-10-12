@@ -40,7 +40,29 @@ pub(crate) fn open_modal() -> std::io::Result<(
         crossterm::cursor::Hide
     )?;
     let terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
+    drain_queued_events();
     Ok((session, terminal))
+}
+
+/// Anything already sitting in the input queue was typed before the modal
+/// painted — it belongs to the composer, not the modal. Left queued, a
+/// fast second Enter or a stray character lands on the modal's first
+/// `read()` and acts instantly (a picker flashing closed on a double-Enter,
+/// or a typed name applied as filter + confirm without a pause).
+fn drain_queued_events() {
+    use crossterm::event::{poll, read};
+    use std::time::Duration;
+    // Bounded so a terminal spewing events can't wedge the modal forever.
+    for _ in 0..256 {
+        match poll(Duration::ZERO) {
+            Ok(true) => {
+                if read().is_err() {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
 }
 
 impl Drop for TuiSession {
@@ -81,15 +103,16 @@ pub fn user_home() -> anyhow::Result<std::path::PathBuf> {
 
 pub mod context;
 pub use context::{
-    ContextParts, DEFAULT_KEEP_RECENT_TOKENS, ModelRate, cache_model_context,
+    CompactAt, ContextParts, DEFAULT_KEEP_RECENT_TOKENS, ModelRate, cache_model_context,
     cache_model_context_if_absent, cache_model_reasoning, cache_models_dev_if_absent,
     cached_model_ids, clamp_thinking_level, context_source, default_keep_for_window,
     default_reserve_for_window, estimate_str_tokens, extract_context_length_from_json,
     fetch_litellm_context_windows, fetch_live_provider_models, fetch_models_dev_context,
     fetch_openrouter_rates, fetch_recommended_models, format_context_length, format_cost,
     friendly_model_name, get_cached_model_context, get_model_rate, get_user_context_window,
-    load_models_cache_to_memory, model_context_info, model_max_context, model_supports_reasoning,
-    parse_context_window, parse_litellm_context_json, parse_models_dev_json,
+    load_models_cache_to_memory, model_context_info, model_max_context, model_price_cliff,
+    model_supports_reasoning, parse_compact_at, parse_context_window, parse_litellm_context_json,
+    parse_models_dev_json,
     parse_openrouter_models_json, resolve_model_context_length, save_models_cache_to_disk,
     set_active_model_provider, set_user_context_window, set_user_keep_recent_tokens,
     set_user_reserve_tokens, supported_efforts, supported_thinking_levels, turn_cost,

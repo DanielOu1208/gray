@@ -479,6 +479,65 @@ fn skip_divider(rows: &[Row], sel: usize, down: bool) -> usize {
     }
 }
 
+/// Whether row `id` is a composite (`Fusion`-style): its catalog declares
+/// slots, so Enter opens a dropdown instead of applying the row.
+fn is_composite_id(id: &str) -> bool {
+    super::variants::row_shape(id).is_some_and(|s| s.is_composite())
+}
+
+/// `list` with its composite rows moved to the front, each group keeping
+/// its own order. Every other row keeps its place.
+fn composites_first<'a>(list: &[&'a (String, String)]) -> Vec<&'a (String, String)> {
+    let (mut out, plain): (Vec<_>, Vec<_>) = list
+        .iter()
+        .copied()
+        .partition(|(id, _)| is_composite_id(id));
+    out.extend(plain);
+    out
+}
+
+/// Whether `models` can show the blank gap: a composite and a plain row are
+/// both listed. Sizes the panel from the whole list, so a filter never
+/// resizes it.
+fn gap_possible(models: &[(String, String)]) -> bool {
+    let composites = models.iter().filter(|(id, _)| is_composite_id(id)).count();
+    composites > 0 && composites < models.len()
+}
+
+// The blank gap under the composite block is drawn, never stored: `rows`
+// holds only data rows, so selection, dropdowns and the live-row lookup keep
+// their indices. The draw maps data rows to visual slots: the gap, at data
+// index `gap`, takes slot `gap` and pushes every later row down one.
+
+/// The visual slot data row `row` is drawn in.
+fn slot_of(row: usize, gap: Option<usize>) -> usize {
+    row + usize::from(gap.is_some_and(|g| row >= g))
+}
+
+/// The data row drawn in visual `slot`; `None` for the blank gap.
+fn row_at(slot: usize, gap: Option<usize>) -> Option<usize> {
+    match gap {
+        Some(g) if slot == g => None,
+        Some(g) if slot > g => Some(slot - 1),
+        _ => Some(slot),
+    }
+}
+
+/// How many data rows are drawn above visual `slot`.
+fn rows_before(slot: usize, gap: Option<usize>) -> usize {
+    slot - usize::from(gap.is_some_and(|g| slot > g))
+}
+
+/// The data index the blank gap sits above: the first plain row, given the
+/// `lead` composites at the front. `None` when nothing plain follows them.
+fn composite_gap(rows: &[Row], lead: usize) -> Option<usize> {
+    if lead == 0 {
+        return None;
+    }
+    rows.iter()
+        .position(|row| matches!(row, Row::Model(mi) if *mi >= lead))
+}
+
 /// Levels a row offers: for a row with declared variants, the efforts of
 /// the variants matching `fast` and its (settled) `parts`; otherwise the
 /// model's `supported_thinking_levels`.
@@ -1192,6 +1251,9 @@ struct PickerView<'a> {
     /// The sole divider marks the recommended head, not recents — it draws
     /// an `all models` label instead of a bare rule.
     all_head: bool,
+    /// Data index the blank gap is drawn above: the first plain row under
+    /// the composites. Drawn only; `rows` never holds it.
+    gap: Option<usize>,
 }
 
 impl PickerView<'_> {
@@ -1769,7 +1831,8 @@ fn draw_picker(
     // Sized to the whole list, so typing a filter never resizes the panel;
     // a short terminal gives up the detail block before the list.
     let avail = area.height.saturating_sub(2) as usize;
-    let want = (v.models.len() + 1).clamp(4, 12);
+    // One row for the recents/all divider, one for the composite gap.
+    let want = (v.models.len() + 1 + usize::from(gap_possible(v.models))).clamp(4, 12);
     let detail_need = detail_rows(v.models);
     let detail_h = if avail >= PICKER_CHROME + detail_need + 6 {
         detail_need
@@ -1873,38 +1936,43 @@ fn draw_picker(
         put_line(frame, at(list_y), line);
     } else {
         safe_sel = skip_divider(v.rows, sel.min(v.rows.len() - 1), false);
-        let (top, shown) = list_window(v.rows.len(), safe_sel, *scroll_top, list_h);
+        // The window counts visual slots: each data row, plus the blank gap.
+        let slots = v.rows.len() + usize::from(v.gap.is_some());
+        let (top, shown) = list_window(slots, slot_of(safe_sel, v.gap), *scroll_top, list_h);
         *scroll_top = top;
+        let end = top + shown;
         let models_in = |rows: &[Row]| rows.iter().filter(|r| matches!(r, Row::Model(_))).count();
         let hint = |text: String| Line::from(Span::styled(text, fg(t.text_dim)));
         let mut y = list_y;
         if top > 0 {
-            let above = models_in(&v.rows[..top]);
+            let above = models_in(&v.rows[..rows_before(top, v.gap)]);
             put_line(frame, at(y), hint(format!("  ↑ {above} more above")));
             y += 1;
         }
-        for (off, row) in v.rows[top..top + shown].iter().enumerate() {
-            let line = match row {
-                Row::Divider if v.all_head => Line::from(Span::styled(
-                    format!("  ─ all models {}", "─".repeat(row_w.saturating_sub(15))),
-                    fg(t.text_faint),
-                )),
-                Row::Divider => Line::from(Span::styled(
-                    format!("  {}", "─".repeat(row_w.saturating_sub(2))),
-                    fg(t.text_faint),
-                )),
-                Row::Model(mi) => {
-                    picker_row_line(v, v.filtered[*mi], top + off == safe_sel, name_w, w)
-                }
-                Row::Opt(oi) => match v.drop {
-                    Some(d) => picker_option_line(v, d, *oi, top + off == safe_sel, name_w, w),
-                    None => Line::default(),
+        for slot in top..end {
+            let line = match row_at(slot, v.gap) {
+                // The blank under the composites: a slot, never a row.
+                None => Line::default(),
+                Some(ri) => match v.rows[ri] {
+                    Row::Divider if v.all_head => Line::from(Span::styled(
+                        format!("  ─ all models {}", "─".repeat(row_w.saturating_sub(15))),
+                        fg(t.text_faint),
+                    )),
+                    Row::Divider => Line::from(Span::styled(
+                        format!("  {}", "─".repeat(row_w.saturating_sub(2))),
+                        fg(t.text_faint),
+                    )),
+                    Row::Model(mi) => picker_row_line(v, v.filtered[mi], ri == safe_sel, name_w, w),
+                    Row::Opt(oi) => match v.drop {
+                        Some(d) => picker_option_line(v, d, oi, ri == safe_sel, name_w, w),
+                        None => Line::default(),
+                    },
                 },
             };
             put_line(frame, at(y), line);
             y += 1;
         }
-        let below = models_in(&v.rows[top + shown..]);
+        let below = models_in(&v.rows[rows_before(end, v.gap)..]);
         if below > 0 {
             put_line(frame, at(y), hint(format!("  ↓ {below} more below")));
         }
@@ -2012,7 +2080,7 @@ pub(crate) fn model_picker_loop(
                 }
             }
             let f = filter.to_lowercase();
-            let mut filtered_models: Vec<&(String, String)> = models
+            let matched: Vec<&(String, String)> = models
                 .iter()
                 .filter(|(m_id, m_name)| {
                     f.is_empty()
@@ -2020,11 +2088,17 @@ pub(crate) fn model_picker_loop(
                         || m_name.to_lowercase().contains(&f)
                 })
                 .collect();
+            // Composite rows lead the list, above the blank gap the draw
+            // lays under them. The recent and recommended ordering below
+            // applies to the plain rows alone.
+            let lead = matched.iter().filter(|(id, _)| is_composite_id(id)).count();
+            let mut ordered = composites_first(&matched);
+            let mut plain = ordered.split_off(lead);
             // One divider after the recent head; selection skips it.
             let sep = recent_prefix_len(
                 current_id.as_deref(),
                 &recent_ids,
-                filtered_models.iter().map(|(id, _)| id.as_str()),
+                plain.iter().map(|(id, _)| id.as_str()),
             );
             // The fresh list (no recents, no filter) leads with the
             // recommended head and a labeled divider; the remainder keeps
@@ -2033,19 +2107,27 @@ pub(crate) fn model_picker_loop(
             let mut all_head = false;
             let mut div_at = sep;
             if sep == 0 && f.is_empty() {
-                let head = super::recommend::recommended_ids(
+                // A composite never takes a head slot: it already leads.
+                let head: Vec<String> = super::recommend::recommended_ids(
                     &models,
                     curated.as_deref(),
                     super::context::model_meta,
                     RECOMMENDED_HEAD,
-                );
-                filtered_models = head_first(&filtered_models, &head);
-                if !head.is_empty() && head.len() < filtered_models.len() {
+                )
+                .into_iter()
+                .filter(|id| !is_composite_id(id))
+                .collect();
+                plain = head_first(&plain, &head);
+                if !head.is_empty() && head.len() < plain.len() {
                     div_at = head.len();
                     all_head = true;
                 }
             }
-            let div = (div_at > 0 && div_at < filtered_models.len()).then_some(div_at);
+            // The divider lies between plain rows, so its index in the whole
+            // list sits past the composites.
+            let div = (div_at > 0 && div_at < plain.len()).then_some(lead + div_at);
+            ordered.extend(plain);
+            let filtered_models = ordered;
             let mut rows: Vec<Row> = Vec::with_capacity(filtered_models.len() + 1);
             for i in 0..filtered_models.len() {
                 if div == Some(i) {
@@ -2101,6 +2183,9 @@ pub(crate) fn model_picker_loop(
                 draw_sel = at + d.sel;
             }
             efforts.fast = toggles.fast;
+            // The blank gap sits above the first plain row: below the
+            // composites, and below any dropdown open on one.
+            let gap = composite_gap(&rows, lead);
 
             let view = PickerView {
                 provider: &item_name,
@@ -2115,6 +2200,7 @@ pub(crate) fn model_picker_loop(
                 toggles,
                 drop: drop.as_ref(),
                 all_head,
+                gap,
             };
             terminal
                 .draw(|frame| draw_picker(frame, &bg_snapshot, &view, draw_sel, &mut scroll_top))?;

@@ -9,6 +9,7 @@
 use crate::index::{Index, enc_size};
 use crate::walk::{self, FLAG_MOUNT, KIND_DIR, Listing, NONE, RawEnt};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy)]
 pub struct OEnt {
@@ -28,14 +29,7 @@ impl OEnt {
     /// `path` may be the whole path or just the name.
     pub fn new(path: &[u8], kind: u8, size: u64, mtime: u32) -> OEnt {
         let name = &path[path.iter().rposition(|&b| b == b'/').map_or(0, |p| p + 1)..];
-        OEnt {
-            kind,
-            size,
-            mtime,
-            mask: crate::index::name_mask(name),
-            prior: 0,
-            slot: 0,
-        }
+        OEnt { kind, size, mtime, mask: crate::index::name_mask(name), prior: 0, slot: 0 }
     }
 }
 
@@ -91,6 +85,10 @@ pub struct Live {
     pub names_cache: crate::query::NameCache,
     /// Wall-clock second up to which every change is known applied.
     pub synced_at: u32,
+    /// The scanned root is gone (unmounted): the tree is offline — events
+    /// under it are dropped, nothing removed — until it is back, when what
+    /// changed meanwhile is unknowable and a rescan runs (see `apply`).
+    pub root_missing: AtomicBool,
     /// Overlay folder -> prior of its nearest base folder.
     priors: HashMap<Vec<u8>, i8>,
 }
@@ -114,6 +112,12 @@ pub enum Applied {
 impl Live {
     pub fn new(base: Index) -> Live {
         base.prefault();
+        Live::lazy(base)
+    }
+
+    /// `new` without faulting the index in first: a restart's first search
+    /// runs on it as mapped, and `Index::prefault` follows.
+    pub fn lazy(base: Index) -> Live {
         let words = base.n.div_ceil(64);
         let event_id = base.event_id;
         let synced_at = base.synced_at;
@@ -128,6 +132,7 @@ impl Live {
             trees: Vec::new(),
             names_cache: Default::default(),
             synced_at,
+            root_missing: AtomicBool::new(false),
             priors: HashMap::new(),
         }
     }
@@ -140,8 +145,7 @@ impl Live {
 
     /// `p` inside the scanned tree (the root itself counts).
     fn under_root(&self, p: &[u8]) -> bool {
-        let r = self.root.as_slice();
-        p == r || (p.starts_with(r) && (r == b"/" || p[r.len()] == b'/'))
+        in_tree(p, &self.root)
     }
 
     /// Put an entry in the overlay, stamping the prior it ranks with.
@@ -187,10 +191,7 @@ impl Live {
     fn kill_subtree(&mut self, e: u32) {
         self.kill(e);
         if let Some(d) = self.base.dir_of(e) {
-            let (a, b) = (
-                self.base.dir_start()[d as usize],
-                self.base.dir_end()[d as usize],
-            );
+            let (a, b) = (self.base.dir_start(d as usize), self.base.dir_end(d as usize));
             for i in a..b {
                 self.kill(i);
             }
@@ -198,16 +199,21 @@ impl Live {
     }
 
     fn drop_over_subtree(&mut self, path: &[u8]) {
+        self.priors.remove(path);
         if let Some(o) = self.over.remove(path) {
             self.flat.clear(o);
         }
         let (lo, hi) = subtree_bounds(path);
         let keys: Vec<Vec<u8>> = self.over.range(lo..hi).map(|(k, _)| k.clone()).collect();
         for k in keys {
+            self.priors.remove(&k);
             if let Some(o) = self.over.remove(&k) {
                 self.flat.clear(o);
             }
         }
+        // Cached priors of the gone dirs would shadow the base's if the
+        // paths ever came back.
+        self.priors.retain(|k, _| !in_tree(k, path));
     }
 
     /// Alive base entry for a path, if the base has one.
@@ -235,14 +241,7 @@ impl Live {
     /// caller does this under a read lock and searches keep answering.
     pub fn fetch(&self, path: &[u8], recursive: bool) -> Fetched {
         let p = normalize(path);
-        let mut f = Fetched {
-            path: p,
-            recursive,
-            blocked: false,
-            attrs: None,
-            listing: None,
-            scans: HashMap::new(),
-        };
+        let mut f = Fetched { path: p, recursive, blocked: false, attrs: None, listing: None, scans: HashMap::new() };
         // Not even an lstat inside folders we may not touch.
         if walk::blocked(&f.path) {
             f.blocked = true;
@@ -254,12 +253,20 @@ impl Live {
             f.blocked = true;
             return f;
         }
+        // Offline (root gone): nothing under it is read — though an event
+        // there is still a chance to spot the root back, and this fetch then
+        // becomes the root's own, which `apply` turns into the rescan.
+        if self.root_missing.load(Ordering::Relaxed) && f.path != self.root {
+            if lstat(&self.root).is_none() {
+                f.blocked = true;
+                return f;
+            }
+            f.path = self.root.clone();
+        }
         if recursive {
             if f.path != b"/" {
                 f.attrs = lstat(&f.path);
-                if f.attrs
-                    .is_some_and(|a| a.kind & 3 == KIND_DIR && a.kind & FLAG_MOUNT == 0)
-                {
+                if f.attrs.is_some_and(|a| a.kind & 3 == KIND_DIR && a.kind & FLAG_MOUNT == 0) {
                     f.scans.insert(f.path.clone(), walk::scan(&f.path, 4));
                 }
             }
@@ -277,11 +284,8 @@ impl Live {
             }
             let name = &listing.names[r.name_off as usize..][..r.name_len as usize];
             let was_dir = match cur.get(name) {
-                Some(Some(c)) => self.base.kind()[*c as usize] & 3 == KIND_DIR,
-                Some(None) => self
-                    .over
-                    .get(&join(&f.path, name))
-                    .is_some_and(|o| o.kind & 3 == KIND_DIR),
+                Some(Some(c)) => self.base.kind(*c as usize) & 3 == KIND_DIR,
+                Some(None) => self.over.get(&join(&f.path, name)).is_some_and(|o| o.kind & 3 == KIND_DIR),
                 None => false,
             };
             if !was_dir {
@@ -321,10 +325,37 @@ impl Live {
             return Applied::Done;
         }
         let p = std::mem::take(&mut f.path);
-        if f.recursive {
-            if p == b"/" {
-                return Applied::Rebuild;
+        if f.recursive && p == b"/" {
+            // A rescan of everything is also the reappeared root's answer.
+            self.root_missing.store(false, Ordering::Relaxed);
+            return Applied::Rebuild;
+        }
+        if p == self.root {
+            if f.attrs.is_none() && f.listing.is_none() {
+                // The root gone is the tree offline, not deleted: dropping
+                // it here would wipe the index on an unmount.
+                self.root_missing.store(true, Ordering::Relaxed);
+                return Applied::Done;
             }
+            if self.root_missing.swap(false, Ordering::Relaxed) {
+                // Back (remounted): a diff of the root alone can't say what
+                // changed under it — a recursive fetch already rescanned, a
+                // plain one asks for the relist.
+                let rec = f.recursive;
+                self.synced_at = if rec { crate::query::now_secs() } else { 0 };
+                let r = self.apply_diff(p, f);
+                return if rec { r } else { Applied::Rebuild };
+            }
+        } else if self.root_missing.load(Ordering::Relaxed) {
+            // Still offline: nothing under the root is added or removed.
+            return Applied::Done;
+        }
+        self.apply_diff(p, f)
+    }
+
+    /// `apply` without the root-offline checks.
+    fn apply_diff(&mut self, p: Vec<u8>, mut f: Fetched) -> Applied {
+        if f.recursive {
             self.remove_path(&p);
             if let Some(attrs) = f.attrs {
                 let scan = f.scans.remove(&p);
@@ -350,15 +381,17 @@ impl Live {
                 }
                 Some(Some(c)) => {
                     let c = c as usize;
-                    let was_kind = self.base.kind()[c];
+                    let was_kind = self.base.kind(c);
                     if was_kind & 3 != now.kind & 3 {
                         self.kill_subtree(c as u32);
+                        // Entries added under the dir while it lived sit in
+                        // the overlay — the base's subtree kill misses them.
+                        if was_kind & 3 == KIND_DIR {
+                            self.drop_over_subtree(&child);
+                        }
                         let scan = f.scans.remove(&child);
                         self.add_new(child, now, scan);
-                    } else if now.kind & 3 != KIND_DIR
-                        && (self.base.size_raw()[c] != enc_size(now.size)
-                            || self.base.mtime()[c] != now.mtime)
-                    {
+                    } else if now.kind & 3 != KIND_DIR && (self.base.size_raw(c) != enc_size(now.size) || self.base.mtime(c) != now.mtime) {
                         self.kill(c as u32);
                         self.put(child, now);
                     }
@@ -379,17 +412,14 @@ impl Live {
             let child = join(&p, &name);
             match c {
                 Some(c) => {
-                    if self.base.kind()[c as usize] & 3 == KIND_DIR {
+                    if self.base.kind(c as usize) & 3 == KIND_DIR {
+                        self.drop_over_subtree(&child);
                         self.trees.push(child);
                     }
                     self.kill_subtree(c)
                 }
                 None => {
-                    if self
-                        .over
-                        .get(&child)
-                        .is_some_and(|o| o.kind & 3 == KIND_DIR)
-                    {
+                    if self.over.get(&child).is_some_and(|o| o.kind & 3 == KIND_DIR) {
                         self.trees.push(child.clone());
                     }
                     self.drop_over_subtree(&child)
@@ -423,29 +453,22 @@ impl Live {
     pub fn changed_dirs(&self, since: u32) -> Vec<Vec<u8>> {
         use rayon::prelude::*;
         let idx = &self.base;
-        let de = idx.dir_entry();
-        let check = |p: &[u8]| {
-            self.under_root(p) && !walk::blocked(p) && lstat(p).is_some_and(|o| o.mtime >= since)
-        };
+        let de = idx.dir_entries();
+        let check = |p: &[u8]| self.under_root(p) && !walk::blocked(p) && lstat(p).is_some_and(|o| o.mtime >= since);
         let pool = stat_pool();
         let mut out: Vec<Vec<u8>> = pool.install(|| {
             (1..idx.d)
                 .into_par_iter()
                 .with_min_len(1024)
-                .filter(|&k| !self.is_dead(de[k]))
+                .filter(|&k| !self.is_dead(de.get(k)))
                 .map_init(Vec::new, |buf, k| {
-                    idx.path(de[k] as usize, buf);
+                    idx.path(de.get(k) as usize, buf);
                     check(buf).then(|| buf.clone())
                 })
                 .flatten()
                 .collect()
         });
-        out.extend(
-            self.over
-                .iter()
-                .filter(|(p, o)| o.kind & 3 == KIND_DIR && o.kind & FLAG_MOUNT == 0 && check(p))
-                .map(|(p, _)| p.clone()),
-        );
+        out.extend(self.over.iter().filter(|(p, o)| o.kind & 3 == KIND_DIR && o.kind & FLAG_MOUNT == 0 && check(p)).map(|(p, _)| p.clone()));
         if lstat(&self.root).is_some_and(|o| o.mtime >= since) {
             out.push(self.root.clone());
         }
@@ -459,28 +482,15 @@ impl Live {
         for (k, v) in &self.over {
             let cut = k.iter().rposition(|&b| b == b'/').unwrap_or(0);
             let parent: &[u8] = if cut == 0 { b"/" } else { &k[..cut] };
-            by_parent
-                .entry(parent)
-                .or_default()
-                .push((&k[cut + 1..], *v));
+            by_parent.entry(parent).or_default().push((&k[cut + 1..], *v));
         }
         let mut out = Vec::new();
         // (base dir id if alive in base, path, listing id)
         let mut stack: Vec<(Option<u32>, Vec<u8>, u32)> = vec![(Some(0), b"/".to_vec(), 0)];
         let mut next = 1u32;
         while let Some((bd, path, id)) = stack.pop() {
-            let mut l = Listing {
-                id,
-                names: Vec::new(),
-                ents: Vec::new(),
-            };
-            let mut push = |l: &mut Listing,
-                            name: &[u8],
-                            kind: u8,
-                            size: u64,
-                            mtime: u32,
-                            child_path: Option<Vec<u8>>,
-                            bdir: Option<u32>| {
+            let mut l = Listing { id, names: Vec::new(), ents: Vec::new() };
+            let mut push = |l: &mut Listing, name: &[u8], kind: u8, size: u64, mtime: u32, child_path: Option<Vec<u8>>, bdir: Option<u32>| {
                 let child = match child_path {
                     Some(cp) => {
                         let c = next;
@@ -490,14 +500,7 @@ impl Live {
                     }
                     None => NONE,
                 };
-                l.ents.push(RawEnt {
-                    name_off: l.names.len() as u32,
-                    name_len: name.len() as u16,
-                    kind,
-                    size,
-                    mtime,
-                    child,
-                });
+                l.ents.push(RawEnt { name_off: l.names.len() as u32, name_len: name.len() as u16, kind, size, mtime, child });
                 l.names.extend_from_slice(name);
             };
             if let Some(d) = bd {
@@ -506,32 +509,16 @@ impl Live {
                         continue;
                     }
                     let name = self.base.name(c);
-                    let k = self.base.kind()[c];
+                    let k = self.base.kind(c);
                     let sub = self.base.dir_of(c as u32);
-                    let cp = sub.map(|_| join(&path, name));
-                    push(
-                        &mut l,
-                        name,
-                        k,
-                        self.base.size_of(c),
-                        self.base.mtime()[c],
-                        cp,
-                        sub,
-                    );
+                    let cp = sub.map(|_| join(&path, &name));
+                    push(&mut l, &name, k, self.base.size_of(c), self.base.mtime(c), cp, sub);
                 }
             }
             if let Some(kids) = by_parent.get(path.as_slice()) {
                 for &(name, o) in kids {
                     let descend = o.kind & 3 == KIND_DIR && o.kind & FLAG_MOUNT == 0;
-                    push(
-                        &mut l,
-                        name,
-                        o.kind,
-                        o.size,
-                        o.mtime,
-                        descend.then(|| join(&path, name)),
-                        None,
-                    );
+                    push(&mut l, name, o.kind, o.size, o.mtime, descend.then(|| join(&path, name)), None);
                 }
             }
             out.push(l);
@@ -542,11 +529,7 @@ impl Live {
 
 /// Threads for bulk lstat: path lookups scale further than opens do.
 pub fn stat_pool() -> rayon::ThreadPool {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(12)
-        .start_handler(|_| crate::no_materialize())
-        .build()
-        .unwrap()
+    rayon::ThreadPoolBuilder::new().num_threads(12).start_handler(|_| crate::no_materialize()).build().unwrap()
 }
 
 /// Visit every entry of a scan with its full path.
@@ -559,10 +542,7 @@ pub fn for_each_path(ls: &[Listing], root: &[u8], mut f: impl FnMut(Vec<u8>, &Ra
     while let Some((id, path)) = stack.pop() {
         let Some(l) = by_id.get(&id) else { continue };
         for r in &l.ents {
-            let p = join(
-                &path,
-                &l.names[r.name_off as usize..][..r.name_len as usize],
-            );
+            let p = join(&path, &l.names[r.name_off as usize..][..r.name_len as usize]);
             if r.child != NONE {
                 stack.push((r.child, p.clone()));
             }
@@ -589,6 +569,12 @@ pub fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
     p
 }
 
+/// `p` is `dir` itself or strictly under it — a '/' boundary, so "/a/bb"
+/// is not in "/a/b"'s tree.
+fn in_tree(p: &[u8], dir: &[u8]) -> bool {
+    p == dir || (p.starts_with(dir) && (dir == b"/" || p[dir.len()] == b'/'))
+}
+
 /// Key range holding everything strictly under `path`.
 fn subtree_bounds(path: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let lo = join(path, b"");
@@ -609,10 +595,114 @@ pub fn lstat(path: &[u8]) -> Option<OEnt> {
         libc::S_IFLNK => walk::KIND_LINK,
         _ => walk::KIND_OTHER,
     };
-    Some(OEnt::new(
-        path,
-        kind,
-        st.st_size as u64,
-        st.st_mtime.clamp(0, u32::MAX as i64) as u32,
-    ))
+    Some(OEnt::new(path, kind, st.st_size as u64, st.st_mtime.clamp(0, u32::MAX as i64) as u32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn listing(id: u32, ents: &[(&[u8], u8, u32)]) -> Listing {
+        let mut l = Listing {
+            id,
+            names: Vec::new(),
+            ents: Vec::new(),
+        };
+        for &(name, kind, child) in ents {
+            l.ents.push(RawEnt {
+                name_off: l.names.len() as u32,
+                name_len: name.len() as u16,
+                kind,
+                size: 0,
+                mtime: 0,
+                child,
+            });
+            l.names.extend_from_slice(name);
+        }
+        l
+    }
+
+    /// "/" with "a", holding dirs "b" (file x) and "bb" (file y).
+    fn base() -> Index {
+        Index::build(
+            vec![
+                listing(0, &[(b"a", KIND_DIR, 1)]),
+                listing(1, &[(b"b", KIND_DIR, 2), (b"bb", KIND_DIR, 3)]),
+                listing(2, &[(b"x", walk::KIND_FILE, NONE)]),
+                listing(3, &[(b"y", walk::KIND_FILE, NONE)]),
+            ],
+            0,
+            0,
+            b"/",
+        )
+    }
+
+    fn listing_of(path: &[u8], ents: &[(&[u8], u8, u32)]) -> Fetched {
+        Fetched {
+            path: path.to_vec(),
+            recursive: false,
+            blocked: false,
+            attrs: None,
+            listing: Some(listing(0, ents)),
+            scans: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn removes_only_the_named_subtree() {
+        let mut live = Live::new(base());
+        live.put(b"/a/b/n".to_vec(), OEnt::new(b"n", walk::KIND_FILE, 1, 1));
+        live.put(b"/a/bb/n".to_vec(), OEnt::new(b"n", walk::KIND_FILE, 1, 1));
+        // "/a" relisted without "b": its tree dies, "/a/bb" is not under it.
+        live.apply(listing_of(b"/a", &[(b"bb", KIND_DIR, NONE)]));
+        let gone = |p: &[u8]| live.base.lookup(p).is_none_or(|e| live.is_dead(e));
+        assert!(gone(b"/a/b") && gone(b"/a/b/x"));
+        assert!(!gone(b"/a/bb") && !gone(b"/a/bb/y") && !gone(b"/a"));
+        assert!(!live.over.contains_key(b"/a/b".as_slice()));
+        assert!(!live.over.contains_key(b"/a/b/n".as_slice()));
+        assert!(live.over.contains_key(b"/a/bb/n".as_slice()));
+    }
+
+    #[test]
+    fn missing_root_goes_offline_and_rescans_on_return() {
+        let dir = std::env::temp_dir().join(format!("fsearch-live-{}", std::process::id()));
+        let root = dir.join("root");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("f"), b"x").unwrap();
+        let root_b = root.as_os_str().as_encoded_bytes().to_vec();
+        // One listing per ancestor, down to the root holding file "f"
+        // (what `scan_rooted` grafts for a rooted build).
+        let comps: Vec<&[u8]> = root_b
+            .split(|&b| b == b'/')
+            .filter(|c| !c.is_empty())
+            .collect();
+        let mut ls: Vec<Listing> = comps
+            .iter()
+            .enumerate()
+            .map(|(i, c)| listing(i as u32, &[(*c, KIND_DIR, i as u32 + 1)]))
+            .collect();
+        ls.push(listing(comps.len() as u32, &[(b"f", walk::KIND_FILE, NONE)]));
+        let mut live = Live::new(Index::build(ls, 0, 1, b"/")).rooted(&root_b);
+        let fpath = join(&root_b, b"f");
+        let present = |live: &Live| {
+            live.over.contains_key(fpath.as_slice())
+                || live.base.lookup(&fpath).is_some_and(|e| !live.is_dead(e))
+        };
+        assert!(matches!(live.apply_dir(&root_b, false), Applied::Done) && present(&live));
+
+        // Unmounted: offline — the tree stays, events under it are dropped.
+        let moved = dir.join("moved");
+        std::fs::rename(&root, &moved).unwrap();
+        assert!(matches!(live.apply_dir(&root_b, false), Applied::Done));
+        assert!(live.root_missing.load(Ordering::Relaxed) && present(&live));
+        assert!(matches!(live.apply_dir(&fpath, false), Applied::Done) && present(&live));
+
+        // Back: an event under it notices, and asks for the rescan a diff
+        // can't provide.
+        std::fs::rename(&moved, &root).unwrap();
+        assert!(matches!(live.apply_dir(&fpath, false), Applied::Rebuild));
+        assert!(!live.root_missing.load(Ordering::Relaxed) && live.synced_at == 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

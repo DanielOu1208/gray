@@ -578,6 +578,10 @@ pub struct Agent {
     /// (`GRAY_CONTEXT_RESERVE` / `GRAY_CONTEXT_KEEP`); `None` = core defaults.
     pub(crate) compact_reserve: Option<usize>,
     pub(crate) compact_keep: Option<usize>,
+    /// Model price cliff (prompt tokens above which the provider bills a higher
+    /// tier) and the pre-turn ceiling derived from it. See `with_price_cliff`.
+    pub(crate) price_cliff: Option<usize>,
+    pub(crate) compact_ceiling: Option<usize>,
     /// Estimate at which the soft elision stage re-arms after a pass that
     /// changed history (hysteresis; see `Agent::soft_elide`). Zero = armed.
     pub(crate) soft_elide_rearm: usize,
@@ -670,6 +674,8 @@ impl Agent {
             context_window: None,
             compact_reserve: None,
             compact_keep: None,
+            price_cliff: None,
+            compact_ceiling: None,
             soft_elide_rearm: 0,
             context_usage: None,
             history_revision: 0,
@@ -912,6 +918,34 @@ impl Agent {
         self.compact_reserve = reserve;
         self.compact_keep = keep;
         self
+    }
+
+    /// Sets the pre-turn compaction ceiling: the estimate at which
+    /// auto-compaction fires besides `window − reserve`. Callers pass an
+    /// explicit `--compact-at`/`GRAY_COMPACT_AT`/config choice, or the ceiling
+    /// `crate::compact::price_cliff_ceiling` derives from a declared cliff.
+    /// `price_cliff` should be `Some` only when the ceiling derives from such
+    /// a cliff — it powers the "why" on compaction notices. `None` ceiling
+    /// clears both.
+    pub fn with_compact_ceiling(
+        mut self,
+        ceiling: Option<usize>,
+        price_cliff: Option<usize>,
+    ) -> Self {
+        self.compact_ceiling = ceiling;
+        self.price_cliff = if ceiling.is_some() { price_cliff } else { None };
+        self
+    }
+
+    /// The provider-declared price cliff behind [`compact_ceiling`](Self::compact_ceiling),
+    /// when there is one.
+    pub fn price_cliff(&self) -> Option<usize> {
+        self.price_cliff
+    }
+
+    /// The pre-turn compaction ceiling, when one is declared.
+    pub fn compact_ceiling(&self) -> Option<usize> {
+        self.compact_ceiling
     }
 
     /// Context size in tokens, pi `estimateContextTokens`: the latest

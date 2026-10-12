@@ -9,7 +9,7 @@ fn plugin_command_initializes_lazy_agent_without_provider_call() {
     std::fs::write(
         dir.path().join("gray.yml"),
         format!(
-            "plugins:\n  - builtin: tools-minimal\n  - sidecar: [sh, {}]\n",
+            "plugins:\n  - builtin: skills\n  - sidecar: [sh, {}]\n",
             echo.display()
         ),
     )

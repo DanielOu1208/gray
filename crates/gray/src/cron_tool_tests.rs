@@ -18,7 +18,7 @@ fn job(tool: &ScheduleTool, name: &str) -> CronJob {
 }
 
 #[test]
-fn create_waits_for_approval_and_binds_the_session() {
+fn create_goes_live_and_binds_the_session() {
     let (_d, t) = tool();
     let out = t
         .apply(
@@ -26,40 +26,34 @@ fn create_waits_for_approval_and_binds_the_session() {
             &json!({"name": "bench", "when": "daily 9am", "prompt": "check maid", "times": 3}),
         )
         .unwrap();
-    assert!(out.contains("approve it in /cron"), "{out}");
     assert!(
-        out.contains("bench · cron 0 9 * * * · awaiting approval · 0/3 runs"),
+        out.contains("bench · cron 0 9 * * * · active · next"),
         "{out}"
     );
     let j = job(&t, "bench");
-    assert_eq!(
-        (j.state, j.next_run_at, j.repeat.times),
-        (JobState::AwaitingApproval, None, Some(3))
-    );
+    assert_eq!(j.state, JobState::Active);
+    assert!(j.next_run_at.is_some());
+    assert_eq!(j.repeat.times, Some(3));
     assert_eq!(j.origin.unwrap().chat, "s1");
     assert!(matches!(j.deliver, Deliver::Origin));
 }
 
 #[test]
-fn editing_an_approved_job_sends_it_back_for_approval() {
+fn editing_rearms_the_job_at_once() {
     let (_d, t) = tool();
     t.apply(
         Some("s1"),
         &json!({"name": "a", "when": "every 1h", "prompt": "x"}),
     )
     .unwrap();
-    let store = CronStore::open(t.home.join("cron")).unwrap();
-    store.approve("a").unwrap();
     t.apply(
         Some("s1"),
         &json!({"name": "a", "when": "every 2h", "prompt": "y"}),
     )
     .unwrap();
     let j = job(&t, "a");
-    assert_eq!(
-        (j.state, j.prompt.as_str()),
-        (JobState::AwaitingApproval, "y")
-    );
+    assert_eq!((j.state, j.prompt.as_str()), (JobState::Active, "y"));
+    assert!(j.next_run_at.is_some());
     assert_eq!(j.schedule, Schedule::Interval { secs: 7200 });
 }
 
@@ -91,14 +85,4 @@ fn list_delete_and_errors() {
         t.apply(None, &json!({"name": "a", "when": "delete"}))
             .is_err()
     );
-}
-
-#[test]
-fn visible_spells_out_what_a_reader_cannot_see() {
-    assert_eq!(visible("plain text"), "plain text");
-    assert_eq!(visible("a\u{200b}b"), "a\u{27e8}U+200B\u{27e9}b");
-    assert_eq!(visible("x\u{202e}y"), "x\u{27e8}U+202E\u{27e9}y");
-    assert_eq!(visible("\u{e0041}"), "\u{27e8}U+E0041\u{27e9}");
-    assert_eq!(visible("one\ntwo"), "one\u{23ce} two");
-    assert_eq!(visible("caf\u{e9} \u{1f600}"), "caf\u{e9} \u{1f600}");
 }

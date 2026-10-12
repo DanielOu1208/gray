@@ -115,7 +115,7 @@ pub fn render_event_with_context<W: Write>(
             writeln!(
                 w,
                 "\n{}",
-                crate::tool_fmt::format_tool_call_header_plain(name, args, cwd, preview_path)
+                crate::tool_fmt::format_tool_call_lines_plain(name, args, cwd, preview_path)
             )?;
             w.flush()
         }
@@ -158,14 +158,16 @@ pub fn render_event_with_context<W: Write>(
             tokens_after,
             messages_before,
             messages_after,
+            reason,
         } => {
             writeln!(
                 w,
-                "\n\x1b[2m\u{21bb} compacted {} \u{2192} {} tok ({} \u{2192} {} messages)\x1b[0m",
+                "\n\x1b[2m\u{21bb} compacted {} \u{2192} {} tok ({} \u{2192} {} messages){}\x1b[0m",
                 crate::repl::fmt_usage(*tokens_before),
                 crate::repl::fmt_usage(*tokens_after),
                 messages_before,
                 messages_after,
+                crate::compact::compact_reason_note(*reason),
             )?;
             w.flush()
         }
@@ -898,7 +900,7 @@ fn parent_id() -> u32 {
 }
 
 impl RunningGuard {
-    fn register(session_id: &str, task: &str, model: &str) -> Self {
+    fn register(session_id: &str, task: &str, model: &str, compact_ceiling: usize) -> Self {
         let Ok(home) = crate::setup::gray_home() else {
             return Self(None);
         };
@@ -918,6 +920,7 @@ impl RunningGuard {
             "name": std::env::var("GRAY_AGENT_NAME").unwrap_or_default(),
             "origin": std::env::var("GRAY_SESSION_ORIGIN").unwrap_or_default(),
             "model": model,
+            "compact_ceiling": compact_ceiling,
             "cwd": std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
             "task": task,
             "started": std::time::SystemTime::now()
@@ -1070,6 +1073,7 @@ async fn run_print_inner(
         session_id.as_str(),
         task_text,
         config.model.as_deref().unwrap_or(""),
+        crate::compact::effective_compact_ceiling(config),
     );
 
     // One-shot run = one turn: only max_turns=0 (nonsensical but
@@ -1081,6 +1085,19 @@ async fn run_print_inner(
         anyhow::bail!("max wall time {max}s reached — stopping (--max-wall-secs SECS)");
     }
     let mut agent = build_agent(config, &cwd, Some(session_id.as_str())).await?;
+    // The effective compaction trigger is supervisor-facing metadata (a
+    // parent choosing GRAY_COMPACT_AT for a child verifies what took).
+    if let Some(out) = json.as_deref_mut() {
+        let mut row = serde_json::json!({
+            "type": "progress",
+            "phase": "compact_ceiling",
+            "compact_ceiling": crate::compact::effective_compact_ceiling(config),
+        });
+        if let Some(cliff) = agent.price_cliff() {
+            row["price_cliff"] = cliff.into();
+        }
+        out.write(row)?;
+    }
     let tool_labels: std::collections::HashMap<String, String> = agent
         .tool_defs()
         .iter()
@@ -1288,12 +1305,14 @@ async fn run_print_inner(
     if render_broken || json.is_some() {
         let _ = crate::host::take_host_say();
     } else {
-        let lines = crate::host::take_host_say();
-        if !lines.is_empty() {
+        let msgs = crate::host::take_host_say();
+        if !msgs.is_empty() {
             let mut out = stdout.lock();
-            for line in &lines {
-                if writeln!(out, "{line}").is_err() {
-                    break;
+            'say: for msg in &msgs {
+                for line in msg {
+                    if writeln!(out, "{line}").is_err() {
+                        break 'say;
+                    }
                 }
             }
             let _ = out.flush();

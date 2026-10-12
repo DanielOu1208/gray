@@ -607,7 +607,7 @@ pub(crate) async fn dispatch_command(
                     }
                     // A plugin asks for the interactive agents panel
                     // (bare `/subagents`): rows/actions ride that
-                    // plugin's CLI; Enter on a finished run resumes
+                    // plugin's CLI; 'o' on a finished run resumes
                     // straight into its child session via `handle_resume`.
                     CommandOutcome::AgentPicker(plugin) => {
                         let bg = tui

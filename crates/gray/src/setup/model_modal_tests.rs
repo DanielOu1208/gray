@@ -413,6 +413,7 @@ fn effort_config(model: &str, effort: Option<&str>) -> Config {
         max_wall_secs: None,
         bare: false,
         lean: false,
+        compact_at: None,
         provider_id: String::new(),
         credential_source: String::new(),
         auth_ref: String::new(),
@@ -819,4 +820,231 @@ fn variant_rows_take_their_knobs_from_the_catalog() {
     assert_eq!(resolved.map(|v| v.id.as_str()), Some("f-opus-a-high-fast"));
     cache_row_shape(id, Vec::new(), Vec::new());
     assert!(row_shape(id).is_none());
+}
+
+// ── composite rows lead; the blank gap is drawn, never stored ──
+
+#[test]
+fn composite_rows_lead_and_the_plain_rows_keep_their_order() {
+    let (lead, other) = ("picker-test/lead-fusion", "picker-test/other-fusion");
+    cache_row_shape(lead, Vec::new(), fusion_shape().slots);
+    cache_row_shape(other, Vec::new(), fusion_shape().slots);
+    let list = vec![
+        ("a/1".to_string(), "A".to_string()),
+        (lead.to_string(), "Fusion".to_string()),
+        ("b/2".to_string(), "B".to_string()),
+        (other.to_string(), "Fusion 2".to_string()),
+        ("c/3".to_string(), "C".to_string()),
+    ];
+    let refs: Vec<&(String, String)> = list.iter().collect();
+    let ids: Vec<&str> = super::composites_first(&refs)
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        [lead, other, "a/1", "b/2", "c/3"],
+        "composites first, each group in order"
+    );
+    // No composite anywhere: the order is untouched.
+    let plain = sorted_models();
+    let refs: Vec<&(String, String)> = plain.iter().collect();
+    let ids: Vec<&str> = super::composites_first(&refs)
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert_eq!(ids, ["cur/m", "a/1", "b/2", "c/3"]);
+    cache_row_shape(lead, Vec::new(), Vec::new());
+    cache_row_shape(other, Vec::new(), Vec::new());
+}
+
+#[test]
+fn the_blank_gap_takes_a_slot_and_never_a_row() {
+    for gap in [None, Some(1), Some(4)] {
+        for row in 0..5 {
+            let slot = super::slot_of(row, gap);
+            assert_eq!(super::row_at(slot, gap), Some(row));
+            assert_eq!(super::rows_before(slot, gap), row);
+        }
+        if let Some(g) = gap {
+            assert_eq!(super::row_at(g, gap), None, "the gap's slot holds no row");
+        }
+    }
+    // Five rows with a gap above row 1 are drawn in six slots.
+    assert_eq!(super::slot_of(0, Some(1)), 0);
+    assert_eq!(super::slot_of(1, Some(1)), 2);
+    assert_eq!(super::rows_before(2, Some(1)), 1);
+}
+
+#[test]
+fn the_window_keeps_the_selection_in_view_with_the_gap_counted() {
+    let gap = Some(1);
+    let slots = 5 + 1;
+    for top in 0..slots {
+        for sel in 0..5 {
+            let at = super::slot_of(sel, gap);
+            let (shown_top, shown) = super::list_window(slots, at, top, 3);
+            assert!(
+                shown_top <= at && at < shown_top + shown,
+                "row {sel} from top {top} lands in {shown_top}+{shown}"
+            );
+        }
+    }
+}
+
+/// Paints the picker for `list` laid out as the loop lays it out: composites
+/// first, an open dropdown's options under its row, the gap above the first
+/// plain row. `sel` is the highlighted data row (an option while one is open).
+/// Returns the screen rows and the scroll position the draw left behind.
+fn painted_picker(
+    list: &[(String, String)],
+    drop: Option<&super::DropState>,
+    sel: usize,
+    top: usize,
+) -> (Vec<String>, usize) {
+    use ratatui::backend::TestBackend;
+    let refs: Vec<&(String, String)> = list.iter().collect();
+    let filtered = super::composites_first(&refs);
+    let lead = filtered
+        .iter()
+        .filter(|(id, _)| super::is_composite_id(id))
+        .count();
+    let mut rows: Vec<super::Row> = (0..filtered.len()).map(super::Row::Model).collect();
+    if let Some(d) = drop {
+        let at = filtered
+            .iter()
+            .position(|(id, _)| *id == d.row)
+            .expect("the open row is listed");
+        let options = row_shape(&d.row)
+            .and_then(|s| s.slots.get(d.slot).map(|slot| slot.options.len()))
+            .unwrap_or(0);
+        for i in (0..options).rev() {
+            rows.insert(at + 1, super::Row::Opt(i));
+        }
+    }
+    let gap = super::composite_gap(&rows, lead);
+    let config = effort_config("other/live-model", None);
+    let saved = SavedConfig::default();
+    let efforts = RowEfforts::default();
+    let view = super::PickerView {
+        provider: "test provider",
+        refreshing: false,
+        filter: "",
+        rows: &rows,
+        filtered: &filtered,
+        models: list,
+        config: &config,
+        saved: &saved,
+        efforts: &efforts,
+        toggles: super::PickerToggles::from_config(&config),
+        drop,
+        all_head: false,
+        gap,
+    };
+    let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 30)).expect("test terminal");
+    let bg = crate::setup::BackgroundSnapshot::default();
+    let mut scroll = top;
+    terminal
+        .draw(|frame| super::draw_picker(frame, &bg, &view, sel, &mut scroll))
+        .expect("draw");
+    let buf = terminal.backend().buffer();
+    let screen: Vec<String> = (0..30u16)
+        .map(|y| {
+            (0..80u16)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect()
+        })
+        .collect();
+    (screen, scroll)
+}
+
+#[test]
+fn a_blank_row_separates_the_composites_from_the_plain_models() {
+    let fusion = "picker-test/gap-render";
+    let shape = fusion_shape();
+    cache_row_shape(fusion, shape.variants, shape.slots);
+    let list = vec![
+        ("a/1".to_string(), "Alpha".to_string()),
+        (fusion.to_string(), "Fusion".to_string()),
+        ("b/2".to_string(), "Beta".to_string()),
+    ];
+    let (screen, _) = painted_picker(&list, None, 0, 0);
+    let fusion_at = screen
+        .iter()
+        .position(|r| r.contains("Fusion"))
+        .expect("the composite row is painted");
+    assert!(
+        screen[fusion_at + 1].trim().is_empty(),
+        "exactly one blank row under the composite: {screen:?}"
+    );
+    assert!(screen[fusion_at + 2].contains("Alpha"), "{screen:?}");
+    assert!(screen[fusion_at + 3].contains("Beta"), "{screen:?}");
+    cache_row_shape(fusion, Vec::new(), Vec::new());
+}
+
+#[test]
+fn an_open_dropdown_sits_under_its_composite_with_the_gap_below_it() {
+    let fusion = "picker-test/gap-dropdown";
+    let shape = fusion_shape();
+    cache_row_shape(fusion, shape.variants, shape.slots);
+    let list = vec![
+        ("a/1".to_string(), "Alpha".to_string()),
+        (fusion.to_string(), "Fusion".to_string()),
+        ("b/2".to_string(), "Beta".to_string()),
+    ];
+    let drop = super::DropState {
+        row: fusion.to_string(),
+        slot: 0,
+        sel: 0,
+    };
+    // The first option is highlighted: the composite is data row 0, so the
+    // option is visual row 1.
+    let (screen, _) = painted_picker(&list, Some(&drop), 1, 0);
+    let fusion_at = screen
+        .iter()
+        .position(|r| r.contains("Fusion"))
+        .expect("the composite row is painted");
+    assert!(screen[fusion_at + 1].contains("OPUS"), "{screen:?}");
+    assert!(screen[fusion_at + 2].contains("SONNET"), "{screen:?}");
+    assert!(
+        screen[fusion_at + 3].trim().is_empty(),
+        "the gap sits below the options, not under the composite: {screen:?}"
+    );
+    // The two plain rows scroll below the gap and are still counted.
+    assert!(
+        screen.iter().any(|r| r.contains("2 more below")),
+        "{screen:?}"
+    );
+    cache_row_shape(fusion, Vec::new(), Vec::new());
+}
+
+#[test]
+fn a_list_without_composites_paints_no_blank_row() {
+    let list = vec![
+        ("a/1".to_string(), "Alpha".to_string()),
+        ("b/2".to_string(), "Beta".to_string()),
+    ];
+    let (screen, _) = painted_picker(&list, None, 0, 0);
+    let alpha = screen
+        .iter()
+        .position(|r| r.contains("Alpha"))
+        .expect("alpha is painted");
+    assert!(screen[alpha + 1].contains("Beta"), "{screen:?}");
+}
+
+#[test]
+fn the_gap_counts_toward_the_scroll_window() {
+    let fusion = "picker-test/gap-scroll";
+    let shape = fusion_shape();
+    cache_row_shape(fusion, shape.variants, shape.slots);
+    let mut list = vec![(fusion.to_string(), "Fusion".to_string())];
+    list.extend((0..30).map(|i| (format!("m/{i:02}"), format!("Model {i:02}"))));
+    // The last plain row is the last data row: it must be reachable.
+    let (screen, scrolled) = painted_picker(&list, None, 30, 0);
+    assert!(scrolled > 0, "the list scrolled to reach the last row");
+    assert!(screen.iter().any(|r| r.contains("Model 29")), "{screen:?}");
+    // Back at the top, the composite is in view again.
+    let (screen, _) = painted_picker(&list, None, 0, scrolled);
+    assert!(screen.iter().any(|r| r.contains("Fusion")), "{screen:?}");
+    cache_row_shape(fusion, Vec::new(), Vec::new());
 }

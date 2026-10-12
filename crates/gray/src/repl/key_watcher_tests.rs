@@ -94,6 +94,18 @@ fn turn_local_commands_are_read_only() {
         "/subagents entries",
         "/subagents manifest",
         "/subagents e2e",
+        // Local UI and config: pickers and toggles that never touch the
+        // running turn, so they should not sit in the follow-up queue.
+        "/theme",
+        "/theme banish",
+        "/plugins",
+        "/hotkeys",
+        "/reload",
+        "/intro",
+        "/intro off",
+        "/gateway",
+        "/gateway off",
+        "/hehe",
     ] {
         assert!(is_turn_local_command(cmd), "{cmd}");
     }

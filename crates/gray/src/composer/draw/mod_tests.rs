@@ -10,6 +10,25 @@ fn status_dock_rows() {
 }
 
 #[test]
+fn home_spacer_fills_to_the_last_row() {
+    // 100x30 home: 17 transcript rows visible above the band, a seam dock
+    // row + the footer (2 reserved) and a 6-row box leave 5 spacer rows,
+    // and the band lands exactly on the screen bottom: 17+2+6+5 = 30.
+    assert_eq!(home_spacer_rows(17, 2, 6, 30), 5);
+    assert_eq!(17 + 2 + 6 + home_spacer_rows(17, 2, 6, 30), 30);
+    // The contract the paint frame relies on: `visible_above` is the
+    // transcript actually on screen (the caller passes
+    // `min(transcript rows, band top)`), not the painted count — a
+    // `/theme` card that pushed two rows into scrollback used to size
+    // the spacer by 19 where 17 showed and ended the band a row short.
+    // With the visible count the band still fills to the last row.
+    assert_eq!(home_spacer_rows(17, 2, 6, 30) + 17, 30 - 2 - 6);
+    // Saturates when the reserved rows alone would fill the screen.
+    assert_eq!(home_spacer_rows(28, 2, 6, 30), 0);
+    assert_eq!(home_spacer_rows(0, 0, 0, 30), 30);
+}
+
+#[test]
 fn transcript_ends_blank_matches_ensure_gap() {
     use ratatui::style::Style;
     assert!(!transcript_ends_blank(&[]));
@@ -295,4 +314,15 @@ fn continue_ghost_hides_while_a_turn_runs() {
     assert_eq!(continue_ghost(false, false, ""), None);
     // The flag is dropped at turn start, so the input gate is honest too.
     // (`begin_turn` needs a TTY; the predicate above is the testable seam.)
+}
+
+/// The plugin band's cap scales with the screen: two-fifths of it, never under
+/// four rows. The subagents plugin's full widget is 15 rows, so a 40-row
+/// screen shows all of it; a 24-row one shows the top and says what it cut.
+#[test]
+fn widget_band_takes_two_fifths_of_the_screen() {
+    assert_eq!(widget_row_cap(40), 16);
+    assert_eq!(widget_row_cap(24), 9);
+    assert_eq!(widget_row_cap(10), 4);
+    assert_eq!(widget_row_cap(0), 4);
 }

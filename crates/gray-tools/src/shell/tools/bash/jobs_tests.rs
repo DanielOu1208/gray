@@ -65,7 +65,9 @@ fn running_lists_only_this_sessions_jobs_and_cancels_them() {
         tool.running_jobs(ctx).into_iter().map(|j| j.id).collect()
     };
     assert_eq!(ids(&ctx), vec!["bg".to_string()]);
-    assert_eq!(ids(&other), vec!["theirs".to_string()]);
+    // Sessionless work predates the session id's minting: the live session
+    // adopts it — only another session's jobs stay invisible.
+    assert_eq!(ids(&other), vec!["bg".to_string(), "theirs".to_string()]);
 
     assert!(!tool.cancel_job(&ctx, "theirs"), "another session's job");
     assert!(!tool.cancel_job(&ctx, "done"), "a finished job");

@@ -1,16 +1,17 @@
 //! Content search: a trigram index over the user's text files.
 //!
 //! Segments are immutable, mmap'd files: a doc table, and the contents first
-//! indexed there: per trigram, the ids of the contents holding it (delta
-//! varints), and per content bloom filters of its 5- and 7-byte substrings. Each
-//! distinct file content is indexed once (most copies are git worktrees):
-//! every doc names its content by a gid, and a copy indexed later, even in
-//! another segment, just names the same gid. A query becomes an AND/OR of
-//! trigrams, the posting lists pick candidate contents, those become the docs
-//! holding them, the bloom filters drop most of those that only contain the
-//! pattern's trigrams scattered about, and the rest are read fresh from disk
-//! and matched for real. Results therefore never show stale content; only
-//! candidate selection can trail a file written in the last couple of seconds.
+//! indexed there: per trigram, the ids of the contents holding it (a bitset
+//! or interpolative code), and per content a bloom filter of its 5-byte
+//! substrings. Each distinct file content is indexed once (most copies are
+//! git worktrees): every doc names its content by a gid, and a copy indexed
+//! later, even in another segment, just names the same gid. A query becomes
+//! an AND/OR of trigrams, the posting lists pick candidate contents, those
+//! become the docs holding them, the bloom filter drops most of those that
+//! only contain the pattern's trigrams scattered about, and the rest are read
+//! fresh from disk and matched for real. Results therefore never show stale
+//! content; only candidate selection can trail a file written in the last
+//! couple of seconds.
 //!
 //! The index is kept in sync by diffing, exactly like the name index: for a
 //! directory (or subtree), compare the eligible files the live name index
@@ -20,43 +21,61 @@
 use crate::index::{HDR, as_bytes, fields, header, layout, sec};
 use crate::live::{Live, join};
 use crate::query::{GrepMode, Query, fold};
-use crate::walk::KIND_FILE;
+use crate::walk::{KIND_DIR, KIND_FILE};
 use memmap2::Mmap;
 use rayon::prelude::*;
 use regex::bytes::{Regex, RegexBuilder};
 use regex_syntax::hir::{Class, Hir, HirKind};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+/// Largest file indexed outside git repos.
 pub const MAX_FILE: u64 = 1 << 20;
+/// Largest file indexed in a git repo, and grepped anywhere (fff's limit
+/// too, as `rg --max-filesize 10M`).
+pub const MAX_REPO_FILE: u64 = 10 << 20;
 /// File bytes per segment build; bounds the build's transient memory.
 const SEG_BYTES: u64 = 64 << 20;
 /// Largest merge, in posting bytes; bounds the merge's transient memory.
 const MERGE_CAP: usize = 96 << 20;
-const MAGIC: &[u8; 8] = b"FSCSEG10";
-/// tri_off high bit: this trigram's list is a bitset over the segment's
-/// contents (cheaper than varints once more than 1 in 8 contain it).
+/// The bytes of deleted and replaced files stay under 1/DEAD of the index
+/// (see `Content::merge_plan`).
+const DEAD: usize = 16;
+const MAGIC: &[u8; 8] = b"FSCSEG16";
+/// Docs per front-coded group of paths (see `Segment::path_off`).
+const PATHS: usize = 16;
+/// A list's offset flag while built: it is a bitset over the segment's
+/// contents (kept once more than 1 in 8 contain it: ANDs of common
+/// trigrams stay a word at a time).
 const BITSET: u32 = 1 << 31;
-/// tri_off next bit: this varint list starts with a skip table, one entry
-/// per SKIP of its contents after the first SKIP: (the content before them,
-/// where they start in the varints), so a search can jump ahead.
+/// The next flag: this interpolative list has more than BLOCK contents, so
+/// a count and a skip table (see `Postings::push`).
 const SKIPS: u32 = 1 << 30;
 const FLAGS: u32 = BITSET | SKIPS;
-const SKIP: usize = 64;
+/// Posting lists per dictionary block (see `Segment::dict`).
+const DICT: usize = 32;
 /// The gid of a doc that is not text, or a doc no content holds.
 const NONE: u32 = u32::MAX;
 
 /// Directory names whose subtrees are generated, vendored, or caches.
 #[rustfmt::skip]
 const SKIP_DIRS: &[&[u8]] = &[
-    b"node_modules", b".git", b"target", b"DerivedData", b"__pycache__", b".venv", b"venv", b"site-packages", b"Pods",
-    b".next", b".turbo", b".cache", b"Library", b"dist", b"build", b".build", b".rustup", b".cargo", b".npm", b".bun",
-    b".nvm", b"vendor", b".pnpm-store", b"coverage", b".Trash", b".svn", b".hg", b".gradle", b".m2", b".pyenv",
-    b".rbenv", b".gem", b".conda", b"miniconda3", b"anaconda3", b".docker", b".orbstack", b".colima", b".lima",
-    b".ollama", b".android", b".expo", b".terraform.d", b".wrangler", b".vscode-server", b"cache", b"Cache", b"caches",
-    b"Caches",
+    b"node_modules", b".git", b"DerivedData", b"__pycache__", b".venv", b"venv", b"site-packages", b"Pods", b".next",
+    b".turbo", b".cache", b"Library", b".build", b".rustup", b".cargo", b".npm", b".bun", b".nvm", b"vendor",
+    b".pnpm-store", b"coverage", b".Trash", b".svn", b".hg", b".gradle", b".m2", b".pyenv", b".rbenv", b".gem", b".conda",
+    b"miniconda3", b"anaconda3", b".docker", b".orbstack", b".colima", b".lima", b".ollama", b".android", b".expo",
+    b".terraform.d", b".wrangler", b".vscode-server",
 ];
+
+/// Names that are build output or caches only when the folder says so, by
+/// holding a marker (Linux's drivers/target is source): the Cache Directory
+/// Tagging standard's file (Cargo's target/), CMake's and Ninja's.
+const MARKED_DIRS: &[&[u8]] = &[b"target", b"build", b"dist", b"cache", b"Cache", b"caches", b"Caches"];
+const MARKERS: &[&[u8]] = &[b"CACHEDIR.TAG", b"CMakeCache.txt", b"build.ninja"];
 
 /// Home-relative trees that are dependencies or app data, not your files.
 #[rustfmt::skip]
@@ -71,6 +90,24 @@ const SKIP_SUFFIXES: &[&[u8]] = &[
     b".xcassets", b".framework", b".bundle", b".xcarchive", b".xcresult", b".dSYM", b".salon", b".lrdata",
 ];
 
+/// Extensions fff takes for binary without reading the file; in a repo the
+/// rest are read, and kept as text as `is_text` decides.
+#[rustfmt::skip]
+const BINARY_EXTS: &[&[u8]] = &[
+    b"png", b"jpg", b"jpeg", b"gif", b"bmp", b"ico", b"webp", b"tiff", b"tif", b"avif", b"heic", b"heif", b"jxl", b"jp2", b"j2k",
+    b"psd", b"icns", b"cur", b"cr2", b"nef", b"dng", b"tga", b"rgbe", b"hdr", b"exr", b"dds", b"ktx", b"ktx2", b"pvr", b"astc", b"ai",
+    b"webarchive", b"mhtml", b"mp4", b"avi", b"mov", b"wmv", b"mkv", b"mp3", b"wav", b"flac", b"ogg", b"m4a", b"aac", b"webm", b"flv",
+    b"mpg", b"mpeg", b"wma", b"opus", b"pcm", b"reapeaks", b"zip", b"tar", b"gz", b"bz2", b"xz", b"7z", b"rar", b"zst", b"lz4", b"lzma",
+    b"cab", b"cpio", b"jsonlz4", b"deb", b"rpm", b"apk", b"dmg", b"msi", b"iso", b"nupkg", b"whl", b"egg", b"appimage", b"flatpak",
+    b"crx", b"pak", b"exe", b"dll", b"so", b"dylib", b"o", b"a", b"lib", b"bin", b"elf", b"pdf", b"doc", b"docx", b"xls", b"xlsx",
+    b"ppt", b"pptx", b"db", b"sqlite", b"sqlite3", b"mdb", b"sqlite-wal", b"sqlite-shm", b"sqlite3-wal", b"sqlite3-shm", b"db-wal",
+    b"db-shm", b"ldb", b"ttf", b"otf", b"woff", b"woff2", b"eot", b"class", b"pyc", b"pyo", b"wasm", b"dex", b"jar", b"war", b"cmi",
+    b"cmt", b"cmti", b"cmx", b"nib", b"swiftdeps", b"swiftdeps~", b"swiftdoc", b"swiftmodule", b"swiftsourceinfo", b"npy", b"npz",
+    b"h5", b"hdf5", b"pt", b"onnx", b"safetensors", b"tfrecord", b"tflite", b"gguf", b"ggml", b"joblib", b"glb", b"blend", b"blp",
+    b"dia", b"bcmap", b"pb", b"parquet", b"arrow", b"suo",
+];
+
+/// Outside git repos, the extensions of text files.
 #[rustfmt::skip]
 const TEXT_EXTS: &[&[u8]] = &[
     b"rs", b"c", b"h", b"cc", b"cpp", b"cxx", b"hpp", b"hh", b"m", b"mm", b"swift", b"go", b"py", b"pyi", b"js", b"mjs", b"cjs",
@@ -88,17 +125,16 @@ pub struct Segment {
     map: std::sync::Arc<Mmap>,
     pub id: u64,
     pub ndocs: usize,
-    ndocs1: usize,
+    ngroups: usize,
     ntri: usize,
-    ntri1: usize,
+    nblk: usize,
+    dict_len: usize,
     plen: usize,
     paths_len: usize,
     nwords: usize,
-    nlong: usize,
     /// Contents first indexed here (its own).
     nown: usize,
     nown1: usize,
-    nown2: usize,
     off: [usize; NS],
     dead: Vec<u64>,
     pub live_docs: usize,
@@ -107,12 +143,15 @@ pub struct Segment {
     refs: Counts,
     /// Own contents as runs of consecutive gids: (first content, first gid, length).
     runs: Vec<(u32, u32, u32)>,
+    /// The first and last path in path order, decoded once: every scoped
+    /// search checks them (see `prefix_run`).
+    ends: [Vec<u8>; 2],
 }
 
 #[derive(Clone, Copy)]
 enum S {
-    TriKey,
-    TriOff,
+    DictIdx,
+    Dict,
     Post,
     PathOff,
     Paths,
@@ -131,24 +170,31 @@ enum S {
     ByHash,
     BloomOff,
     Bloom,
-    LongOff,
-    Long,
 }
-const NS: usize = 22;
+const NS: usize = 20;
 
 #[rustfmt::skip]
-fn lens(ndocs: usize, ntri: usize, plen: usize, paths_len: usize, nwords: usize, nown: usize, nlong: usize) -> [usize; NS] {
+fn lens(ndocs: usize, ntri: usize, plen: usize, paths_len: usize, nwords: usize, nown: usize, dict_len: usize) -> [usize; NS] {
     let (d, c) = (ndocs * 4, nown * 4);
-    [ntri * 4, (ntri + 1) * 4, plen, d + 4, paths_len, ndocs * 8, d, d, ndocs, d, d, d, d, d, c, c, c * 4, c, c + 4, nwords * 8, c + 4, nlong * 8]
+    [ntri.div_ceil(DICT) * 12, dict_len, plen, ndocs.div_ceil(PATHS) * 4, paths_len, d, d, d, ndocs, d, d, d, d, d, c, c, c * 2, c, c + 4, nwords * 8]
 }
 
 impl Segment {
-    sec!(tri_key, S::TriKey, u32, ntri);
-    sec!(tri_off, S::TriOff, u32, ntri1);
+    // The posting lists' keys (trigrams, then definition keys), in blocks of
+    // DICT: per block, its first key and where its entries and lists start;
+    // per list, a varint key delta (0 for a block's first) and a varint
+    // byte length << 2 | 1 if a bitset | 2 if an interpolative list with a
+    // skip table.
+    sec!(dict_idx, S::DictIdx, [u32; 3], nblk);
+    sec!(dict, S::Dict, u8, dict_len);
     sec!(post, S::Post, u8, plen);
-    sec!(path_off, S::PathOff, u32, ndocs1);
+    // Per doc: its path, front-coded in groups of PATHS docs (per doc, a
+    // varint of the bytes it shares with the previous doc's path, 0 for a
+    // group's first, a varint of the rest's length, and the rest; and where
+    // each group starts), size, mtime; the docs in path order.
+    sec!(path_off, S::PathOff, u32, ngroups);
     sec!(paths, S::Paths, u8, paths_len);
-    sec!(size, S::Size, u64, ndocs);
+    sec!(size, S::Size, u32, ndocs);
     sec!(mtime, S::Mtime, u32, ndocs);
     sec!(by_path, S::ByPath, u32, ndocs);
     sec!(rank, S::Rank, i8, ndocs);
@@ -161,20 +207,30 @@ impl Segment {
     sec!(gid_sorted, S::GidSorted, u32, ndocs);
     sec!(by_gid, S::ByGid, u32, ndocs);
     // Per own content: its gid, the first doc here holding it (or NONE), a
-    // hash of its bytes (two u64s), and bloom filters of its SHORT- and
-    // LONG-byte substrings. And the contents in hash order.
+    // hash of its bytes, and a bloom filter of its SHORT-byte substrings.
+    // And the contents in hash order.
     sec!(own_gid, S::OwnGid, u32, nown);
     sec!(own_doc, S::OwnDoc, u32, nown);
-    sec!(hash, S::Hash, u64, nown2);
+    sec!(hash, S::Hash, u64, nown);
     sec!(by_hash, S::ByHash, u32, nown);
     sec!(bloom_off, S::BloomOff, u32, nown1);
     sec!(bloom, S::Bloom, u64, nwords);
-    sec!(long_off, S::LongOff, u32, nown1);
-    sec!(long, S::Long, u64, nlong);
 
-    pub fn path(&self, d: u32) -> &[u8] {
-        let o = self.path_off();
-        &self.paths()[o[d as usize] as usize..o[d as usize + 1] as usize]
+    /// Doc `d`'s path: its group's paths decoded up to it.
+    pub fn path(&self, d: u32) -> Vec<u8> {
+        let (g, k) = (d as usize / PATHS, d as usize % PATHS);
+        let mut r = PathReader { b: &self.paths()[self.path_off()[g] as usize..], ..Default::default() };
+        r.skip(k + 1);
+        r.path
+    }
+
+    /// Every doc's path in doc order, in one pass.
+    fn all_paths(&self) -> impl Iterator<Item = Vec<u8>> + '_ {
+        let mut r = PathReader { b: self.paths(), ..Default::default() };
+        (0..self.ndocs).map(move |_| {
+            r.skip(1);
+            r.path.clone()
+        })
     }
 
     fn bloom_of(&self, c: u32) -> &[u64] {
@@ -182,29 +238,35 @@ impl Segment {
         &self.bloom()[o[c as usize] as usize..o[c as usize + 1] as usize]
     }
 
-    fn long_of(&self, c: u32) -> &[u64] {
-        let o = self.long_off();
-        &self.long()[o[c as usize] as usize..o[c as usize + 1] as usize]
+    fn hash_of(&self, c: u32) -> u64 {
+        self.hash()[c as usize]
     }
 
-    fn hash_of(&self, c: u32) -> [u64; 2] {
-        [self.hash()[2 * c as usize], self.hash()[2 * c as usize + 1]]
-    }
-
-    /// Can own content `c` hold every gram in `probes`, by its bloom filters?
+    /// Can own content `c` hold every gram in `probes`, by its bloom filter?
     fn may_contain(&self, c: u32, probes: &Probes) -> bool {
-        let has = |words: &[u64], h: u32| {
-            bloom_bits(h, words.len())
-                .iter()
-                .all(|&b| words.get(b / 64).is_some_and(|w| w >> (b % 64) & 1 != 0))
-        };
-        let (short, long) = (self.bloom_of(c), self.long_of(c));
-        probes.short.iter().all(|&h| has(short, h)) && probes.long.iter().all(|&h| has(long, h))
+        let words = self.bloom_of(c);
+        probes.short.iter().all(|&h| bloom_bits(h, words.len()).iter().all(|&b| words.get(b / 64).is_some_and(|w| w >> (b % 64) & 1 != 0)))
     }
 
     /// Own contents a live doc still holds.
     fn live_own(&self) -> usize {
         self.refs.live()
+    }
+
+    /// About the bytes a rewrite would drop: dead docs' rows, and the own
+    /// contents no live doc holds (their blooms, and about as much again in
+    /// postings).
+    pub fn dead_bytes(&self) -> usize {
+        let (o, mut bytes) = (self.bloom_off(), (self.ndocs - self.live_docs) * (41 + self.paths_len / self.ndocs.max(1)));
+        for w in 0..self.nown.div_ceil(64) {
+            let mut z = !self.refs.held(w) & u64::MAX >> (64 - (self.nown - 64 * w).min(64));
+            while z != 0 {
+                let c = 64 * w + z.trailing_zeros() as usize;
+                bytes += (o[c + 1] - o[c]) as usize * 16 + 36;
+                z &= z - 1;
+            }
+        }
+        bytes
     }
 
     #[inline]
@@ -223,21 +285,29 @@ impl Segment {
     }
 
     /// Live docs whose path starts with `prefix`, via the sorted permutation.
-    fn with_prefix<'a>(&'a self, prefix: &'a [u8]) -> impl Iterator<Item = u32> + 'a {
-        let bp = self.by_path();
-        let start = bp.partition_point(|&d| self.path(d) < prefix);
-        bp[start..]
-            .iter()
-            .copied()
-            .take_while(move |&d| self.path(d).starts_with(prefix))
-            .filter(move |&d| !self.is_dead(d))
+    fn with_prefix(&self, prefix: &[u8]) -> impl Iterator<Item = u32> + '_ {
+        self.live_at(self.prefix_run(prefix))
     }
 
-    /// How many docs (live or not) have paths starting with `prefix`.
-    fn count_prefix(&self, prefix: &[u8]) -> usize {
-        let bp = self.by_path();
-        let start = bp.partition_point(|&d| self.path(d) < prefix);
-        bp[start..].partition_point(|&d| self.path(d).starts_with(prefix))
+    /// The live docs at `run` in path order.
+    fn live_at(&self, run: std::ops::Range<usize>) -> impl Iterator<Item = u32> + '_ {
+        self.by_path()[run].iter().copied().filter(|&d| !self.is_dead(d))
+    }
+
+    /// Where the paths starting with `prefix` lie in path order (positions
+    /// in `by_path`): the first and last path settle most segments, else two
+    /// binary searches (each probe read into one buffer).
+    fn prefix_run(&self, prefix: &[u8]) -> std::ops::Range<usize> {
+        let (bp, [first, last]) = (self.by_path(), &self.ends);
+        if bp.is_empty() || last.as_slice() < prefix || (first.as_slice() > prefix && !first.starts_with(prefix)) {
+            return 0..0;
+        }
+        if first.starts_with(prefix) && last.starts_with(prefix) {
+            return 0..bp.len();
+        }
+        let mut paths = PathCursor::default();
+        let a = bp.partition_point(|&d| paths.get(self, d) < prefix);
+        a..a + bp[a..].partition_point(|&d| paths.get(self, d).starts_with(prefix))
     }
 
     /// Live docs directly inside `prefix` (which ends in '/'), skipping each
@@ -245,7 +315,7 @@ impl Segment {
     fn direct_children(&self, prefix: &[u8]) -> Vec<u32> {
         let bp = self.by_path();
         let mut out = Vec::new();
-        let mut i = bp.partition_point(|&d| self.path(d) < prefix);
+        let mut i = bp.partition_point(|&d| self.path(d).as_slice() < prefix);
         while i < bp.len() {
             let p = self.path(bp[i]);
             if !p.starts_with(prefix) {
@@ -262,78 +332,84 @@ impl Segment {
                     // Jump past "prefix/sub/..." : first path >= "prefix/sub0".
                     let mut hi = p[..prefix.len() + k + 1].to_vec();
                     *hi.last_mut().unwrap() = b'/' + 1;
-                    i += bp[i..].partition_point(|&d| self.path(d) < hi.as_slice());
+                    i += bp[i..].partition_point(|&d| self.path(d) < hi);
                 }
             }
         }
         out
     }
 
+    /// The posting list of key `tri`, if any doc here has it: a search of
+    /// the blocks' first keys, then a scan of one block's entries (every
+    /// query does this per trigram and segment).
     fn list(&self, tri: u32) -> Option<List<'_>> {
-        self.tri_key()
-            .binary_search(&tri)
-            .ok()
-            .map(|k| self.list_at(k))
-    }
-
-    fn list_at(&self, k: usize) -> List<'_> {
-        let o = self.tri_off();
-        let bytes = &self.post()[(o[k] & !FLAGS) as usize..(o[k + 1] & !FLAGS) as usize];
-        if o[k] & BITSET != 0 {
-            List::Bits(bytes)
-        } else {
-            List::Var(Var::new(bytes, o[k] & SKIPS != 0))
-        }
-    }
-
-    /// The live docs under `prefix` lie in this doc id range (exactly, for a
-    /// segment built from sorted paths; a superset after a merge, or when
-    /// most of the segment is under it). True if every doc is under it.
-    fn doc_range(&self, prefix: &[u8]) -> (std::ops::Range<u32>, bool) {
-        let bp = self.by_path();
-        let (Some(&first), Some(&last)) = (bp.first(), bp.last()) else {
-            return (0..0, false);
-        };
-        let (first, last) = (self.path(first), self.path(last));
-        if last < prefix || (first > prefix && !first.starts_with(prefix)) {
-            return (0..0, false);
-        }
-        // Paths under the prefix are one run in path order.
-        if first.starts_with(prefix) && last.starts_with(prefix) {
-            return (0..self.ndocs as u32, true);
-        }
-        let a = bp.partition_point(|&d| self.path(d) < prefix);
-        let z = a + bp[a..].partition_point(|&d| self.path(d).starts_with(prefix));
-        if (z - a) * 2 > bp.len() {
-            return (0..self.ndocs as u32, false);
-        }
-        let (lo, hi) = bp[a..z]
-            .iter()
-            .fold((u32::MAX, 0), |(lo, hi), &d| (lo.min(d), hi.max(d + 1)));
-        (lo.min(hi)..hi, false)
-    }
-
-    fn list_into(&self, k: usize, out: &mut Vec<u32>) {
-        match self.list_at(k) {
-            List::Bits(bytes) => {
-                for (w, &b) in bytes.iter().enumerate() {
-                    let mut b = b;
-                    while b != 0 {
-                        out.push(w as u32 * 8 + b.trailing_zeros());
-                        b &= b - 1;
-                    }
-                }
+        let (idx, dict) = (self.dict_idx(), self.dict());
+        let b = idx.partition_point(|e| e[0] <= tri).checked_sub(1)?;
+        let [mut key, at, p] = idx[b];
+        let (mut at, mut p) = (at as usize, p as usize);
+        for _ in b * DICT..((b + 1) * DICT).min(self.ntri) {
+            let (d, n) = varint(&dict[at..]);
+            let (f, m) = varint(&dict[at + n..]);
+            (key, at) = (key + d, at + n + m);
+            if key >= tri {
+                return (key == tri).then(|| self.list_of(f & 3, &self.post()[p..p + (f >> 2) as usize]));
             }
-            List::Var(v) => out.extend(v.iter()),
+            p += (f >> 2) as usize;
         }
+        None
+    }
+
+    /// The posting lists from dictionary block `b` on, by key: (key, list).
+    fn lists_from(&self, b: usize) -> impl Iterator<Item = (u32, List<'_>)> + '_ {
+        self.entries_from(b).map(|(k, f, bytes)| (k, self.list_of(f, bytes)))
+    }
+
+    /// The dictionary entries from block `b` on: (key, flags, list bytes).
+    fn entries_from(&self, b: usize) -> impl Iterator<Item = (u32, u32, &[u8])> + '_ {
+        let (idx, dict, post) = (self.dict_idx(), self.dict(), self.post());
+        let (mut key, mut at, mut p) = (0, 0, 0);
+        (b * DICT..self.ntri).map(move |i| {
+            if i % DICT == 0 {
+                let [k, a, q] = idx[i / DICT];
+                (key, at, p) = (k, a as usize, q as usize);
+            }
+            let (d, n) = varint(&dict[at..]);
+            let (f, m) = varint(&dict[at + n..]);
+            at += n + m;
+            key += d;
+            let bytes = &post[p..p + (f >> 2) as usize];
+            p += bytes.len();
+            (key, f & 3, bytes)
+        })
+    }
+
+    fn list_of<'a>(&self, f: u32, bytes: &'a [u8]) -> List<'a> {
+        if f & 1 != 0 { List::Bits(bytes) } else { List::Ic(Ic::new(bytes, f & 2 != 0, self.nown as u32)) }
+    }
+
+    /// The dictionary block holding the first key at or past `key`'s.
+    fn block_of(&self, key: u64) -> usize {
+        self.dict_idx().partition_point(|e| (e[0] as u64) <= key).saturating_sub(1)
+    }
+
+    /// The doc id range holding the docs at `run` in path order (see
+    /// `prefix_run`); all of the segment when they are most of it. True if
+    /// it holds no other doc, as for a segment built from sorted paths (after
+    /// a merge it is a superset).
+    fn doc_range(&self, run: std::ops::Range<usize>) -> (std::ops::Range<u32>, bool) {
+        let n = run.len();
+        if n * 2 > self.ndocs {
+            return (0..self.ndocs as u32, n == self.ndocs);
+        }
+        let (lo, hi) = self.by_path()[run].iter().fold((u32::MAX, 0), |(lo, hi), &d| (lo.min(d), hi.max(d + 1)));
+        (lo.min(hi)..hi, (hi - lo.min(hi)) as usize == n)
     }
 
     fn load(dir: &Path, id: u64) -> Option<Segment> {
         let f = std::fs::File::open(seg_path(dir, id)).ok()?;
         let map = std::sync::Arc::new(unsafe { Mmap::map(&f) }.ok()?);
-        let [ndocs, ntri, plen, paths_len, nwords, nown, nlong] =
-            fields(&map, MAGIC)?.map(|v| v as usize);
-        let (off, total) = layout(&lens(ndocs, ntri, plen, paths_len, nwords, nown, nlong));
+        let [ndocs, ntri, plen, paths_len, nwords, nown, dict_len] = fields(&map, MAGIC)?.map(|v| v as usize);
+        let (off, total) = layout(&lens(ndocs, ntri, plen, paths_len, nwords, nown, dict_len));
         if map.len() < total {
             return None;
         }
@@ -346,8 +422,8 @@ impl Segment {
         let live_docs = ndocs - dead.iter().map(|w| w.count_ones() as usize).sum::<usize>();
         #[rustfmt::skip]
         let mut s = Segment {
-            map, id, ndocs, ndocs1: ndocs + 1, ntri, ntri1: ntri + 1, plen, paths_len, nwords, nlong, nown, nown1: nown + 1, nown2: nown * 2,
-            off, dead, live_docs, refs: Counts::new(nown), runs: Vec::new(),
+            map, id, ndocs, ngroups: ndocs.div_ceil(PATHS), ntri, nblk: ntri.div_ceil(DICT), dict_len, plen, paths_len, nwords, nown, nown1: nown + 1,
+            off, dead, live_docs, refs: Counts::new(nown), runs: Vec::new(), ends: Default::default(),
         };
         let mut runs: Vec<(u32, u32, u32)> = Vec::new();
         for (c, &g) in s.own_gid().iter().enumerate() {
@@ -357,6 +433,11 @@ impl Segment {
             }
         }
         s.runs = runs;
+        let bp = s.by_path();
+        s.ends = match (bp.first(), bp.last()) {
+            (Some(&a), Some(&b)) => [s.path(a), s.path(b)],
+            _ => Default::default(),
+        };
         Some(s)
     }
 
@@ -396,35 +477,121 @@ fn put_varint(out: &mut Vec<u8>, mut v: u32) {
     out.push(v as u8);
 }
 
-/// A 128-bit hash of a file's bytes: files with the same hash are taken to
-/// hold the same bytes. Four multiply-fold lanes, 32 bytes a step.
-fn content_hash(b: &[u8]) -> [u64; 2] {
+/// Front-coded paths from a group's start on (see `Segment::path_off`).
+#[derive(Default)]
+struct PathReader<'a> {
+    b: &'a [u8],
+    path: Vec<u8>,
+    /// Entries read past the one `path` holds, not applied yet: the bytes
+    /// each shares with the path before it, and the rest. (A group's first
+    /// shares none, which drops those before it: a group's worth at most.)
+    ents: [(usize, &'a [u8]); PATHS],
+    n: usize,
+}
+
+impl<'a> PathReader<'a> {
+    /// Read the next entry, to apply later; the bytes it adds.
+    fn read(&mut self) -> &'a [u8] {
+        let (shared, k) = varint(self.b);
+        let (len, m) = varint(&self.b[k..]);
+        let rest = &self.b[k + m..][..len as usize];
+        self.b = &self.b[k + m + len as usize..];
+        if shared == 0 {
+            self.n = 0;
+        }
+        self.ents[self.n] = (shared as usize, rest);
+        self.n += 1;
+        rest
+    }
+
+    /// `path` becomes the last entry read's: each byte copied once, from the
+    /// last entry holding it; the bytes before them stay as they are.
+    fn build(&mut self) {
+        let Some(&(s, rest)) = self.ents[..self.n].last() else { return };
+        let (mut parts, mut k, mut end) = ([&[][..]; PATHS], 0, s + rest.len());
+        for &(s, rest) in self.ents[..self.n].iter().rev() {
+            if s < end {
+                (parts[k], k, end) = (&rest[..end - s], k + 1, s);
+            }
+        }
+        self.path.truncate(end);
+        for p in parts[..k].iter().rev() {
+            self.path.extend_from_slice(p);
+        }
+        self.n = 0;
+    }
+
+    /// On `n` paths (1 to PATHS): the entries in between are only parsed.
+    fn skip(&mut self, n: usize) {
+        for _ in 0..n {
+            self.read();
+        }
+        self.build();
+    }
+}
+
+/// Paths of docs asked for in ascending order within a segment: each read
+/// on from the last (groups follow each other), not from its group's start,
+/// into one buffer.
+#[derive(Default)]
+struct PathCursor<'a> {
+    s: Option<&'a Segment>,
+    r: PathReader<'a>,
+    /// The doc after the one `r.path` holds.
+    next: usize,
+}
+
+impl<'a> PathCursor<'a> {
+    fn get(&mut self, s: &'a Segment, d: u32) -> &[u8] {
+        self.read_to(s, d);
+        self.r.build();
+        &self.r.path
+    }
+
+    /// Doc `d`'s path, unless `keep` turns down the end of it its entry
+    /// holds (the bytes past those it shares with the path before): then
+    /// None, without building it.
+    fn get_if(&mut self, s: &'a Segment, d: u32, keep: impl FnOnce(&[u8]) -> bool) -> Option<&[u8]> {
+        let end = self.read_to(s, d);
+        if !keep(end) {
+            return None;
+        }
+        self.r.build();
+        Some(&self.r.path)
+    }
+
+    /// Read on to doc `d`'s entry; the bytes it adds (none if read before).
+    fn read_to(&mut self, s: &'a Segment, d: u32) -> &'a [u8] {
+        let d = d as usize;
+        // Another segment, behind, or a group or more ahead: from the start
+        // of d's group.
+        if !self.s.is_some_and(|x| std::ptr::eq(x, s)) || d + 1 < self.next || d >= self.next + PATHS {
+            (self.s, self.r.b, self.r.n, self.next) = (Some(s), &s.paths()[s.path_off()[d / PATHS] as usize..], 0, d / PATHS * PATHS);
+        }
+        let mut end = &[][..];
+        while self.next <= d {
+            end = self.r.read();
+            self.next += 1;
+        }
+        end
+    }
+}
+
+/// A 64-bit hash of a file's bytes: files with the same hash are taken to
+/// hold the same bytes (a million distinct files hold a collision about
+/// once in 37 million indexes). Four multiply-fold lanes, 32 bytes a step.
+fn content_hash(b: &[u8]) -> u64 {
     #[inline]
     fn mix(x: u64, y: u64) -> u64 {
         let m = x as u128 * y as u128;
         m as u64 ^ (m >> 64) as u64
     }
-    const K: [u64; 4] = [
-        0x9E37_79B9_7F4A_7C15,
-        0xC2B2_AE3D_27D4_EB4F,
-        0x1656_67B1_9E37_79F9,
-        0x85EB_CA77_C2B2_AE63,
-    ];
+    const K: [u64; 4] = [0x9E37_79B9_7F4A_7C15, 0xC2B2_AE3D_27D4_EB4F, 0x1656_67B1_9E37_79F9, 0x85EB_CA77_C2B2_AE63];
     let word = |w: &[u8], i: usize| u64::from_le_bytes(w[i * 8..i * 8 + 8].try_into().unwrap());
-    let mut s = [
-        K[0] ^ b.len() as u64,
-        K[1],
-        K[2],
-        K[3] ^ (b.len() as u64).rotate_left(32),
-    ];
+    let mut s = [K[0] ^ b.len() as u64, K[1], K[2], K[3] ^ (b.len() as u64).rotate_left(32)];
     let mut step = |w: &[u8]| {
         let x = [word(w, 0), word(w, 1), word(w, 2), word(w, 3)];
-        s = [
-            mix(x[0] ^ K[0], x[1] ^ s[0]),
-            mix(x[1] ^ K[1], x[0] ^ s[1]),
-            mix(x[2] ^ K[2], x[3] ^ s[2]),
-            mix(x[3] ^ K[3], x[2] ^ s[3]),
-        ];
+        s = [mix(x[0] ^ K[0], x[1] ^ s[0]), mix(x[1] ^ K[1], x[0] ^ s[1]), mix(x[2] ^ K[2], x[3] ^ s[2]), mix(x[3] ^ K[3], x[2] ^ s[3])];
     };
     let (blocks, rem) = b.as_chunks::<32>();
     for w in blocks {
@@ -433,39 +600,26 @@ fn content_hash(b: &[u8]) -> [u64; 2] {
     let mut last = [0u8; 32];
     last[..rem.len()].copy_from_slice(rem);
     step(&last);
-    let h0 = mix(mix(s[0] ^ K[1], s[2] ^ K[2]) ^ s[1], s[3] ^ K[0]);
-    let h1 = mix(mix(s[1] ^ K[3], s[3] ^ K[1]) ^ s[0], s[2] ^ K[2]);
-    [h0, h1]
+    mix(mix(s[0] ^ K[1], s[2] ^ K[2]) ^ s[1], s[3] ^ K[0])
 }
 
 /// A file's distinct trigrams and its end-of-file key into `tri`, and the
-/// distinct hashes of its SHORT- and LONG-byte grams into `short` and `long`
-/// (all cleared, unordered). One pass, with no branch on whether a gram is
-/// new. `seen` is three 2 MiB bitsets, all zero on entry and exit.
-fn index_grams(
-    buf: &[u8],
-    seen: &mut [u64],
-    tri: &mut Vec<u32>,
-    short: &mut Vec<u32>,
-    long: &mut Vec<u32>,
-) {
+/// distinct hashes of its SHORT-byte grams into `short` (both cleared,
+/// unordered). One pass, with no branch on whether a gram is new. `seen` is
+/// two 2 MiB bitsets, all zero on entry and exit.
+fn index_grams(buf: &[u8], seen: &mut [u64], tri: &mut Vec<u32>, short: &mut Vec<u32>) {
     tri.clear();
     short.clear();
-    long.clear();
     let n = buf.len();
     if n < 2 {
         return;
     }
-    let (st, rest) = seen.split_at_mut(1 << 18);
-    let (ss, sl) = rest.split_at_mut(1 << 18);
+    let (st, ss) = seen.split_at_mut(1 << 18);
     // Its last two bytes and a 0: so a two-byte search finds them too.
     let eof = (fold(buf[n - 2]) as u32) << 16 | (fold(buf[n - 1]) as u32) << 8;
     st[(eof >> 6) as usize] |= 1 << (eof & 63);
-    tri.resize(n, 0);
-    tri[0] = eof;
-    short.resize(n, 0);
-    long.resize(n, 0);
-    let (mut nt, mut ns, mut nl) = (1, 0, 0);
+    tri.push(eof);
+    let (mut nt, mut ns) = (1, 0);
     // A gram's hash into `out` at `k`, which moves past it if it is whole
     // and new.
     let add = |seen: &mut [u64], out: &mut [u32], k: &mut usize, h: u32, whole: bool| {
@@ -475,28 +629,22 @@ fn index_grams(
         seen[w] |= bit & 0u64.wrapping_sub(whole as u64);
     };
     let mut g = (fold(buf[0]) as u64) << 8 | fold(buf[1]) as u64;
-    for (i, &c) in buf.iter().enumerate().skip(2) {
-        g = g << 8 | fold(c) as u64;
-        add(st, tri, &mut nt, (g & 0xFF_FFFF) as u32, true);
-        add(
-            ss,
-            short,
-            &mut ns,
-            gram_hash(g & ((1 << (8 * SHORT)) - 1)),
-            i + 1 >= SHORT,
-        );
-        add(
-            sl,
-            long,
-            &mut nl,
-            gram_hash(g & ((1 << (8 * LONG)) - 1)),
-            i + 1 >= LONG,
-        );
+    // A chunk at a time, with room for each of its grams to be new: the
+    // arrays grow with a big file's distinct grams, not with its size.
+    const CHUNK: usize = 1 << 20;
+    for (c, part) in buf[2..].chunks(CHUNK).enumerate() {
+        tri.resize(nt + part.len(), 0);
+        short.resize(ns + part.len(), 0);
+        for (j, &b) in part.iter().enumerate() {
+            let i = 2 + c * CHUNK + j;
+            g = g << 8 | fold(b) as u64;
+            add(st, tri, &mut nt, (g & 0xFF_FFFF) as u32, true);
+            add(ss, short, &mut ns, gram_hash(g & ((1 << (8 * SHORT)) - 1)), i + 1 >= SHORT);
+        }
     }
     tri.truncate(nt);
     short.truncate(ns);
-    long.truncate(nl);
-    for (seen, out) in [(st, &*tri), (ss, &*short), (sl, &*long)] {
+    for (seen, out) in [(st, &*tri), (ss, &*short)] {
         for &h in out {
             seen[(h >> 6) as usize] = 0;
         }
@@ -505,22 +653,18 @@ fn index_grams(
 
 /// Trigrams of a short string (query side), no scratch needed.
 fn trigrams_small(s: &[u8]) -> Vec<u32> {
-    let mut t: Vec<u32> = s
-        .windows(3)
-        .map(|w| (fold(w[0]) as u32) << 16 | (fold(w[1]) as u32) << 8 | fold(w[2]) as u32)
-        .collect();
+    let mut t: Vec<u32> = s.windows(3).map(|w| (fold(w[0]) as u32) << 16 | (fold(w[1]) as u32) << 8 | fold(w[2]) as u32).collect();
     t.sort_unstable();
     t.dedup();
     t
 }
 
-/// Bloom filters hold a content's case-folded substrings of these lengths: a
-/// match holds all of its pattern's grams, so a content missing one of them
-/// can't match even if it has every trigram. The longer ones rule out a
-/// content holding the pattern's shorter ones only apart ("different" and
-/// "reference" for "difference").
+/// The bloom filter holds a content's case-folded substrings of this length:
+/// a match holds all of its pattern's grams, so a content missing one of them
+/// can't match even if it has every trigram. A second filter, of 7-byte
+/// grams, read 0.66x the files on rare greps (0.82x their time) but took 30%
+/// of the index (0.87 bits per content byte).
 const SHORT: usize = 5;
-const LONG: usize = 7;
 
 /// A gram's 24-bit hash (its folded bytes, big-endian in the low 40 bits).
 #[inline]
@@ -555,17 +699,13 @@ const DEFINES: &str = "fn|func|function|def|class|struct|enum|trait|interface|ty
 /// The posting key for "this doc defines `name`": a hash above the 24-bit
 /// trigram space, so definitions live in the same key table as trigrams.
 fn symbol_key(name: &[u8]) -> u32 {
-    let h = name.iter().fold(0x811c_9dc5u32, |h, &b| {
-        (h ^ b as u32).wrapping_mul(0x0100_0193)
-    });
+    let h = name.iter().fold(0x811c_9dc5u32, |h, &b| (h ^ b as u32).wrapping_mul(0x0100_0193));
     h | 0x8000_0000
 }
 
 /// Is `name` something the definition index records (a plain identifier)?
 fn plain_identifier(name: &[u8]) -> bool {
-    name.first()
-        .is_some_and(|&b| b.is_ascii_alphabetic() || b == b'_')
-        && name.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+    name.first().is_some_and(|&b| b.is_ascii_alphabetic() || b == b'_') && name.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Append the sorted distinct definition keys of a buffer to `out`: every
@@ -573,21 +713,16 @@ fn plain_identifier(name: &[u8]) -> bool {
 fn symbols(buf: &[u8], out: &mut Vec<u32>) {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
-        RegexBuilder::new(&format!(
-            r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?[A-Za-z_][A-Za-z0-9_]*"
-        ))
-        .unicode(false)
-        .build()
-        .unwrap()
+        RegexBuilder::new(&format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?[A-Za-z_][A-Za-z0-9_]*"))
+            .unicode(false)
+            .build()
+            .unwrap()
     });
     let mut keys = Vec::new();
     let mut at = 0;
     while let Some(m) = re.find_at(buf, at) {
         let end = m.end();
-        let begin = buf[..end]
-            .iter()
-            .rposition(|&b| !(b.is_ascii_alphanumeric() || b == b'_'))
-            .map_or(0, |p| p + 1);
+        let begin = buf[..end].iter().rposition(|&b| !(b.is_ascii_alphanumeric() || b == b'_')).map_or(0, |p| p + 1);
         keys.push(symbol_key(&buf[begin..end]));
         // The name may itself be a keyword ("static func main"): look again
         // from it, not past it.
@@ -599,10 +734,10 @@ fn symbols(buf: &[u8], out: &mut Vec<u32>) {
 }
 
 /// Paths with size and mtime, all in one buffer: a full sync holds ~500k
-/// of them, and one allocation (mmap-backed, returned on drop) beats 500k.
+/// of them, and one allocation beats 500k (see `Paths` for big ones).
 #[derive(Default)]
 pub struct Docs {
-    buf: Vec<u8>,
+    buf: Paths,
     items: Vec<(u32, u32, u64, u32)>,
     /// What builds of these docs share: the contents already indexed (set
     /// by `diff`; docs from elsewhere are for a new, empty index).
@@ -615,7 +750,7 @@ pub struct Docs {
 #[derive(Default)]
 struct Dedup {
     held: Vec<Held>,
-    built: std::sync::Mutex<HashMap<[u64; 2], u32>>,
+    built: std::sync::Mutex<HashMap<u64, u32>>,
     free: std::sync::Mutex<Gids>,
 }
 
@@ -627,38 +762,22 @@ struct Held {
 }
 
 impl Held {
-    fn find(&self, h: [u64; 2]) -> Option<u32> {
-        let at = |s: S, k: usize| unsafe {
-            (self.map.as_ptr().add(self.off[s as usize]) as *const u32)
-                .add(k)
-                .read()
-        };
-        let hash = |c: u32| unsafe {
-            let p = (self.map.as_ptr().add(self.off[S::Hash as usize]) as *const u64)
-                .add(2 * c as usize);
-            [p.read(), p.add(1).read()]
-        };
+    fn find(&self, h: u64) -> Option<u32> {
+        let at = |s: S, k: usize| unsafe { (self.map.as_ptr().add(self.off[s as usize]) as *const u32).add(k).read() };
+        let hash = |c: u32| unsafe { (self.map.as_ptr().add(self.off[S::Hash as usize]) as *const u64).add(c as usize).read() };
         let (mut lo, mut hi) = (0, self.nown);
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if hash(at(S::ByHash, mid)) < h {
-                lo = mid + 1
-            } else {
-                hi = mid
-            }
+            if hash(at(S::ByHash, mid)) < h { lo = mid + 1 } else { hi = mid }
         }
-        (lo < self.nown && hash(at(S::ByHash, lo)) == h)
-            .then(|| at(S::OwnGid, at(S::ByHash, lo) as usize))
+        (lo < self.nown && hash(at(S::ByHash, lo)) == h).then(|| at(S::OwnGid, at(S::ByHash, lo) as usize))
     }
 }
 
 impl Dedup {
     /// The gid of a content with this hash, if one is indexed.
-    fn find(&self, h: [u64; 2]) -> Option<u32> {
-        self.held
-            .iter()
-            .find_map(|s| s.find(h))
-            .or_else(|| self.built.lock().unwrap().get(&h).copied())
+    fn find(&self, h: u64) -> Option<u32> {
+        self.held.iter().find_map(|s| s.find(h)).or_else(|| self.built.lock().unwrap().get(&h).copied())
     }
 }
 
@@ -692,13 +811,54 @@ impl Gids {
     }
 }
 
+/// A want list's path bytes. A big one has pages of its own, handed back
+/// when it goes: macOS malloc keeps a freed big buffer in the process's
+/// footprint.
+enum Paths {
+    Heap(Vec<u8>),
+    Mapped(memmap2::MmapMut, usize),
+}
+
+impl Default for Paths {
+    fn default() -> Paths {
+        Paths::Heap(Vec::new())
+    }
+}
+
+impl Paths {
+    /// Room for exactly `n` bytes.
+    fn exactly(n: usize) -> Paths {
+        let map = (n >= 1 << 20).then(|| memmap2::MmapMut::map_anon(n).ok()).flatten();
+        map.map_or_else(|| Paths::Heap(Vec::with_capacity(n)), |m| Paths::Mapped(m, 0))
+    }
+
+    fn push(&mut self, b: &[u8]) {
+        match self {
+            Paths::Heap(v) => v.extend_from_slice(b),
+            Paths::Mapped(m, n) => {
+                m[*n..*n + b.len()].copy_from_slice(b);
+                *n += b.len();
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for Paths {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Paths::Heap(v) => v,
+            Paths::Mapped(m, n) => &m[..*n],
+        }
+    }
+}
+
 impl Docs {
     fn push(&mut self, path: &[u8], size: u64, mtime: u32) {
-        self.items
-            .push((self.buf.len() as u32, path.len() as u32, size, mtime));
-        self.buf.extend_from_slice(path);
+        self.items.push((self.buf.len() as u32, path.len() as u32, size, mtime));
+        self.buf.push(path);
     }
-    fn path(&self, i: usize) -> &[u8] {
+    pub fn path(&self, i: usize) -> &[u8] {
         let (o, l, _, _) = self.items[i];
         &self.buf[o as usize..(o + l) as usize]
     }
@@ -710,17 +870,11 @@ impl Docs {
     }
     fn sort(&mut self) {
         let buf = &self.buf;
-        self.items.sort_by(|a, b| {
-            buf[a.0 as usize..(a.0 + a.1) as usize].cmp(&buf[b.0 as usize..(b.0 + b.1) as usize])
-        });
-        self.items.dedup_by(|a, b| {
-            buf[a.0 as usize..(a.0 + a.1) as usize] == buf[b.0 as usize..(b.0 + b.1) as usize]
-        });
+        self.items.sort_by(|a, b| buf[a.0 as usize..(a.0 + a.1) as usize].cmp(&buf[b.0 as usize..(b.0 + b.1) as usize]));
+        self.items.dedup_by(|a, b| buf[a.0 as usize..(a.0 + a.1) as usize] == buf[b.0 as usize..(b.0 + b.1) as usize]);
     }
     fn find(&self, path: &[u8]) -> Option<usize> {
-        let i = self
-            .items
-            .partition_point(|&(o, l, _, _)| &self.buf[o as usize..(o + l) as usize] < path);
+        let i = self.items.partition_point(|&(o, l, _, _)| &self.buf[o as usize..(o + l) as usize] < path);
         (i < self.items.len() && self.path(i) == path).then_some(i)
     }
 
@@ -750,7 +904,7 @@ const SMALL: usize = 256;
 const NOT_TEXT: i8 = i8::MIN;
 
 struct DocMeta<'a> {
-    path: &'a [u8],
+    path: std::borrow::Cow<'a, [u8]>,
     size: u64,
     mtime: u32,
     rank: i8,
@@ -760,9 +914,8 @@ struct DocMeta<'a> {
 /// One of the contents a segment being written owns.
 struct ContentMeta<'a> {
     gid: u32,
-    hash: [u64; 2],
+    hash: u64,
     bloom: &'a [u64],
-    long: &'a [u64],
     /// The first doc there holding it, or NONE.
     doc: u32,
 }
@@ -780,13 +933,12 @@ enum Holds {
 
 /// One run of docs' output: what each doc holds, and for the contents new
 /// in this build that it saw first, their (trigram, content) pairs in 256
-/// buckets by the trigram's first byte, and their definition keys and two
-/// bloom filters, flat.
+/// buckets by the trigram's first byte, and their definition keys and bloom
+/// filters, flat.
 struct Split {
     pairs: Vec<Vec<u64>>,
     syms: Vec<u32>,
     blooms: Vec<u64>,
-    longs: Vec<u64>,
     docs: Vec<(usize, Holds)>,
     contents: Vec<SplitContent>,
 }
@@ -794,45 +946,48 @@ struct Split {
 /// Where a new content's data is in its split.
 struct SplitContent {
     new: u32,
-    hash: [u64; 2],
+    hash: u64,
     small: bool,
     sym: std::ops::Range<usize>,
     bloom: std::ops::Range<usize>,
-    long: std::ops::Range<usize>,
 }
 
 /// Build one segment file from docs (any order). Files that turn out not
 /// to be text are recorded with no content; a file whose bytes are already
 /// indexed (this sync, or before it: see `diff`) just names that content.
-pub fn build_segment(
-    dir: &Path,
-    id: u64,
-    docs: &Docs,
-    range: std::ops::Range<usize>,
-) -> Option<Segment> {
+pub fn build_segment(dir: &Path, id: u64, docs: &Docs, range: std::ops::Range<usize>) -> Option<Segment> {
     use std::io::Read;
     // Docs in runs of 256, a run on one thread with its next 8 files open
     // and their reads started (`open_ahead`): on a cold cache those reads
-    // overlap the work on earlier files. A read buffer and three 2 MiB
+    // overlap the work on earlier files. A read buffer and two 2 MiB
     // seen-sets go back to a pool after each run, so a build holds one per
     // thread.
     const RUN: usize = 256;
     const AHEAD: usize = 8;
     let dedup = docs.dedup.get_or_init(Dedup::default);
     // Contents new in this build, by hash, numbered as first seen.
-    let new = std::sync::Mutex::new(HashMap::<[u64; 2], u32>::new());
+    let new = std::sync::Mutex::new(HashMap::<u64, u32>::new());
     let scratch = std::sync::Mutex::new(Vec::new());
-    let runs: Vec<std::ops::Range<usize>> = range
-        .clone()
-        .step_by(RUN)
-        .map(|s| s..(s + RUN).min(range.end))
-        .collect();
+    // (A run also ends after RUN_BYTES of files, so big files don't keep
+    // one thread busy while the others wait.)
+    const RUN_BYTES: u64 = 4 << 20;
+    let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+    let (mut start, mut bytes) = (range.start, 0);
+    for i in range.clone() {
+        if i - start == RUN || bytes >= RUN_BYTES {
+            runs.push(start..i);
+            (start, bytes) = (i, 0);
+        }
+        bytes += docs.items[i].2;
+    }
+    if start < range.end {
+        runs.push(start..range.end);
+    }
     let splits: Vec<Split> = (runs.into_par_iter())
         .map(|run| {
-            let (mut seen, mut buf, mut short, mut long, mut tri) =
-                scratch.lock().unwrap().pop().unwrap_or_else(|| (vec![0u64; 3 << 18], Vec::new(), Vec::new(), Vec::new(), Vec::new()));
-            #[rustfmt::skip]
-            let mut sp = Split { pairs: vec![Vec::new(); 256], syms: Vec::new(), blooms: Vec::new(), longs: Vec::new(), docs: Vec::new(), contents: Vec::new() };
+            let (mut seen, mut buf, mut short, mut tri) =
+                scratch.lock().unwrap().pop().unwrap_or_else(|| (vec![0u64; 2 << 18], Vec::new(), Vec::new(), Vec::new()));
+            let mut sp = Split { pairs: vec![Vec::new(); 256], syms: Vec::new(), blooms: Vec::new(), docs: Vec::new(), contents: Vec::new() };
             let mut ahead = std::collections::VecDeque::new();
             for i in run.clone() {
                 while ahead.len() <= AHEAD && i + ahead.len() < run.end {
@@ -840,8 +995,8 @@ pub fn build_segment(
                 }
                 buf.clear();
                 let text = (ahead.pop_front().flatten())
-                    .and_then(|f| f.take(MAX_FILE + 1).read_to_end(&mut buf).ok())
-                    .is_some_and(|n| n as u64 <= MAX_FILE && memchr::memchr(0, &buf[..n.min(8192)]).is_none());
+                    .and_then(|f| f.take(MAX_REPO_FILE + 1).read_to_end(&mut buf).ok())
+                    .is_some_and(|n| n as u64 <= MAX_REPO_FILE && is_text(&buf));
                 let holds = if !text {
                     Holds::Nothing
                 } else {
@@ -856,18 +1011,15 @@ pub fn build_segment(
                                 (k, k == n)
                             };
                             if first {
-                                let (sym, bl, lo) = (sp.syms.len(), sp.blooms.len(), sp.longs.len());
-                                index_grams(&buf, &mut seen, &mut tri, &mut short, &mut long);
+                                let (sym, bl) = (sp.syms.len(), sp.blooms.len());
+                                index_grams(&buf, &mut seen, &mut tri, &mut short);
                                 for &t in &tri {
                                     sp.pairs[(t >> 16) as usize].push((t as u64) << 32 | k as u64);
                                 }
                                 symbols(&buf, &mut sp.syms);
-                                // Three bits a short gram; two a long one, three in big
-                                // files (the costliest to read for nothing).
                                 bloom(&short, 3, &mut sp.blooms);
-                                bloom(&long, if buf.len() >= 16 << 10 { 3 } else { 2 }, &mut sp.longs);
-                                let (bloom, long) = (bl..sp.blooms.len(), lo..sp.longs.len());
-                                sp.contents.push(SplitContent { new: k, hash: h, small: buf.len() < SMALL, sym: sym..sp.syms.len(), bloom, long });
+                                let bloom = bl..sp.blooms.len();
+                                sp.contents.push(SplitContent { new: k, hash: h, small: buf.len() < SMALL, sym: sym..sp.syms.len(), bloom });
                             }
                             Holds::New(k)
                         }
@@ -875,7 +1027,14 @@ pub fn build_segment(
                 };
                 sp.docs.push((i, holds));
             }
-            scratch.lock().unwrap().push((seen, buf, short, long, tri));
+            // A big file's buffers go, not back to the pool.
+            if buf.capacity() > 4 << 20 {
+                buf = Vec::new();
+            }
+            for v in [&mut short, &mut tri].into_iter().filter(|v| v.capacity() > 1 << 20) {
+                *v = Vec::new();
+            }
+            scratch.lock().unwrap().push((seen, buf, short, tri));
             sp
         })
         .collect();
@@ -900,40 +1059,19 @@ pub fn build_segment(
                 Holds::Gid(g) => g,
                 Holds::New(k) => gids[local[k as usize] as usize],
             };
-            DocMeta {
-                path: docs.path(i),
-                size,
-                mtime,
-                rank: if gid == NONE {
-                    NOT_TEXT
-                } else {
-                    doc_rank(docs.path(i))
-                },
-                gid,
-            }
+            DocMeta { path: docs.path(i).into(), size, mtime, rank: if gid == NONE { NOT_TEXT } else { doc_rank(docs.path(i)) }, gid }
         })
         .collect();
     let mut own: Vec<Option<ContentMeta>> = (0..nnew).map(|_| None).collect();
     for sp in &splits {
         for c in &sp.contents {
             let l = local[c.new as usize] as usize;
-            let (bloom, long) = (&sp.blooms[c.bloom.clone()], &sp.longs[c.long.clone()]);
-            own[l] = Some(ContentMeta {
-                gid: gids[l],
-                hash: c.hash,
-                bloom,
-                long,
-                doc: first[l],
-            });
+            own[l] = Some(ContentMeta { gid: gids[l], hash: c.hash, bloom: &sp.blooms[c.bloom.clone()], doc: first[l] });
         }
     }
     let own: Vec<ContentMeta> = own.into_iter().map(Option::unwrap).collect();
-    let shared: Vec<([u64; 2], u32)> = splits
-        .iter()
-        .flat_map(|sp| &sp.contents)
-        .filter(|c| !c.small)
-        .map(|c| (c.hash, gids[local[c.new as usize] as usize]))
-        .collect();
+    let shared: Vec<(u64, u32)> =
+        splits.iter().flat_map(|sp| &sp.contents).filter(|c| !c.small).map(|c| (c.hash, gids[local[c.new as usize] as usize])).collect();
     // Postings, built in parallel over runs of keys: a run of trigrams takes
     // its bucket of every split, the definition keys every new content's.
     let parts = key_runs()
@@ -941,11 +1079,7 @@ pub fn build_segment(
             let mut pairs: Vec<u64> = Vec::new();
             if keys.start < 1 << 24 {
                 for sp in &splits {
-                    pairs.extend(
-                        sp.pairs[(keys.start >> 16) as usize]
-                            .iter()
-                            .map(|&p| p >> 32 << 32 | local[p as u32 as usize] as u64),
-                    );
+                    pairs.extend(sp.pairs[(keys.start >> 16) as usize].iter().map(|&p| p >> 32 << 32 | local[p as u32 as usize] as u64));
                 }
             } else {
                 for sp in &splits {
@@ -977,15 +1111,9 @@ pub fn build_segment(
 pub fn merge(dir: &Path, id: u64, segs: &[&Segment]) -> Option<Segment> {
     let mut meta = Vec::new();
     for s in segs {
-        for d in (0..s.ndocs as u32).filter(|&d| !s.is_dead(d)) {
-            let i = d as usize;
-            meta.push(DocMeta {
-                path: s.path(d),
-                size: s.size()[i],
-                mtime: s.mtime()[i],
-                rank: s.rank()[i],
-                gid: s.doc_gid()[i],
-            });
+        for (i, path) in s.all_paths().enumerate().filter(|&(i, _)| !s.is_dead(i as u32)) {
+            let (size, mtime, rank, gid) = (s.size()[i] as u64, s.mtime()[i], s.rank()[i], s.doc_gid()[i]);
+            meta.push(DocMeta { path: path.into(), size, mtime, rank, gid });
         }
     }
     let (mut own, mut remap) = (Vec::new(), Vec::with_capacity(segs.len()));
@@ -993,22 +1121,11 @@ pub fn merge(dir: &Path, id: u64, segs: &[&Segment]) -> Option<Segment> {
         let mut r = vec![NONE; s.nown];
         for c in (0..s.nown).filter(|&c| s.refs.get(c) > 0) {
             r[c] = own.len() as u32;
-            let (bloom, long) = (s.bloom_of(c as u32), s.long_of(c as u32));
-            own.push(ContentMeta {
-                gid: s.own_gid()[c],
-                hash: s.hash_of(c as u32),
-                bloom,
-                long,
-                doc: NONE,
-            });
+            own.push(ContentMeta { gid: s.own_gid()[c], hash: s.hash_of(c as u32), bloom: s.bloom_of(c as u32), doc: NONE });
         }
         remap.push(r);
     }
-    let at: HashMap<u32, u32> = own
-        .iter()
-        .enumerate()
-        .map(|(c, m)| (m.gid, c as u32))
-        .collect();
+    let at: HashMap<u32, u32> = own.iter().enumerate().map(|(c, m)| (m.gid, c as u32)).collect();
     for (d, m) in meta.iter().enumerate() {
         if let Some(&c) = at.get(&m.gid)
             && own[c as usize].doc == NONE
@@ -1019,30 +1136,22 @@ pub fn merge(dir: &Path, id: u64, segs: &[&Segment]) -> Option<Segment> {
     // Postings, merged in parallel over runs of keys.
     let parts = key_runs()
         .map(|keys| {
-            let k = |s: &Segment, x: u64| s.tri_key().partition_point(|&t| (t as u64) < x);
-            let mut pos: Vec<std::ops::Range<usize>> = segs
-                .iter()
-                .map(|s| k(s, keys.start)..k(s, keys.end))
+            let mut its: Vec<_> = (segs.iter())
+                .map(|s| {
+                    s.lists_from(s.block_of(keys.start))
+                        .skip_while(|&(k, _)| (k as u64) < keys.start)
+                        .take_while(|&(k, _)| (k as u64) < keys.end)
+                        .peekable()
+                })
                 .collect();
             let (mut out, mut list, mut part) = (Postings::default(), Vec::new(), Vec::new());
-            while let Some(t) = segs
-                .iter()
-                .zip(&pos)
-                .filter(|(_, p)| !p.is_empty())
-                .map(|(s, p)| s.tri_key()[p.start])
-                .min()
-            {
+            while let Some(t) = its.iter_mut().filter_map(|it| it.peek().map(|x| x.0)).min() {
                 list.clear();
-                for (si, s) in segs.iter().enumerate() {
-                    if !pos[si].is_empty() && s.tri_key()[pos[si].start] == t {
+                for (si, it) in its.iter_mut().enumerate() {
+                    if let Some((_, l)) = it.next_if(|x| x.0 == t) {
                         part.clear();
-                        s.list_into(pos[si].start, &mut part);
-                        list.extend(
-                            part.iter()
-                                .map(|&c| remap[si][c as usize])
-                                .filter(|&c| c != NONE),
-                        );
-                        pos[si].start += 1;
+                        l.all_into(&mut part);
+                        list.extend(part.iter().map(|&c| remap[si][c as usize]).filter(|&c| c != NONE));
                     }
                 }
                 if !list.is_empty() {
@@ -1058,13 +1167,7 @@ pub fn merge(dir: &Path, id: u64, segs: &[&Segment]) -> Option<Segment> {
 /// The key space in runs that postings are built in, in parallel: the
 /// trigrams 64k at a time, then the definition keys (above 2^24).
 fn key_runs() -> impl IndexedParallelIterator<Item = std::ops::Range<u64>> {
-    (0..257usize).into_par_iter().map(|r| {
-        if r < 256 {
-            (r as u64) << 16..(r as u64 + 1) << 16
-        } else {
-            1 << 24..1 << 32
-        }
-    })
+    (0..257usize).into_par_iter().map(|r| if r < 256 { (r as u64) << 16..(r as u64 + 1) << 16 } else { 1 << 24..1 << 32 })
 }
 
 /// Posting lists for a run of keys, encoded: the keys (ascending), where
@@ -1078,74 +1181,88 @@ struct Postings {
 
 impl Postings {
     /// Add `key`'s contents (ascending) in a segment owning `n`: a bitset
-    /// when dense, delta varints otherwise.
+    /// when dense, else in interpolative code. Up to BLOCK contents are an
+    /// Elias-gamma count and one block; more are a u32 count, a skip entry
+    /// per block but the last (its last content, where the next block's bits
+    /// start), and the blocks, each within the previous block's last content
+    /// and its own (whose last content the skip entry holds).
     fn push(&mut self, n: usize, key: u32, list: &[u32]) {
         self.keys.push(key);
+        let at = self.post.len();
         if list.len() * 8 > n {
-            self.offs.push(self.post.len() as u32 | BITSET);
-            let at = self.post.len();
+            self.offs.push(at as u32 | BITSET);
             self.post.resize(at + n.div_ceil(8), 0);
             for &d in list {
                 self.post[at + d as usize / 8] |= 1 << (d % 8);
             }
+            return;
+        }
+        let (mut w, top) = (Bits::default(), n as u32 - 1);
+        if list.len() <= BLOCK {
+            self.offs.push(at as u32);
+            let (len, z) = (list.len() as u32, list.len().ilog2());
+            w.put((len & ((1 << z) - 1)) << (z + 1) | 1 << z, 2 * z + 1);
+            ic_put(&mut w, list, 0, top);
         } else {
-            let (at, skips) = (self.post.len(), list.len().saturating_sub(1) / SKIP);
-            if skips > 0 {
-                self.offs.push(at as u32 | SKIPS);
-                self.post.extend_from_slice(&(skips as u32).to_le_bytes());
-                self.post.resize(at + 4 + skips * 8, 0);
-            } else {
-                self.offs.push(at as u32);
-            }
-            let start = self.post.len();
-            let mut last = 0u32;
-            for (i, &d) in list.iter().enumerate() {
-                if i > 0 && i % SKIP == 0 {
-                    let e = at + 4 + (i / SKIP - 1) * 8;
-                    let off = (self.post.len() - start) as u32;
-                    self.post[e..e + 8]
-                        .copy_from_slice(&((off as u64) << 32 | last as u64).to_le_bytes());
+            self.offs.push(at as u32 | SKIPS);
+            self.post.extend_from_slice(&(list.len() as u32).to_le_bytes());
+            let mut lo = 0;
+            for (j, blk) in list.chunks(BLOCK).enumerate() {
+                if (j + 1) * BLOCK < list.len() {
+                    let last = blk[BLOCK - 1];
+                    ic_put(&mut w, &blk[..BLOCK - 1], lo, last - 1);
+                    self.post.extend_from_slice(&(last as u64 | (w.len() as u64) << 32).to_le_bytes());
+                    lo = last + 1;
+                } else {
+                    ic_put(&mut w, blk, lo, top);
                 }
-                put_varint(&mut self.post, d - last);
-                last = d;
             }
         }
+        self.post.extend_from_slice(&w.finish());
     }
 }
 
 /// Write the segment file: docs, own contents, and their postings in runs
 /// of keys (ascending).
-fn write_segment(
-    dir: &Path,
-    id: u64,
-    docs: &[DocMeta<'_>],
-    own: &[ContentMeta<'_>],
-    parts: Vec<Postings>,
-) -> Option<Segment> {
+fn write_segment(dir: &Path, id: u64, docs: &[DocMeta<'_>], own: &[ContentMeta<'_>], parts: Vec<Postings>) -> Option<Segment> {
     if docs.is_empty() && own.is_empty() {
         return None;
     }
     let (ndocs, nown) = (docs.len(), own.len());
-    let (mut keys, mut tri_off, mut post) = (Vec::new(), Vec::new(), Vec::new());
+    // The posting lists' dictionary, in blocks of DICT (see `Segment::dict`).
+    let (mut idx, mut dict, mut post, mut ntri, mut last) = (Vec::new(), Vec::new(), Vec::new(), 0usize, 0u32);
     for p in &parts {
-        let base = post.len() as u32;
-        keys.extend_from_slice(&p.keys);
-        tri_off.extend(p.offs.iter().map(|&o| ((o & !FLAGS) + base) | (o & FLAGS)));
+        let ends = p.offs.iter().skip(1).map(|&o| (o & !FLAGS) as usize).chain([p.post.len()]);
+        for ((&key, &o), end) in p.keys.iter().zip(&p.offs).zip(ends) {
+            let at = (o & !FLAGS) as usize;
+            if ntri % DICT == 0 {
+                idx.push([key, dict.len() as u32, (post.len() + at) as u32]);
+                last = key;
+            }
+            put_varint(&mut dict, key - last);
+            put_varint(&mut dict, ((end - at) as u32) << 2 | (o & BITSET != 0) as u32 | ((o & SKIPS != 0) as u32) << 1);
+            (last, ntri) = (key, ntri + 1);
+        }
         post.extend_from_slice(&p.post);
     }
     drop(parts);
-    tri_off.push(post.len() as u32);
-    let mut paths = Vec::new();
-    let mut path_off = vec![0u32];
-    for d in docs {
-        paths.extend_from_slice(d.path);
-        path_off.push(paths.len() as u32);
+    // Paths front-coded in groups of PATHS docs (see `Segment::path_off`).
+    let (mut paths, mut path_off) = (Vec::new(), Vec::with_capacity(ndocs.div_ceil(PATHS)));
+    for (i, d) in docs.iter().enumerate() {
+        if i % PATHS == 0 {
+            path_off.push(paths.len() as u32);
+        }
+        let shared = if i % PATHS == 0 { 0 } else { d.path.iter().zip(docs[i - 1].path.iter()).take_while(|(a, b)| a == b).count() };
+        put_varint(&mut paths, shared as u32);
+        put_varint(&mut paths, (d.path.len() - shared) as u32);
+        paths.extend_from_slice(&d.path[shared..]);
     }
-    let size: Vec<u64> = docs.iter().map(|d| d.size).collect();
+    // (Docs are files of at most MAX_FILE bytes.)
+    let size: Vec<u32> = docs.iter().map(|d| d.size as u32).collect();
     let mtime: Vec<u32> = docs.iter().map(|d| d.mtime).collect();
     let rank: Vec<i8> = docs.iter().map(|d| d.rank).collect();
     let mut by_path: Vec<u32> = (0..ndocs as u32).collect();
-    by_path.sort_by(|&a, &b| docs[a as usize].path.cmp(docs[b as usize].path));
+    by_path.sort_by(|&a, &b| docs[a as usize].path.cmp(&docs[b as usize].path));
     let mut by_rank: Vec<u32> = (0..ndocs as u32).collect();
     by_rank.sort_by_key(|&d| (rank_key(docs[d as usize].rank, docs[d as usize].mtime), d));
     let doc_gid: Vec<u32> = docs.iter().map(|d| d.gid).collect();
@@ -1155,41 +1272,21 @@ fn write_segment(
     let gid_sorted: Vec<u32> = by_gid.iter().map(|&d| doc_gid[d as usize]).collect();
     let own_gid: Vec<u32> = own.iter().map(|c| c.gid).collect();
     let own_doc: Vec<u32> = own.iter().map(|c| c.doc).collect();
-    let hash: Vec<u64> = own.iter().flat_map(|c| c.hash).collect();
+    let hash: Vec<u64> = own.iter().map(|c| c.hash).collect();
     let mut by_hash: Vec<u32> = (0..nown as u32).collect();
     by_hash.sort_by_key(|&c| own[c as usize].hash);
-    let (mut bloom_off, mut blooms, mut long_off, mut longs) =
-        (vec![0u32], Vec::new(), vec![0u32], Vec::new());
+    let (mut bloom_off, mut blooms) = (vec![0u32], Vec::new());
     for c in own {
         blooms.extend_from_slice(c.bloom);
         bloom_off.push(blooms.len() as u32);
-        longs.extend_from_slice(c.long);
-        long_off.push(longs.len() as u32);
     }
 
-    let (off, _) = layout(&lens(
-        ndocs,
-        keys.len(),
-        post.len(),
-        paths.len(),
-        blooms.len(),
-        nown,
-        longs.len(),
-    ));
-    let fields = [
-        ndocs,
-        keys.len(),
-        post.len(),
-        paths.len(),
-        blooms.len(),
-        nown,
-        longs.len(),
-    ]
-    .map(|v| v as u64);
+    let (off, _) = layout(&lens(ndocs, ntri, post.len(), paths.len(), blooms.len(), nown, dict.len()));
+    let fields = [ndocs, ntri, post.len(), paths.len(), blooms.len(), nown, dict.len()].map(|v| v as u64);
     let hdr = header(MAGIC, &fields);
     let sections: [&[u8]; NS] = [
-        as_bytes(&keys),
-        as_bytes(&tri_off),
+        as_bytes(&idx),
+        &dict,
         &post,
         as_bytes(&path_off),
         &paths,
@@ -1208,8 +1305,6 @@ fn write_segment(
         as_bytes(&by_hash),
         as_bytes(&bloom_off),
         as_bytes(&blooms),
-        as_bytes(&long_off),
-        as_bytes(&longs),
     ];
     let p = seg_path(dir, id);
     let tmp = p.with_extension("tmp");
@@ -1230,29 +1325,91 @@ fn write_segment(
     Segment::load(dir, id)
 }
 
-/// Should this file be in the content index?
+/// Should this file be in the content index? (Resolves its folders from the
+/// disk; a sync resolves each folder once, see `Scope`.)
 pub fn eligible(path: &[u8], size: u64, home: &[u8]) -> bool {
-    let name = &path[path.iter().rposition(|&b| b == b'/').map_or(0, |p| p + 1)..];
-    name_ok(name, size) && in_scope(path, home)
+    Scope::new(home, &on_disk).file(path, size)
 }
 
-/// The name/size half of eligibility, checkable before building a path.
+/// Outside git repos, the text files are known by name and size.
 fn name_ok(name: &[u8], size: u64) -> bool {
-    if size > MAX_FILE {
+    if size > MAX_FILE || SKIP_DIRS.contains(&name) {
         return false;
     }
     match name.iter().rposition(|&b| b == b'.').filter(|&p| p > 0) {
         Some(dot) => {
             let ext = &name[dot + 1..];
-            TEXT_EXTS.iter().any(|x| x.eq_ignore_ascii_case(ext))
-                && !name.ends_with(b".min.js")
-                && name != b"package-lock.json"
+            TEXT_EXTS.iter().any(|x| x.eq_ignore_ascii_case(ext)) && !name.ends_with(b".min.js") && name != b"package-lock.json"
         }
         None => size <= 256 << 10,
     }
 }
 
-/// Is this path (file or directory) inside the indexed area?
+/// A name fff takes for binary without reading it.
+fn binary_ext(name: &[u8]) -> bool {
+    name.iter().rposition(|&b| b == b'.').filter(|&p| p > 0).is_some_and(|p| BINARY_EXTS.iter().any(|x| x.eq_ignore_ascii_case(&name[p + 1..])))
+}
+
+/// A name's extension (after its last dot, not a leading one), or "".
+fn ext(name: &[u8]) -> &[u8] {
+    name.iter().rposition(|&b| b == b'.').filter(|&p| p > 0).map_or(&b""[..], |p| &name[p + 1..])
+}
+
+/// JSON and JSON lines keep the 1 MB cap in git repos too: past that they
+/// are transcripts and app state far more often than text to grep.
+fn json_ext(name: &[u8]) -> bool {
+    [&b"json"[..], b"jsonl", b"ndjson"].iter().any(|x| x.eq_ignore_ascii_case(ext(name)))
+}
+
+/// Lockfiles: generated, long, and not what you grep for.
+#[rustfmt::skip]
+const LOCKFILES: &[&[u8]] = &[
+    b"package-lock.json", b"npm-shrinkwrap.json", b"yarn.lock", b"pnpm-lock.yaml", b"bun.lock", b"bun.lockb", b"deno.lock",
+    b"Cargo.lock", b"Gemfile.lock", b"poetry.lock", b"Pipfile.lock", b"uv.lock", b"composer.lock", b"go.sum", b"Podfile.lock",
+    b"Package.resolved", b"Cartfile.resolved", b"flake.lock", b"mix.lock", b"pubspec.lock", b"packages.lock.json", b"gradle.lockfile",
+];
+
+/// Files whose text the index leaves out by name and size, in repos and
+/// out (their names stay findable, and a grep of the file itself reads it):
+/// lockfiles, JSON of 100 KB and up (data and state; JSON lines transcripts
+/// stay), minified or bundled JS and CSS.
+fn generated(name: &[u8], size: u64) -> bool {
+    let is = |exts: &[&[u8]]| exts.iter().any(|x| x.eq_ignore_ascii_case(ext(name)));
+    let has = |w: &[u8]| memchr::memmem::find(name, w).is_some();
+    LOCKFILES.contains(&name)
+        || is(&[b"json", b"jsonc", b"json5"]) && size >= 100 << 10
+        || is(&[b"js", b"mjs", b"cjs", b"css"])
+            && (has(b".min.") || has(b".bundle.") || has(b".chunk.") || name.starts_with(b"bundle.") || name.starts_with(b"chunk-"))
+}
+
+/// Text, as the content build takes a file's bytes: no NUL byte anywhere (as
+/// fff decides), and not minified or generated (`long_lines`). A grep that
+/// reads files directly keeps a file by the same test (see `Reading`), so
+/// a search answers the same before the build and after.
+fn is_text(buf: &[u8]) -> bool {
+    memchr::memchr(0, buf).is_none() && !long_lines(buf)
+}
+
+/// Minified or generated, by a cheap look: lines averaging over 1000 bytes,
+/// in a file of 4 KB and up (fewer than one newline per 1001 bytes, counted
+/// only that far). Its name stays findable, its text unindexed.
+fn long_lines(buf: &[u8]) -> bool {
+    buf.len() >= 4096 && memchr::memchr_iter(b'\n', buf).nth(buf.len() / 1001 - 1).is_none()
+}
+
+/// Does home's heuristic skip this folder (`rel`: its path under home;
+/// `holds` tells whether it holds a file)?
+fn skipped(rel: &[u8], name: &[u8], holds: impl Fn(&[u8]) -> bool) -> bool {
+    SKIP_DIRS.contains(&name)
+        || SKIP_SUFFIXES.iter().any(|x| name.len() > x.len() && name.ends_with(x))
+        || SKIP_UNDER_HOME.contains(&rel)
+        || MARKED_DIRS.contains(&name) && MARKERS.iter().any(|m| holds(m))
+}
+
+/// Can this path (file or folder) be in the indexed area: under home, not
+/// in a `.git`, and past no folder home's heuristics skip unless a git repo
+/// holds that folder (then its ignore files decide, see `Scope`)? Cheap: it
+/// touches the disk only to look for a repo above a skipped folder.
 pub fn in_scope(path: &[u8], home: &[u8]) -> bool {
     let Some(rest) = path.strip_prefix(home) else {
         return false;
@@ -1261,31 +1418,562 @@ pub fn in_scope(path: &[u8], home: &[u8]) -> bool {
         return false;
     }
     let rel = rest.strip_prefix(b"/").unwrap_or(rest);
-    if SKIP_UNDER_HOME
-        .iter()
-        .any(|p| rel.starts_with(p) && rel.get(p.len()).is_none_or(|&b| b == b'/'))
-    {
-        return false;
+    let mut at = 0;
+    for c in rel.split(|&b| b == b'/') {
+        if c == b".git" {
+            return false;
+        }
+        if skipped(&rel[..at + c.len()], c, |m| on_disk(&join(&path[..home.len() + 1 + at + c.len()], m)).is_some()) {
+            let mut above = (0..at).filter(|&i| rel[i] == b'/');
+            return above.any(|i| on_disk(&join(&path[..home.len() + 1 + i], b".git")).is_some());
+        }
+        at += c.len() + 1;
     }
-    !rel.split(|&b| b == b'/').any(|c| {
-        SKIP_DIRS.contains(&c)
-            || SKIP_SUFFIXES
-                .iter()
-                .any(|x| c.len() > x.len() && c.ends_with(x))
+    true
+}
+
+/// A path's (kind, size, mtime) on disk.
+fn on_disk(path: &[u8]) -> Option<(u8, u64, u32)> {
+    crate::live::lstat(path).map(|o| (o.kind, o.size, o.mtime))
+}
+
+/// A path's (kind, size, mtime) as the name index has it.
+fn in_index(live: &Live, path: &[u8]) -> Option<(u8, u64, u32)> {
+    if let Some(o) = live.over.get(path) {
+        return Some((o.kind, o.size, o.mtime));
+    }
+    let i = live.base.lookup(path).filter(|&e| !live.is_dead(e))? as usize;
+    Some((live.base.kind(i), live.base.size_of(i), live.base.mtime(i)))
+}
+
+/// The user's own folders never to grep inside (their names stay findable,
+/// a grep of a file there still reads it): a file in the data dir, one
+/// folder a line, `~/` allowed, `#` comments. Empty or missing: none.
+pub const SKIP_LIST: &str = "content-skip.txt";
+
+/// The skip list's path (known once the content index opens), and the
+/// folders it held when a sync last read it.
+static USER_SKIPS: Mutex<UserSkips> = Mutex::new((None, None));
+type UserSkips = (Option<PathBuf>, Option<Vec<Vec<u8>>>);
+
+/// The skip list's folders, as absolute paths.
+fn skip_list(home: &[u8]) -> Vec<Vec<u8>> {
+    let path = USER_SKIPS.lock().unwrap().0.clone();
+    let text = path.and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+    (text.split(|&b| b == b'\n').map(<[u8]>::trim_ascii))
+        .filter(|l| !l.is_empty() && !l.starts_with(b"#"))
+        .map(|l| {
+            let l = l.strip_suffix(b"/").unwrap_or(l);
+            match l.strip_prefix(b"~") {
+                Some(rest) => [home, rest].concat(),
+                None if l.starts_with(b"/") => l.to_vec(),
+                None => join(home, l),
+            }
+        })
+        .collect()
+}
+
+/// Ignore files parsed so far, by path, with the (size, mtime) they were
+/// read at; and the repo roots seen, as their `.git` with no globs.
+type Parsed = HashMap<Vec<u8>, (u64, u32, Option<Arc<Globs>>)>;
+static PARSED: std::sync::LazyLock<Mutex<Parsed>> = std::sync::LazyLock::new(Default::default);
+
+/// A path's (kind, size, mtime) in the name index (or on disk), if there.
+type Look<'a> = &'a dyn Fn(&[u8]) -> Option<(u8, u64, u32)>;
+
+/// Decides which folders and files the content index takes. In a git repo,
+/// the files git doesn't ignore (as ripgrep and fff read .gitignore,
+/// .ignore, .git/info/exclude and the global excludes file), up to 10 MB,
+/// but for names fff takes for binary; files holding a NUL byte are then
+/// kept as not text. Elsewhere under home, text files by extension, outside
+/// dependency, cache and app-data folders. Folders resolve top-down from
+/// home, each once.
+struct Scope<'a> {
+    home: &'a [u8],
+    look: Look<'a>,
+    global: Option<Arc<Globs>>,
+    /// The user's skip list (see SKIP_LIST).
+    skips: Vec<Vec<u8>>,
+    /// Folders resolved so far (None: out of scope), and the last one.
+    dirs: HashMap<Vec<u8>, Option<Place>>,
+    last: Option<(Vec<u8>, Option<Place>)>,
+}
+
+/// A folder in scope: the ignore files over it, innermost first, and
+/// whether it is in a git repo.
+#[derive(Clone)]
+struct Place {
+    rules: Option<Arc<Rules>>,
+    repo: bool,
+}
+
+/// A folder's ignore files, then the ones further up.
+struct Rules {
+    /// The folder, with a trailing '/': their globs match paths below it.
+    dir: Vec<u8>,
+    gitignore: Option<Arc<Globs>>,
+    ignore: Option<Arc<Globs>>,
+    /// At a repo root: its info/exclude. Git's files above it don't apply.
+    root: Option<Option<Arc<Globs>>>,
+    up: Option<Arc<Rules>>,
+}
+
+impl<'a> Scope<'a> {
+    fn new(home: &'a [u8], look: Look<'a>) -> Scope<'a> {
+        let mut s = Scope { home, look, global: None, skips: skip_list(home), dirs: HashMap::new(), last: None };
+        s.global = s.globs(&excludes_file(home));
+        s
+    }
+
+    /// An ignore file's globs, parsed once per version of it.
+    fn globs(&self, path: &[u8]) -> Option<Arc<Globs>> {
+        let (kind, size, mtime) = (self.look)(path)?;
+        if kind & 3 != KIND_FILE {
+            return None;
+        }
+        let mut parsed = PARSED.lock().unwrap();
+        if let Some((s, m, g)) = parsed.get(path)
+            && (*s, *m) == (size, mtime)
+        {
+            return g.clone();
+        }
+        let g = std::fs::read(OsStr::from_bytes(path)).ok().and_then(|t| Globs::parse(&t)).map(Arc::new);
+        parsed.insert(path.to_vec(), (size, mtime, g.clone()));
+        g
+    }
+
+    /// Did this folder's ignore files or repo root change since a sync last
+    /// resolved it (or appear in a folder it never saw)? Then everything
+    /// below it may have changed eligibility.
+    fn rules_changed(&self, dir: &[u8]) -> bool {
+        let mut parsed = PARSED.lock().unwrap();
+        let mut changed = false;
+        for name in [&b".git"[..], b".gitignore", b".ignore"] {
+            let p = join(dir, name);
+            let (now, was) = ((self.look)(&p), parsed.get(&p).map(|e| (e.0, e.1)));
+            // (A .git folder's mtime moves with every git command.)
+            changed |= if name == b".git" { now.is_some() != was.is_some() } else { now.map(|(_, s, m)| (s, m)) != was };
+            if now.is_none() {
+                parsed.remove(&p);
+            }
+        }
+        changed
+    }
+
+    /// Is `dir` a linked git worktree: its `.git` a file pointing into another
+    /// repo's `.git/worktrees/` (a submodule's points into `.git/modules/`)?
+    /// Its text is mostly its main checkout's: left out.
+    fn linked_worktree(&self, dir: &[u8]) -> bool {
+        let dot = join(dir, b".git");
+        if (self.look)(&dot).is_none_or(|(kind, ..)| kind & 3 != KIND_FILE) {
+            return false;
+        }
+        let text = std::fs::read(OsStr::from_bytes(&dot)).unwrap_or_default();
+        let to = text.strip_prefix(b"gitdir:").map_or(&b""[..], <[u8]>::trim_ascii);
+        to.strip_suffix(b"/").unwrap_or(to).rsplit(|&b| b == b'/').nth(1) == Some(&b"worktrees"[..])
+    }
+
+    /// The place of a folder (None: out of scope).
+    fn place(&mut self, dir: &[u8]) -> Option<Place> {
+        if let Some(p) = self.dirs.get(dir) {
+            return p.clone();
+        }
+        let p = if dir == self.home {
+            Some(self.enter(dir, Place { rules: None, repo: false }))
+        } else {
+            let cut = dir.iter().rposition(|&b| b == b'/').filter(|&c| dir.starts_with(self.home) && c >= self.home.len())?;
+            let up = self.place(&dir[..cut])?;
+            let name = &dir[cut + 1..];
+            let skip = if up.repo { name == b".git" } else { skipped(&dir[self.home.len() + 1..], name, |m| (self.look)(&join(dir, m)).is_some()) };
+            let skip = skip || self.skips.iter().any(|s| s == dir) || self.linked_worktree(dir);
+            (!skip && !ignored(&up.rules, self.global.as_deref(), dir, true)).then(|| self.enter(dir, up))
+        };
+        self.dirs.insert(dir.to_vec(), p.clone());
+        p
+    }
+
+    /// A folder's place: its own ignore files and repo root on its parent's.
+    fn enter(&self, dir: &[u8], up: Place) -> Place {
+        // Home itself is never taken for a repo: it holds everything else.
+        let git = (dir != self.home).then(|| (self.look)(&join(dir, b".git"))).flatten();
+        let (gitignore, ignore) = (self.globs(&join(dir, b".gitignore")), self.globs(&join(dir, b".ignore")));
+        if git.is_none() && gitignore.is_none() && ignore.is_none() {
+            return up;
+        }
+        let root = git.map(|(kind, ..)| {
+            PARSED.lock().unwrap().insert(join(dir, b".git"), (0, 0, None));
+            git_dir(dir, kind).and_then(|g| self.globs(&join(&g, b"info/exclude")))
+        });
+        let rules = Rules { dir: join(dir, b""), gitignore, ignore, root, up: up.rules };
+        Place { repo: up.repo || rules.root.is_some(), rules: Some(Arc::new(rules)) }
+    }
+
+    /// Should the file at `path` be indexed?
+    fn file(&mut self, path: &[u8], size: u64) -> bool {
+        let cut = path.iter().rposition(|&b| b == b'/').unwrap_or(0);
+        let (dir, name) = (&path[..cut], &path[cut + 1..]);
+        let place = match &self.last {
+            Some((d, p)) if d == dir => p.clone(),
+            _ => {
+                let p = self.place(dir);
+                self.last = Some((dir.to_vec(), p.clone()));
+                p
+            }
+        };
+        let Some(place) = place else { return false };
+        let cap = if json_ext(name) { MAX_FILE } else { MAX_REPO_FILE };
+        let ok = if place.repo { size <= cap && name != b".git" && !binary_ext(name) } else { name_ok(name, size) };
+        ok && !generated(name, size) && !ignored(&place.rules, self.global.as_deref(), path, false)
+    }
+
+    /// What should be indexed under `dir` (direct children only unless
+    /// `recursive`), by the name index.
+    fn wanted(&mut self, live: &Live, dir: &[u8], recursive: bool) -> Docs {
+        let mut want = Docs::default();
+        if self.place(dir).is_none() {
+            return want;
+        }
+        let idx = &live.base;
+        let path = |i: usize, p: &mut Vec<u8>| if recursive { idx.path(i, p) } else { *p = join(dir, &idx.name(i)) };
+        // The files first, then their paths into buffers of just their size:
+        // grown a push at a time, a big list's freed buffers stay in the
+        // process's footprint (macOS malloc), a new copy each sync.
+        let (mut p, mut picked, mut bytes) = (Vec::new(), Vec::new(), 0);
+        if let Some(d) = idx.lookup(dir).filter(|&e| !live.is_dead(e)).and_then(|e| idx.dir_of(e)) {
+            let range = if recursive { idx.dir_start(d as usize) as usize..idx.dir_end(d as usize) as usize } else { idx.children(d) };
+            picked.reserve_exact(range.len());
+            for i in range {
+                let (name, size) = (idx.name(i), idx.size_of(i));
+                if idx.kind(i) & 3 != KIND_FILE || live.is_dead(i as u32) || size > MAX_REPO_FILE || binary_ext(&name) {
+                    continue;
+                }
+                path(i, &mut p);
+                if self.file(&p, size) {
+                    picked.push(i);
+                    bytes += p.len();
+                }
+            }
+        }
+        let lo = join(dir, b"");
+        let over: Vec<_> = (live.over.range(lo.clone()..).take_while(|(k, _)| k.starts_with(&lo)))
+            .filter(|(k, o)| o.kind & 3 == KIND_FILE && (recursive || !k[lo.len()..].contains(&b'/')) && self.file(k, o.size))
+            .collect();
+        want.items.reserve_exact(picked.len() + over.len());
+        want.buf = Paths::exactly(bytes + over.iter().map(|(k, _)| k.len()).sum::<usize>());
+        for i in picked {
+            path(i, &mut p);
+            want.push(&p, idx.size_of(i), idx.mtime(i));
+        }
+        for (k, o) in over {
+            want.push(k, o.size, o.mtime);
+        }
+        want
+    }
+}
+
+/// The global excludes file, as git finds it: core.excludesFile in the
+/// user's git config, else ~/.config/git/ignore.
+fn excludes_file(home: &[u8]) -> Vec<u8> {
+    for config in [&b"/.gitconfig"[..], b"/.config/git/config"] {
+        let Ok(text) = std::fs::read(OsStr::from_bytes(&[home, config].concat())) else { continue };
+        let (mut core, mut found) = (false, None);
+        for l in text.split(|&b| b == b'\n').map(<[u8]>::trim_ascii) {
+            if l.starts_with(b"[") {
+                core = l.eq_ignore_ascii_case(b"[core]");
+            } else if let Some(eq) = l.iter().position(|&b| b == b'=')
+                && core
+                && l[..eq].trim_ascii().eq_ignore_ascii_case(b"excludesfile")
+            {
+                let v = l[eq + 1..].trim_ascii();
+                let v = v.strip_prefix(b"\"").and_then(|v| v.strip_suffix(b"\"")).unwrap_or(v);
+                found = Some(v.strip_prefix(b"~").map_or(v.to_vec(), |r| [home, r].concat()));
+            }
+        }
+        if let Some(f) = found {
+            return f;
+        }
+    }
+    [home, b"/.config/git/ignore"].concat()
+}
+
+/// The git dir of the repo rooted at `dir`: its `.git`, or for a worktree
+/// or submodule (a `.git` file), the common dir it points to.
+fn git_dir(dir: &[u8], kind: u8) -> Option<Vec<u8>> {
+    let dot = join(dir, b".git");
+    if kind & 3 == KIND_DIR {
+        return Some(dot);
+    }
+    let text = std::fs::read(OsStr::from_bytes(&dot)).ok()?;
+    let to = text.strip_prefix(b"gitdir:")?.trim_ascii();
+    let git = if to.starts_with(b"/") { to.to_vec() } else { join(dir, to) };
+    Some(match std::fs::read(OsStr::from_bytes(&join(&git, b"commondir"))) {
+        Ok(c) if c.trim_ascii().starts_with(b"/") => c.trim_ascii().to_vec(),
+        Ok(c) => join(&git, c.trim_ascii()),
+        Err(_) => git,
     })
+}
+
+/// Do the ignore files over `path` (innermost first) ignore it? As ripgrep
+/// decides: the innermost .ignore that says either way, else the innermost
+/// .gitignore up to the repo root, else the root's info/exclude, else the
+/// global excludes. Git's files count only in a repo.
+fn ignored(rules: &Option<Arc<Rules>>, global: Option<&Globs>, path: &[u8], dir: bool) -> bool {
+    let (mut ig, mut gi, mut ex, mut root) = (None, None, None, None);
+    let mut r = rules.as_deref();
+    while let Some(l) = r {
+        let rel = &path[l.dir.len()..];
+        ig = ig.or_else(|| l.ignore.as_ref()?.decide(rel, dir));
+        if root.is_none() {
+            gi = gi.or_else(|| l.gitignore.as_ref()?.decide(rel, dir));
+            if let Some(x) = &l.root {
+                ex = x.as_ref().and_then(|x| x.decide(rel, dir));
+                root = Some(rel);
+            }
+        }
+        r = l.up.as_deref();
+    }
+    match root {
+        Some(rel) => ig.or(gi).or(ex).or_else(|| global?.decide(rel, dir)),
+        None => ig,
+    }
+    .unwrap_or(false)
+}
+
+/// One ignore file's globs as regexes over paths relative to its folder,
+/// with (whitelist, folders only) per glob: a path's last match decides.
+struct Globs {
+    set: regex::bytes::RegexSet,
+    kinds: Vec<(bool, bool)>,
+}
+
+impl Globs {
+    fn parse(text: &[u8]) -> Option<Globs> {
+        let (mut res, mut kinds): (Vec<String>, Vec<(bool, bool)>) = (Vec::new(), Vec::new());
+        for (re, white, dir) in text.split(|&b| b == b'\n').filter_map(ignore_line) {
+            res.push(re);
+            kinds.push((white, dir));
+        }
+        // A glob that won't compile is left out, as ripgrep leaves it out.
+        let set = match regex::bytes::RegexSet::new(&res) {
+            Ok(set) => set,
+            Err(_) => {
+                let ok: Vec<bool> = res.iter().map(|r| regex::bytes::Regex::new(r).is_ok()).collect();
+                kinds = kinds.into_iter().zip(&ok).filter(|(_, ok)| **ok).map(|(k, _)| k).collect();
+                regex::bytes::RegexSet::new(res.iter().zip(&ok).filter(|(_, ok)| **ok).map(|(r, _)| r)).ok()?
+            }
+        };
+        (!kinds.is_empty()).then_some(Globs { set, kinds })
+    }
+
+    /// Some(true): the last glob matching `rel` ignores it; Some(false): it
+    /// whitelists it.
+    fn decide(&self, rel: &[u8], dir: bool) -> Option<bool> {
+        if !self.set.is_match(rel) {
+            return None;
+        }
+        self.set.matches(rel).iter().rev().map(|i| self.kinds[i]).find(|k| !k.1 || dir).map(|k| !k.0)
+    }
+}
+
+/// A gitignore line as ripgrep's `ignore` crate reads it: (regex, whitelist,
+/// folders only), or None for blanks and comments.
+fn ignore_line(line: &[u8]) -> Option<(String, bool, bool)> {
+    if line.starts_with(b"#") {
+        return None;
+    }
+    let mut l = if line.ends_with(b"\\ ") { line } else { line.trim_ascii_end() };
+    let (mut white, mut anchored, mut dir) = (false, false, false);
+    if l.starts_with(b"\\!") || l.starts_with(b"\\#") {
+        l = &l[1..];
+    } else {
+        if let Some(r) = l.strip_prefix(b"!") {
+            (white, l) = (true, r);
+        }
+        if let Some(r) = l.strip_prefix(b"/") {
+            (anchored, l) = (true, r);
+        }
+    }
+    if let Some(r) = l.strip_suffix(b"/") {
+        dir = true;
+        l = r.strip_suffix(b"\\").unwrap_or(r);
+    }
+    if l.is_empty() {
+        return None;
+    }
+    // No slash: it matches at any depth.
+    let mut glob = if !anchored && !l.contains(&b'/') && !l.starts_with(b"**/") && l != b"**" { [b"**/", l].concat() } else { l.to_vec() };
+    // `x/**` matches what is inside x, not x.
+    if glob.ends_with(b"/**") {
+        glob.extend_from_slice(b"/*");
+    }
+    Some((glob_regex(&glob)?, white, dir))
+}
+
+/// A glob as a regex, as ripgrep's globset builds it for ignore files: `*`
+/// and `?` stop at '/', `**` spans folders as a whole component, `[...]`
+/// classes, `{a,b}` alternatives, backslash escapes. None if malformed.
+fn glob_regex(g: &[u8]) -> Option<String> {
+    use std::fmt::Write;
+    enum T {
+        Lit(u8),
+        Any,
+        Star,
+        Pre,
+        Suf,
+        Mid,
+        Class(String),
+        Alt(Vec<Vec<T>>),
+    }
+    // The tokens read so far; inside {}, one list per alternative after it.
+    let mut stack: Vec<Vec<T>> = vec![Vec::new()];
+    let mut i = 0;
+    while i < g.len() {
+        let depth = stack.len();
+        let top = stack.last_mut()?;
+        match g[i] {
+            b'?' => top.push(T::Any),
+            b'*' if g.get(i + 1) != Some(&b'*') => top.push(T::Star),
+            b'*' => {
+                // "**": recursive only as a whole path component.
+                let (prev, next) = (i.checked_sub(1).map(|p| g[p]), g.get(i + 2).copied());
+                i += 1;
+                let end = next.is_none() || (depth > 1 && matches!(next, Some(b',' | b'}')));
+                if top.is_empty() && next.is_none_or(|n| n == b'/') {
+                    top.push(T::Pre);
+                    i += next.is_some() as usize;
+                } else if top.is_empty() || prev != Some(b'/') || !(end || next == Some(b'/')) {
+                    top.extend([T::Star, T::Star]);
+                } else {
+                    i += (next == Some(b'/')) as usize;
+                    // It takes the place of the '/' before it.
+                    match top.pop()? {
+                        t @ (T::Pre | T::Suf) => top.push(t),
+                        _ => top.push(if end { T::Suf } else { T::Mid }),
+                    }
+                }
+            }
+            b'[' => {
+                // A class; unclosed, a literal '['.
+                let neg = matches!(g.get(i + 1), Some(b'!' | b'^'));
+                let start = i + 1 + neg as usize;
+                match (start + 1..g.len()).find(|&j| g[j] == b']') {
+                    Some(end) => {
+                        let mut ranges: Vec<(u8, u8)> = Vec::new();
+                        let mut j = start;
+                        while j < end {
+                            if g[j] == b'-' && j > start && j + 1 < end {
+                                let last = ranges.last_mut()?;
+                                last.1 = g[j + 1];
+                                if last.1 < last.0 {
+                                    return None;
+                                }
+                                j += 2;
+                            } else {
+                                ranges.push((g[j], g[j]));
+                                j += 1;
+                            }
+                        }
+                        let mut re = String::from(if neg { "[^" } else { "[" });
+                        for (a, b) in ranges {
+                            let _ = if a == b { write!(re, "\\x{a:02x}") } else { write!(re, "\\x{a:02x}-\\x{b:02x}") };
+                        }
+                        re.push(']');
+                        top.push(T::Class(re));
+                        i = end;
+                    }
+                    None => top.push(T::Lit(b'[')),
+                }
+            }
+            b'{' if depth > 1 => return None,
+            b'{' => stack.push(Vec::new()),
+            // (A stray '}' matches nothing.)
+            b'}' => {
+                let alts = stack.split_off(1);
+                stack[0].push(T::Alt(alts));
+            }
+            b',' if depth > 1 => stack.push(Vec::new()),
+            b'\\' => {
+                i += 1;
+                top.push(T::Lit(*g.get(i)?));
+            }
+            c => top.push(T::Lit(c)),
+        }
+        i += 1;
+    }
+    if stack.len() > 1 {
+        return None;
+    }
+    fn render(ts: &[T], re: &mut String) {
+        for t in ts {
+            let _ = match t {
+                T::Lit(b) if b.is_ascii_alphanumeric() || *b == b'/' || *b == b'_' => write!(re, "{}", *b as char),
+                T::Lit(b) => write!(re, "\\x{b:02x}"),
+                T::Any => write!(re, "[^/]"),
+                T::Star => write!(re, "[^/]*"),
+                T::Pre => write!(re, "(?:/?|.*/)"),
+                T::Suf => write!(re, "/.*"),
+                T::Mid => write!(re, "(?:/|/.*/)"),
+                T::Class(c) => write!(re, "{c}"),
+                T::Alt(parts) => {
+                    let parts: Vec<String> = (parts.iter())
+                        .map(|p| {
+                            let mut s = String::new();
+                            render(p, &mut s);
+                            s
+                        })
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if parts.is_empty() { Ok(()) } else { write!(re, "(?:{})", parts.join("|")) }
+                }
+            };
+        }
+    }
+    let mut re = String::from("(?s-u)^");
+    match stack[0].as_slice() {
+        [T::Pre] => re.push_str(".*"),
+        ts => render(ts, &mut re),
+    }
+    re.push('$');
+    Some(re)
 }
 
 /// Does the name query let every indexed doc under its scope (if any)
 /// through: no words, extensions, ranges or patterns? Then a segment wholly
 /// in scope needn't be checked doc by doc.
 fn only_scope(q: &Query) -> bool {
+    q.exts.is_empty() && nothing_else(q)
+}
+
+/// Does the name query ask only for extensions (see `path_ok`)?
+fn only_exts(q: &Query) -> bool {
+    q.scope.is_none() && !q.exts.is_empty() && nothing_else(q)
+}
+
+/// No words, ranges or patterns in the name query, and files let through.
+fn nothing_else(q: &Query) -> bool {
     q.tokens.is_empty()
         && q.kind_ok(KIND_FILE)
-        && q.exts.is_empty()
         && q.size == (0, u64::MAX)
         && q.mtime == (0, u32::MAX)
         && q.name_re.is_none()
         && q.path_re.is_none()
+        && q.not_exts.is_empty()
+        && q.globs.is_empty()
+}
+
+/// Does doc `d` of `s` pass the name query? The end of its path its entry
+/// holds can settle an extension asked for (`ext_only`: all it asks) before
+/// the path is built.
+fn path_ok<'a>(filt: &Query, ext_only: bool, paths: &mut PathCursor<'a>, s: &'a Segment, d: u32) -> bool {
+    let mut by_end = None;
+    let keep = |end: &[u8]| {
+        by_end = filt.ext_by_end(end);
+        by_end.is_none() || (by_end == Some(true) && !ext_only)
+    };
+    match paths.get_if(s, d, keep) {
+        Some(p) => filt.match_path(p, KIND_FILE, s.size()[d as usize] as u64, s.mtime()[d as usize]).is_some(),
+        None => by_end == Some(true),
+    }
 }
 
 /// Candidate order tier: your files first, then dot-dirs, logs and transcripts.
@@ -1295,10 +1983,7 @@ fn doc_rank(path: &[u8]) -> i8 {
         r -= 2;
     }
     let name = &path[path.iter().rposition(|&b| b == b'/').map_or(0, |p| p + 1)..];
-    if [&b".jsonl"[..], b".ndjson", b".log", b".lock", b".sum"]
-        .iter()
-        .any(|x| name.ends_with(x))
-    {
+    if [&b".jsonl"[..], b".ndjson", b".log", b".lock", b".sum"].iter().any(|x| name.ends_with(x)) {
         r -= 1;
     }
     r
@@ -1346,18 +2031,11 @@ struct Counts {
 
 impl Counts {
     fn new(n: usize) -> Counts {
-        Counts {
-            planes: Vec::new(),
-            n,
-        }
+        Counts { planes: Vec::new(), n }
     }
 
     fn get(&self, c: usize) -> u32 {
-        self.planes
-            .iter()
-            .enumerate()
-            .map(|(k, p)| ((p[c / 64] >> (c % 64) & 1) as u32) << k)
-            .sum()
+        self.planes.iter().enumerate().map(|(k, p)| ((p[c / 64] >> (c % 64) & 1) as u32) << k).sum()
     }
 
     fn add(&mut self, c: usize) {
@@ -1384,22 +2062,17 @@ impl Counts {
 
     /// The counts of the contents set in `bits`, added up.
     fn sum(&self, bits: &[u64]) -> usize {
-        (self.planes.iter().enumerate())
-            .map(|(k, p)| {
-                p.iter()
-                    .zip(bits)
-                    .map(|(a, b)| (a & b).count_ones() as usize)
-                    .sum::<usize>()
-                    << k
-            })
-            .sum()
+        (self.planes.iter().enumerate()).map(|(k, p)| p.iter().zip(bits).map(|(a, b)| (a & b).count_ones() as usize).sum::<usize>() << k).sum()
     }
 
     /// How many are held at all.
     fn live(&self) -> usize {
-        (0..self.n.div_ceil(64))
-            .map(|w| self.planes.iter().fold(0, |x, p| x | p[w]).count_ones() as usize)
-            .sum()
+        (0..self.n.div_ceil(64)).map(|w| self.held(w).count_ones() as usize).sum()
+    }
+
+    /// Word `w` of which are held at all.
+    fn held(&self, w: usize) -> u64 {
+        self.planes.iter().fold(0, |x, p| x | p[w])
     }
 }
 
@@ -1414,15 +2087,9 @@ impl Content {
     /// Open the segments the manifest lists, without touching anything: the
     /// view of an engine that follows another process's index.
     pub fn open_shared(dir: PathBuf) -> Content {
-        let manifest: Vec<u64> = std::fs::read_to_string(dir.join("manifest"))
-            .unwrap_or_default()
-            .split_whitespace()
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        let segs: Vec<Segment> = manifest
-            .iter()
-            .filter_map(|&id| Segment::load(&dir, id))
-            .collect();
+        let manifest: Vec<u64> =
+            std::fs::read_to_string(dir.join("manifest")).unwrap_or_default().split_whitespace().filter_map(|s| s.parse().ok()).collect();
+        let segs: Vec<Segment> = manifest.iter().filter_map(|&id| Segment::load(&dir, id)).collect();
         let next_id = segs.iter().map(|s| s.id + 1).max().unwrap_or(1);
         #[rustfmt::skip]
         let mut c = Content { dir, segs, next_id, gids: Vec::new(), base: Vec::new(), blocks: Vec::new(), copies: Vec::new(), users: Vec::new(), sources: Vec::new() };
@@ -1433,18 +2100,10 @@ impl Content {
     /// Open as the owner: also delete what the manifest doesn't list.
     pub fn open(dir: PathBuf) -> Content {
         std::fs::create_dir_all(&dir).ok();
+        USER_SKIPS.lock().unwrap().0 = dir.parent().map(|d| d.join(SKIP_LIST));
         let c = Content::open_shared(dir);
         // Anything not loaded (old format, crashed build) is garbage.
-        let keep: Vec<String> = c
-            .segs
-            .iter()
-            .flat_map(|s| {
-                [
-                    format!("seg-{:06}.fsc", s.id),
-                    format!("seg-{:06}.dead", s.id),
-                ]
-            })
-            .collect();
+        let keep: Vec<String> = c.segs.iter().flat_map(|s| [format!("seg-{:06}.fsc", s.id), format!("seg-{:06}.dead", s.id)]).collect();
         for e in std::fs::read_dir(&c.dir).into_iter().flatten().flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if name.starts_with("seg-") && !keep.contains(&name) {
@@ -1457,9 +2116,7 @@ impl Content {
     /// Link the segments through the contents they share: the gid table,
     /// each content's live docs, and which segments use which.
     fn link(&mut self) {
-        self.gids = (self.segs.iter().enumerate())
-            .flat_map(|(si, s)| s.runs.iter().map(move |&(c, g, n)| (g, n, si as u32, c)))
-            .collect();
+        self.gids = (self.segs.iter().enumerate()).flat_map(|(si, s)| s.runs.iter().map(move |&(c, g, n)| (g, n, si as u32, c))).collect();
         self.gids.sort_unstable();
         self.base = Vec::new();
         self.copies = (0..self.segs.len()).map(|_| Copies::default()).collect();
@@ -1477,24 +2134,11 @@ impl Content {
         let n = self.segs.len();
         while self.base.len() < n {
             let at = self.base.len();
-            self.base.push(if at == 0 {
-                0
-            } else {
-                self.base[at - 1] + self.segs[at - 1].ndocs as u32
-            });
+            self.base.push(if at == 0 { 0 } else { self.base[at - 1] + self.segs[at - 1].ndocs as u32 });
         }
-        let all = self
-            .base
-            .last()
-            .map_or(0, |&b| b as usize + self.segs[n - 1].ndocs);
-        self.blocks = (0..all.div_ceil(256))
-            .map(|k| (self.base.partition_point(|&b| b as usize <= k * 256) - 1) as u32)
-            .collect();
-        let mut refs: Vec<Counts> = self
-            .segs
-            .iter_mut()
-            .map(|s| std::mem::take(&mut s.refs))
-            .collect();
+        let all = self.base.last().map_or(0, |&b| b as usize + self.segs[n - 1].ndocs);
+        self.blocks = (0..all.div_ceil(256)).map(|k| (self.base.partition_point(|&b| b as usize <= k * 256) - 1) as u32).collect();
+        let mut refs: Vec<Counts> = self.segs.iter_mut().map(|s| std::mem::take(&mut s.refs)).collect();
         // Per owner, (content, doc) of the docs that are not its first.
         let mut more: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n];
         for b in from..n {
@@ -1507,12 +2151,7 @@ impl Content {
                     continue;
                 }
                 if g.wrapping_sub(run.0) >= run.1 {
-                    let Some(i) = self
-                        .gids
-                        .partition_point(|r| r.0 <= g)
-                        .checked_sub(1)
-                        .filter(|&i| g - self.gids[i].0 < self.gids[i].1)
-                    else {
+                    let Some(i) = self.gids.partition_point(|r| r.0 <= g).checked_sub(1).filter(|&i| g - self.gids[i].0 < self.gids[i].1) else {
                         continue;
                     };
                     run = self.gids[i];
@@ -1536,10 +2175,7 @@ impl Content {
                 add.extend(cp.docs[cp.starts[k] as usize..end].iter().map(|&h| (c, h)));
             }
             add.sort_unstable();
-            *cp = Copies {
-                docs: Vec::with_capacity(add.len()),
-                ..Default::default()
-            };
+            *cp = Copies { docs: Vec::with_capacity(add.len()), ..Default::default() };
             for (k, &(c, h)) in add.iter().enumerate() {
                 if cp.contents.last() != Some(&c) {
                     cp.contents.push(c);
@@ -1630,17 +2266,13 @@ impl Content {
             let mut held = vec![false; want.len()];
             let lo = join(&dir, b"");
             for (si, s) in self.segs.iter_mut().enumerate() {
-                let ids = if recursive {
-                    s.with_prefix(&lo).collect::<Vec<_>>()
-                } else {
-                    s.direct_children(&lo)
-                };
+                let ids = if recursive { s.with_prefix(&lo).collect::<Vec<_>>() } else { s.direct_children(&lo) };
                 for d in ids {
                     let (i, g) = (d as usize, s.doc_gid()[d as usize]);
-                    match want.find(s.path(d)) {
+                    match want.find(&s.path(d)) {
                         // (A doc whose content is gone is indexed again.)
                         Some(k)
-                            if want.items[k].2 == s.size()[i]
+                            if want.items[k].2 == s.size()[i] as u64
                                 && want.items[k].3 == s.mtime()[i]
                                 && (g == NONE || content_of(gids, g).is_some()) =>
                         {
@@ -1673,12 +2305,7 @@ impl Content {
             }
         }
         // A segment goes once no live doc is in it and none holds its contents.
-        let empty: Vec<u64> = self
-            .segs
-            .iter()
-            .filter(|s| s.live_docs == 0 && s.live_own() == 0)
-            .map(|s| s.id)
-            .collect();
+        let empty: Vec<u64> = self.segs.iter().filter(|s| s.live_docs == 0 && s.live_own() == 0).map(|s| s.id).collect();
         if !empty.is_empty() {
             self.drop_segments(&empty);
             self.link();
@@ -1694,16 +2321,7 @@ impl Content {
     /// What a sync's builds need to index each distinct content once: the
     /// segments' own contents, by hash, and the gids no segment owns.
     fn dedup(&self) -> Dedup {
-        let held = self
-            .segs
-            .iter()
-            .filter(|s| s.nown > 0)
-            .map(|s| Held {
-                map: s.map.clone(),
-                nown: s.nown,
-                off: s.off,
-            })
-            .collect();
+        let held = self.segs.iter().filter(|s| s.nown > 0).map(|s| Held { map: s.map.clone(), nown: s.nown, off: s.off }).collect();
         let (mut gaps, mut next) = (Vec::new(), 0u32);
         for &(g, n, _, _) in &self.gids {
             if g > next {
@@ -1711,11 +2329,7 @@ impl Content {
             }
             next = next.max(g + n);
         }
-        Dedup {
-            held,
-            built: Default::default(),
-            free: std::sync::Mutex::new(Gids { gaps, next }),
-        }
+        Dedup { held, built: Default::default(), free: std::sync::Mutex::new(Gids { gaps, next }) }
     }
 
     /// Folders holding an indexed file that changed (or went away) since
@@ -1727,15 +2341,8 @@ impl Content {
         let mut out: Vec<Vec<u8>> = pool.install(|| {
             self.segs
                 .par_iter()
-                .flat_map_iter(|s| {
-                    (0..s.ndocs as u32)
-                        .filter(|&d| !s.is_dead(d))
-                        .map(move |d| (s, d))
-                })
-                .filter(|&(s, d)| {
-                    crate::live::lstat(s.path(d))
-                        .is_none_or(|o| o.mtime >= since || o.size != s.size()[d as usize])
-                })
+                .flat_map_iter(|s| (0..s.ndocs as u32).filter(|&d| !s.is_dead(d)).map(move |d| (s, d)))
+                .filter(|&(s, d)| crate::live::lstat(&s.path(d)).is_none_or(|o| o.mtime >= since || o.size != s.size()[d as usize] as u64))
                 .map(|(s, d)| {
                     let p = s.path(d);
                     p[..p.iter().rposition(|&b| b == b'/').unwrap_or(0).max(1)].to_vec()
@@ -1754,8 +2361,7 @@ impl Content {
 
     pub fn push(&mut self, seg: Segment) {
         let si = self.segs.len() as u32;
-        self.gids
-            .extend(seg.runs.iter().map(|&(c, g, n)| (g, n, si, c)));
+        self.gids.extend(seg.runs.iter().map(|&(c, g, n)| (g, n, si, c)));
         self.gids.sort_unstable();
         self.segs.push(seg);
         self.copies.push(Copies::default());
@@ -1765,19 +2371,19 @@ impl Content {
         self.save_manifest();
     }
 
-    /// Tiered merging: 8 segments of the same size tier become one, so
-    /// incremental updates never pile up thousands of tiny segments. Returns
-    /// the group to merge (ids), capped so a merge's postings stay small.
-    /// First, a segment whose docs or contents were mostly replaced is
-    /// rewritten alone: every query decodes the postings of its dead
-    /// contents too.
+    /// The segments to merge into one next (ids), if any. First, once the
+    /// bytes of deleted and replaced files (see `Segment::dead_bytes`) pass
+    /// 1/DEAD of the index, the segment with the largest dead share is
+    /// rewritten alone: the most bytes back for the least rewriting (every
+    /// query decodes dead contents' postings too). Then tiered merging: 8
+    /// segments of the same size tier become one, so incremental updates
+    /// never pile up thousands of tiny segments, capped so a merge's
+    /// postings stay small.
     pub fn merge_plan(&self) -> Option<Vec<u64>> {
-        let stale = |s: &&Segment| {
-            let own = s.live_own();
-            (s.live_docs > 0 || own > 0) && (s.live_docs * 2 < s.ndocs || own * 2 < s.nown)
-        };
-        if let Some(s) = self.segs.iter().find(stale) {
-            return Some(vec![s.id]);
+        let dead: Vec<usize> = self.segs.iter().map(Segment::dead_bytes).collect();
+        if dead.iter().sum::<usize>() * DEAD > self.bytes() {
+            let share = |(s, d): &(&Segment, &usize)| ((**d as u128) << 32) / s.map.len() as u128;
+            return self.segs.iter().zip(&dead).max_by_key(share).map(|(s, _)| vec![s.id]);
         }
         let tier = |s: &Segment| (s.plen.max(1) as f64).log(4.0) as u32;
         let mut by_tier: HashMap<u32, Vec<&Segment>> = HashMap::new();
@@ -1805,11 +2411,7 @@ impl Content {
     /// Only the content worker writes, so nothing was tombstoned while the
     /// merge ran.
     pub fn replace(&mut self, ids: &[u64], seg: Segment) {
-        let at = self
-            .segs
-            .iter()
-            .position(|s| ids.contains(&s.id))
-            .unwrap_or(self.segs.len());
+        let at = self.segs.iter().position(|s| ids.contains(&s.id)).unwrap_or(self.segs.len());
         self.drop_segments(ids);
         self.segs.insert(at, seg);
         self.link();
@@ -1826,34 +2428,26 @@ impl Content {
 
     /// Candidate docs for a pattern, filtered by the name query: in groups
     /// (each with its `FIRST` best in front), and how many in all.
-    fn candidates(&self, plan: &TQ, filt: &Query) -> Found {
-        // A scope narrows each segment to the doc range holding its paths;
-        // None: no live doc there under it.
+    fn candidates<'c>(&'c self, plan: &TQ, filt: &Query) -> Found {
+        // A scope narrows each segment to its paths under it (a run in path
+        // order) and the doc range holding those; None: no live doc there
+        // under it. A range holding only those needs no path checked.
         let prefix = filt.scope.as_ref().map(|s| [s.as_slice(), b"/"].concat());
-        let only_scope = only_scope(filt);
-        let scope: Vec<Option<(std::ops::Range<u32>, bool)>> = (self.segs.iter())
-            .map(|s| {
-                let (docs, whole) = prefix
-                    .as_ref()
-                    .map_or((0..s.ndocs as u32, true), |p| s.doc_range(p));
-                (s.live_docs > 0 && !docs.is_empty()).then_some((docs, !(only_scope && whole)))
+        let (only_scope, ext_only) = (only_scope(filt), only_exts(filt));
+        let runs: Vec<std::ops::Range<usize>> = self.segs.iter().map(|s| prefix.as_ref().map_or(0..s.ndocs, |p| s.prefix_run(p))).collect();
+        let scope: Vec<Option<(std::ops::Range<u32>, bool)>> = (self.segs.iter().zip(&runs))
+            .map(|(s, run)| {
+                let (docs, exact) = s.doc_range(run.clone());
+                (s.live_docs > 0 && !docs.is_empty()).then_some((docs, !(only_scope && exact)))
             })
             .collect();
         // About a lane per 25k docs to search, at most 8: helpers start
         // within ~10 us, but past 8 lanes they get in each other's way.
         let docs: usize = scope.iter().flatten().map(|(docs, _)| docs.len()).sum();
         let lanes = |n: usize| (docs / 25_000).clamp(1, n.max(1)).min(8);
-        let ranked = |s: &Segment, si: usize, d: u32| {
-            (
-                rank_key(s.rank()[d as usize], s.mtime()[d as usize]),
-                si as u32,
-                d,
-            )
-        };
+        let ranked = |s: &Segment, si: usize, d: u32| (rank_key(s.rank()[d as usize], s.mtime()[d as usize]), si as u32, d);
         if matches!(plan, TQ::All) {
-            let work: Vec<usize> = (0..self.segs.len())
-                .filter(|&si| scope[si].is_some())
-                .collect();
+            let work: Vec<usize> = (0..self.segs.len()).filter(|&si| scope[si].is_some()).collect();
             let per = par_claim(&work, lanes(work.len()), |&si| {
                 let s = &self.segs[si];
                 let (docs, check) = scope[si].clone().unwrap();
@@ -1879,75 +2473,37 @@ impl Content {
                 } else {
                     docs.collect()
                 };
-                let mut v: Vec<Ranked> = Vec::with_capacity(ids.len());
+                let (mut v, mut paths) = (Vec::with_capacity(ids.len()), PathCursor::default());
                 v.extend(
                     ids.into_iter()
                         .filter(|&d| !s.is_dead(d) && s.rank()[d as usize] != NOT_TEXT)
-                        .filter(|&d| {
-                            !check
-                                || filt
-                                    .match_path(
-                                        s.path(d),
-                                        KIND_FILE,
-                                        s.size()[d as usize],
-                                        s.mtime()[d as usize],
-                                    )
-                                    .is_some()
-                        })
+                        .filter(|&d| !check || path_ok(filt, ext_only, &mut paths, s, d))
                         .map(|d| ranked(s, si, d)),
                 );
                 let n = v.len();
                 (Cands::list(v), n)
             });
             let total = per.iter().map(|p| p.1).sum();
-            return Found {
-                per: per.into_iter().map(|p| p.0).collect(),
-                total,
-                dense: Vec::new(),
-            };
+            return Found { per: per.into_iter().map(|p| p.0).collect(), total, dense: Vec::new() };
         }
         // Every live doc counts, unchecked: then a content found in bulk
         // counts as its live docs.
-        let global = scope.iter().zip(&self.segs).all(|(x, s)| {
-            s.live_docs == 0
-                || x.as_ref()
-                    .is_some_and(|(docs, check)| !check && docs.len() == s.ndocs)
-        });
-        // A candidate doc under the scope.
-        let admit = |b: usize, d: u32| -> Option<Ranked> {
+        let global =
+            scope.iter().zip(&self.segs).all(|(x, s)| s.live_docs == 0 || x.as_ref().is_some_and(|(docs, check)| !check && docs.len() == s.ndocs));
+        // A candidate doc under the scope (`paths` reads its path).
+        let admit = |b: usize, d: u32, paths: &mut PathCursor<'c>| -> Option<Ranked> {
             let (docs, check) = scope[b].as_ref()?;
             let t = &self.segs[b];
-            let ok = docs.contains(&d)
-                && (!check
-                    || filt
-                        .match_path(
-                            t.path(d),
-                            KIND_FILE,
-                            t.size()[d as usize],
-                            t.mtime()[d as usize],
-                        )
-                        .is_some());
+            let ok = docs.contains(&d) && (!check || path_ok(filt, ext_only, paths, t, d));
             ok.then(|| ranked(t, b, d))
         };
         // A scope holding few of the docs (up to 1 in 16): the contents its
         // docs hold, per owner, then which of those the plan selects (in the
         // range they span).
         let few = self.segs.iter().map(|s| s.ndocs).sum::<usize>() / 16;
-        let under: Option<Vec<(usize, Vec<u32>)>> = (prefix.as_ref())
-            .filter(|p| {
-                !global
-                    && (self.segs.iter().enumerate())
-                        .filter(|(b, _)| scope[*b].is_some())
-                        .map(|(_, t)| t.count_prefix(p))
-                        .sum::<usize>()
-                        <= few
-            })
-            .map(|p| {
-                (0..self.segs.len())
-                    .filter(|&b| scope[b].is_some())
-                    .map(|b| (b, self.segs[b].with_prefix(p).collect()))
-                    .collect()
-            });
+        let within: Vec<usize> = (0..self.segs.len()).filter(|&b| scope[b].is_some()).collect();
+        let under: Option<Vec<(usize, Vec<u32>)>> = (prefix.is_some() && !global && within.iter().map(|&b| runs[b].len()).sum::<usize>() <= few)
+            .then(|| within.iter().map(|&b| (b, self.segs[b].live_at(runs[b].clone()).collect())).collect());
         if let Some(under) = under {
             let mut need: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); self.segs.len()];
             for (b, docs) in under {
@@ -1958,22 +2514,14 @@ impl Content {
                     }
                 }
             }
-            let owners: Vec<usize> = (0..self.segs.len())
-                .filter(|&a| !need[a].is_empty())
-                .collect();
+            let owners: Vec<usize> = (0..self.segs.len()).filter(|&a| !need[a].is_empty()).collect();
             let per = par_claim(&owners, lanes(owners.len()), |&a| {
-                let mut top = Top::new();
-                let n = needed(&self.segs[a], plan, need[a].clone(), |b, d| {
-                    admit(b, d).map(|r| top.push(r)).is_some()
-                });
+                let (mut top, mut paths) = (Top::new(), PathCursor::default());
+                let n = needed(&self.segs[a], plan, need[a].clone(), |b, d| admit(b, d, &mut paths).map(|r| top.push(r)).is_some());
                 (top.done(), n)
             });
             let total = per.iter().map(|p| p.1).sum();
-            return Found {
-                per: per.into_iter().map(|p| p.0).collect(),
-                total,
-                dense: Vec::new(),
-            };
+            return Found { per: per.into_iter().map(|p| p.0).collect(), total, dense: Vec::new() };
         }
         // Per segment owning contents docs under the scope hold, the ones
         // the plan selects. A few become their docs right away (many, in
@@ -1984,31 +2532,14 @@ impl Content {
         // their few by gid (see `decide`).
         use std::sync::atomic::{AtomicUsize, Ordering::*};
         let n = self.segs.len();
-        let owners: Vec<usize> = (0..n)
-            .filter(|&a| {
-                self.segs[a].nown > 0
-                    && self.users[a]
-                        .iter()
-                        .any(|&(b, _)| scope[b as usize].is_some())
-            })
-            .collect();
+        let owners: Vec<usize> =
+            (0..n).filter(|&a| self.segs[a].nown > 0 && self.users[a].iter().any(|&(b, _)| scope[b as usize].is_some())).collect();
         // (Made by the first owner that needs it.)
         let dense: std::sync::OnceLock<Vec<std::sync::atomic::AtomicU64>> = Default::default();
-        let has_dense = |g: u32| {
-            dense
-                .get()
-                .and_then(|d| d.get(g as usize / 64))
-                .is_some_and(|w| w.load(Relaxed) >> (g % 64) & 1 != 0)
-        };
+        let has_dense = |g: u32| dense.get().and_then(|d| d.get(g as usize / 64)).is_some_and(|w| w.load(Relaxed) >> (g % 64) & 1 != 0);
         // Per owner found in bulk: the contents, and how many.
-        let bulk: Vec<std::sync::OnceLock<(Vec<u64>, usize)>> =
-            (0..n).map(|_| Default::default()).collect();
-        let (next, done, next_item, total) = (
-            AtomicUsize::new(0),
-            AtomicUsize::new(0),
-            AtomicUsize::new(0),
-            AtomicUsize::new(0),
-        );
+        let bulk: Vec<std::sync::OnceLock<(Vec<u64>, usize)>> = (0..n).map(|_| Default::default()).collect();
+        let (next, done, next_item, total) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
         // Chunks to expand, and how many there are (checked before locking).
         let chunks: std::sync::Mutex<Vec<Chunk>> = Default::default();
         let queued = AtomicUsize::new(0);
@@ -2026,8 +2557,9 @@ impl Content {
                     top.push((rank_key(seg.1[d as usize], seg.2[d as usize]), b as u32, d));
                 });
             } else {
+                let mut paths = PathCursor::default();
                 self.holders(a, sel, |b, d| {
-                    if let Some(r) = admit(b, d) {
+                    if let Some(r) = admit(b, d, &mut paths) {
                         top.push(r)
                     }
                 });
@@ -2045,11 +2577,7 @@ impl Content {
             }
             let sel = std::sync::Arc::new(sel);
             let mut q = chunks.lock().unwrap();
-            q.extend(
-                (step..sel.len())
-                    .step_by(step)
-                    .map(|at| (a, sel.clone(), at..(at + step).min(sel.len()))),
-            );
+            q.extend((step..sel.len()).step_by(step).map(|at| (a, sel.clone(), at..(at + step).min(sel.len()))));
             queued.store(q.len(), Release);
             drop(q);
             expand(a, &sel[..step], top);
@@ -2060,29 +2588,20 @@ impl Content {
             // hold: only those contents.
             if scope[a].is_none() && !global {
                 let mut need = Vec::new();
-                for (b, t) in self.users[a]
-                    .iter()
-                    .map(|&(b, _)| b as usize)
-                    .filter(|&b| scope[b].is_some())
-                    .map(|b| (b, &self.segs[b]))
-                {
+                for (b, t) in self.users[a].iter().map(|&(b, _)| b as usize).filter(|&b| scope[b].is_some()).map(|b| (b, &self.segs[b])) {
                     let (gs, by_gid) = (t.gid_sorted(), t.by_gid());
                     for &(c0, g0, m) in &s.runs {
                         let lo = gs.partition_point(|&x| x < g0);
                         let at = lo..lo + gs[lo..].partition_point(|&x| x < g0 + m);
-                        need.extend(
-                            at.filter(|&i| !t.is_dead(by_gid[i]))
-                                .map(|i| (c0 + gs[i] - g0, b as u32, by_gid[i])),
-                        );
+                        need.extend(at.filter(|&i| !t.is_dead(by_gid[i])).map(|i| (c0 + gs[i] - g0, b as u32, by_gid[i])));
                     }
                     if need.len() > 4096 {
                         break;
                     }
                 }
                 if need.len() <= 4096 {
-                    let n = needed(s, plan, need, |b, d| {
-                        admit(b, d).map(|r| top.push(r)).is_some()
-                    });
+                    let mut paths = PathCursor::default();
+                    let n = needed(s, plan, need, |b, d| admit(b, d, &mut paths).map(|r| top.push(r)).is_some());
                     total.fetch_add(n, Relaxed);
                     return;
                 }
@@ -2100,11 +2619,7 @@ impl Content {
                 Ok(sel) => give(a, sel, top),
                 Err((bits, k)) => {
                     let max_gid = self.gids.last().map_or(0, |r| r.0 + r.1) as usize;
-                    let dense = dense.get_or_init(|| {
-                        (0..max_gid.div_ceil(64))
-                            .map(|_| Default::default())
-                            .collect()
-                    });
+                    let dense = dense.get_or_init(|| (0..max_gid.div_ceil(64)).map(|_| Default::default()).collect());
                     for &(c, g, m) in &s.runs {
                         or_bits(dense, g as usize, &bits, c as usize, m as usize);
                     }
@@ -2121,12 +2636,7 @@ impl Content {
         // else its few found by gid.
         let items: std::sync::OnceLock<Vec<(usize, bool)>> = Default::default();
         let decide = || {
-            let held = (0..n).filter(|&b| {
-                scope[b].is_some()
-                    && self.sources[b]
-                        .iter()
-                        .any(|&(a, _)| bulk[a as usize].get().is_some())
-            });
+            let held = (0..n).filter(|&b| scope[b].is_some() && self.sources[b].iter().any(|&(a, _)| bulk[a as usize].get().is_some()));
             held.map(|b| {
                 let (mut from, mut many) = (0, false);
                 for &(a, w) in &self.sources[b] {
@@ -2151,11 +2661,7 @@ impl Content {
                     }
                     i += 1;
                 }
-                return out.lock().unwrap().push(Cands::Bulk {
-                    si: b,
-                    top: best,
-                    from: i,
-                });
+                return out.lock().unwrap().push(Cands::Bulk { si: b, top: best, from: i });
             }
             // (The owners counted these.)
             let (gs, by_gid) = (t.gid_sorted(), t.by_gid());
@@ -2186,9 +2692,7 @@ impl Content {
                     continue;
                 }
                 let items = (done.load(Acquire) == owners.len()).then(|| items.get_or_init(decide));
-                if let Some(item) =
-                    items.and_then(|items| items.get(next_item.fetch_add(1, Relaxed)))
-                {
+                if let Some(item) = items.and_then(|items| items.get(next_item.fetch_add(1, Relaxed))) {
                     run(item, &mut top);
                     continue;
                 }
@@ -2216,68 +2720,161 @@ impl Content {
         };
         run_lanes((docs / 25_000).clamp(1, 8), &work);
         let per = out.into_inner().unwrap();
-        let dense = dense.into_inner().map_or(Vec::new(), |d| {
-            d.into_iter().map(|w| w.into_inner()).collect()
-        });
-        Found {
-            per,
-            total: total.into_inner(),
-            dense,
-        }
+        let dense = dense.into_inner().map_or(Vec::new(), |d| d.into_iter().map(|w| w.into_inner()).collect());
+        Found { per, total: total.into_inner(), dense }
     }
 
     pub fn search(&self, g: &Grep, filt: &Query) -> GrepResult {
-        let Found {
-            mut per,
-            total,
-            dense,
-        } = self.candidates(&g.plan(), filt);
+        self.search_with(g, filt, &[])
+    }
+
+    /// `search`, reading `fresh` first: files the index may not hold as
+    /// they are now (see `Dirty`), newest first.
+    pub fn search_with(&self, g: &Grep, filt: &Query, fresh: &[Vec<u8>]) -> GrepResult {
+        let Found { mut per, total, dense } = self.candidates(&g.plan(), filt);
         // A candidate whose content's bloom filter lacks one of the pattern's
-        // grams can't match: skip it without opening the file.
+        // grams can't match: skip it without opening the file. (A fresh one
+        // was read already.)
         let probes = g.probes();
+        let read: std::collections::HashSet<&[u8]> = fresh.iter().map(Vec::as_slice).collect();
         let path = |&(_, si, d): &Ranked| {
             let s = &self.segs[si as usize];
             let (a, c) = self.content_of(s.doc_gid()[d as usize])?;
-            self.segs[a].may_contain(c, &probes).then(|| s.path(d))
+            self.segs[a].may_contain(c, &probes).then(|| s.path(d)).filter(|p| read.is_empty() || !read.contains(p.as_slice())).map(Into::into)
         };
-        // Most searches are done within the best few hundred candidates:
-        // rank those first, and the rest only if reading gets that far.
         let t = std::time::Instant::now();
-        let best = take_best(&mut per);
-        let (mut r, done) = verify_from(g, best.len(), filt.limit, READERS, t, |i| path(&best[i]));
-        if r.files.len() < filt.limit && done == best.len() && best.len() < total {
-            // Then the next best few thousand, and the others only if
-            // reading gets past those too.
-            let mut rest: Vec<Ranked> =
-                par_claim(&per, per.len().min(8), |c| c.rest(&self.segs, &dense)).concat();
-            let next = rest.len().min(8 * FIRST);
-            if next < rest.len() {
-                rest.select_nth_unstable(next);
-            }
-            rest[..next].sort_unstable();
-            let mut at = 0;
-            for end in [next, rest.len()] {
-                if at == end {
-                    continue;
+        let limit = filt.limit;
+        // A later page passes over the candidates the pages before read.
+        let mut skip = g.skip;
+        let mut from = |n: usize| {
+            let f = skip.min(n);
+            skip -= f;
+            f
+        };
+        let (mut r, done) = match fresh.len() {
+            0 => (GrepResult { complete: true, ..Default::default() }, 0),
+            n => verify_from(g, from(n), n, limit, Reading::Fresh, t, |i| Some(fresh[i].as_slice().into())),
+        };
+        // Then most searches are done within the best few hundred
+        // candidates: rank those first, and the rest only if reading gets
+        // that far.
+        let add = |r: &mut GrepResult, more: GrepResult, base: usize| {
+            r.files.extend(more.files);
+            r.read += more.read;
+            r.complete = more.complete;
+            r.next = more.next.map(|x| base + x);
+        };
+        if r.files.len() < limit && done == fresh.len() {
+            let best = take_best(&mut per);
+            let (more, done) = verify_from(g, from(best.len()), best.len(), limit - r.files.len(), Reading::Index, t, |i| path(&best[i]));
+            add(&mut r, more, fresh.len());
+            if r.files.len() < limit && done == best.len() && best.len() < total {
+                // Then the next best few thousand, and the others only if
+                // reading gets past those too.
+                let mut rest: Vec<Ranked> = par_claim(&per, per.len().min(8), |c| c.rest(&self.segs, &dense)).concat();
+                let next = rest.len().min(8 * FIRST);
+                if next < rest.len() {
+                    rest.select_nth_unstable(next);
                 }
-                if at > 0 {
-                    rest[at..].par_sort_unstable();
+                rest[..next].sort_unstable();
+                let mut at = 0;
+                for end in [next, rest.len()] {
+                    if at == end {
+                        continue;
+                    }
+                    if at > 0 {
+                        rest[at..].par_sort_unstable();
+                    }
+                    let f = at + from(end - at);
+                    let (more, done) = verify_from(g, f, end, limit - r.files.len(), Reading::Index, t, |i| path(&rest[i]));
+                    add(&mut r, more, fresh.len() + best.len());
+                    if r.files.len() >= limit || done < end {
+                        break;
+                    }
+                    at = end;
                 }
-                let (more, done) =
-                    verify_from(g, end - at, filt.limit - r.files.len(), READERS, t, |i| {
-                        path(&rest[at + i])
-                    });
-                r.files.extend(more.files);
-                r.read += more.read;
-                r.complete = more.complete;
-                if r.files.len() >= filt.limit || done < end - at {
-                    break;
-                }
-                at = end;
             }
         }
-        r.candidates = total;
+        r.candidates = total + fresh.len();
+        r.next = r.next.filter(|&x| x < r.candidates);
         r
+    }
+
+    /// Does a live doc lie under this folder?
+    pub fn holds(&self, dir: &[u8]) -> bool {
+        let lo = join(dir, b"");
+        self.segs.iter().any(|s| s.with_prefix(&lo).next().is_some())
+    }
+
+    /// Which of `want` (what should be indexed under `dir`) no live doc
+    /// holds as it is now: what a sync of it would index.
+    fn unheld(&self, dir: &[u8], recursive: bool, want: &Docs) -> Vec<usize> {
+        let mut held = vec![false; want.len()];
+        let lo = join(dir, b"");
+        for s in &self.segs {
+            let ids = if recursive { s.with_prefix(&lo).collect::<Vec<_>>() } else { s.direct_children(&lo) };
+            for d in ids {
+                if let Some(k) = want.find(&s.path(d))
+                    && (want.items[k].2, want.items[k].3) == (s.size()[d as usize] as u64, s.mtime()[d as usize])
+                {
+                    held[k] = true;
+                }
+            }
+        }
+        (0..want.len()).filter(|&k| !held[k]).collect()
+    }
+}
+
+/// Files changed since their folder's last content sync, by (folder,
+/// recursive): the index may not hold their text yet (a folder waits for
+/// its changes to settle), so searches read them directly, first.
+#[derive(Default)]
+pub struct Dirty(Mutex<Changed>);
+
+/// Per folder (and whether its subtree), its changed files: path, size, mtime.
+type Changed = HashMap<(Vec<u8>, bool), Vec<(Vec<u8>, u64, u32)>>;
+
+/// Past this many changed files in one folder, the rest wait for the sync.
+const DIRTY_MAX: usize = 4096;
+
+impl Dirty {
+    /// Note the files under these folders (`wanted_now`) the index doesn't
+    /// hold as they are now.
+    pub fn mark(&self, content: &Content, wants: Vec<(Vec<u8>, bool, Docs)>) {
+        let mut m = self.0.lock().unwrap();
+        for (dir, recursive, want) in wants {
+            let files: Vec<_> = content
+                .unheld(&dir, recursive, &want)
+                .into_iter()
+                .take(DIRTY_MAX)
+                .map(|k| (want.path(k).to_vec(), want.items[k].2, want.items[k].3))
+                .collect();
+            if files.is_empty() {
+                m.remove(&(dir, recursive));
+            } else {
+                m.insert((dir, recursive), files);
+            }
+        }
+    }
+
+    /// These folders' changes are in the index now.
+    pub fn clear(&self, synced: &[(Vec<u8>, bool)]) {
+        let mut m = self.0.lock().unwrap();
+        for k in synced {
+            m.remove(k);
+        }
+    }
+
+    /// The changed files the query's name filters let through, newest first.
+    pub fn files(&self, q: &Query) -> Vec<Vec<u8>> {
+        let m = self.0.lock().unwrap();
+        let mut out: Vec<(u32, &Vec<u8>)> = (m.values().flatten())
+            .filter(|(p, size, mtime)| q.match_path(p, KIND_FILE, *size, *mtime).is_some())
+            .map(|(p, _, mtime)| (*mtime, p))
+            .collect();
+        out.sort_unstable_by(|a, b| b.cmp(a));
+        out.dedup_by(|a, b| a.1 == b.1);
+        out.into_iter().map(|(_, p)| p.clone()).collect()
     }
 }
 
@@ -2296,19 +2893,13 @@ struct Found {
 /// Is gid `g` set in `bits`?
 #[inline]
 fn has(bits: &[u64], g: u32) -> bool {
-    bits.get(g as usize / 64)
-        .is_some_and(|w| w >> (g % 64) & 1 != 0)
+    bits.get(g as usize / 64).is_some_and(|w| w >> (g % 64) & 1 != 0)
 }
 
 /// Of the docs (`need`: content, segment, doc) holding contents of `s`, give
 /// `f` those whose contents the plan selects (evaluated over the range they
 /// span), and return how many it took.
-fn needed(
-    s: &Segment,
-    plan: &TQ,
-    mut need: Vec<(u32, u32, u32)>,
-    mut f: impl FnMut(usize, u32) -> bool,
-) -> usize {
+fn needed(s: &Segment, plan: &TQ, mut need: Vec<(u32, u32, u32)>, mut f: impl FnMut(usize, u32) -> bool) -> usize {
     if need.is_empty() {
         return 0;
     }
@@ -2394,11 +2985,7 @@ struct Top {
 
 impl Top {
     fn new() -> Top {
-        Top {
-            best: Vec::new(),
-            rest: Vec::new(),
-            bar: (u64::MAX, u32::MAX, u32::MAX),
-        }
+        Top { best: Vec::new(), rest: Vec::new(), bar: (u64::MAX, u32::MAX, u32::MAX) }
     }
 
     #[inline]
@@ -2435,18 +3022,10 @@ enum Cands {
     Two(Vec<Ranked>, Vec<Ranked>),
     /// A segment's docs (for a pattern with nothing to look up): `top`, its
     /// `FIRST` best (in order), and the rest, set in `bits`.
-    Walk {
-        si: usize,
-        bits: Vec<u64>,
-        top: Vec<Ranked>,
-    },
+    Walk { si: usize, bits: Vec<u64>, top: Vec<Ranked> },
     /// A segment's docs holding a content found in bulk: `top`, its `FIRST`
     /// best (in order), then the rest, in rank order from `from` on.
-    Bulk {
-        si: usize,
-        top: Vec<Ranked>,
-        from: usize,
-    },
+    Bulk { si: usize, top: Vec<Ranked>, from: usize },
 }
 
 impl Cands {
@@ -2460,27 +3039,15 @@ impl Cands {
 
     /// What `take_best` left, unordered (`dense`: the gids found in bulk).
     fn rest(&self, segs: &[Segment], dense: &[u64]) -> Vec<Ranked> {
-        let ranked = |s: &Segment, si: usize, d: u32| {
-            (
-                rank_key(s.rank()[d as usize], s.mtime()[d as usize]),
-                si as u32,
-                d,
-            )
-        };
+        let ranked = |s: &Segment, si: usize, d: u32| (rank_key(s.rank()[d as usize], s.mtime()[d as usize]), si as u32, d);
         match self {
             Cands::List(v) => v.clone(),
             Cands::Two(_, rest) => rest.clone(),
-            Cands::Walk { si, bits, .. } => set_bits(bits, 0)
-                .into_iter()
-                .map(|d| ranked(&segs[*si], *si, d))
-                .collect(),
+            Cands::Walk { si, bits, .. } => set_bits(bits, 0).into_iter().map(|d| ranked(&segs[*si], *si, d)).collect(),
             Cands::Bulk { si, from, .. } => {
                 let s = &segs[*si];
                 let (by_rank, gids) = (s.by_rank(), s.rank_gid());
-                (*from..by_rank.len())
-                    .filter(|&i| has(dense, gids[i]) && !s.is_dead(by_rank[i]))
-                    .map(|i| ranked(s, *si, by_rank[i]))
-                    .collect()
+                (*from..by_rank.len()).filter(|&i| has(dense, gids[i]) && !s.is_dead(by_rank[i])).map(|i| ranked(s, *si, by_rank[i])).collect()
             }
         }
     }
@@ -2556,42 +3123,32 @@ struct Helpers {
 fn helpers() -> &'static Helpers {
     static H: std::sync::OnceLock<&'static Helpers> = std::sync::OnceLock::new();
     H.get_or_init(|| {
-        let h: &'static Helpers = Box::leak(Box::new(Helpers {
-            latest: Default::default(),
-            bell: Default::default(),
-        }));
-        let n = std::thread::available_parallelism()
-            .map_or(1, |n| n.get())
-            .max(SCAN_READERS);
+        let h: &'static Helpers = Box::leak(Box::new(Helpers { latest: Default::default(), bell: Default::default() }));
+        let n = std::thread::available_parallelism().map_or(1, |n| n.get()).max(SCAN_READERS);
         for i in 1..n {
-            let spawned = std::thread::Builder::new()
-                .name(format!("fsearch-help-{i}"))
-                .spawn(move || {
-                    // Someone is waiting: keep off the slow cores and out of the
-                    // throttled IO tiers, and never download iCloud placeholders.
-                    #[cfg(target_os = "macos")]
-                    unsafe {
-                        libc::pthread_set_qos_class_self_np(
-                            libc::qos_class_t::QOS_CLASS_USER_INITIATED,
-                            0,
-                        )
-                    };
-                    crate::no_materialize();
-                    let mut seen = 0;
-                    loop {
-                        let lanes = {
-                            let mut g = h.latest.lock().unwrap();
-                            while g.0 == seen {
-                                g = h.bell.wait(g).unwrap();
-                            }
-                            seen = g.0;
-                            g.1.clone()
-                        };
-                        if let Some(l) = lanes {
-                            l.work();
+            let spawned = std::thread::Builder::new().name(format!("fsearch-help-{i}")).spawn(move || {
+                // Someone is waiting: keep off the slow cores and out of the
+                // throttled IO tiers, and never download iCloud placeholders.
+                #[cfg(target_os = "macos")]
+                unsafe {
+                    libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0)
+                };
+                crate::no_materialize();
+                let mut seen = 0;
+                loop {
+                    let lanes = {
+                        let mut g = h.latest.lock().unwrap();
+                        while g.0 == seen {
+                            g = h.bell.wait(g).unwrap();
                         }
+                        seen = g.0;
+                        g.1.clone()
+                    };
+                    if let Some(l) = lanes {
+                        l.work();
                     }
-                });
+                }
+            });
             if spawned.is_err() {
                 break;
             }
@@ -2613,13 +3170,7 @@ fn run_lanes(n: usize, job: &(dyn Fn() + Sync)) {
     let job: *const (dyn Fn() + Sync + '_) = job;
     // Safety: see `Lanes::job`; the wait below is what makes it hold.
     let job: *const (dyn Fn() + Sync + 'static) = unsafe { std::mem::transmute(job) };
-    let lanes = std::sync::Arc::new(Lanes {
-        n,
-        next: AtomicUsize::new(0),
-        done: AtomicUsize::new(0),
-        panicked: AtomicBool::new(false),
-        job,
-    });
+    let lanes = std::sync::Arc::new(Lanes { n, next: AtomicUsize::new(0), done: AtomicUsize::new(0), panicked: AtomicBool::new(false), job });
     {
         let mut g = h.latest.lock().unwrap();
         g.0 += 1;
@@ -2656,71 +3207,41 @@ fn take_best(per: &mut Vec<Cands>) -> Vec<Ranked> {
 /// What the name index says should be indexed under `dir` (direct
 /// children only unless `recursive`).
 pub fn wanted(live: &Live, home: &[u8], dir: &[u8], recursive: bool) -> Docs {
-    let mut want = Docs::default();
-    if !in_scope(dir, home) {
-        return want;
-    }
-    let idx = &live.base;
-    let mut p = Vec::new();
-    if let Some(d) = idx
-        .lookup(dir)
-        .filter(|&e| !live.is_dead(e))
-        .and_then(|e| idx.dir_of(e))
-    {
-        let range = if recursive {
-            idx.dir_start()[d as usize] as usize..idx.dir_end()[d as usize] as usize
-        } else {
-            idx.children(d)
-        };
-        for i in range {
-            if idx.kind()[i] & 3 != KIND_FILE
-                || live.is_dead(i as u32)
-                || !name_ok(idx.name(i), idx.size_of(i))
-            {
-                continue;
-            }
-            if recursive {
-                idx.path(i, &mut p);
-            } else {
-                p = join(dir, idx.name(i));
-            }
-            if in_scope(&p, home) {
-                want.push(&p, idx.size_of(i), idx.mtime()[i]);
-            }
-        }
-    }
-    let lo = join(dir, b"");
-    for (k, o) in live
-        .over
-        .range(lo.clone()..)
-        .take_while(|(k, _)| k.starts_with(&lo))
-    {
-        if o.kind & 3 == KIND_FILE
-            && (recursive || !k[lo.len()..].contains(&b'/'))
-            && eligible(k, o.size, home)
-        {
-            want.push(k, o.size, o.mtime);
-        }
-    }
-    want
+    let look = |p: &[u8]| in_index(live, p);
+    Scope::new(home, &look).wanted(live, dir, recursive)
+}
+
+/// What should be indexed under these folders (direct children unless
+/// recursive) as the name index has them now, for `Dirty::mark`.
+pub fn wanted_now(live: &Live, home: &[u8], dirs: &[(Vec<u8>, bool)]) -> Vec<(Vec<u8>, bool, Docs)> {
+    let look = |p: &[u8]| in_index(live, p);
+    let mut scope = Scope::new(home, &look);
+    (dirs.iter())
+        .map(|(d, r)| {
+            let mut w = scope.wanted(live, d, *r);
+            w.sort();
+            (d.clone(), *r, w)
+        })
+        .collect()
 }
 
 /// The dirs/trees from one batch of changes, each with what should be
 /// indexed there. Done under the name-index read lock only.
-pub fn wants(
-    live: &Live,
-    home: &[u8],
-    dirs: &[Vec<u8>],
-    trees: &[Vec<u8>],
-) -> Vec<(Vec<u8>, bool, Docs)> {
+pub fn wants(live: &Live, home: &[u8], dirs: &[Vec<u8>], trees: &[Vec<u8>]) -> Vec<(Vec<u8>, bool, Docs)> {
+    let look = |p: &[u8]| in_index(live, p);
+    let mut scope = Scope::new(home, &look);
     let mut out: Vec<(Vec<u8>, bool)> = Vec::new();
-    for (d, r) in dirs
-        .iter()
-        .map(|d| (d, false))
-        .chain(trees.iter().map(|d| (d, true)))
-    {
+    // A changed skip list changes what's wanted anywhere: all of home.
+    let mut skips = USER_SKIPS.lock().unwrap();
+    if skips.1.as_ref().is_some_and(|was| *was != scope.skips) {
+        out.push((home.to_vec(), true));
+    }
+    skips.1 = Some(scope.skips.clone());
+    drop(skips);
+    for (d, r) in dirs.iter().map(|d| (d, false)).chain(trees.iter().map(|d| (d, true))) {
         if in_scope(d, home) {
-            out.push((d.clone(), r));
+            // A folder whose ignore files changed: so may all below it.
+            out.push((d.clone(), r || scope.rules_changed(d)));
         } else if r && home.starts_with(d) {
             // A subtree containing home (e.g. "/" rescanned): sync all of home.
             out.push((home.to_vec(), true));
@@ -2730,17 +3251,95 @@ pub fn wants(
     out.dedup();
     out.into_iter()
         .map(|(d, r)| {
-            let mut w = wanted(live, home, &d, r);
+            let mut w = scope.wanted(live, &d, r);
             w.sort();
             (d, r, w)
         })
         .collect()
 }
 
+/// Grep the docs `wanted` lists by reading them all: the content index's
+/// first build is still running, and its partial answer would be missing
+/// files. Reads them in the order the built index will rank them (it
+/// numbers a first build's docs in path order), so the answer is the same.
+pub fn grep_unindexed(g: &Grep, mut docs: Docs, filt: &Query) -> GrepResult {
+    docs.sort();
+    let mut order: Vec<(u64, u32)> = (0..docs.len())
+        .filter_map(|i| {
+            let (p, (_, _, size, mtime)) = (docs.path(i), docs.items[i]);
+            filt.match_path(p, KIND_FILE, size, mtime)?;
+            Some((rank_key(doc_rank(p), mtime), i as u32))
+        })
+        .collect();
+    order.sort_unstable();
+    let n = order.len();
+    let mut r =
+        verify_from(g, g.skip.min(n), n, filt.limit, Reading::Scan, std::time::Instant::now(), |k| Some(docs.path(order[k].1 as usize).into())).0;
+    r.next = r.next.filter(|&x| x < n);
+    r
+}
+
 /// A pattern's gram hashes, as `may_contain` checks them.
 struct Probes {
     short: Vec<u32>,
-    long: Vec<u32>,
+}
+
+/// How a pattern's letter case matters.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub enum Case {
+    /// Insensitive unless the pattern has an upper-case letter.
+    #[default]
+    Smart,
+    Sensitive,
+    Insensitive,
+}
+
+impl Case {
+    fn insensitive(self, pattern: &str) -> bool {
+        match self {
+            Case::Smart => !pattern.chars().any(|c| c.is_uppercase()),
+            Case::Sensitive => false,
+            Case::Insensitive => true,
+        }
+    }
+
+    /// For a regex, smart case counts what ripgrep counts: its literal
+    /// characters (in classes too), not escapes like `\S` or `\pL`; with
+    /// none at all it is exact.
+    fn regex_insensitive(self, pattern: &str) -> bool {
+        use regex_syntax::ast::{self, Ast, ClassSetItem};
+        struct Lits(bool, bool);
+        impl Lits {
+            fn add(&mut self, c: char) {
+                (self.0, self.1) = (true, self.1 || c.is_uppercase());
+            }
+        }
+        impl ast::Visitor for Lits {
+            type Output = bool;
+            type Err = ();
+            fn finish(self) -> Result<bool, ()> {
+                Ok(self.0 && !self.1)
+            }
+            fn visit_pre(&mut self, a: &Ast) -> Result<(), ()> {
+                if let Ast::Literal(l) = a {
+                    self.add(l.c);
+                }
+                Ok(())
+            }
+            fn visit_class_set_item_pre(&mut self, i: &ClassSetItem) -> Result<(), ()> {
+                match i {
+                    ClassSetItem::Literal(l) => self.add(l.c),
+                    ClassSetItem::Range(r) => [r.start.c, r.end.c].into_iter().for_each(|c| self.add(c)),
+                    _ => {}
+                }
+                Ok(())
+            }
+        }
+        match (self, ast::parse::Parser::new().parse(pattern)) {
+            (Case::Smart, Ok(a)) => ast::visit(&a, Lits(false, false)).unwrap_or(false),
+            _ => self.insensitive(pattern),
+        }
+    }
 }
 
 pub struct Grep {
@@ -2749,6 +3348,13 @@ pub struct Grep {
     pub max_per_file: usize,
     /// Stop reading candidates after this long (None = read them all).
     pub budget: Option<std::time::Duration>,
+    /// Lines of context to give before and after each matched line.
+    pub before: usize,
+    pub after: usize,
+    /// Tell which matched lines define the name they matched (`Hit::def`).
+    pub defs: bool,
+    /// Candidates to pass over: the `next` of the page before.
+    pub skip: usize,
     /// The matching regex, compiled when first needed (a plain ASCII
     /// literal mostly isn't: `literal` finds it).
     re: std::sync::OnceLock<Regex>,
@@ -2758,37 +3364,32 @@ pub struct Grep {
 }
 
 impl Grep {
+    /// A pattern in smart case.
     pub fn new(pattern: &str, mode: GrepMode) -> Result<Grep, String> {
-        Self::with_case(pattern, mode, !pattern.chars().any(|c| c.is_uppercase()))
+        Grep::with_case(pattern, mode, Case::Smart)
     }
 
-    /// `new` with the case fold explicit rather than inferred: embedders
-    /// whose contract is rg's `-i` (set or unset, not smart-case) pass it
-    /// through directly.
-    pub fn with_case(pattern: &str, mode: GrepMode, insensitive: bool) -> Result<Grep, String> {
-        let smart_ci = insensitive;
+    pub fn with_case(pattern: &str, mode: GrepMode, case: Case) -> Result<Grep, String> {
         let src = match mode {
             GrepMode::Literal => regex::escape(pattern),
             GrepMode::Regex => pattern.to_string(),
             // A definition: a declaring keyword, optional generics/modifiers,
             // then the name. ASCII word boundaries keep the regex on the fast
             // DFA path even in files with non-ASCII text.
-            GrepMode::Symbol => format!(
-                r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?{}(?-u:\b)",
-                regex::escape(pattern)
-            ),
+            GrepMode::Symbol => format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?{}(?-u:\b)", regex::escape(pattern)),
         };
-        let case_insensitive = smart_ci && mode != GrepMode::Symbol;
+        // (A definition's name is exact unless asked otherwise.)
+        let case_insensitive = match mode {
+            GrepMode::Symbol => case == Case::Insensitive,
+            GrepMode::Regex => case.regex_insensitive(pattern),
+            _ => case.insensitive(pattern),
+        };
         let short = (1..=4096).contains(&pattern.len());
         let literal = match mode {
-            GrepMode::Symbol if short => Some(Literal::Definition(
-                memchr::memmem::Finder::new(pattern.as_bytes()).into_owned(),
-            )),
+            GrepMode::Symbol if short && !case_insensitive => Some(Literal::Definition(memchr::memmem::Finder::new(pattern.as_bytes()).into_owned())),
             GrepMode::Literal if short && pattern.is_ascii() => Some(match case_insensitive {
                 true => Literal::folded(pattern.as_bytes()),
-                false => {
-                    Literal::Exact(memchr::memmem::Finder::new(pattern.as_bytes()).into_owned())
-                }
+                false => Literal::Exact(memchr::memmem::Finder::new(pattern.as_bytes()).into_owned()),
             }),
             _ => None,
         };
@@ -2797,6 +3398,10 @@ impl Grep {
             mode,
             max_per_file: 5,
             budget: Some(std::time::Duration::from_millis(250)),
+            before: 0,
+            after: 0,
+            defs: false,
+            skip: 0,
             re: std::sync::OnceLock::new(),
             src,
             case_insensitive,
@@ -2808,13 +3413,19 @@ impl Grep {
         Ok(g)
     }
 
+    /// Lines holding any of these literals. Smart case is insensitive only
+    /// when none of them has an upper-case letter.
+    pub fn any_of(patterns: &[impl AsRef<str>], case: Case) -> Result<Grep, String> {
+        let pats: Vec<&str> = patterns.iter().map(|p| p.as_ref()).filter(|p| !p.is_empty()).collect();
+        if pats.is_empty() {
+            return Err("no pattern".into());
+        }
+        let case = if pats.iter().all(|p| case.insensitive(p)) { Case::Insensitive } else { Case::Sensitive };
+        Grep::with_case(&pats.iter().map(|p| regex::escape(p)).collect::<Vec<_>>().join("|"), GrepMode::Regex, case)
+    }
+
     fn build(&self) -> Result<Regex, String> {
-        RegexBuilder::new(&self.src)
-            .case_insensitive(self.case_insensitive)
-            .multi_line(true)
-            .size_limit(1 << 26)
-            .build()
-            .map_err(|e| e.to_string())
+        RegexBuilder::new(&self.src).case_insensitive(self.case_insensitive).multi_line(true).size_limit(1 << 26).build().map_err(|e| e.to_string())
     }
 
     fn re(&self) -> &Regex {
@@ -2828,33 +3439,22 @@ impl Grep {
             let mut out: Vec<u32> = if self.mode == GrepMode::Regex {
                 Vec::new()
             } else {
-                self.pattern
-                    .as_bytes()
-                    .windows(n)
-                    .map(|w| gram_hash(w.iter().fold(0, |g, &b| g << 8 | fold(b) as u64)))
-                    .collect()
+                self.pattern.as_bytes().windows(n).map(|w| gram_hash(w.iter().fold(0, |g, &b| g << 8 | fold(b) as u64))).collect()
             };
             out.sort_unstable();
             out.dedup();
             out
         };
-        Probes {
-            short: grams(SHORT),
-            long: grams(LONG),
-        }
+        Probes { short: grams(SHORT) }
     }
 
     fn plan(&self) -> TQ {
         match self.mode {
             // Exactly the docs that define it (plus rare hash collisions,
             // which reading the file weeds out).
-            GrepMode::Symbol if plain_identifier(self.pattern.as_bytes()) => {
-                TQ::Tri(symbol_key(self.pattern.as_bytes()))
-            }
+            GrepMode::Symbol if plain_identifier(self.pattern.as_bytes()) => TQ::Tri(symbol_key(self.pattern.as_bytes())),
             GrepMode::Literal | GrepMode::Symbol => literal_plan(self.pattern.as_bytes()),
-            GrepMode::Regex => regex_syntax::Parser::new()
-                .parse(&self.pattern)
-                .map_or(TQ::All, |h| regex_plan(&h)),
+            GrepMode::Regex => regex_syntax::Parser::new().parse(&self.pattern).map_or(TQ::All, |h| regex_plan(&h)),
         }
     }
 }
@@ -2866,16 +3466,65 @@ pub struct GrepResult {
     pub read: usize,
     /// False if the time budget ran out before every candidate was read.
     pub complete: bool,
+    /// Where the next page starts (as `Grep::skip`), if there may be more.
+    pub next: Option<usize>,
 }
 
-/// Threads reading candidates (the searching one and helpers): file opens on
-/// this Mac stop scaling past ~4 (Endpoint Security clients tax every open;
-/// measured on hot files: 7.5 us/file at 4 threads, 9 at 8, 14 at 12).
+/// Threads reading candidates (the searching one and helpers): opens on this
+/// Mac stop scaling past ~4 (the kernel's read authorization contends;
+/// measured on hot files: 7.5 us/file at 4 threads, 9 at 8, 14 at 12). Past
+/// the first FIRST candidates of a search reading alone, up to two more
+/// threads join (`readers_more`), which match what was read while at most
+/// OPENING threads open files.
 const READERS: usize = 4;
+const READERS_MORE: usize = 6;
+const OPENING: usize = 4;
+
+/// The read threads of a search reading alone past its FIRST candidates:
+/// READERS_MORE, but no more than the cores above the efficiency ones. An M4
+/// mini (4 performance, 6 efficiency) ran all-matches greps 1.4-1.6x slower
+/// with the two extra threads (on efficiency cores, and the gate's waiting
+/// spins on performance ones); the M6 (2 + 4 above its 6) gains 0.85x.
+fn readers_more() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        {
+            let get = |name: &str| {
+                let name = std::ffi::CString::new(name).ok()?;
+                let (mut v, mut len) = (0i32, std::mem::size_of::<i32>());
+                let ok = unsafe { libc::sysctlbyname(name.as_ptr(), (&raw mut v).cast(), &mut len, std::ptr::null_mut(), 0) } == 0;
+                (ok && v > 0).then_some(v as usize)
+            };
+            // The levels run fastest first; the last one is the efficiency cores.
+            let fast = match get("hw.nperflevels") {
+                Some(n) if n > 1 => (0..n - 1).filter_map(|i| get(&format!("hw.perflevel{i}.physicalcpu"))).sum(),
+                _ => get("hw.physicalcpu").unwrap_or(READERS),
+            };
+            fast.clamp(READERS, READERS_MORE)
+        }
+        // No fast/efficiency split to count around on Linux.
+        #[cfg(not(target_os = "macos"))]
+        std::thread::available_parallelism().map_or(READERS, |n| n.get()).clamp(READERS, READERS_MORE)
+    })
+}
+/// Index searches reading candidates now (see READERS).
+static READING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Folders outside the index (`in:/etc`) are read with more threads: their
 /// files are mostly small and not in the page cache, so reads wait on the
 /// disk more than on the open() tax.
 const SCAN_READERS: usize = 8;
+
+/// A scan's thread, once it has read AHEAD_AFTER files, takes SCAN_RUN of
+/// them at a time and keeps AHEAD open, their reads started (as the build
+/// reads). A big folder's files come from the disk even when warm (macOS
+/// keeps ~250k vnodes, and a file's cached pages go with its vnode): one read
+/// at a time per thread waits on each, and threads taking every other file
+/// wait on the same folders. Every match in Chromium's 467k files, M6:
+/// 11.5-15.2 -> 6.6-6.7 s. First pages that fill early read as before.
+const AHEAD: usize = 8;
+const AHEAD_AFTER: usize = 64;
+const SCAN_RUN: usize = 64;
 
 /// Run `f` with this thread never downloading iCloud placeholders (as the
 /// helper threads), then restore its policy.
@@ -2903,136 +3552,317 @@ fn without_materializing<T>(f: impl FnOnce() -> T) -> T {
 
 pub struct FileMatches {
     pub path: Vec<u8>,
+    /// The lines holding a match: number, and text (the line's first 400
+    /// bytes, trailing space trimmed).
     pub lines: Vec<(usize, String)>,
+    /// Per line, where its matches are and the lines around it.
+    pub hits: Vec<Hit>,
+}
+
+/// One matched line's matches and context.
+#[derive(Clone, Default)]
+pub struct Hit {
+    /// Byte column of its first match.
+    pub col: usize,
+    /// Its matches as byte ranges in the line's text.
+    pub ranges: Vec<(usize, usize)>,
+    /// One of them is where the name it matched is defined (with `Grep::defs`).
+    pub def: bool,
+    /// The lines before and after it (`Grep::before`, `Grep::after`).
+    pub before: Vec<String>,
+    pub after: Vec<String>,
 }
 
 /// Read candidates in rank order until `limit` files have matched or the
 /// time budget is spent (best-ranked results first, so a cut-short search
 /// still returns the ones you most likely wanted). Each read thread claims
 /// the next unread candidate, so the files read are always a prefix of the
-/// ranking and reading stops as soon as the `limit`th match is in.
+/// ranking and reading stops as soon as the `limit`th match is in. A file
+/// counts only if the content build would take it for text (`is_text`).
 pub fn verify(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize) -> GrepResult {
-    verify_from(
-        g,
-        paths.len(),
-        limit,
-        SCAN_READERS,
-        std::time::Instant::now(),
-        |i| Some(paths[i].as_ref()),
-    )
-    .0
+    verify_as(g, paths, limit, Reading::Scan)
 }
 
-/// `verify` over `n` candidates with `readers` threads, `path(i)` giving the
-/// i-th, or None if the index already rules it out; the budget counts from
-/// `t`. Also returns how many candidates it got through.
+/// Grep one file the user named: its text is read whatever it looks like
+/// (minified, a NUL byte past its first 8 KB), unlike a file a search
+/// comes across, which counts only as the index would hold it.
+pub fn grep_file(g: &Grep, path: &[u8]) -> GrepResult {
+    verify_as(g, &[path], 1, Reading::Named)
+}
+
+fn verify_as(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize, how: Reading) -> GrepResult {
+    let mut r = verify_from(g, g.skip.min(paths.len()), paths.len(), limit, how, std::time::Instant::now(), |i| Some(paths[i].as_ref().into())).0;
+    r.next = r.next.filter(|&x| x < paths.len());
+    r
+}
+
+/// What a search reads, which says how it reads them and whether a file
+/// must pass the content build's text test (`is_text`) to count: a file
+/// read directly answers as the index will once it holds the file.
+#[derive(Clone, Copy)]
+enum Reading {
+    /// The content index's candidates (the build took them for text).
+    Index,
+    /// Files changed since their folder's last sync, read as candidates.
+    Fresh,
+    /// Files read without the index (its first build, folders it doesn't
+    /// cover): more threads, opened ahead (see SCAN_READERS, AHEAD).
+    Scan,
+    /// One file the user named, read whatever its text looks like.
+    Named,
+}
+
+impl Reading {
+    fn scan(self) -> bool {
+        matches!(self, Reading::Scan | Reading::Named)
+    }
+
+    fn text_test(self) -> bool {
+        matches!(self, Reading::Fresh | Reading::Scan)
+    }
+}
+
+/// `verify` over candidates `from..n`, `path(i)` giving the i-th, or None
+/// if the index already rules it out; the budget counts from `t`. Also
+/// returns how far it got through them.
 fn verify_from<'a>(
     g: &Grep,
+    from: usize,
     n: usize,
     limit: usize,
-    readers: usize,
+    how: Reading,
     t: std::time::Instant,
-    path: impl Fn(usize) -> Option<&'a [u8]> + Sync,
+    path: impl Fn(usize) -> Option<std::borrow::Cow<'a, [u8]>> + Sync,
 ) -> (GrepResult, usize) {
     use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-    let (next, found, read) = (
-        AtomicUsize::new(0),
-        AtomicUsize::new(0),
-        AtomicUsize::new(0),
-    );
+    let (scan, text) = (how.scan(), how.text_test());
+    let (next, found, read, opening) = (AtomicUsize::new(from), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
     let hits = std::sync::Mutex::new(Vec::new());
     let work = || {
-        while found.load(Relaxed) < limit && g.budget.is_none_or(|b| t.elapsed() <= b) {
-            let i = next.fetch_add(1, Relaxed);
-            if i >= n {
-                break;
+        // Files taken, each read before the thread stops (so all before
+        // `next` are); a scan gone deep takes runs and opens ahead (`AHEAD`).
+        let (mut taken, mut mine, mut run) = (std::collections::VecDeque::new(), 0, 0..0);
+        loop {
+            let deep = scan && mine >= AHEAD_AFTER;
+            let depth = if deep { AHEAD } else { 1 };
+            while taken.len() < depth {
+                if run.is_empty() {
+                    if found.load(Relaxed) >= limit || g.budget.is_some_and(|b| t.elapsed() > b) {
+                        break;
+                    }
+                    let k = if deep { SCAN_RUN } else { 1 };
+                    let at = next.fetch_add(k, Relaxed);
+                    if at >= n {
+                        break;
+                    }
+                    run = at..(at + k).min(n);
+                }
+                let i = run.next().unwrap();
+                let Some(p) = path(i) else { continue };
+                let f = deep.then(|| open_ahead_sized(&p));
+                taken.push_back((i, p, f));
             }
-            let Some(p) = path(i) else { continue };
+            let Some((i, p, f)) = taken.pop_front() else { break };
             read.fetch_add(1, Relaxed);
-            if let Some(m) = match_file(g, p) {
+            mine += 1;
+            let m = match f {
+                Some(f) => f.and_then(|(file, size)| match_open(g, &p, file, size, text)),
+                None => match_file(g, &p, (!scan).then_some(&opening), text),
+            };
+            if let Some(m) = m {
                 found.fetch_add(1, Relaxed);
                 hits.lock().unwrap().push((i, m));
             }
         }
         // Don't sit on a big file's worth of buffer between searches.
         READ_BUF.with_borrow_mut(|b| {
-            if b.capacity() > 256 << 10 {
+            if b.capacity() as u64 > READ_BUF_MAX {
                 *b = Vec::new();
             }
         });
     };
+    let others = if scan { 0 } else { READING.fetch_add(1, Relaxed) };
+    let readers = if scan {
+        SCAN_READERS
+    } else if n - from > FIRST && others == 0 {
+        readers_more()
+    } else {
+        READERS
+    };
     without_materializing(|| run_lanes(readers, &work));
+    if !scan {
+        READING.fetch_sub(1, Relaxed);
+    }
     let mut hits = hits.into_inner().unwrap();
     hits.sort_unstable_by_key(|h| h.0);
     hits.truncate(limit);
     let done = next.into_inner().min(n);
     let complete = done == n || hits.len() >= limit;
-    (
-        GrepResult {
-            files: hits.into_iter().map(|h| h.1).collect(),
-            candidates: n,
-            read: read.into_inner(),
-            complete,
-        },
-        done,
-    )
+    // The next page: past the last file shown, or where reading stopped.
+    let more = if hits.len() >= limit { hits.last().map(|h| h.0 + 1) } else { (done < n).then_some(done) };
+    let files = hits.into_iter().map(|h| h.1).collect();
+    (GrepResult { files, candidates: n, read: read.into_inner(), complete, next: more }, done)
 }
 
 thread_local! {
-    /// One read buffer per read-pool thread: a fresh ~1 MB Vec per file
-    /// costs page faults and an munmap every time. Kept only while a search
-    /// runs if it grew past 256 KB.
+    /// One read buffer per read-pool thread, for files up to READ_BUF_MAX
+    /// (kept: a fresh Vec per file costs page faults every time, and a
+    /// freed big one stays in the footprint anyway).
     static READ_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
+const READ_BUF_MAX: u64 = 1 << 20;
 
-fn match_file(g: &Grep, path: &[u8]) -> Option<FileMatches> {
-    READ_BUF.with_borrow_mut(|buf| {
-        use std::io::Read;
-        buf.clear();
-        open_regular(path)?
-            .take(MAX_FILE * 4)
-            .read_to_end(buf)
-            .ok()?;
-        if memchr::memchr(0, &buf[..buf.len().min(8192)]).is_some() {
-            return None;
+/// A file's matches (see `matches_in`).
+fn match_file(g: &Grep, path: &[u8], opening: Option<&std::sync::atomic::AtomicUsize>, text: bool) -> Option<FileMatches> {
+    let (file, size) = match opening {
+        Some(at) => open_gated(path, at),
+        None => open_sized(path),
+    }?;
+    match_open(g, path, file, size, text)
+}
+
+/// `match_file` on a file opened at `size` bytes.
+fn match_open(g: &Grep, path: &[u8], mut file: std::fs::File, size: u64, text: bool) -> Option<FileMatches> {
+    use std::io::{Read, Seek};
+    if size > MAX_REPO_FILE {
+        return None;
+    }
+    // A big file gets pages of its own, handed back when done: macOS malloc
+    // keeps a freed big buffer in the process's footprint, a new one for
+    // each such file read. (One that grew since is read whole, below.)
+    if size > READ_BUF_MAX {
+        let mut map = memmap2::MmapMut::map_anon(size as usize + 1).ok()?;
+        let mut n = 0;
+        while n < map.len() {
+            match file.read(&mut map[n..]) {
+                Ok(0) => break,
+                Ok(k) => n += k,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return None,
+            }
         }
-        let lines = match g.literal.as_ref().filter(|l| !l.needs_regex(buf)) {
-            Some(l) => lines_at(g, buf, l.starts(buf)),
-            None => lines_at(g, buf, g.re().find_iter(buf).map(|m| m.start())),
-        };
-        (!lines.is_empty()).then(|| FileMatches {
-            path: path.to_vec(),
-            lines,
-        })
+        if n <= size as usize {
+            return matches_in(g, path, &map[..n], text);
+        }
+        file.rewind().ok()?;
+    }
+    READ_BUF.with_borrow_mut(|buf| {
+        buf.clear();
+        file.take(MAX_REPO_FILE + 1).read_to_end(buf).ok()?;
+        matches_in(g, path, buf, text)
     })
 }
 
-/// The first `max_per_file` lines holding a match (by where matches start),
-/// numbered, as shown.
-fn lines_at(g: &Grep, buf: &[u8], starts: impl Iterator<Item = usize>) -> Vec<(usize, String)> {
-    let mut lines = Vec::new();
-    let (mut line_no, mut counted) = (1usize, 0usize);
-    let mut last_line_start = usize::MAX;
-    for start in starts {
-        line_no += memchr::memchr_iter(b'\n', &buf[counted..start]).count();
-        counted = start;
-        let ls = memchr::memrchr(b'\n', &buf[..start]).map_or(0, |p| p + 1);
-        if ls == last_line_start {
-            continue;
-        }
-        last_line_start = ls;
-        let le = memchr::memchr(b'\n', &buf[start..]).map_or(buf.len(), |p| start + p);
-        lines.push((
-            line_no,
-            String::from_utf8_lossy(&buf[ls..le.min(ls + 400)])
-                .trim_end()
-                .to_string(),
-        ));
-        if lines.len() >= g.max_per_file {
-            break;
-        }
+/// The matching lines of a file's text (None if it's past the size limit,
+/// or not text: a NUL byte in its first 8 KB, or with `text`, the content
+/// build's whole test, decided only for a file that matched).
+fn matches_in(g: &Grep, path: &[u8], buf: &[u8], text: bool) -> Option<FileMatches> {
+    if buf.len() as u64 > MAX_REPO_FILE || memchr::memchr(0, &buf[..buf.len().min(8192)]).is_some() {
+        return None;
     }
-    lines
+    let (lines, hits) = match g.literal.as_ref().filter(|l| !l.needs_regex(buf)) {
+        Some(l) => lines_at(g, buf, l.starts(buf).map(|p| (p, p + l.len()))),
+        None => lines_at(g, buf, on_lines(g.re(), buf)),
+    };
+    (!lines.is_empty() && (!text || is_text(buf))).then(|| FileMatches { path: path.to_vec(), lines, hits })
+}
+
+/// The first `max_per_file` lines holding a match (by where matches start),
+/// numbered, as shown, and where the matches on them are.
+fn lines_at(g: &Grep, buf: &[u8], found: impl Iterator<Item = (usize, usize)>) -> (Vec<(usize, String)>, Vec<Hit>) {
+    let (mut lines, mut hits) = (Vec::new(), Vec::<Hit>::new());
+    let (mut line_no, mut counted) = (1usize, 0usize);
+    // The current line, as it is shown.
+    let (mut ls, mut le, mut raw, mut utf8) = (0, 0, &buf[..0], true);
+    for (start, end) in found {
+        if hits.is_empty() || start > le {
+            if lines.len() >= g.max_per_file {
+                break;
+            }
+            line_no += memchr::memchr_iter(b'\n', &buf[counted..start]).count();
+            counted = start;
+            ls = memchr::memrchr(b'\n', &buf[..start]).map_or(0, |p| p + 1);
+            le = memchr::memchr(b'\n', &buf[start..]).map_or(buf.len(), |p| start + p);
+            raw = &buf[ls..le.min(ls + 400)];
+            let text = String::from_utf8_lossy(raw);
+            utf8 = matches!(text, std::borrow::Cow::Borrowed(_));
+            lines.push((line_no, text.trim_end().to_string()));
+            let (before, after) = (lines_before(buf, ls, g.before), lines_after(buf, le, g.after));
+            hits.push(Hit { col: start - ls, before, after, ..Default::default() });
+        }
+        // Offsets in the shown text (past invalid UTF-8, after its replacements).
+        let text = &lines.last().unwrap().1;
+        let at = |off: usize| if utf8 { off.min(raw.len()) } else { String::from_utf8_lossy(&raw[..off.min(raw.len())]).len() }.min(text.len());
+        let (a, b) = (at(start - ls), at(end.min(le) - ls));
+        let hit = hits.last_mut().unwrap();
+        if start - ls < raw.len() {
+            hit.ranges.push((a, b.max(a)));
+        }
+        hit.def |= g.defs && defined_at(buf, start, end - start);
+    }
+    (lines, hits)
+}
+
+/// A regex's matches as ripgrep finds them, each within its line: the lines
+/// a match runs across are searched again one at a time. Past a final
+/// newline (or in an empty file) there is no line, so no match either.
+fn on_lines<'a>(re: &'a Regex, buf: &'a [u8]) -> impl Iterator<Item = (usize, usize)> + 'a {
+    let lines_end = buf.len() + buf.last().is_some_and(|&b| b != b'\n') as usize;
+    let (mut at, mut last, mut queue) = (0, None, std::collections::VecDeque::new());
+    std::iter::from_fn(move || {
+        loop {
+            if let Some(m) = queue.pop_front() {
+                return Some(m);
+            }
+            let m = re.find_at(buf, at.min(buf.len())).filter(|_| at <= buf.len())?;
+            // (As find_iter: no empty match where the last one ended.)
+            if m.is_empty() && last == Some(m.end()) {
+                at += 1;
+                continue;
+            }
+            if memchr::memchr(b'\n', m.as_bytes()).is_none() {
+                (at, last) = (m.end(), Some(m.end()));
+                return Some((m.start(), m.end()));
+            }
+            let mut ls = memchr::memrchr(b'\n', &buf[..m.start()]).map_or(0, |p| p + 1);
+            let end = memchr::memchr(b'\n', &buf[m.end()..]).map_or(buf.len(), |p| m.end() + p);
+            for line in buf[ls..end].split(|&b| b == b'\n') {
+                let found = re.find_iter(line).map(|x| (ls + x.start(), ls + x.end()));
+                queue.extend(found.filter(|x| x.0 >= at && (x.1 > at || last != Some(at))));
+                ls += line.len() + 1;
+            }
+            (at, last) = (end + 1, None);
+        }
+    })
+    .take_while(move |m| m.0 < lines_end)
+}
+
+/// A line as shown: its first 400 bytes, trailing space trimmed.
+fn shown(line: &[u8]) -> String {
+    String::from_utf8_lossy(&line[..line.len().min(400)]).trim_end().to_string()
+}
+
+/// Up to `n` lines before the line starting at `ls`, in order.
+fn lines_before(buf: &[u8], mut ls: usize, n: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    while out.len() < n && ls > 0 {
+        let s = memchr::memrchr(b'\n', &buf[..ls - 1]).map_or(0, |p| p + 1);
+        out.push(shown(&buf[s..ls - 1]));
+        ls = s;
+    }
+    out.reverse();
+    out
+}
+
+/// Up to `n` lines after the line ending at `le` (its newline, or the end).
+fn lines_after(buf: &[u8], mut le: usize, n: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    while out.len() < n && le + 1 < buf.len() {
+        let s = le + 1;
+        le = memchr::memchr(b'\n', &buf[s..]).map_or(buf.len(), |p| s + p);
+        out.push(shown(&buf[s..le]));
+    }
+    out
 }
 
 /// An ASCII literal pattern, found without a regex: its exact bytes (it has
@@ -3059,35 +3889,21 @@ impl Literal {
         let common = |b: u8| match b {
             b' ' | b'e' | b't' | b'a' | b'o' | b'i' | b'n' | b's' | b'r' => 3,
             b'h' | b'l' | b'd' | b'c' | b'u' | b'm' | b'\n' | b'\t' => 2,
-            b'f'
-            | b'p'
-            | b'g'
-            | b'w'
-            | b'y'
-            | b'b'
-            | b'.'
-            | b','
-            | b'_'
-            | b'('
-            | b')'
-            | b'"'
-            | b'='
-            | b'0'..=b'9' => 1,
+            b'f' | b'p' | b'g' | b'w' | b'y' | b'b' | b'.' | b',' | b'_' | b'(' | b')' | b'"' | b'=' | b'0'..=b'9' => 1,
             _ => 0,
         };
         let mut by_rarity: Vec<usize> = (0..needle.len()).collect();
         by_rarity.sort_by_key(|&i| (common(needle[i]), i));
         let (a, b) = (by_rarity[0], *by_rarity.get(1).unwrap_or(&by_rarity[0]));
-        let odd = [(b's', "\u{17F}"), (b'k', "\u{212A}")]
-            .iter()
-            .filter(|(c, _)| needle.contains(c));
-        let odd = odd
-            .map(|(_, u)| memchr::memmem::Finder::new(u.as_bytes()).into_owned())
-            .collect();
-        Literal::Folded {
-            needle,
-            pair: (a.min(b), a.max(b)),
-            odd,
+        let odd = [(b's', "\u{17F}"), (b'k', "\u{212A}")].iter().filter(|(c, _)| needle.contains(c));
+        let odd = odd.map(|(_, u)| memchr::memmem::Finder::new(u.as_bytes()).into_owned()).collect();
+        Literal::Folded { needle, pair: (a.min(b), a.max(b)), odd }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Literal::Exact(f) | Literal::Definition(f) => f.needle().len(),
+            Literal::Folded { needle, .. } => needle.len(),
         }
     }
 
@@ -3105,9 +3921,7 @@ impl Literal {
         std::iter::from_fn(move || {
             loop {
                 let p = match self {
-                    Literal::Exact(f) | Literal::Definition(f) => {
-                        f.find(hay.get(at..)?).map(|p| at + p)
-                    }
+                    Literal::Exact(f) | Literal::Definition(f) => f.find(hay.get(at..)?).map(|p| at + p),
                     Literal::Folded { needle, pair, .. } => find_folded(hay, at, needle, *pair),
                 }?;
                 if !matches!(self, Literal::Definition(_)) {
@@ -3132,12 +3946,7 @@ fn defined_at(hay: &[u8], p: usize, len: usize) -> bool {
     if word(hay[..p + len].last()) == word(hay.get(p + len)) {
         return false;
     }
-    let re = KEYWORD.get_or_init(|| {
-        Regex::new(&format!(
-            r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?\z"
-        ))
-        .unwrap()
-    });
+    let re = KEYWORD.get_or_init(|| Regex::new(&format!(r"(?-u:\b)(?:{DEFINES})(?:<[^>\n]*>)?[ \t*&]+(?:mut[ \t]+)?\z")).unwrap());
     let line = memchr::memrchr(b'\n', &hay[..p]).map_or(0, |i| i + 1);
     re.is_match(&hay[line..p])
 }
@@ -3149,12 +3958,7 @@ fn find_folded(hay: &[u8], from: usize, needle: &[u8], pair: (usize, usize)) -> 
     let _ = pair;
     let k = needle.len();
     let last = hay.len().checked_sub(k)?;
-    let at = |c: usize| {
-        hay[c..c + k]
-            .iter()
-            .zip(needle)
-            .all(|(&x, &y)| fold(x) == y)
-    };
+    let at = |c: usize| hay[c..c + k].iter().zip(needle).all(|(&x, &y)| fold(x) == y);
     #[allow(unused_mut)]
     let mut i = from;
     #[cfg(target_arch = "aarch64")]
@@ -3167,14 +3971,9 @@ fn find_folded(hay: &[u8], from: usize, needle: &[u8], pair: (usize, usize)) -> 
         let (v1, v2, m1, m2) = (vdupq_n_u8(c1), vdupq_n_u8(c2), case(c1), case(c2));
         while i + 16 <= last + 1 {
             let p = hay.as_ptr().add(i);
-            let eq = vandq_u8(
-                vceqq_u8(vorrq_u8(vld1q_u8(p.add(pair.0)), m1), v1),
-                vceqq_u8(vorrq_u8(vld1q_u8(p.add(pair.1)), m2), v2),
-            );
+            let eq = vandq_u8(vceqq_u8(vorrq_u8(vld1q_u8(p.add(pair.0)), m1), v1), vceqq_u8(vorrq_u8(vld1q_u8(p.add(pair.1)), m2), v2));
             // Four bits per byte lane.
-            let mut bits = vget_lane_u64::<0>(vreinterpret_u64_u8(vshrn_n_u16::<4>(
-                vreinterpretq_u16_u8(eq),
-            )));
+            let mut bits = vget_lane_u64::<0>(vreinterpret_u64_u8(vshrn_n_u16::<4>(vreinterpretq_u16_u8(eq))));
             while bits != 0 {
                 let c = i + (bits.trailing_zeros() / 4) as usize;
                 if at(c) {
@@ -3213,153 +4012,282 @@ fn literal_plan(s: &[u8]) -> TQ {
 enum List<'a> {
     /// Bit d: doc d has the trigram.
     Bits(&'a [u8]),
-    /// Ascending doc ids as delta varints.
-    Var(Var<'a>),
+    /// Ascending contents in interpolative code.
+    Ic(Ic<'a>),
 }
 
-/// A varint list: its skip table (see `SKIPS`; maybe empty) and varints.
+/// Contents per block of an interpolative list (see `Postings::push`).
+const BLOCK: usize = 128;
+
+/// Bits to write any of 0..=r.
+#[inline]
+fn width(r: u32) -> u32 {
+    32 - r.leading_zeros()
+}
+
+/// A bit stream being written, least significant bit first.
+#[derive(Default)]
+struct Bits {
+    out: Vec<u8>,
+    acc: u64,
+    n: u32,
+}
+
+impl Bits {
+    /// Append the low `w` (at most 32) bits of `v` (`v` < 2^w).
+    fn put(&mut self, v: u32, w: u32) {
+        self.acc |= (v as u64) << self.n;
+        self.n += w;
+        while self.n >= 8 {
+            self.out.push(self.acc as u8);
+            (self.acc, self.n) = (self.acc >> 8, self.n - 8);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.out.len() * 8 + self.n as usize
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.n > 0 {
+            self.out.push(self.acc as u8);
+        }
+        self.out
+    }
+}
+
+/// `w` (at most 32) bits of `b` from bit `pos` (zeros past its end).
+#[inline]
+fn get_bits(b: &[u8], pos: usize, w: u32) -> u32 {
+    let at = pos / 8;
+    let word = match b.get(at..at + 8) {
+        Some(x) => u64::from_le_bytes(x.try_into().unwrap()),
+        None => b.get(at..).unwrap_or(&[]).iter().rev().fold(0, |x, &y| x << 8 | y as u64),
+    };
+    (word >> (pos % 8) & ((1u64 << w) - 1)) as u32
+}
+
+/// Write ascending `a`, all within lo..=hi, in binary interpolative code:
+/// the middle value in as few bits as its bounds allow, then each half
+/// within the bounds that leaves. Contents of one folder cluster, and a run
+/// of consecutive ones costs nothing.
+fn ic_put(w: &mut Bits, a: &[u32], lo: u32, hi: u32) {
+    let m = a.len() / 2;
+    let Some(&x) = a.get(m) else { return };
+    let low = lo + m as u32;
+    w.put(x - low, width(hi - (a.len() - 1 - m) as u32 - low));
+    ic_put(w, &a[..m], lo, x.wrapping_sub(1));
+    ic_put(w, &a[m + 1..], x + 1, hi);
+}
+
+/// Read what `ic_put` wrote of `out.len()` values within lo..=hi, from bit `pos`.
+fn ic_get(b: &[u8], pos: &mut usize, out: &mut [u32], lo: u32, hi: u32) {
+    let n = out.len();
+    if (hi - lo) as usize + 1 == n {
+        for (k, o) in out.iter_mut().enumerate() {
+            *o = lo + k as u32;
+        }
+        return;
+    }
+    let m = n / 2;
+    let low = lo + m as u32;
+    let k = width(hi - (n - 1 - m) as u32 - low);
+    let x = low + get_bits(b, *pos, k);
+    *pos += k as usize;
+    out[m] = x;
+    let (left, right) = out.split_at_mut(m);
+    if m > 0 {
+        ic_get(b, pos, left, lo, x - 1);
+    }
+    if m + 1 < n {
+        ic_get(b, pos, &mut right[1..], x + 1, hi);
+    }
+}
+
+/// Whether what `ic_put` wrote of `n` values within lo..=hi, from bit `pos`,
+/// holds `x`: the middle value, then only the half `x` would be in (a lower
+/// half passed over is decoded, to find where the upper one starts). About
+/// half the values are read, on average. (`passed`: room for those.)
+fn ic_has(b: &[u8], mut pos: usize, mut n: usize, mut lo: u32, mut hi: u32, x: u32, passed: &mut [u32]) -> bool {
+    while n > 0 && (lo..=hi).contains(&x) {
+        if (hi - lo) as usize + 1 == n {
+            return true;
+        }
+        let m = n / 2;
+        let low = lo + m as u32;
+        let k = width(hi - (n - 1 - m) as u32 - low);
+        let v = low + get_bits(b, pos, k);
+        pos += k as usize;
+        if x <= v {
+            if x == v {
+                return true;
+            }
+            (n, hi) = (m, v - 1);
+        } else {
+            if m > 0 {
+                ic_get(b, &mut pos, &mut passed[..m], lo, v - 1);
+            }
+            (n, lo) = (n - m - 1, v + 1);
+        }
+    }
+    false
+}
+
+/// An interpolative list (see `Postings::push`): its contents, below `n`.
 #[derive(Clone, Copy)]
-struct Var<'a> {
+struct Ic<'a> {
+    len: usize,
+    n: u32,
+    /// Per block but the last: its last content and where the next block's
+    /// bits start (u32 each).
     skips: &'a [u8],
-    deltas: &'a [u8],
+    bits: &'a [u8],
+    /// Where the first block's bits start.
+    start: usize,
 }
 
-impl<'a> Var<'a> {
-    fn new(bytes: &'a [u8], skips: bool) -> Var<'a> {
-        if !skips {
-            return Var {
-                skips: &[],
-                deltas: bytes,
-            };
+impl<'a> Ic<'a> {
+    fn new(bytes: &'a [u8], skips: bool, n: u32) -> Ic<'a> {
+        if skips {
+            let len = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+            let t = 4 + 8 * (len.div_ceil(BLOCK) - 1);
+            return Ic { len, n, skips: &bytes[4..t], bits: &bytes[t..], start: 0 };
         }
-        let n = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-        Var {
-            skips: &bytes[4..4 + 8 * n],
-            deltas: &bytes[4 + 8 * n..],
-        }
+        // An Elias-gamma count.
+        let z = get_bits(bytes, 0, 32).trailing_zeros();
+        let len = (1 << z | get_bits(bytes, z as usize + 1, z)) as usize;
+        Ic { len, n, skips: &[], bits: bytes, start: 2 * z as usize + 1 }
     }
 
-    fn iter(&self) -> Varints<'a> {
-        Varints {
-            b: self.deltas,
-            last: 0,
-        }
+    fn blocks(&self) -> usize {
+        self.len.div_ceil(BLOCK)
     }
 
-    /// Skip entry `i`: (the content before its run, where the run starts).
-    fn skip(&self, i: usize) -> (u32, usize) {
-        let e = u64::from_le_bytes(self.skips[8 * i..8 * i + 8].try_into().unwrap());
+    /// Skip entry `j`: (block j's last content, where block j + 1 starts).
+    fn skip(&self, j: usize) -> (u32, usize) {
+        let e = u64::from_le_bytes(self.skips[8 * j..8 * j + 8].try_into().unwrap());
         (e as u32, (e >> 32) as usize)
     }
+
+    /// Where block `j` starts: the least content it can hold, and its bits.
+    fn start_of(&self, j: usize) -> (u32, usize) {
+        if j == 0 { (0, self.start) } else { (self.skip(j - 1).0 + 1, self.skip(j - 1).1) }
+    }
+
+    /// The first block from `from` on ending at or past `x` (else the last):
+    /// steps doubling along the skip entries, then a binary search.
+    fn block_at(&self, from: usize, x: u32) -> usize {
+        let last = self.blocks() - 1;
+        let (mut lo, mut hi, mut step) = (from, from, 1);
+        while hi < last && self.skip(hi).0 < x {
+            (lo, hi, step) = (hi + 1, (hi + step).min(last), step * 2);
+        }
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.skip(mid).0 < x { lo = mid + 1 } else { hi = mid }
+        }
+        lo
+    }
+
+    /// Whether block `j` holds `x`, without decoding all of it (see `ic_has`).
+    fn has(&self, j: usize, x: u32, tmp: &mut [u32; BLOCK]) -> bool {
+        let (lo, pos) = self.start_of(j);
+        if j + 1 < self.blocks() {
+            let last = self.skip(j).0;
+            return x == last || (x < last && ic_has(self.bits, pos, BLOCK - 1, lo, last - 1, x, tmp));
+        }
+        ic_has(self.bits, pos, self.len - BLOCK * j, lo, self.n - 1, x, tmp)
+    }
+
+    /// Block `j`'s contents into `out`; how many.
+    fn block(&self, j: usize, out: &mut [u32; BLOCK]) -> usize {
+        let (lo, mut pos) = self.start_of(j);
+        if j + 1 < self.blocks() {
+            let last = self.skip(j).0;
+            ic_get(self.bits, &mut pos, &mut out[..BLOCK - 1], lo, last - 1);
+            out[BLOCK - 1] = last;
+            return BLOCK;
+        }
+        let n = self.len - BLOCK * j;
+        ic_get(self.bits, &mut pos, &mut out[..n], lo, self.n - 1);
+        n
+    }
+
+    /// All its contents, appended to `out`.
+    fn decode_into(&self, out: &mut Vec<u32>) {
+        let mut buf = [0; BLOCK];
+        for j in 0..self.blocks() {
+            let n = self.block(j, &mut buf);
+            out.extend_from_slice(&buf[..n]);
+        }
+    }
 }
 
-/// A walk along a varint list that jumps ahead by its skip table.
+/// A walk along an interpolative list, a block at a time.
 struct Cursor<'a> {
-    var: Var<'a>,
-    it: Varints<'a>,
-    /// Contents read so far; the last is `cur`.
-    read: usize,
-    cur: Option<u32>,
-    /// The skip entry of the next run after `cur`, and the content before
-    /// that run (u32::MAX: no next run).
-    skip: usize,
-    before: u32,
+    ic: Ic<'a>,
+    /// The block at hand (`len` of it decoded into `buf`), and the position
+    /// in it.
+    j: usize,
+    buf: [u32; BLOCK],
+    len: usize,
+    i: usize,
 }
 
 impl<'a> Cursor<'a> {
-    fn new(var: Var<'a>) -> Cursor<'a> {
-        let mut it = var.iter();
-        let cur = it.next();
-        let before = if var.skips.is_empty() {
-            u32::MAX
-        } else {
-            var.skip(0).0
-        };
-        Cursor {
-            var,
-            it,
-            read: 1,
-            cur,
-            skip: 0,
-            before,
-        }
+    /// (Its first block is read when first needed.)
+    fn new(ic: Ic<'a>) -> Cursor<'a> {
+        Cursor { ic, j: 0, buf: [0; BLOCK], len: 0, i: 0 }
+    }
+
+    fn load(&mut self, j: usize) {
+        (self.j, self.len, self.i) = (j, self.ic.block(j, &mut self.buf), 0);
     }
 
     fn next(&mut self) -> Option<u32> {
-        self.cur = self.it.next();
-        self.read += 1;
-        self.cur
+        self.i += 1;
+        if self.i == self.len && self.j + 1 < self.ic.blocks() {
+            self.load(self.j + 1);
+        }
+        self.buf[..self.len].get(self.i).copied()
     }
 
     /// The first content from here on that is `x` or more.
     fn seek(&mut self, x: u32) -> Option<u32> {
-        if self.cur.is_none_or(|c| c >= x) {
-            return self.cur;
-        }
-        let n = self.var.skips.len() / 8;
-        if (self.read - 1) / SKIP != self.skip {
-            self.skip = (self.read - 1) / SKIP;
-            self.before = if self.skip < n {
-                self.var.skip(self.skip).0
-            } else {
-                u32::MAX
-            };
-        }
-        // A run past `cur` starts before `x`: jump to the last such.
-        if self.before < x {
-            let (mut lo, mut hi) = (self.skip, n);
-            while hi - lo > 1 {
-                let mid = (lo + hi) / 2;
-                if self.var.skip(mid).0 < x {
-                    lo = mid
-                } else {
-                    hi = mid
-                }
+        if self.buf[..self.len].last().is_none_or(|&l| l < x) {
+            let from = if self.len == 0 { 0 } else { self.j + 1 };
+            if from < self.ic.blocks() {
+                self.load(self.ic.block_at(from, x));
             }
-            let (last, at) = self.var.skip(lo);
-            self.it = Varints {
-                b: &self.var.deltas[at..],
-                last,
-            };
-            self.read = (lo + 1) * SKIP;
-            self.next();
         }
-        while self.cur.is_some_and(|c| c < x) {
-            self.next();
-        }
-        self.cur
-    }
-}
-
-/// Decodes a delta-varint list.
-struct Varints<'a> {
-    b: &'a [u8],
-    last: u32,
-}
-
-impl Iterator for Varints<'_> {
-    type Item = u32;
-    #[inline]
-    fn next(&mut self) -> Option<u32> {
-        let x = *self.b.first()?;
-        let (v, n) = if x < 0x80 {
-            (x as u32, 1)
-        } else {
-            varint(self.b)
-        };
-        self.b = &self.b[n..];
-        self.last += v;
-        Some(self.last)
+        self.i = gallop(&self.buf[..self.len], self.i.min(self.len), x);
+        self.buf[..self.len].get(self.i).copied()
     }
 }
 
 impl List<'_> {
+    /// Append all its docs, ascending.
+    fn all_into(self, out: &mut Vec<u32>) {
+        match self {
+            List::Bits(bytes) => {
+                for (w, &b) in bytes.iter().enumerate() {
+                    let mut b = b;
+                    while b != 0 {
+                        out.push(w as u32 * 8 + b.trailing_zeros());
+                        b &= b - 1;
+                    }
+                }
+            }
+            List::Ic(ic) => ic.decode_into(out),
+        }
+    }
+
     /// Append its docs within `docs`, ascending.
     fn decode(self, docs: std::ops::Range<u32>, out: &mut Vec<u32>) {
         match self {
             List::Bits(b) => and_bits(&[b], docs, out),
-            List::Var(v) => {
-                let mut c = Cursor::new(v);
+            List::Ic(ic) => {
+                let mut c = Cursor::new(ic);
                 let mut d = c.seek(docs.start);
                 while let Some(x) = d.filter(|&x| x < docs.end) {
                     out.push(x);
@@ -3372,23 +4300,18 @@ impl List<'_> {
     /// Keep the docs of `acc` (ascending) that are in the list.
     fn retain(self, acc: &mut Vec<u32>) {
         match self {
-            List::Bits(b) => {
-                acc.retain(|&d| b.get(d as usize / 8).is_some_and(|x| x >> (d % 8) & 1 != 0))
-            }
-            // Few to find in a long list: jump by its skip table.
-            List::Var(v) if acc.len() * 64 < v.deltas.len() => {
-                let mut c = Cursor::new(v);
-                acc.retain(|&d| c.seek(d) == Some(d));
-            }
-            List::Var(v) => {
-                let mut it = v.iter();
-                let mut cur = it.next();
+            List::Bits(b) => acc.retain(|&d| b.get(d as usize / 8).is_some_and(|x| x >> (d % 8) & 1 != 0)),
+            // Fewer to find than it has blocks: each tested in its block.
+            List::Ic(ic) if acc.len() < ic.blocks() => {
+                let (mut j, mut tmp) = (0, [0; BLOCK]);
                 acc.retain(|&d| {
-                    while cur.is_some_and(|c| c < d) {
-                        cur = it.next();
-                    }
-                    cur == Some(d)
+                    j = ic.block_at(j, d);
+                    ic.has(j, d, &mut tmp)
                 });
+            }
+            List::Ic(ic) => {
+                let mut c = Cursor::new(ic);
+                acc.retain(|&d| c.seek(d) == Some(d));
             }
         }
     }
@@ -3396,9 +4319,7 @@ impl List<'_> {
 
 /// Append the docs within `docs` set in every bitset, ascending.
 fn and_bits(lists: &[&[u8]], docs: std::ops::Range<u32>, out: &mut Vec<u32>) {
-    let end = (docs.end as usize)
-        .div_ceil(8)
-        .min(lists.iter().map(|l| l.len()).min().unwrap_or(0));
+    let end = (docs.end as usize).div_ceil(8).min(lists.iter().map(|l| l.len()).min().unwrap_or(0));
     // A list's 64 docs from byte i (none past its end).
     let word = |l: &[u8], i: usize| match l.get(i..i + 8) {
         Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
@@ -3443,9 +4364,7 @@ fn and_dense(s: &Segment, q: &TQ) -> Option<(Vec<u64>, usize)> {
     let TQ::And(qs) = q else { return None };
     let lists: Vec<&[u8]> = (qs.iter())
         .map(|q| match q {
-            TQ::Tri(t) => s
-                .list(*t)
-                .and_then(|l| if let List::Bits(b) = l { Some(b) } else { None }),
+            TQ::Tri(t) => s.list(*t).and_then(|l| if let List::Bits(b) = l { Some(b) } else { None }),
             _ => None,
         })
         .collect::<Option<_>>()?;
@@ -3479,29 +4398,23 @@ fn eval(s: &Segment, q: &TQ, docs: std::ops::Range<u32>) -> Option<Vec<u32>> {
             Some(out)
         }
         TQ::Pair(p) => {
-            let keys = s.tri_key();
-            let mut bits = vec![0u64; s.nown.div_ceil(64)];
-            for &k in
-                &keys[keys.partition_point(|&k| k < *p)..keys.partition_point(|&k| k <= p | 0xFF)]
-            {
-                match s.list(k) {
-                    Some(List::Bits(b)) => {
+            let (mut bits, mut buf) = (vec![0u64; s.nown.div_ceil(64)], Vec::new());
+            let lists = s.lists_from(s.block_of(*p as u64)).skip_while(|&(k, _)| k < *p).take_while(|&(k, _)| k <= p | 0xFF);
+            for (_, l) in lists {
+                match l {
+                    List::Bits(b) => {
                         for (w, c) in bits.iter_mut().zip(b.chunks(8)) {
                             *w |= c.iter().rev().fold(0, |x, &y| x << 8 | y as u64);
                         }
                     }
-                    Some(List::Var(v)) => v
-                        .iter()
-                        .for_each(|d| bits[d as usize / 64] |= 1 << (d % 64)),
-                    None => {}
+                    List::Ic(ic) => {
+                        buf.clear();
+                        ic.decode_into(&mut buf);
+                        buf.iter().for_each(|&d| bits[d as usize / 64] |= 1 << (d % 64));
+                    }
                 }
             }
-            Some(
-                set_bits(&bits, 0)
-                    .into_iter()
-                    .filter(|d| docs.contains(d))
-                    .collect(),
-            )
+            Some(set_bits(&bits, 0).into_iter().filter(|d| docs.contains(d)).collect())
         }
         TQ::And(qs) => {
             let (mut bits, mut vars, mut rest) = (Vec::new(), Vec::new(), Vec::new());
@@ -3509,18 +4422,18 @@ fn eval(s: &Segment, q: &TQ, docs: std::ops::Range<u32>) -> Option<Vec<u32>> {
                 match q {
                     TQ::Tri(t) => match s.list(*t) {
                         Some(List::Bits(b)) => bits.push(b),
-                        Some(List::Var(b)) => vars.push(b),
+                        Some(List::Ic(b)) => vars.push(b),
                         None => return Some(Vec::new()),
                     },
                     TQ::All => {}
                     q => rest.push(q),
                 }
             }
-            vars.sort_by_key(|v| v.deltas.len());
+            vars.sort_by_key(|v| v.len);
             let mut acc = None;
             if let Some((&first, vars)) = vars.split_first() {
                 let mut v = Vec::new();
-                List::Var(first).decode(docs.clone(), &mut v);
+                List::Ic(first).decode(docs.clone(), &mut v);
                 for &b in &bits {
                     List::Bits(b).retain(&mut v);
                 }
@@ -3528,7 +4441,7 @@ fn eval(s: &Segment, q: &TQ, docs: std::ops::Range<u32>) -> Option<Vec<u32>> {
                     if v.is_empty() {
                         break;
                     }
-                    List::Var(b).retain(&mut v);
+                    List::Ic(b).retain(&mut v);
                 }
                 acc = Some(v);
             } else if !bits.is_empty() {
@@ -3595,31 +4508,18 @@ const MAX_EXACT: usize = 16;
 
 impl Info {
     fn exact(set: Set) -> Info {
-        Info {
-            exact: Some(set.clone()),
-            prefix: Some(set.clone()),
-            suffix: Some(set),
-            q: TQ::All,
-        }
+        Info { exact: Some(set.clone()), prefix: Some(set.clone()), suffix: Some(set), q: TQ::All }
     }
 
     fn any() -> Info {
-        Info {
-            exact: None,
-            prefix: None,
-            suffix: None,
-            q: TQ::All,
-        }
+        Info { exact: None, prefix: None, suffix: None, q: TQ::All }
     }
 
     /// All it says about a doc, as one trigram query.
     fn query(self) -> TQ {
         match self.exact {
             Some(_) => and(self.q, exact_query(self.exact)),
-            None => and(
-                and(self.q, exact_query(self.prefix)),
-                exact_query(self.suffix),
-            ),
+            None => and(and(self.q, exact_query(self.prefix)), exact_query(self.suffix)),
         }
     }
 }
@@ -3630,10 +4530,7 @@ fn cross(a: &Option<Set>, b: &Option<Set>) -> Option<Set> {
     if a.len() * b.len() > MAX_EXACT {
         return None;
     }
-    let mut set: Set = a
-        .iter()
-        .flat_map(|x| b.iter().map(move |y| [x.as_slice(), y].concat()))
-        .collect();
+    let mut set: Set = a.iter().flat_map(|x| b.iter().map(move |y| [x.as_slice(), y].concat())).collect();
     set.sort();
     set.dedup();
     Some(set)
@@ -3647,27 +4544,10 @@ fn exact_query(set: Option<Set>) -> TQ {
         return TQ::All;
     };
     let tris: Vec<Vec<u32>> = set.iter().map(|s| trigrams_small(s)).collect();
-    let common: Vec<u32> = tris[0]
-        .iter()
-        .copied()
-        .filter(|t| tris.iter().all(|ts| ts.binary_search(t).is_ok()))
-        .collect();
-    let rest: Vec<TQ> = tris
-        .iter()
-        .map(|ts| {
-            TQ::And(
-                ts.iter()
-                    .filter(|t| !common.contains(t))
-                    .map(|&t| TQ::Tri(t))
-                    .collect(),
-            )
-        })
-        .collect();
+    let common: Vec<u32> = tris[0].iter().copied().filter(|t| tris.iter().all(|ts| ts.binary_search(t).is_ok())).collect();
+    let rest: Vec<TQ> = tris.iter().map(|ts| TQ::And(ts.iter().filter(|t| !common.contains(t)).map(|&t| TQ::Tri(t)).collect())).collect();
     let mut q = TQ::And(common.into_iter().map(TQ::Tri).collect());
-    if rest
-        .iter()
-        .all(|r| !matches!(r, TQ::And(v) if v.is_empty()))
-    {
+    if rest.iter().all(|r| !matches!(r, TQ::And(v) if v.is_empty())) {
         q = and(q, TQ::Or(rest));
     }
     q
@@ -3703,17 +4583,9 @@ fn info(h: &Hir) -> Info {
                 return i;
             }
             // At least one copy, which starts it; one ends it.
-            Info {
-                q: and(i.q, exact_query(i.exact)),
-                exact: None,
-                prefix: i.prefix,
-                suffix: i.suffix,
-            }
+            Info { q: and(i.q, exact_query(i.exact)), exact: None, prefix: i.prefix, suffix: i.suffix }
         }
-        HirKind::Concat(hs) => hs
-            .iter()
-            .map(info)
-            .fold(Info::exact(vec![Vec::new()]), concat),
+        HirKind::Concat(hs) => hs.iter().map(info).fold(Info::exact(vec![Vec::new()]), concat),
         HirKind::Alternation(hs) => {
             let parts: Vec<Info> = hs.iter().map(info).collect();
             let union = |f: fn(&Info) -> &Option<Set>| {
@@ -3725,31 +4597,13 @@ fn info(h: &Hir) -> Info {
                 set.dedup();
                 (set.len() <= MAX_EXACT).then_some(set)
             };
-            let (exact, prefix, suffix) = (
-                union(|p| &p.exact),
-                union(|p| &p.prefix),
-                union(|p| &p.suffix),
-            );
+            let (exact, prefix, suffix) = (union(|p| &p.exact), union(|p| &p.prefix), union(|p| &p.suffix));
             if exact.is_some() {
-                return Info {
-                    exact,
-                    prefix,
-                    suffix,
-                    q: TQ::All,
-                };
+                return Info { exact, prefix, suffix, q: TQ::All };
             }
             let ors: Vec<TQ> = parts.into_iter().map(Info::query).collect();
-            let q = if ors.iter().any(|q| matches!(q, TQ::All)) {
-                TQ::All
-            } else {
-                TQ::Or(ors)
-            };
-            Info {
-                exact,
-                prefix,
-                suffix,
-                q,
-            }
+            let q = if ors.iter().any(|q| matches!(q, TQ::All)) { TQ::All } else { TQ::Or(ors) };
+            Info { exact, prefix, suffix, q }
         }
     }
 }
@@ -3758,20 +4612,10 @@ fn info(h: &Hir) -> Info {
 /// if few (`\s`: tab to CR, space, and four UTF-8 lead bytes), start it.
 fn class(c: &Class) -> Info {
     let mut set: Set = match c {
-        Class::Unicode(u) => u
-            .ranges()
-            .iter()
-            .flat_map(|r| r.start()..=r.end())
-            .take(9)
-            .map(|ch| ch.to_string().bytes().map(fold).collect())
-            .collect(),
-        Class::Bytes(b) => b
-            .ranges()
-            .iter()
-            .flat_map(|r| r.start()..=r.end())
-            .take(9)
-            .map(|x| vec![fold(x)])
-            .collect(),
+        Class::Unicode(u) => {
+            u.ranges().iter().flat_map(|r| r.start()..=r.end()).take(9).map(|ch| ch.to_string().bytes().map(fold).collect()).collect()
+        }
+        Class::Bytes(b) => b.ranges().iter().flat_map(|r| r.start()..=r.end()).take(9).map(|x| vec![fold(x)]).collect(),
     };
     if set.len() <= 8 {
         set.sort();
@@ -3780,25 +4624,12 @@ fn class(c: &Class) -> Info {
     }
     let lead = |c: char| c.to_string().as_bytes()[0];
     let mut first: Vec<u8> = match c {
-        Class::Unicode(u) => u
-            .ranges()
-            .iter()
-            .flat_map(|r| lead(r.start())..=lead(r.end()))
-            .map(fold)
-            .collect(),
-        Class::Bytes(b) => b
-            .ranges()
-            .iter()
-            .flat_map(|r| r.start()..=r.end())
-            .map(fold)
-            .collect(),
+        Class::Unicode(u) => u.ranges().iter().flat_map(|r| lead(r.start())..=lead(r.end())).map(fold).collect(),
+        Class::Bytes(b) => b.ranges().iter().flat_map(|r| r.start()..=r.end()).map(fold).collect(),
     };
     first.sort();
     first.dedup();
-    Info {
-        prefix: (first.len() <= MAX_EXACT).then(|| first.into_iter().map(|b| vec![b]).collect()),
-        ..Info::any()
-    }
+    Info { prefix: (first.len() <= MAX_EXACT).then(|| first.into_iter().map(|b| vec![b]).collect()), ..Info::any() }
 }
 
 /// `a` then `b`. A match holds a's suffix right before b's prefix; that
@@ -3813,36 +4644,15 @@ fn concat(a: Info, b: Info) -> Info {
         q = match cross(&a.suffix, &b.prefix) {
             Some(j) => and(q, exact_query(Some(j))),
             None => {
-                let sa = if a.exact.is_none() {
-                    exact_query(a.suffix.clone())
-                } else {
-                    TQ::All
-                };
-                let pb = if b.exact.is_none() {
-                    exact_query(b.prefix.clone())
-                } else {
-                    TQ::All
-                };
+                let sa = if a.exact.is_none() { exact_query(a.suffix.clone()) } else { TQ::All };
+                let pb = if b.exact.is_none() { exact_query(b.prefix.clone()) } else { TQ::All };
                 and(and(q, sa), pb)
             }
         };
     }
-    let prefix = if a.exact.is_some() {
-        ab_prefix.or(a.exact)
-    } else {
-        a.prefix
-    };
-    let suffix = if b.exact.is_some() {
-        ab_suffix.or(b.exact)
-    } else {
-        b.suffix
-    };
-    Info {
-        exact,
-        prefix,
-        suffix,
-        q,
-    }
+    let prefix = if a.exact.is_some() { ab_prefix.or(a.exact) } else { a.prefix };
+    let suffix = if b.exact.is_some() { ab_suffix.or(b.exact) } else { b.suffix };
+    Info { exact, prefix, suffix, q }
 }
 
 fn regex_plan(h: &Hir) -> TQ {
@@ -3865,12 +4675,29 @@ pub fn scan_paths(live: &Live, mut q: Query) -> Vec<Vec<u8>> {
             None => {
                 let mut p = Vec::new();
                 live.base.path(h.idx as usize, &mut p);
-                (p, live.base.mtime()[h.idx as usize])
+                (p, live.base.mtime(h.idx as usize))
             }
         })
         .collect();
     files.sort_by_key(|(_, m)| std::cmp::Reverse(*m));
     files.into_iter().map(|(p, _)| p).collect()
+}
+
+/// `open_sized` once fewer than OPENING of a search's read threads (`at`
+/// counts them) are opening a file (see READERS); waits are an open or two
+/// long, so they spin. Per search: across searches a shared limit only
+/// makes waiters crowd out the threads opening.
+fn open_gated(path: &[u8], at: &std::sync::atomic::AtomicUsize) -> Option<(std::fs::File, u64)> {
+    use std::sync::atomic::Ordering::*;
+    while at.fetch_add(1, Acquire) >= OPENING {
+        at.fetch_sub(1, Relaxed);
+        while at.load(Relaxed) >= OPENING {
+            std::hint::spin_loop();
+        }
+    }
+    let f = open_sized(path);
+    at.fetch_sub(1, Release);
+    f
 }
 
 /// Open a path for reading only if it is a regular file, never blocking:
@@ -3885,11 +4712,8 @@ pub fn open_regular(path: &[u8]) -> Option<std::fs::File> {
 fn open_sized(path: &[u8]) -> Option<(std::fs::File, u64)> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(std::ffi::OsStr::from_bytes(path))
-        .ok()?;
+    let f =
+        std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | crate::walk::NOFOLLOW).open(std::ffi::OsStr::from_bytes(path)).ok()?;
     let m = f.metadata().ok()?;
     m.is_file().then_some((f, m.len()))
 }
@@ -3897,24 +4721,21 @@ fn open_sized(path: &[u8]) -> Option<(std::fs::File, u64)> {
 /// `open_regular` for a file about to be indexed, telling the kernel to
 /// start reading it now (as much as indexing reads).
 fn open_ahead(path: &[u8]) -> Option<std::fs::File> {
+    open_ahead_sized(path).map(|(f, _)| f)
+}
+
+/// `open_ahead`, and the file's size.
+fn open_ahead_sized(path: &[u8]) -> Option<(std::fs::File, u64)> {
     use std::os::unix::io::AsRawFd;
     let (f, len) = open_sized(path)?;
     #[cfg(target_os = "macos")]
     {
-        let ra = libc::radvisory {
-            ra_offset: 0,
-            ra_count: len.min(MAX_FILE + 1) as libc::c_int,
-        };
+        let ra = libc::radvisory { ra_offset: 0, ra_count: len.min(MAX_REPO_FILE + 1) as libc::c_int };
         unsafe { libc::fcntl(f.as_raw_fd(), libc::F_RDADVISE, &ra) };
     }
     #[cfg(target_os = "linux")]
     unsafe {
-        libc::posix_fadvise(
-            f.as_raw_fd(),
-            0,
-            len.min(MAX_FILE + 1) as libc::off_t,
-            libc::POSIX_FADV_WILLNEED,
-        );
+        libc::posix_fadvise(f.as_raw_fd(), 0, len.min(MAX_REPO_FILE + 1) as libc::off_t, libc::POSIX_FADV_WILLNEED);
     }
-    Some(f)
+    Some((f, len))
 }

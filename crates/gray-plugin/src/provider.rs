@@ -372,6 +372,12 @@ pub struct ProviderModel {
     pub context_window: Option<u32>,
     #[serde(default)]
     pub reasoning_efforts: Vec<String>,
+    /// Prompt size in tokens above which this model bills a higher price tier,
+    /// as the provider's public pricing page declares it (e.g. the
+    /// "(for prompts over N tokens)" rows). `None` = no cliff declared; the
+    /// host compacts at `window - reserve` as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_cliff_tokens: Option<u32>,
     /// Concrete wire ids behind this row. Empty = the row id is the only wire id
     /// (legacy behavior: effort travels as a request parameter).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

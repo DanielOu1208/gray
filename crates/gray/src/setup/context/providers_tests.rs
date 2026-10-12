@@ -203,6 +203,7 @@ fn a_legacy_pair_cache_still_loads_and_objects_keep_their_metadata() {
         }],
         slots: vec![],
         declared: true,
+        price_cliff_tokens: None,
     });
     save_provider_model_rows_at(dir.path(), "plugin:devin-subscription", vec![rich]);
     save_provider_model_list_at(

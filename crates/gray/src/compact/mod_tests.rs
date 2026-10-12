@@ -6,9 +6,85 @@ use std::sync::Arc;
 fn should_compact_threshold() {
     let s = CompactionSettings {
         reserve_tokens: 16384,
+        ceiling_tokens: None,
+        price_cliff_tokens: None,
     };
     assert!(!should_compact(100_000, 128_000, &s));
     assert!(should_compact(115_000, 128_000, &s)); // 115k > 128k-16k
+}
+
+#[test]
+fn should_compact_ceiling() {
+    // Haiku-like: 200k window, 100k cliff, 12.5k reserve → ceiling 87.5k.
+    let (ceiling, _) = ceiling_for(None, 200_000, 12_500, Some(100_000));
+    let s = CompactionSettings {
+        reserve_tokens: 12_500,
+        ceiling_tokens: ceiling,
+        price_cliff_tokens: Some(100_000),
+    };
+    assert!(!should_compact(87_499, 200_000, &s));
+    assert!(should_compact(87_500, 200_000, &s));
+    assert_eq!(
+        binding_reason(87_500, &s),
+        Some(CompactReason::PriceCliff { cliff: 100_000 })
+    );
+    assert_eq!(binding_reason(87_499, &s), None);
+    // Window bound still fires past it regardless of the ceiling.
+    assert!(should_compact(190_000, 200_000, &s));
+    assert_eq!(binding_reason(190_000, &s), Some(CompactReason::PriceCliff { cliff: 100_000 }));
+}
+
+#[test]
+fn ceiling_for_math() {
+    use crate::setup::CompactAt;
+    // Haiku-like auto: margin = max(10% of cliff, reserve) → 100k − 12.5k.
+    assert_eq!(
+        ceiling_for(None, 200_000, 12_500, Some(100_000)),
+        (Some(87_500), Some(100_000))
+    );
+    // Opus-like: no declared cliff → no ceiling, the window bound stands.
+    assert_eq!(ceiling_for(None, 200_000, 12_500, None), (None, None));
+    // 1M window + 100k cliff: the cliff still wins over the far window
+    // bound — margin is the (large) reserve here, 100k − 62.5k.
+    assert_eq!(
+        ceiling_for(Some(CompactAt::Auto), 1_000_000, 62_500, Some(100_000)),
+        (Some(37_500), Some(100_000))
+    );
+    // Explicit value is the user's choice — it may sit above the cliff…
+    assert_eq!(
+        ceiling_for(Some(CompactAt::Tokens(150_000)), 200_000, 12_500, Some(100_000)),
+        (Some(150_000), None)
+    );
+    // …but never above window − reserve.
+    assert_eq!(
+        ceiling_for(Some(CompactAt::Tokens(1_000_000)), 200_000, 12_500, Some(100_000)),
+        (Some(187_500), None)
+    );
+    // Degenerate: a window smaller than its reserve yields no ceiling.
+    assert_eq!(
+        ceiling_for(Some(CompactAt::Tokens(50_000)), 10_000, 12_500, None),
+        (None, None)
+    );
+}
+
+#[test]
+fn parse_compact_at_grammar() {
+    use crate::setup::{CompactAt, parse_compact_at};
+    assert_eq!(parse_compact_at("auto"), Some(CompactAt::Auto));
+    assert_eq!(parse_compact_at(" AUTO "), Some(CompactAt::Auto));
+    assert_eq!(parse_compact_at("90k"), Some(CompactAt::Tokens(90_000)));
+    assert_eq!(parse_compact_at("1.5m"), Some(CompactAt::Tokens(1_500_000)));
+    assert_eq!(parse_compact_at("90000"), Some(CompactAt::Tokens(90_000)));
+    assert_eq!(parse_compact_at("garbage"), None);
+    // config.json accepts the number or the string forms.
+    assert_eq!(
+        serde_json::from_str::<CompactAt>("90000").unwrap(),
+        CompactAt::Tokens(90_000)
+    );
+    assert_eq!(
+        serde_json::from_str::<CompactAt>("\"auto\"").unwrap(),
+        CompactAt::Auto
+    );
 }
 
 #[test]
@@ -80,6 +156,8 @@ fn tool_heavy_history_trips_threshold_without_provider_usage() {
 
     let s = CompactionSettings {
         reserve_tokens: 16_384,
+        ceiling_tokens: None,
+        price_cliff_tokens: None,
     };
     // 32k window, 16384 reserve => threshold 15616. 20480 is over it.
     assert!(
@@ -126,6 +204,8 @@ fn repl_threshold_120k_128k_triggers_compact() {
     assert_eq!(tokens, 120_000);
     let s = CompactionSettings {
         reserve_tokens: 16_384,
+        ceiling_tokens: None,
+        price_cliff_tokens: None,
     };
     assert!(should_compact(tokens, window, &s));
     // 100k should NOT trigger
@@ -699,7 +779,9 @@ async fn image_then_text_turn_keeps_image_without_spurious_compaction() {
         tokens,
         128_000,
         &CompactionSettings {
-            reserve_tokens: 16_384
+            reserve_tokens: 16_384,
+            ceiling_tokens: None,
+            price_cliff_tokens: None
         }
     ));
     agent

@@ -523,12 +523,6 @@ fn origin_from_env() -> Option<gray::cron::store::Origin> {
     })
 }
 
-/// True inside a gray session's bash tool (`GRAY_SESSION_ID` is exported
-/// there): the caller is the model, not the user at a terminal.
-fn in_gray_session() -> bool {
-    std::env::var("GRAY_SESSION_ID").is_ok_and(|s| !s.trim().is_empty())
-}
-
 /// The gray session running this command (`GRAY_SESSION_ID`, exported to
 /// every bash-tool child), as a [`gray::cron_serve::SESSION_PLATFORM`] origin.
 fn session_origin_from_env() -> Option<gray::cron::store::Origin> {
@@ -605,11 +599,7 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
                     j.id,
                     j.name,
                     fmt_schedule(&j.schedule),
-                    if j.state == gray::cron::store::JobState::AwaitingApproval {
-                        "awaiting approval".to_string()
-                    } else {
-                        fmt_ts_opt(j.next_run_at)
-                    },
+                    fmt_ts_opt(j.next_run_at),
                     fmt_status(j.last_status)
                 );
             }
@@ -697,46 +687,22 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
             };
             // Hosted chats are ticked by their host (`cron tick --json`).
             let chat_bound = origin.as_ref().is_some_and(gray::cron_serve::is_hosted);
-            // A job a gray session's bash tool creates is the model asking for
-            // it: it waits for the user's `gray cron approve` — unless the
-            // user opted out of the gate with GRAY_CRON_AUTO_APPROVE.
-            let model_requested = in_gray_session() && !gray::cron::auto_approve();
-            let id = if model_requested {
-                store.add_awaiting_approval(
-                    &name,
-                    &schedule,
-                    &prompt,
-                    deliver_kind,
-                    origin,
-                    workdir,
-                    skill_names,
-                    script,
-                    reminder,
-                )?
-            } else {
-                store.add_full(
-                    &name,
-                    &schedule,
-                    &prompt,
-                    deliver_kind,
-                    origin,
-                    workdir,
-                    skill_names,
-                    script,
-                    reminder,
-                )?
-            };
-            if model_requested {
-                println!(
-                    "added {id} awaiting approval; the user approves it in /cron (space) or with `gray cron approve {id}`"
-                );
-            } else {
-                let next = store
-                    .get(&id)?
-                    .map(|j| fmt_ts_opt(j.next_run_at))
-                    .unwrap_or_else(|| "-".to_string());
-                println!("added {id} next {next}");
-            }
+            let id = store.add_full(
+                &name,
+                &schedule,
+                &prompt,
+                deliver_kind,
+                origin,
+                workdir,
+                skill_names,
+                script,
+                reminder,
+            )?;
+            let next = store
+                .get(&id)?
+                .map(|j| fmt_ts_opt(j.next_run_at))
+                .unwrap_or_else(|| "-".to_string());
+            println!("added {id} next {next}");
             if cfg!(windows) {
                 println!(
                     "Stored only: cron execution is not supported on native Windows. Use a supported execution host."
@@ -845,19 +811,6 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
         CronCmd::Pause { id } => {
             if cron_store()?.set_paused(&id, true)? {
                 println!("paused {id}");
-                Ok(())
-            } else {
-                anyhow::bail!("unknown cron job {id:?}");
-            }
-        }
-        CronCmd::Approve { id } => {
-            if in_gray_session() {
-                anyhow::bail!(
-                    "approval is the user's: they press space on the job in /cron, or run `gray cron approve` outside gray"
-                );
-            }
-            if cron_store()?.approve(&id)? {
-                println!("approved {id}");
                 Ok(())
             } else {
                 anyhow::bail!("unknown cron job {id:?}");

@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use gray_plugin::{HOST_ASK, HOST_RUN, HOST_SAY, HostHandler};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 
 // Weak: the host must not keep an exited composer alive.
 static TUI: Mutex<std::sync::Weak<std::sync::Mutex<crate::composer::Tui>>> =
@@ -47,27 +49,50 @@ fn background(params: serde_json::Value) -> anyhow::Result<()> {
     tui.set_background(request.path.as_deref())
 }
 
-// bounded queue; a chatty sidecar must not grow this without limit
+// bounded queue; a chatty sidecar must not grow this without limit.
+// One entry per queued message: a multi-line frame stays one entry so the
+// painter doesn't gap inside it.
 const MAX_SAY_QUEUE: usize = 32;
-static SAY_QUEUE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static SAY_QUEUE: Mutex<Vec<Vec<Line<'static>>>> = Mutex::new(Vec::new());
 
 /// Drain queued `host/say` lines (the REPL loop and print mode own rendering).
-pub fn take_host_say() -> Vec<String> {
+pub fn take_host_say() -> Vec<Vec<Line<'static>>> {
     SAY_QUEUE
         .lock()
         .map(|mut q| std::mem::take(&mut *q))
         .unwrap_or_default()
 }
 
-pub(crate) fn queue_say(text: String) {
+fn queue_say_inner(lines: Vec<Line<'static>>) {
     if let Ok(mut q) = SAY_QUEUE.lock() {
         if q.len() >= MAX_SAY_QUEUE {
             q.remove(0);
         }
-        q.push(text);
+        q.push(lines);
     }
     // Paint it now, not when the user next presses Enter.
     request_wake();
+}
+
+/// A plain-text say: dim + the command-output indent, exactly what the
+/// composer painted for queued strings before the queue carried lines.
+pub(crate) fn queue_say(text: String) {
+    queue_say_inner(
+        text.split('\n')
+            .map(|l| {
+                Line::from(Span::styled(
+                    format!("  {l}"),
+                    Style::new().add_modifier(Modifier::DIM),
+                ))
+            })
+            .collect(),
+    );
+}
+
+/// A pre-styled say: colors survive to the transcript (notices that carry
+/// status — cron ticks — instead of one flat dim row).
+pub(crate) fn queue_say_lines(lines: Vec<Line<'static>>) {
+    queue_say_inner(lines);
 }
 
 /// Set when something wants the idle REPL's attention (a queued say line, a

@@ -301,34 +301,3 @@ fn job_notice_becomes_a_card_without_the_model_hint() {
     assert_eq!(card_text(&body[0]), "  log /tmp/x/bash-9.log");
     assert!(parse_job_notice("something else").is_none());
 }
-
-#[test]
-fn awaiting_approval_rows_are_actionable_in_the_picker() {
-    let job = crate::cron::CronJob {
-        state: crate::cron::store::JobState::AwaitingApproval,
-        ..job("asked", None)
-    };
-    let rows = items(&[job], None, 0);
-    assert!(!rows[0].read_only, "space must reach the approve handler");
-    assert!(!rows[0].enabled);
-    assert!(rows[0].row.contains("space approves"), "{}", rows[0].row);
-}
-
-#[test]
-fn awaiting_rows_show_the_prompt_with_hidden_chars_spelled_out() {
-    let job = crate::cron::CronJob {
-        state: crate::cron::store::JobState::AwaitingApproval,
-        prompt: "check\u{200b} bench".into(),
-        ..job("asked", None)
-    };
-    let row = &items(std::slice::from_ref(&job), None, 0)[0].row;
-    assert!(
-        row.contains("\"check\u{27e8}U+200B\u{27e9} bench\""),
-        "{row}"
-    );
-    let active = crate::cron::CronJob {
-        state: Default::default(),
-        ..job
-    };
-    assert!(!items(&[active], None, 0)[0].row.contains("bench\""));
-}

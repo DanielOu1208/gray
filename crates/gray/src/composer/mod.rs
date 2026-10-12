@@ -251,8 +251,9 @@ pub(crate) fn live_tool_rows(
         .iter()
         .take(MAX_LIVE_TOOLS)
         .flat_map(|t| {
-            let mut line = t.header.clone();
-            if t.running {
+            let mut headers = t.header.clone();
+            // The shimmer marks the headline (the first row) only.
+            if let Some(line) = headers.first_mut().filter(|_| t.running) {
                 // ponytail: reuse the status shimmer; only the live bash verb changes.
                 let prefix =
                     usize::from(line.spans.first().is_some_and(|s| s.content == "\u{2b22} "));
@@ -271,7 +272,7 @@ pub(crate) fn live_tool_rows(
                     draw::shimmer_spans(live.unwrap_or("Running "), elapsed),
                 );
             }
-            std::iter::once(line).chain(t.tail.rows().into_iter().map(|text| {
+            headers.into_iter().chain(t.tail.rows().into_iter().map(|text| {
                 let chars: Vec<char> = text.chars().collect();
                 let text = if crate::text_width::fit_char_count(&chars, text_budget) < chars.len() {
                     let fit =
@@ -344,6 +345,16 @@ pub struct Tui {
     /// draw (its frames land on the modal's screen as duplicated chrome).
     /// Set by with_modal/with_modal_sync around every modal call.
     pub(crate) modal_open: bool,
+    /// Scrollback rows committed to `transcript`/`history_entries` while a
+    /// modal owned the screen: the `insert_before` paint was deferred (a
+    /// scrollback insert on the alternate screen garbles the modal). The
+    /// queue flushes in order when the flag drops; a resize reflow drops it
+    /// instead — its clear + re-emit already repaints the stored rows.
+    pub(crate) modal_pending: Vec<PendingInsert>,
+    /// Palette the scrollback was last painted under. Rows bake the window
+    /// color into their cells, so a palette switch needs one re-emit (see
+    /// [`Tui::repaint_for_palette`]).
+    pub(crate) painted_palette: crate::theme::UiTheme,
     pub queued_inputs: std::collections::VecDeque<(String, Vec<PathBuf>)>,
     /// Slash command submitted via Esc mid-turn: cancel + run locally, never to the AI.
     pub local_command: Option<String>,
@@ -475,7 +486,7 @@ pub(crate) struct LiveTool {
     /// Tool name — the fusion footer lights the sidekick while its
     /// `handoff` call is the one executing.
     pub(crate) name: String,
-    pub(crate) header: Line<'static>,
+    pub(crate) header: Vec<Line<'static>>,
     pub(crate) running: bool,
     pub(crate) tail: LiveToolTail,
 }
@@ -531,12 +542,28 @@ impl LiveToolTail {
     }
 }
 
+/// One scrollback insert held while a modal owned the screen
+/// ([`Tui::modal_pending`]). `Rows` replays through `insert_paragraph`;
+/// `Styled` keeps each row's hyperlink targets so the deferred paint still
+/// patches OSC8 links exactly like the live path.
+#[derive(Clone, Debug)]
+pub(crate) enum PendingInsert {
+    Rows(Vec<Line<'static>>, Option<ratatui::style::Color>),
+    Styled(Vec<(Line<'static>, Vec<HyperlinkTarget>)>),
+}
+
 #[derive(Clone, Debug)]
 pub enum TranscriptEntry {
     Welcome,
     UserPrompt(String, Vec<std::path::PathBuf>),
     ToolBox {
         header: Line<'static>,
+        body: Vec<Line<'static>>,
+    },
+    /// A tool box whose header runs to several rows (a template preview's
+    /// second line). Drawn exactly like `ToolBox`.
+    ToolBoxLines {
+        header: Vec<Line<'static>>,
         body: Vec<Line<'static>>,
     },
     StyledLines {
@@ -933,8 +960,20 @@ fn play_logo_intro(
     skipped
 }
 
+/// Whether the scrollback must be re-emitted before the next frame: it was
+/// last painted under `painted` and the palette is now `current`. A modal
+/// owns the screen, so nothing repaints under it; the check runs again when
+/// the modal closes.
+pub(crate) fn palette_repaint_due(
+    painted: crate::theme::UiTheme,
+    current: crate::theme::UiTheme,
+    modal_open: bool,
+) -> bool {
+    !modal_open && painted != current
+}
+
 impl Tui {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(resuming: bool) -> anyhow::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
 
@@ -958,7 +997,9 @@ impl Tui {
         // Print welcome logo into scrollback once at startup
         let welcome_lines = build_welcome_lines(cols as usize);
         let welcome_h = welcome_lines.len() as u16;
-        let pending_input = if crate::setup::intro_enabled() {
+        // A resumed session skips the sweep: the replay starts painting
+        // immediately, and the intro's frames would hide it for a second.
+        let pending_input = if crate::setup::intro_enabled() && !resuming {
             play_logo_intro(
                 &mut terminal,
                 cols as usize,
@@ -969,7 +1010,9 @@ impl Tui {
             None
         };
         let _ = terminal.insert_before(welcome_h, |buf| {
-            Paragraph::new(welcome_lines.clone()).render(buf.area, buf);
+            Paragraph::new(welcome_lines.clone())
+                .style(Style::default().bg(crate::theme::theme().window()))
+                .render(buf.area, buf);
         });
 
         let cwd = std::env::current_dir()
@@ -997,6 +1040,8 @@ impl Tui {
             is_task_running: false,
             allow_empty_submit: false,
             modal_open: false,
+            modal_pending: Vec::new(),
+            painted_palette: crate::theme::theme(),
             queued_inputs: std::collections::VecDeque::new(),
             local_command: None,
             pending: String::new(),
@@ -1160,6 +1205,11 @@ impl Tui {
         lines: &[Line<'static>],
         bg: Option<ratatui::style::Color>,
     ) {
+        if self.modal_open {
+            self.modal_pending
+                .push(PendingInsert::Rows(lines.to_vec(), bg));
+            return;
+        }
         let height = lines.len() as u16;
         self.atomic(|t| {
             let _ = draw::settle_band(t);
@@ -1196,6 +1246,17 @@ impl Tui {
         self.commit_markdown_tail();
     }
 
+    /// Re-emits the history under the palette that is live now, when a
+    /// palette switch has left it painted under the old one. Called at the
+    /// top level right after `set_theme`, never from inside an emit: the
+    /// command's own reflow (`/theme` retracts its echo first) still ran
+    /// under the outgoing palette, and every row bakes its window in.
+    pub(crate) fn repaint_for_palette(&mut self) {
+        if palette_repaint_due(self.painted_palette, crate::theme::theme(), self.modal_open) {
+            self.reflow_on_resize(self.last_width);
+        }
+    }
+
     /// Codex-style transcript reflow on terminal resize:
     /// Clears scrollback and visible screen, re-anchors the inline viewport at the new dimensions,
     /// and re-emits the stored transcript history so lines wrap cleanly without distortion.
@@ -1206,6 +1267,8 @@ impl Tui {
     }
 
     fn reflow_on_resize_inner(&mut self, new_cols: u16) {
+        // Every row this pass re-emits takes the palette live right now.
+        self.painted_palette = crate::theme::theme();
         let _ = self.hide_background();
         self.last_width = new_cols;
         if let Ok((_, rows)) = crossterm::terminal::size() {
@@ -1220,6 +1283,9 @@ impl Tui {
         // over-wide — Paragraph has no `.wrap()`, so it hard-clips at the
         // right edge and the reasoning reads "shortened".
         self.drain_inflight_for_reflow();
+        // The clear + re-emit below repaints everything deferred rows were
+        // already stored as; replaying the queue would paint them twice.
+        self.modal_pending.clear();
 
         // Codex-style: purge scrollback and the screen; the band starts over
         // on row 0 and the re-emitted history pushes it down.
@@ -1245,7 +1311,7 @@ impl Tui {
                     // stranded mid-screen.
                     let lines = build_welcome_lines(w);
                     self.record_rows(lines.clone());
-                    self.insert_paragraph(&lines, None);
+                    self.insert_paragraph(&lines, Some(crate::theme::theme().window_bg));
                 }
                 TranscriptEntry::UserPrompt(text, attached) => {
                     let lines =
@@ -1257,6 +1323,12 @@ impl Tui {
                         crate::composer::transcript::format_tool_box_lines(header.clone(), body, w);
                     self.emit_rows(lines, Some(crate::theme::theme().surface_bg));
                 }
+                TranscriptEntry::ToolBoxLines { header, body } => {
+                    let lines = crate::composer::transcript::format_tool_box_lines_multi(
+                        header, body, w,
+                    );
+                    self.emit_rows(lines, Some(crate::theme::theme().surface_bg));
+                }
                 TranscriptEntry::StyledLines { lines, hyperlinks } => {
                     self.emit_styled(lines.clone(), hyperlinks.clone());
                 }
@@ -1266,7 +1338,7 @@ impl Tui {
                         crate::composer::transcript::prose_width(w),
                         false,
                     );
-                    self.emit_rows(rows, None);
+                    self.emit_rows(rows, Some(crate::theme::theme().window_bg));
                 }
                 TranscriptEntry::Mascot => {
                     if let Some(lines) = crate::mascot::mascot_lines(
@@ -1358,7 +1430,9 @@ impl Tui {
                 | TranscriptEntry::Mascot
                 | TranscriptEntry::StyledLines { .. } => true,
                 TranscriptEntry::UserPrompt(text, _) => text.starts_with('/'),
-                TranscriptEntry::ToolBox { .. } | TranscriptEntry::ThinkingRun(_) => false,
+                TranscriptEntry::ToolBox { .. }
+                | TranscriptEntry::ToolBoxLines { .. }
+                | TranscriptEntry::ThinkingRun(_) => false,
             })
     }
 
@@ -1510,7 +1584,7 @@ impl Tui {
         &mut self,
         id: &str,
         name: &str,
-        header: Line<'static>,
+        header: Vec<Line<'static>>,
         running: bool,
     ) {
         if let Some(slot) = self.live_tools.iter_mut().find(|t| t.id == id) {
@@ -1633,6 +1707,28 @@ impl Tui {
             let _ = self.hide_background();
         }
         self.modal_open = open;
+        if !open {
+            self.flush_modal_pending();
+        }
+    }
+
+    /// Replays scrollback inserts deferred while a modal owned the screen,
+    /// in arrival order. Runs on every close path (`with_modal*`, the
+    /// external-editor pause): the rows were already committed to
+    /// `transcript`/`history_entries` at emit time — this is only the
+    /// paint. The band repaints once at the end.
+    pub(crate) fn flush_modal_pending(&mut self) {
+        if self.modal_pending.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.modal_pending);
+        for item in pending {
+            match item {
+                PendingInsert::Rows(lines, bg) => self.insert_paragraph(&lines, bg),
+                PendingInsert::Styled(rows) => self.insert_styled_rows(rows),
+            }
+        }
+        let _ = self.draw();
     }
 
     pub(crate) fn draw(&mut self) -> anyhow::Result<()> {
@@ -1990,5 +2086,9 @@ mod thought_line_tests;
 #[path = "mod_compaction_tests.rs"]
 #[cfg(test)]
 mod compaction_tests;
+
+#[path = "mod_palette_tests.rs"]
+#[cfg(test)]
+mod palette_tests;
 
 mod background;

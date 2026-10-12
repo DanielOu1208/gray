@@ -582,6 +582,10 @@ pub(crate) fn context_breakdown_text(
     let keep = crate::setup::user_keep_for(window);
     let used = parts.used();
     let free = parts.free(window, reserve);
+    // The trigger auto-compaction actually fires at: an explicit
+    // --compact-at/GRAY_COMPACT_AT or the provider's price cliff can pull it
+    // below the window - reserve bound this table otherwise implies.
+    let compact_at = crate::compact::effective_compact_ceiling(config);
     let pct = |n: usize| {
         n.checked_mul(100)
             .and_then(|v| v.checked_div(window))
@@ -601,6 +605,7 @@ pub(crate) fn context_breakdown_text(
            · Messages:           {} tokens ({}%)\n\
            · Free space:         {} ({}%)\n\
            · Autocompact buffer: {} tokens ({}%)\n\
+           · Compacts at:         {} tokens ({}%)\n\
          \n\
          Settings: reserve: {}  keep: {}\n\
          Commands: /context <size> | /context reserve <size> | /context keep <size> | /context auto",
@@ -622,6 +627,8 @@ pub(crate) fn context_breakdown_text(
         pct(free),
         f(reserve),
         pct(reserve),
+        f(compact_at),
+        pct(compact_at),
         f(reserve),
         f(keep),
     )

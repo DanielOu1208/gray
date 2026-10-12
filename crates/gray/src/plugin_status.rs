@@ -67,6 +67,28 @@ pub(crate) fn drop_boot() {
     }
 }
 
+/// Tool defs the lazy agent will carry once built: the shared boot's
+/// plugins plus the always-on surface extras, merged through the same
+/// registry `build_agent` uses. Startup resume replays its transcript
+/// before that agent exists, so its card labels/previews come from here
+/// instead of `agent.tool_defs()`.
+pub(crate) async fn booted_tool_defs(
+    handler: Option<gray_plugin::HostHandler>,
+    extra: Vec<Arc<dyn Plugin>>,
+) -> Option<Vec<gray_core::message::ToolDef>> {
+    let boot = ensure_boot(handler)?;
+    let mut plugins = boot.await.ok()?;
+    for p in extra {
+        let name = p.manifest().name.clone();
+        if let Some(pos) = plugins.iter().position(|e| e.manifest().name == name) {
+            plugins.remove(pos);
+        }
+        plugins.push(p);
+    }
+    let (registry, _) = gray_plugin::builder::from_plugins(&plugins);
+    Some(registry.defs())
+}
+
 fn recent_updated() -> Option<u64> {
     let path = crate::setup::gray_home().ok()?.join("auto-update.json");
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;

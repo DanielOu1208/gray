@@ -63,6 +63,7 @@ fn only_rows_holding_a_credential_are_removable() {
         max_wall_secs: None,
         bare: false,
         lean: false,
+        compact_at: None,
     };
     let auth = auth_map(&[("openrouter", "sk-or"), ("custom", "sk-custom")]);
 
@@ -136,6 +137,7 @@ fn list_footer_advertises_removal_only_for_a_stored_provider() {
         max_wall_secs: None,
         bare: false,
         lean: false,
+        compact_at: None,
     };
     let auth = auth_map(&[("openrouter", "sk-or")]);
     let mut items = build_connect_items(&load_catalog().unwrap(), &[], &[]);
@@ -192,6 +194,7 @@ fn config_for(base_url: &str) -> crate::config::Config {
         max_wall_secs: None,
         bare: false,
         lean: false,
+        compact_at: None,
     }
 }
 

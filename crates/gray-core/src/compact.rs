@@ -293,6 +293,21 @@ pub(crate) fn soft_elide_keep_budget(window: usize) -> usize {
     (window as f64 * SOFT_ELIDE_KEEP_RATIO) as usize
 }
 
+/// Price-cliff ceiling: the prompt-token count at which auto-compaction fires
+/// for a model that bills a higher tier above `cliff` tokens. The margin below
+/// the cliff is 10% of it or `reserve`, whichever is larger, so the compaction
+/// call and the request after it stay under the cliff. `None` when the margin
+/// leaves no room (a cliff at or under its margin is not a usable trigger).
+pub fn price_cliff_ceiling(cliff: usize, reserve: usize) -> Option<usize> {
+    cliff
+        .checked_sub((cliff / 10).max(reserve))
+        .filter(|ceiling| *ceiling > 0)
+}
+
+/// Divisor of the price-cliff retained-tail cap: under a ceiling the kept tail
+/// is at most a quarter of it, so summary + tail lands well below the trigger.
+pub(crate) const PRICE_CLIFF_KEEP_DIVISOR: usize = 4;
+
 /// In-place rule-based elision of the middle region: every at-threshold
 /// `ToolResult` body older than the verbatim recent window becomes the same
 /// citation stub compaction uses ([`tool_result_stub`]); the newest groups

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use fsearch::{Engine, Grep, GrepMode, Query};
+use fsearch::{Case, Engine, Grep, GrepMode, Query};
 use tokio_util::sync::CancellationToken;
 
 use crate::grep_builtin::Found;
@@ -225,7 +225,11 @@ impl FsearchPool {
             } else {
                 GrepMode::Regex
             },
-            ignore_case,
+            if ignore_case {
+                Case::Insensitive
+            } else {
+                Case::Sensitive
+            },
         )
         .ok()?; // invalid regex → rg reports the canonical error
         // rg shows every matching line of a file; the index caps at five.

@@ -3,11 +3,13 @@
 //! Format:
 //! ```yaml
 //! plugins:
-//!   - builtin: tools-basic
+//!   - builtin: skills
 //!   - sidecar: ~/.gray/plugins/my-tools
 //!   - sidecar: [npx, -y, my-tools]
 //! ```
-//! Bare names (`- tools-basic`) are accepted as builtins.
+//! Bare names (`- skills`) are accepted as builtins. `builtin:` names
+//! resolve against the host's catalog; the `bash` surface is implicit
+//! (registered by the builder, not a plugin) and needs no entry.
 
 // Hand-rolled line parser instead of a YAML dependency;
 // switch to a YAML dependency if profiles grow beyond a flat entry list.

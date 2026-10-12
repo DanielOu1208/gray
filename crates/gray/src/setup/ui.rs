@@ -75,7 +75,14 @@ pub fn dim_color(c: ratatui::style::Color) -> ratatui::style::Color {
 /// dimmed style still carries an explicit bg so no unpainted cells remain; the
 /// initial `Clear` plus full-height row-by-row rendering keeps stale
 /// alt-screen cells from bleeding through behind the popup.
-pub(crate) const BACKDROP_BG: ratatui::style::Color = ratatui::style::Color::Reset;
+pub(crate) fn backdrop_bg() -> ratatui::style::Color {
+    let w = crate::theme::theme().window_bg;
+    if w == ratatui::style::Color::Reset {
+        w
+    } else {
+        dim_color(w)
+    }
+}
 
 pub fn dim_style(style: ratatui::style::Style) -> ratatui::style::Style {
     use ratatui::style::{Modifier, Style};
@@ -105,7 +112,7 @@ pub fn dim_line(line: &ratatui::text::Line<'_>) -> ratatui::text::Line<'static> 
     let mut new_line = Line::from(spans);
     let mut st = dim_style(line.style);
     if st.bg.is_none() {
-        st = st.bg(BACKDROP_BG);
+        st = st.bg(backdrop_bg());
     }
     new_line.style = st;
     new_line
@@ -120,7 +127,7 @@ fn pad_backdrop_line(
 ) -> ratatui::text::Line<'static> {
     use ratatui::style::Style;
     use ratatui::text::Span;
-    let bg = line.style.bg.unwrap_or(BACKDROP_BG);
+    let bg = line.style.bg.unwrap_or(backdrop_bg());
     let used = line.width();
     if used < w {
         line.spans
@@ -146,7 +153,7 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
     // stale alt-screen content / terminal transparency visible behind modals.
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Block::default().style(Style::default().bg(BACKDROP_BG)),
+        Block::default().style(Style::default().bg(backdrop_bg())),
         area,
     );
 
@@ -251,47 +258,47 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
     let pad_len = w.saturating_sub(left_len + right_text.chars().count());
 
     let footer_line = Line::from(vec![
-        Span::styled("  ", Style::default().bg(BACKDROP_BG)),
+        Span::styled("  ", Style::default().bg(backdrop_bg())),
         Span::styled(
             ctx_display,
             Style::default()
                 .fg(footer_cwd_color)
                 .add_modifier(Modifier::DIM)
-                .bg(BACKDROP_BG),
+                .bg(backdrop_bg()),
         ),
         Span::styled(
             " · ",
             Style::default()
                 .fg(footer_cwd_color)
                 .add_modifier(Modifier::DIM)
-                .bg(BACKDROP_BG),
+                .bg(backdrop_bg()),
         ),
         Span::styled(
             cache_display,
             Style::default()
                 .fg(footer_model_color)
                 .add_modifier(Modifier::DIM)
-                .bg(BACKDROP_BG),
+                .bg(backdrop_bg()),
         ),
-        Span::styled(" ".repeat(pad_len), Style::default().bg(BACKDROP_BG)),
+        Span::styled(" ".repeat(pad_len), Style::default().bg(backdrop_bg())),
         Span::styled(
             right_text,
             Style::default()
                 .fg(footer_model_color)
                 .add_modifier(Modifier::DIM)
-                .bg(BACKDROP_BG),
+                .bg(backdrop_bg()),
         ),
     ])
-    .style(Style::default().bg(BACKDROP_BG));
+    .style(Style::default().bg(backdrop_bg()));
 
     let transcript = bg.rebuild_transcript(w);
 
     // Live TUI parity: ensure breathing room (a gap row) between transcript and
     // composer input box whenever transcript does not already end blank.
     let transcript_ends_blank = transcript.last().is_some_and(|l| {
-        (l.style.bg.is_none() || l.style.bg == Some(BACKDROP_BG))
+        (l.style.bg.is_none() || l.style.bg == Some(backdrop_bg()))
             && l.spans.iter().all(|s| {
-                (s.style.bg.is_none() || s.style.bg == Some(BACKDROP_BG))
+                (s.style.bg.is_none() || s.style.bg == Some(backdrop_bg()))
                     && s.content.trim().is_empty()
             })
     });

@@ -3,7 +3,11 @@
 
 use std::path::Path;
 
-use super::say;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+
+use super::{say, say_lines};
+use crate::composer::transcript::prose_width;
 use crate::theme::{self, UiTheme};
 
 /// What a `/theme` invocation decided: text for the user, plus the palette
@@ -12,6 +16,19 @@ use crate::theme::{self, UiTheme};
 pub(crate) struct ThemeOutcome {
     pub(crate) message: String,
     pub(crate) apply: Option<(UiTheme, Option<String>)>,
+    /// The success card for a switch. `message` stays the plain text for
+    /// paths without a transcript and for `/reload`; the card is laid out at
+    /// render time, once the transcript width is known.
+    pub(crate) card: Option<ThemeCard>,
+}
+
+/// What the success card names: the theme switched to, plus any save or
+/// palette notes that print as plain text beneath it.
+#[derive(Debug)]
+pub(crate) struct ThemeCard {
+    pub(crate) name: String,
+    pub(crate) builtin: bool,
+    pub(crate) notes: Vec<String>,
 }
 
 impl ThemeOutcome {
@@ -19,6 +36,7 @@ impl ThemeOutcome {
         Self {
             message: message.into(),
             apply: None,
+            card: None,
         }
     }
 }
@@ -35,6 +53,90 @@ fn with_warnings(mut msg: String, warnings: &[String]) -> String {
         msg.push_str(&format!("\n  warning: {w}"));
     }
     msg
+}
+
+/// Columns of padding inside the success card, left and right of its text.
+const CARD_PAD: usize = 1;
+
+/// The success card for a theme switch, `width` columns wide and painted on
+/// the palette's `surface_bg`. Row 1 is `✓ Theme <name>` (plus `(built-in)`
+/// for the built-in palette) with the swatch at the right edge; row 2 spells
+/// the accent roles in their own colors. The swatch keeps its own cell
+/// colors, since those pairs are the sample.
+fn theme_card_lines(
+    palette: &UiTheme,
+    name: &str,
+    builtin: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let bg = palette.surface_bg;
+    let on = |fg: Color| Style::new().fg(fg).bg(bg);
+    let pad = |n: usize| Span::styled(" ".repeat(n), Style::new().bg(bg));
+
+    let mut head = vec![
+        pad(CARD_PAD),
+        Span::styled("✓", on(palette.success)),
+        pad(1),
+        Span::styled("Theme", on(palette.text_dim)),
+        pad(1),
+        Span::styled(
+            name.to_string(),
+            on(palette.text_bright).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if builtin {
+        head.push(pad(1));
+        head.push(Span::styled("(built-in)", on(palette.text_dim)));
+    }
+    let swatch = theme::swatch_spans(palette);
+    let text_w: usize = head.iter().map(Span::width).sum();
+    let swatch_w: usize = swatch.iter().map(Span::width).sum();
+    let gap = width.saturating_sub(text_w + swatch_w + CARD_PAD);
+    // Too narrow for the swatch beside the text: it steps aside, not wraps.
+    if gap >= 2 {
+        head.push(pad(gap));
+        head.extend(swatch);
+        head.push(pad(CARD_PAD));
+    }
+
+    let roles = [
+        ("accent", palette.accent),
+        ("success", palette.success),
+        ("error", palette.error),
+        ("info", palette.info),
+        ("rose", palette.rose),
+    ];
+    let mut specimen = vec![pad(CARD_PAD)];
+    for (i, (word, fg)) in roles.into_iter().enumerate() {
+        if i > 0 {
+            specimen.push(pad(1));
+        }
+        specimen.push(Span::styled(word, on(fg)));
+    }
+    vec![card_row(head, width, bg), card_row(specimen, width, bg)]
+}
+
+/// A card row padded out to `width` with `bg`, so the card's color runs to
+/// its edge rather than stopping at the last span.
+fn card_row(mut spans: Vec<Span<'static>>, width: usize, bg: Color) -> Line<'static> {
+    let used: usize = spans.iter().map(Span::width).sum();
+    if used < width {
+        spans.push(Span::styled(" ".repeat(width - used), Style::new().bg(bg)));
+    }
+    Line::from(spans)
+}
+
+/// The success block: the card, then its notes as plain dim rows. One block,
+/// so the notes sit directly under the card.
+fn theme_success_lines(palette: &UiTheme, card: &ThemeCard, width: usize) -> Vec<Line<'static>> {
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let mut lines = theme_card_lines(palette, &card.name, card.builtin, width);
+    lines.extend(
+        card.notes
+            .iter()
+            .map(|n| Line::from(Span::styled(format!(" {n}"), dim))),
+    );
+    lines
 }
 
 /// `/theme` core against explicit paths (test seam). `active` is the name
@@ -94,6 +196,7 @@ pub(crate) fn theme_command(
                 Ok((t, warnings)) => ThemeOutcome {
                     message: with_warnings(format!("✓ reloaded theme {name}"), &warnings),
                     apply: Some((t, Some(name.to_string()))),
+                    card: None,
                 },
                 Err(e) => ThemeOutcome::say(format!("theme not reloaded: {e}")),
             },
@@ -104,22 +207,41 @@ pub(crate) fn theme_command(
         name if theme::is_builtin_name(name) => {
             let note = persist(config_path, None).err();
             ThemeOutcome {
-                message: match note {
+                message: match &note {
                     None => "✓ theme gray (built-in)".to_string(),
                     Some(e) => format!("✓ theme gray (built-in) — not saved: {e}"),
                 },
                 apply: Some((theme::GRAY_UI_THEME, None)),
+                card: Some(ThemeCard {
+                    name: theme::BUILTIN_THEME_NAME.to_string(),
+                    builtin: true,
+                    notes: note
+                        .map(|e| format!("not saved: {e}"))
+                        .into_iter()
+                        .collect(),
+                }),
             }
         }
         name => match theme::load_theme_in(themes_dir, name) {
             Ok((t, warnings)) => {
+                let saved = persist(config_path, Some(name)).err();
                 let mut msg = format!("✓ theme {name}");
-                if let Err(e) = persist(config_path, Some(name)) {
+                if let Some(e) = &saved {
                     msg.push_str(&format!(" — not saved: {e}"));
                 }
+                let notes = saved
+                    .map(|e| format!("not saved: {e}"))
+                    .into_iter()
+                    .chain(warnings.iter().map(|w| format!("warning: {w}")))
+                    .collect();
                 ThemeOutcome {
                     message: with_warnings(msg, &warnings),
                     apply: Some((t, Some(name.to_string()))),
+                    card: Some(ThemeCard {
+                        name: name.to_string(),
+                        builtin: false,
+                        notes,
+                    }),
                 }
             }
             Err(e) => ThemeOutcome::say(format!("theme not applied: {e}")),
@@ -169,12 +291,30 @@ pub(crate) fn handle_theme(arg: Option<String>, tui: Option<&crate::composer::Sh
     };
     let active = theme::active_theme_name();
     let outcome = theme_command(arg.as_deref(), active.as_deref(), &dir, &config_path);
-    if let Some((t, name)) = outcome.apply {
-        theme::set_theme(t, name.as_deref());
+    if let Some((t, name)) = &outcome.apply {
+        theme::set_theme(*t, name.as_deref());
     }
-    say(tui, &outcome.message);
+    // Re-emit the history under the palette now live, before the card below
+    // paints under it (see `Tui::repaint_for_palette`).
+    if let Some(shared) = tui {
+        shared.lock().expect("tui lock").repaint_for_palette();
+    }
+    show_outcome(tui, &outcome);
     if let Some(shared) = tui {
         let _ = shared.lock().expect("tui lock").draw();
+    }
+}
+
+/// Paints a `/theme` result: the success card on the applied palette when
+/// there is a transcript to paint it in, the plain text otherwise. The card
+/// fills the transcript's prose column, so it lines up with the answers.
+fn show_outcome(tui: Option<&crate::composer::SharedTui>, outcome: &ThemeOutcome) {
+    match (tui, &outcome.card, &outcome.apply) {
+        (Some(shared), Some(card), Some((palette, _))) => {
+            let width = prose_width(shared.lock().expect("tui lock").width());
+            say_lines(tui, theme_success_lines(palette, card, width));
+        }
+        _ => say(tui, &outcome.message),
     }
 }
 
@@ -262,6 +402,9 @@ pub(crate) fn handle_reload(tui: Option<&crate::composer::SharedTui>) {
     match theme::active_theme_name() {
         Some(_) => handle_theme_quiet(Some("reload"), &mut lines),
         None => lines.push("theme: built-in gray".to_string()),
+    }
+    if let Some(shared) = tui {
+        shared.lock().expect("tui lock").repaint_for_palette();
     }
     match crate::setup::gray_home() {
         Ok(home) => {

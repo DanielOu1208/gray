@@ -8,15 +8,16 @@
 
 use gray_core::agent::Agent;
 use gray_core::error::CoreError;
-use gray_core::event::Usage;
+use gray_core::event::{CompactReason, Usage};
 use gray_core::message::Message;
 
 pub mod policy;
 
 pub use policy::{
-    CompactionSettings, compaction_settings_for, estimate_context_tokens, estimate_tokens,
-    init_auto_compact_from_env, is_auto_compact_enabled, is_context_overflow_error,
-    set_auto_compact_enabled, should_compact,
+    CompactionSettings, binding_reason, ceiling_for, compact_reason_note,
+    compaction_settings_for, effective_compact_ceiling, estimate_context_tokens,
+    estimate_tokens, init_auto_compact_from_env, is_auto_compact_enabled,
+    is_context_overflow_error, set_auto_compact_enabled, should_compact,
 };
 
 pub async fn auto_compact_if_needed(agent: &mut Agent) -> Result<bool, CoreError> {

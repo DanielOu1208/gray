@@ -513,66 +513,6 @@ fn a_reminder_round_trips_and_old_stores_default_to_a_task() {
 }
 
 #[test]
-fn model_requested_job_waits_for_approval() {
-    let (_dir, store) = test_store();
-    let id = store
-        .add_awaiting_approval(
-            "ping",
-            "every 1h",
-            "say hi",
-            Deliver::Local,
-            None,
-            None,
-            vec![],
-            None,
-            false,
-        )
-        .unwrap();
-    let job = store.get(&id).unwrap().unwrap();
-    assert_eq!(job.state, JobState::AwaitingApproval);
-    assert_eq!(job.next_run_at, None);
-
-    // Due, but every gate requires Active, so nothing fires it.
-    store.set_next_run_for_test(&id, 1).unwrap();
-    assert!(store.claim_due(now_secs(), "t").unwrap().is_empty());
-
-    // Pause and resume cannot start it without approval.
-    assert!(store.set_paused(&id, false).is_err());
-    assert!(store.set_paused(&id, true).is_err());
-    assert_eq!(
-        store.get(&id).unwrap().unwrap().state,
-        JobState::AwaitingApproval
-    );
-
-    assert!(store.approve(&id).unwrap());
-    assert_eq!(store.get(&id).unwrap().unwrap().state, JobState::Active);
-    // A second approve is an error, not a silent no-op.
-    assert!(store.approve(&id).is_err());
-    assert!(!store.approve("no-such-job").unwrap());
-}
-
-#[test]
-fn approved_job_fires_once_due() {
-    let (_dir, store) = test_store();
-    let id = store
-        .add_awaiting_approval(
-            "ping",
-            "every 1h",
-            "say hi",
-            Deliver::Local,
-            None,
-            None,
-            vec![],
-            None,
-            false,
-        )
-        .unwrap();
-    store.approve(&id).unwrap();
-    store.set_next_run_for_test(&id, 1).unwrap();
-    assert_eq!(store.claim_due(now_secs(), "t").unwrap().len(), 1);
-}
-
-#[test]
 fn repeat_times_retires_a_recurring_job_after_n_fires() {
     let (_dir, store) = test_store();
     let id = store

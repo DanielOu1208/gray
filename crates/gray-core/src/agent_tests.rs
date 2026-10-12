@@ -1021,6 +1021,7 @@ async fn context_overflow_compacts_once_then_continues() {
                 tokens_after,
                 messages_before,
                 messages_after,
+                ..
             } => Some((
                 *tokens_before,
                 *tokens_after,

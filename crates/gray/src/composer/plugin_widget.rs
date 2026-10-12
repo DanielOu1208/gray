@@ -20,15 +20,21 @@ pub(crate) fn lines(
     max_rows: usize,
     width: usize,
 ) -> Vec<Line<'static>> {
-    if snapshot.version != 1 {
+    if snapshot.version != 1 || max_rows == 0 {
         return Vec::new();
     }
     let dim = ratatui::style::Style::default().fg(crate::theme::theme().text_dim);
     let text = |chars: &[char]| chars.iter().collect::<String>();
-    snapshot
+    // A band shorter than the widget keeps its top rows and spends its last
+    // row on how many lines it cut, so a short screen never hides agents
+    // without saying so.
+    let total = snapshot.text.lines().count();
+    let cut = total > max_rows;
+    let keep = if cut { max_rows - 1 } else { total };
+    let mut rows: Vec<Line<'static>> = snapshot
         .text
         .lines()
-        .take(max_rows.min(12))
+        .take(keep)
         .enumerate()
         .map(|(index, line)| {
             let mut chars: Vec<char> = line
@@ -76,7 +82,14 @@ pub(crate) fn lines(
             }
             Line::from(spans)
         })
-        .collect()
+        .collect();
+    if cut {
+        rows.push(Line::from(ratatui::text::Span::styled(
+            format!(" \u{2193} {} more lines", total - keep),
+            dim,
+        )));
+    }
+    rows
 }
 
 pub(crate) struct Widget {
@@ -235,6 +248,61 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].to_string().contains('\x1b'));
     }
+    /// The subagents plugin's text for eight running runs, as `lines()` reads
+    /// it: a blank lead row, the count header, five agents at two rows each,
+    /// the overflow line, a blank and the affordance (15 rows).
+    fn eight_running() -> Snapshot {
+        let mut rows = vec![String::new(), "8 subagents \u{b7} 8 running".to_string()];
+        for n in 1..=5 {
+            rows.push(format!("  \u{25cf} agent-{n}  Haiku 5.5  1m  Task {n}"));
+            rows.push(format!("      step {n}"));
+        }
+        rows.push("  +3 more".into());
+        rows.push(String::new());
+        rows.push("   /subagents \u{2014} open \u{b7} chat \u{b7} stop".into());
+        Snapshot {
+            version: 1,
+            text: rows.join("\n") + "\n",
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_band_shorter_than_the_widget_says_how_much_it_cut() {
+        let rows = lines(&eight_running(), Duration::ZERO, 9, 80);
+        assert_eq!(rows.len(), 9);
+        assert_eq!(rows[1].to_string(), " 8 subagents \u{b7} 8 running");
+        // Eight rows of the widget are shown; the ninth names the other seven.
+        assert_eq!(rows[8].to_string(), " \u{2193} 7 more lines");
+        assert!(lines(&eight_running(), Duration::ZERO, 0, 80).is_empty());
+    }
+
+    #[test]
+    fn a_band_tall_enough_shows_the_whole_widget_without_an_indicator() {
+        let rows = lines(&eight_running(), Duration::ZERO, 16, 80);
+        assert_eq!(rows.len(), 15);
+        assert!(rows[12].to_string().contains("+3 more"));
+        assert!(rows[14].to_string().contains("/subagents"));
+        assert!(rows.iter().all(|r| !r.to_string().contains('\u{2193}')));
+    }
+
+    #[test]
+    fn rows_use_the_real_width_and_cut_with_an_ellipsis() {
+        let snapshot = Snapshot {
+            version: 1,
+            text: format!("{}\n", "word ".repeat(30).trim_end()),
+            ..Default::default()
+        };
+        // 149 cells fit a 200-column band (one cell of inset): no cut.
+        let wide = lines(&snapshot, Duration::ZERO, 4, 200)[0].to_string();
+        assert!(wide.ends_with("word"), "{wide}");
+        assert!(!wide.contains('\u{2026}'), "{wide}");
+        // At 80 columns the same row is cut to exactly the width.
+        let narrow = lines(&snapshot, Duration::ZERO, 4, 80)[0].to_string();
+        assert!(narrow.ends_with('\u{2026}'), "{narrow}");
+        assert_eq!(crate::text_width::display_width(&narrow), 80);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn widget_uses_registered_owner_and_honors_disable() {

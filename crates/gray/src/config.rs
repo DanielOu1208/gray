@@ -138,6 +138,10 @@ pub struct Config {
     pub context_reserve: Option<usize>,
     /// Tail budget kept alongside the summary after compaction.
     pub context_keep: Option<usize>,
+    /// Explicit auto-compact trigger (`--compact-at` / `GRAY_COMPACT_AT` /
+    /// `"compact_at_tokens"` in config.json). `Auto`/unset = the provider
+    /// price-cliff default; a count still clamps to `window − reserve`.
+    pub compact_at: Option<crate::setup::CompactAt>,
     /// Program that runs the model's shell commands somewhere else, e.g.
     /// `docker exec -i dev sh -s` or `ssh box sh -s`. `GRAY_EXEC_PREFIX` or
     /// the saved `exec_prefix`; None = commands run in this process's shell.
@@ -295,6 +299,10 @@ impl Config {
             })
             .or(saved.context_reserve);
 
+        let compact_at = cli
+            .compact_at
+            .or(env("GRAY_COMPACT_AT").and_then(|s| crate::setup::parse_compact_at(&s)))
+            .or(saved.compact_at);
         let context_keep = cli
             .context_keep
             .or_else(|| {
@@ -379,6 +387,7 @@ impl Config {
             context_window,
             context_reserve,
             context_keep,
+            compact_at,
             exec_prefix,
             max_turns,
             max_cost_micros,

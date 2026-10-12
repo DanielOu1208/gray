@@ -2,12 +2,24 @@
 //! subagents widget. A plugin's `agent_picker` command outcome opens it;
 //! rows and every action ride that plugin's own CLI (`entries` for the
 //! list, `view`/`open`/`stop`/`chat` for the verbs), so the panel works
-//! for any plugin speaking that surface. Enter on a finished run hands
+//! for any plugin speaking that surface. Enter opens a floating window on
+//! the run's own session (live while it works); 'o' on a finished run hands
 //! its child session to `/resume` — the subagent then chats as its own
 //! session, the same model opencode and Claude Code use.
 
+use gray_core::message::{ContentBlock, Role};
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use crate::composer::TranscriptEntry;
+use crate::session_store::SessionEntry;
 
 /// What the dispatch arm does after the modal closes.
 pub(crate) enum PanelAction {
@@ -130,11 +142,743 @@ fn fetch_rows(argv: &[String], all: bool) -> Vec<Row> {
         .collect()
 }
 
-/// The keyboard-navigable overlay: ↑↓/j/k move, Enter opens (finished
-/// runs resume their child session), c chats into the run, x stops, v
-/// prints the transcript tail, a widens to every session, r refreshes.
-/// Synchronous like the other pickers — plugin calls are local CLI
-/// spawns, fast enough to run between key events.
+// ---------------------------------------------------------------------------
+// Floating run viewer — the child session as a small gray window.
+// ---------------------------------------------------------------------------
+
+/// The one-line chat composer shared by the list and the viewer.
+struct ChatInput {
+    /// The plugin-verb target (`chat <target> <msg>`).
+    target: String,
+    /// Display name for the `chat NAME:` prompt.
+    name: String,
+    buf: String,
+}
+
+/// Incremental reader for `sessions/<id>.jsonl`. The file is append-only, so
+/// each poll reads only the bytes after the last consumed offset and keeps
+/// complete lines — a torn tail waits for the next poll. The viewer replays
+/// the WHOLE session from entry 0 — compaction boundaries don't truncate the
+/// history the way `resume` (active-suffix only) does.
+struct SessionFeed {
+    path: PathBuf,
+    offset: u64,
+    lines_seen: usize,
+    cwd: PathBuf,
+    entries: Vec<SessionEntry>,
+    /// The file shrank or was replaced: already-built content is stale.
+    reset: bool,
+}
+
+impl SessionFeed {
+    /// `None` on an unusable slug (the plugin's own `[A-Za-z0-9_-]{1,128}`
+    /// rule) or a missing sessions root. The file itself may not exist yet.
+    fn open(session: &str) -> Option<Self> {
+        let ok = !session.is_empty()
+            && session.len() <= 128
+            && session
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !ok {
+            return None;
+        }
+        Some(Self {
+            path: crate::session_store::default_root()?.join(format!("{session}.jsonl")),
+            offset: 0,
+            lines_seen: 0,
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            entries: Vec::new(),
+            reset: false,
+        })
+    }
+
+    /// Consume newly completed lines. True when entries were added.
+    fn poll(&mut self) -> bool {
+        let Ok(mut file) = std::fs::File::open(&self.path) else {
+            return false;
+        };
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if len < self.offset {
+            self.offset = 0;
+            self.lines_seen = 0;
+            self.entries.clear();
+            self.reset = true;
+        }
+        if len <= self.offset || file.seek(SeekFrom::Start(self.offset)).is_err() {
+            return false;
+        }
+        let mut buf = Vec::new();
+        if file.read_to_end(&mut buf).is_err() {
+            return false;
+        }
+        let Some(last_nl) = buf.iter().rposition(|b| *b == b'\n') else {
+            return false;
+        };
+        self.offset += last_nl as u64 + 1;
+        let mut changed = false;
+        for line in String::from_utf8_lossy(&buf[..=last_nl]).lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            self.lines_seen += 1;
+            if self.lines_seen == 1 {
+                // Line 0 is the session header; only `cwd` matters here —
+                // tool headers relativize paths against it.
+                if let Ok(v) = serde_json::from_str::<Value>(line)
+                    && let Some(c) = v["cwd"].as_str()
+                {
+                    self.cwd = PathBuf::from(c);
+                }
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<SessionEntry>(line) {
+                self.entries.push(entry);
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+/// The open run window: the row's identity for the title bar, the feed that
+/// fills `transcript`, the rendered `lines` cache, and the scroll state.
+/// `tool_calls` mirrors `replay_session_history`'s pairing map — unmatched
+/// calls hang off the tail as empty boxes until their result lands.
+struct Viewer {
+    target: String,
+    session: String,
+    name: String,
+    icon: String,
+    status: String,
+    stats: String,
+    running: bool,
+    managed: bool,
+    resumable: bool,
+    feed: Option<SessionFeed>,
+    transcript: Vec<TranscriptEntry>,
+    /// `feed.entries` index up to which `transcript` is built.
+    built: usize,
+    tool_calls: HashMap<String, (String, Value)>,
+    /// `label`/`preview` per wire tool name, resolved from the enabled
+    /// plugins' persisted manifests — the live turn's `tool_display_maps`
+    /// for a session that has no live agent.
+    tool_labels: HashMap<String, String>,
+    tool_previews: HashMap<String, String>,
+    /// Maps resolve at first feed open; empty is a valid answer for a
+    /// builtin-only session, so the flag, not emptiness, marks "tried".
+    tools_loaded: bool,
+    gap_owed: bool,
+    lines: Vec<Line<'static>>,
+    /// Width the transcript was built for; markdown is baked at build time,
+    /// so a width change replays `entries` from scratch.
+    layout_w: u16,
+    dirty: bool,
+    scroll: u16,
+    /// Pinned to the tail: new lines autoscroll until the user scrolls up.
+    stick: bool,
+    max_scroll: u16,
+    view_h: u16,
+    last_tick: Instant,
+    /// One-shot footer note (verb receipts, read-only refusals).
+    note: Option<String>,
+}
+
+impl Viewer {
+    fn open(row: &Row) -> Self {
+        let mut v = Self {
+            target: row.target.clone(),
+            session: row.session.clone(),
+            name: row.name.clone(),
+            icon: row.icon.clone(),
+            status: row.status.clone(),
+            stats: row.stats.clone(),
+            running: row.running,
+            managed: row.managed,
+            resumable: row.resumable,
+            feed: None,
+            transcript: Vec::new(),
+            built: 0,
+            tool_calls: HashMap::new(),
+            tool_labels: HashMap::new(),
+            tool_previews: HashMap::new(),
+            tools_loaded: false,
+            gap_owed: false,
+            lines: Vec::new(),
+            layout_w: 0,
+            dirty: true,
+            scroll: 0,
+            stick: true,
+            max_scroll: 0,
+            view_h: 1,
+            last_tick: Instant::now(),
+            note: None,
+        };
+        v.refresh_feed();
+        v
+    }
+
+    /// Re-sync identity fields against the refreshed row — the run keeps
+    /// living while watched: status, stats, a late-arriving session id.
+    fn sync_row(&mut self, row: Option<&Row>) {
+        let Some(r) = row else {
+            return;
+        };
+        self.name = r.name.clone();
+        self.icon = r.icon.clone();
+        self.status = r.status.clone();
+        self.stats = r.stats.clone();
+        self.running = r.running;
+        self.managed = r.managed;
+        self.resumable = r.resumable;
+        if !r.session.is_empty() {
+            self.session = r.session.clone();
+        }
+    }
+
+    /// Open the feed lazily (the session id can arrive after the run starts)
+    /// and pull whatever the child appended.
+    fn refresh_feed(&mut self) {
+        if self.session.is_empty() {
+            return;
+        }
+        if self.feed.is_none() {
+            self.feed = SessionFeed::open(&self.session);
+        }
+        if !self.tools_loaded && self.feed.is_some() {
+            let cwd = self
+                .feed
+                .as_ref()
+                .map(|f| f.cwd.clone())
+                .unwrap_or_default();
+            (self.tool_labels, self.tool_previews) = viewer_tool_maps(&cwd);
+            self.tools_loaded = true;
+        }
+        if let Some(feed) = self.feed.as_mut() {
+            feed.poll();
+        }
+    }
+
+    /// Fold `entries[built..]` into `transcript`. Always the FULL session —
+    /// compaction boundaries don't truncate (scrolling up reaches the first
+    /// prompt); only a replaced file rebuilds from zero.
+    fn build_pending(&mut self) {
+        {
+            let Some(feed) = self.feed.as_ref() else {
+                return;
+            };
+            if feed.reset || self.built > feed.entries.len() {
+                self.transcript.clear();
+                self.tool_calls.clear();
+                self.gap_owed = false;
+                self.built = 0;
+            }
+        }
+        if let Some(feed) = self.feed.as_mut() {
+            feed.reset = false;
+        }
+        let new: Vec<SessionEntry> = self
+            .feed
+            .as_ref()
+            .map(|f| f.entries[self.built..].to_vec())
+            .unwrap_or_default();
+        if new.is_empty() {
+            return;
+        }
+        let cwd = self
+            .feed
+            .as_ref()
+            .map(|f| f.cwd.clone())
+            .unwrap_or_default();
+        let w = usize::from(self.layout_w.max(20));
+        for e in &new {
+            replay_entry(self, e, &cwd, w);
+        }
+        self.built += new.len();
+        self.dirty = true;
+    }
+
+    /// Produce `lines` at width `w` through `layout_history` — the margin
+    /// funnel the setup backdrop shares with the live transcript. Pending
+    /// tool calls hang off the tail as empty boxes, like replay's end flush.
+    fn layout(&mut self, w: usize) {
+        let w16 = u16::try_from(w).unwrap_or(u16::MAX);
+        if self.layout_w != w16 {
+            self.layout_w = w16;
+            self.transcript.clear();
+            self.tool_calls.clear();
+            self.gap_owed = false;
+            self.built = 0;
+        }
+        self.build_pending();
+        if !self.dirty {
+            return;
+        }
+        let mut blocks = self.transcript.clone();
+        let cwd = self.feed.as_ref().map(|f| f.cwd.clone());
+        let display = crate::tool_fmt::ToolDisplay {
+            labels: Some(&self.tool_labels),
+            previews: Some(&self.tool_previews),
+        };
+        for (_id, (name, args)) in &self.tool_calls {
+            blocks.push(TranscriptEntry::Gap(1));
+            blocks.push(TranscriptEntry::ToolBoxLines {
+                header: crate::tool_fmt::format_tool_card_lines(
+                    name,
+                    args,
+                    cwd.as_deref(),
+                    display.label(name),
+                    display.preview(name),
+                ),
+                body: Vec::new(),
+            });
+            blocks.push(TranscriptEntry::Gap(1));
+        }
+        self.lines = crate::composer::transcript::layout_history(&blocks, w, 0);
+        self.dirty = false;
+    }
+}
+
+/// `ensure_gap` on the viewer's transcript: one owed boundary, paid once.
+fn gap_mark(v: &mut Viewer) {
+    if !v.gap_owed {
+        v.transcript.push(TranscriptEntry::Gap(1));
+        v.gap_owed = true;
+    }
+}
+
+fn push_block(v: &mut Viewer, e: TranscriptEntry) {
+    v.transcript.push(e);
+    v.gap_owed = false;
+}
+
+/// `Tui::replay_session_history` mirrored onto a `Viewer`'s transcript: same
+/// block types, same pairing of tool calls to results, minus the terminal
+/// side effects (input-history seeding, usage gauge).
+fn replay_entry(v: &mut Viewer, entry: &SessionEntry, cwd: &Path, w: usize) {
+    match entry.message.role {
+        Role::User => {
+            let mut user_text = String::new();
+            let mut attached: Vec<PathBuf> = Vec::new();
+            for block in &entry.message.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        if !user_text.is_empty() {
+                            user_text.push('\n');
+                        }
+                        user_text.push_str(text);
+                    }
+                    ContentBlock::StructuredInput { kind, .. } => {
+                        if !user_text.is_empty() {
+                            user_text.push('\n');
+                        }
+                        user_text.push_str("[component event: ");
+                        user_text.push_str(kind);
+                        user_text.push(']');
+                    }
+                    ContentBlock::Image { media_type, data }
+                    | ContentBlock::Media {
+                        media_type, data, ..
+                    } => {
+                        if let Some(p) = gray_core::paths::materialize_media(media_type, data) {
+                            attached.push(p);
+                        }
+                    }
+                    ContentBlock::ToolResult {
+                        id,
+                        content,
+                        is_error,
+                    } => replay_tool_result(v, id, content, *is_error, cwd),
+                    _ => {}
+                }
+            }
+            if !user_text.is_empty() || !attached.is_empty() {
+                gap_mark(v);
+                push_block(v, TranscriptEntry::UserPrompt(user_text, attached));
+                gap_mark(v);
+            }
+        }
+        Role::Assistant => {
+            for block in &entry.message.content {
+                match block {
+                    ContentBlock::Thinking { text, .. } => {
+                        let rows = crate::composer::transcript::thinking_replay_lines(text);
+                        if !rows.is_empty() {
+                            gap_mark(v);
+                            push_block(
+                                v,
+                                TranscriptEntry::StyledLines {
+                                    lines: rows,
+                                    hyperlinks: Vec::new(),
+                                },
+                            );
+                        }
+                    }
+                    ContentBlock::Text { text } => {
+                        let (lines, hyperlinks) =
+                            crate::composer::transcript::render_markdown_lines(text, Some(w));
+                        if !lines.is_empty() {
+                            gap_mark(v);
+                            push_block(v, TranscriptEntry::StyledLines { lines, hyperlinks });
+                        }
+                    }
+                    ContentBlock::ToolUse { id, name, args } => {
+                        v.tool_calls
+                            .insert(id.clone(), (name.clone(), args.clone()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Role::System => {
+            for block in &entry.message.content {
+                if let ContentBlock::ToolResult {
+                    id,
+                    content,
+                    is_error,
+                } = block
+                {
+                    replay_tool_result(v, id, content, *is_error, cwd);
+                }
+            }
+        }
+    }
+}
+
+/// The viewed run's `label`/`preview` per wire tool name: the live turn's
+/// `tool_display_maps`, but built without a live agent — read the enabled
+/// plugins' persisted manifests (builtins declare neither field, so only
+/// plugin tools land in the maps). Display metadata only: a tool missing
+/// here still renders its wire-name header.
+fn viewer_tool_maps(cwd: &Path) -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut defs = Vec::new();
+    let Ok(home) = crate::setup::gray_home() else {
+        return crate::repl::session::tool_display_maps(&defs);
+    };
+    let load_lock = |path: PathBuf| {
+        gray_plugin::lock::LockFile::load(&path).unwrap_or_else(|_| gray_plugin::lock::LockFile {
+            schema: 0,
+            plugins: Default::default(),
+        })
+    };
+    let user = load_lock(gray_plugin::lock::lock_path(&home));
+    let project = load_lock(gray_plugin::lock::project_lock_path(cwd));
+    for name in user.plugins.keys().chain(project.plugins.keys()) {
+        if !gray_plugin::lock::effective_enabled(&user, &project, name) {
+            continue;
+        }
+        for dir in [home.join("plugins"), cwd.join(".gray/plugins")] {
+            let Ok(raw) = std::fs::read_to_string(dir.join(format!("{name}-manifest.json"))) else {
+                continue;
+            };
+            if let Ok(json) = serde_json::from_str::<Value>(&raw) {
+                defs.extend(gray_plugin::manifest_tools(&json));
+                break;
+            }
+        }
+    }
+    crate::repl::session::tool_display_maps(&defs)
+}
+
+/// The replay twin of `replay_tool_result` in transcript/boxes.rs: resolve
+/// the matching ToolUse, render header + body, push the card.
+fn replay_tool_result(v: &mut Viewer, id: &str, content: &str, is_error: bool, cwd: &Path) {
+    let (name, args) = v
+        .tool_calls
+        .remove(id)
+        .map(|(n, a)| (n, Some(a)))
+        .unwrap_or_else(|| ("tool".to_string(), None));
+    let display = crate::tool_fmt::ToolDisplay {
+        labels: Some(&v.tool_labels),
+        previews: Some(&v.tool_previews),
+    };
+    let header = args
+        .as_ref()
+        .map(|a| {
+            crate::tool_fmt::format_tool_card_lines(
+                &name,
+                a,
+                Some(cwd),
+                display.label(&name),
+                display.preview(&name),
+            )
+        })
+        .unwrap_or_else(|| vec![Line::from(name.clone())]);
+    let body = crate::tool_fmt::format_tool_result_lines_with_context(
+        &name,
+        args.as_ref(),
+        content,
+        is_error,
+        Some(cwd),
+    );
+    gap_mark(v);
+    push_block(v, TranscriptEntry::ToolBoxLines { header, body });
+    gap_mark(v);
+}
+
+/// Scroll by `delta` rows (negative = up) and recompute bottom-stickiness:
+/// landing on the last row re-engages autoscroll, leaving it disengages.
+/// Visible window over `lines` as `(top_pad, start, end)`: `top_pad` blank
+/// rows above `lines[start..end]`, together filling `view` rows exactly.
+/// Bottom-anchored semantics — content shorter than the viewport pins to the
+/// bottom edge (pad above); longer content is a contiguous slice and `start`
+/// clamps to `len - view`. Every viewport row is assigned, so no hole can
+/// open mid-viewport the way `Paragraph::scroll` (top-anchored) left one.
+fn viewport_window(len: usize, view: usize, scroll: usize) -> (usize, usize, usize) {
+    let start = scroll.min(len.saturating_sub(view));
+    let end = (start + view).min(len);
+    (view.saturating_sub(end - start), start, end)
+}
+
+fn scroll_by(v: &mut Viewer, delta: i64) {
+    let next = (i64::from(v.scroll) + delta).clamp(0, i64::from(v.max_scroll));
+    v.scroll = next as u16;
+    v.stick = v.scroll >= v.max_scroll;
+}
+
+/// The run's own little window: dimmed backdrop, one bordered block ~80% of
+/// the screen titled with the run, the child session laid out inside.
+fn paint_viewer(
+    frame: &mut ratatui::Frame,
+    bg: &crate::setup::BackgroundSnapshot,
+    v: &mut Viewer,
+    chat: Option<&ChatInput>,
+    read_only: bool,
+) {
+    crate::setup::render_dimmed_background(frame, bg);
+    let area = frame.area();
+    let theme = crate::theme::theme();
+    let w = (area.width * 4 / 5).max(24).min(area.width);
+    let h = (area.height * 4 / 5).max(6).min(area.height);
+    let rect = Rect::new((area.width - w) / 2, (area.height - h) / 2, w, h);
+    frame.render_widget(Clear, rect);
+
+    let state = if v.running {
+        "running".to_string()
+    } else {
+        v.status.clone()
+    };
+    let title = format!(" {} {} · {} · {} ", v.icon, v.name, state, v.stats);
+    let title: String = title.chars().take(w.saturating_sub(2) as usize).collect();
+    // A persistent chat row sits at the bottom of a mutable run — the
+    // viewer is a little "gray session iframe": transcript + input.
+    // Read-only runs get the row back as transcript space.
+    let input_rows = u16::from(!read_only);
+    let footer = if chat.is_some() {
+        " enter send · esc unfocus · ↑↓/PgUp/PgDn/Home/End scroll ".to_string()
+    } else if read_only {
+        match &v.note {
+            Some(n) => format!(" {n} "),
+            None => " ↑↓/jk scroll · PgUp/PgDn · Home/End · esc back — read-only ".to_string(),
+        }
+    } else {
+        " ↑↓/jk scroll · PgUp/PgDn · Home/End · c/i chat · x stop · o resume · esc ".to_string()
+    };
+    let footer: String = footer.chars().take(w.saturating_sub(2) as usize).collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.text_dim).bg(theme.surface_bg))
+        .style(Style::default().bg(theme.surface_bg))
+        .title(Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.text_bright)
+                .add_modifier(Modifier::BOLD)
+                .bg(theme.surface_bg),
+        )))
+        .title_bottom(Line::from(Span::styled(
+            footer,
+            Style::default().fg(theme.text_dim).bg(theme.surface_bg),
+        )));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let body_h = inner.height.saturating_sub(input_rows);
+    let body = Rect {
+        height: body_h,
+        ..inner
+    };
+    let input = Rect {
+        y: inner.y + body_h,
+        height: input_rows,
+        ..inner
+    };
+
+    v.view_h = body_h;
+    v.layout(inner.width as usize);
+    let max = v.lines.len().saturating_sub(body_h as usize);
+    let max16 = u16::try_from(max).unwrap_or(u16::MAX);
+    if v.stick {
+        v.scroll = max16;
+    }
+    v.scroll = v.scroll.min(max16);
+    v.max_scroll = max16;
+
+    if v.lines.is_empty() {
+        let hint = if v.session.is_empty() {
+            "(no child session yet — nothing to show)"
+        } else {
+            "(empty transcript)"
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("  {hint}"),
+                Style::default().fg(theme.text_dim).bg(theme.surface_bg),
+            ))),
+            body,
+        );
+    } else {
+        // Bottom-anchored slice: blank pad above short content, contiguous
+        // rows otherwise — every body row is assigned, no mid-viewport hole.
+        let (pad, start, end) = viewport_window(v.lines.len(), body_h as usize, v.scroll as usize);
+        let mut rows = vec![Line::default(); pad];
+        rows.extend(v.lines[start..end].iter().cloned());
+        frame.render_widget(Paragraph::new(rows), body);
+    }
+
+    if input_rows > 0 {
+        let spans = if let Some(c) = chat {
+            let mut spans = vec![
+                Span::styled(
+                    " chat ▸ ",
+                    Style::default().fg(theme.accent).bg(theme.surface_bg),
+                ),
+                Span::styled(
+                    c.buf.clone(),
+                    Style::default().fg(theme.text_body).bg(theme.surface_bg),
+                ),
+                Span::styled("_", Style::default().fg(theme.accent).bg(theme.surface_bg)),
+            ];
+            if let Some(n) = &v.note {
+                spans.push(Span::styled(
+                    format!("  {n}"),
+                    Style::default().fg(theme.text_dim).bg(theme.surface_bg),
+                ));
+            }
+            spans
+        } else {
+            let mut spans = vec![Span::styled(
+                " chat ▸ ",
+                Style::default().fg(theme.text_dim).bg(theme.surface_bg),
+            )];
+            if let Some(n) = &v.note {
+                spans.push(Span::styled(
+                    n.clone(),
+                    Style::default().fg(theme.text_dim).bg(theme.surface_bg),
+                ));
+            }
+            spans
+        };
+        frame.render_widget(Paragraph::new(Line::from(spans)), input);
+    }
+}
+
+/// Modal width: the terminal less a cell of margin each side, so rows get
+/// every column. Never narrower than 42 nor wider than the screen.
+fn picker_modal_w(term_w: u16) -> u16 {
+    term_w.saturating_sub(2).max(42).min(term_w)
+}
+
+/// List rows the picker holds: about three-fifths of the screen less the
+/// title, status and keys rows. Never more than there are runs, never fewer
+/// than three, so a short terminal scrolls instead of hiding runs.
+fn picker_list_h(term_h: u16, runs: usize) -> usize {
+    (usize::from(term_h) * 3 / 5)
+        .saturating_sub(7)
+        .max(3)
+        .min(runs.max(1))
+}
+
+/// The top of the `visible`-row window: the old top clamped into the list,
+/// then moved just enough to keep `sel` inside it.
+fn picker_scroll_top(runs: usize, sel: usize, top: usize, visible: usize) -> usize {
+    let visible = visible.max(1);
+    let mut top = top.min(runs.saturating_sub(visible));
+    if sel < top {
+        top = sel;
+    } else if sel >= top + visible {
+        top = sel + 1 - visible;
+    }
+    top
+}
+
+/// `1–7 of 8` while the list overflows its window; nothing when it fits.
+fn picker_range_label(runs: usize, top: usize, visible: usize) -> Option<String> {
+    (runs > visible).then(|| format!("{}–{} of {runs}", top + 1, (top + visible).min(runs)))
+}
+
+/// Longest live activity a picker row prints; the task keeps the rest.
+const PICKER_ACTIVITY_MAX: usize = 60;
+
+/// `s` cut to at most `max` display cells, a cut ending in `…`.
+fn cut_cells(s: &str, max: usize) -> String {
+    use crate::text_width::{char_width, display_width};
+    if display_width(s) <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return "…".chars().take(max).collect();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let w = char_width(c);
+        if used + w > max - 1 {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
+/// One picker row, exactly `width` cells: `▸ ● name — task · stats · activity`
+/// (a finished run ends `· status`). The fixed parts come first, then the task
+/// keeps its first 40 cells; the live activity takes what is left (at most 60
+/// cells) and is dropped when that is under a dozen; the task takes the rest.
+fn picker_row_text(row: &Row, selected: bool, width: usize) -> String {
+    use crate::text_width::display_width;
+    let mark = if selected { "▸" } else { " " };
+    let task = row.task.lines().next().unwrap_or("").trim();
+    let activity = row.activity.lines().next().unwrap_or("").trim();
+    let head = format!(" {mark} {} {}", row.icon, row.name);
+    let sep = if task.is_empty() { "" } else { " — " };
+    let stats = format!(" · {}", row.stats);
+    let state = if row.running {
+        String::new()
+    } else {
+        format!(" · {}", row.status)
+    };
+    let spare = width.saturating_sub(
+        display_width(&head) + display_width(sep) + display_width(&stats) + display_width(&state),
+    );
+    let act_room = spare
+        .saturating_sub(display_width(task).min(40))
+        .min(PICKER_ACTIVITY_MAX);
+    let act = if row.running && !activity.is_empty() && act_room >= 15 {
+        format!(" · {}", cut_cells(activity, act_room - 3))
+    } else {
+        String::new()
+    };
+    let task_room = spare.saturating_sub(display_width(&act));
+    let task = if task.is_empty() {
+        String::new()
+    } else {
+        cut_cells(task, task_room)
+    };
+    let line = cut_cells(&format!("{head}{sep}{task}{stats}{act}{state}"), width);
+    let pad = width.saturating_sub(display_width(&line));
+    format!("{line}{}", " ".repeat(pad))
+}
+
+/// The keyboard-navigable overlay: ↑↓/j/k move, Enter opens the floating
+/// run viewer (a small gray window on the child session, live while the
+/// run works), o resumes a finished run's session, c chats into the run,
+/// x stops, v prints the transcript tail, a widens to every session, r
+/// refreshes. Synchronous like the other pickers — plugin calls are local
+/// CLI spawns, fast enough to run between key events.
 pub(crate) fn run_agents_picker(
     plugin: &str,
     bg: Option<&crate::setup::BackgroundSnapshot>,
@@ -184,7 +928,8 @@ fn run_agents_panel(
     let mut sel: usize = 0;
     let mut scroll_top: usize = 0;
     let mut status = String::new();
-    let mut chat_buf: Option<String> = None;
+    let mut chat_in: Option<ChatInput> = None;
+    let mut viewer: Option<Viewer> = None;
     let mut result: Option<PanelAction> = None;
 
     let out: anyhow::Result<()> = (|| {
@@ -194,17 +939,33 @@ fn run_agents_panel(
             } else if sel >= rows.len() {
                 sel = rows.len() - 1;
             }
+            if let Some(vw) = viewer.as_mut()
+                && vw.last_tick.elapsed() >= Duration::from_secs(1)
+            {
+                vw.last_tick = Instant::now();
+                if vw.running {
+                    rows = fetch_rows(&argv, all);
+                    let upd = rows.iter().find(|r| r.target == vw.target).cloned();
+                    vw.sync_row(upd.as_ref());
+                }
+                vw.refresh_feed();
+            }
             terminal.draw(|frame| {
                 let area = frame.area();
                 if area.width < 40 || area.height < 10 {
                     return;
                 }
+                if let Some(vw) = viewer.as_mut() {
+                    paint_viewer(frame, &bg_snapshot, vw, chat_in.as_ref(), read_only);
+                    return;
+                }
                 crate::setup::render_dimmed_background(frame, &bg_snapshot);
 
-                // Height hugs the rows: title + blank + list + blank +
-                // status + keys, plus the one-cell pad top and bottom.
-                let list_h = rows.len().clamp(1, 8);
-                let modal_w = 96.min(area.width.saturating_sub(2)).max(42).min(area.width);
+                // Height hugs the rows (three-fifths of the screen at most):
+                // title + blank + list + blank + status + keys, plus the
+                // one-cell pad top and bottom.
+                let list_h = picker_list_h(area.height, rows.len());
+                let modal_w = picker_modal_w(area.width);
                 let modal_h = (list_h as u16 + 7)
                     .min(area.height.saturating_sub(2))
                     .max(8)
@@ -233,6 +994,14 @@ fn run_agents_panel(
                     );
                 };
 
+                // The list band holds what the modal's height leaves; the
+                // window follows the selection, and the header names it.
+                let visible = list_h.min(usize::from(modal_h.saturating_sub(7))).max(1);
+                scroll_top = picker_scroll_top(rows.len(), sel, scroll_top, visible);
+                let range = picker_range_label(rows.len(), scroll_top, visible)
+                    .map(|label| format!("  {label}"))
+                    .unwrap_or_default();
+
                 let title = if read_only {
                     if all {
                         "Agents — all sessions · read-only"
@@ -245,8 +1014,9 @@ fn run_agents_panel(
                     "Agents"
                 };
                 let esc_str = "esc";
-                let pad_len = (inner.width as usize)
-                    .saturating_sub(title.chars().count() + esc_str.chars().count() + 8);
+                let pad_len = (inner.width as usize).saturating_sub(
+                    title.chars().count() + range.chars().count() + esc_str.chars().count() + 8,
+                );
                 put(
                     0,
                     Line::from(vec![
@@ -257,21 +1027,16 @@ fn run_agents_panel(
                                 .add_modifier(Modifier::BOLD)
                                 .bg(box_bg),
                         ),
+                        Span::styled(range, Style::default().fg(text_dim).bg(box_bg)),
                         Span::styled(" ".repeat(pad_len), Style::default().bg(box_bg)),
                         Span::styled("a: all/cwd  ", Style::default().fg(text_dim).bg(box_bg)),
                         Span::styled(esc_str, Style::default().fg(text_dim).bg(box_bg)),
                     ]),
                 );
 
-                // List band: up to 8 rows, then the status/input line,
+                // List band: the visible window, then the status/input line,
                 // then the keys hint.
                 let list_y = 2u16;
-                let visible = list_h;
-                if sel < scroll_top {
-                    scroll_top = sel;
-                } else if sel >= scroll_top + visible {
-                    scroll_top = sel + 1 - visible;
-                }
                 if rows.is_empty() {
                     put(
                         list_y,
@@ -286,35 +1051,8 @@ fn run_agents_panel(
                         if idx >= rows.len() {
                             break;
                         }
-                        let row = &rows[idx];
                         let is_sel = idx == sel;
-                        let task_w = (inner.width as usize).saturating_sub(
-                            3 + row.icon.chars().count()
-                                + 1
-                                + row.name.chars().count()
-                                + 3
-                                + row.stats.chars().count()
-                                + 3
-                                + row.activity.chars().count().min(20),
-                        );
-                        let task: String = row.task.chars().take(task_w.max(8)).collect();
-                        let mut content = format!(
-                            " {} {} {} — {} · {}",
-                            if is_sel { "▸" } else { " " },
-                            row.icon,
-                            row.name,
-                            task,
-                            row.stats
-                        );
-                        if row.running && !row.activity.is_empty() {
-                            let act: String = row.activity.chars().take(20).collect();
-                            content.push_str(&format!(" · {act}"));
-                        }
-                        if !row.running {
-                            content.push_str(&format!(" · {}", row.status));
-                        }
-                        let fill = (inner.width as usize).saturating_sub(content.chars().count());
-                        let row_str = format!("{}{}", content, " ".repeat(fill));
+                        let row_str = picker_row_text(&rows[idx], is_sel, inner.width as usize);
                         let line = if is_sel {
                             Line::from(Span::styled(
                                 row_str,
@@ -337,12 +1075,8 @@ fn run_agents_panel(
 
                 // Status / chat-input band, then the keys hint.
                 let status_y = inner.height.saturating_sub(2);
-                if let Some(buf) = &chat_buf {
-                    let prompt = format!(
-                        " chat {}: {}_",
-                        rows.get(sel).map(|r| r.name.as_str()).unwrap_or(""),
-                        buf
-                    );
+                if let Some(c) = &chat_in {
+                    let prompt = format!(" chat {}: {}_", c.name, c.buf);
                     let clipped: String = prompt.chars().take(inner.width as usize).collect();
                     put(
                         status_y,
@@ -359,15 +1093,15 @@ fn run_agents_panel(
                     // do — the affordance, not just the key names.
                     let hint = rows.get(sel).map_or("", |r| {
                         if read_only {
-                            " read-only while a turn is running · ⏎/v transcript"
+                            " read-only while a turn is running · ⏎ watch · v tail"
                         } else if r.running {
-                            " c queues a follow-up · v transcript · x stops it"
+                            " ⏎ watch live · c follow-up · x stop · v tail"
                         } else if r.resumable {
-                            " ⏎ steps into its session · c continues it · v transcript"
+                            " ⏎ view · o steps into its session · c continues · v tail"
                         } else if r.managed {
-                            " v transcript · c starts a new turn"
+                            " ⏎ view · v tail · c starts a new turn"
                         } else {
-                            " v transcript"
+                            " ⏎ view · v tail"
                         }
                     });
                     let text = if status.is_empty() {
@@ -390,9 +1124,9 @@ fn run_agents_panel(
                     inner.height.saturating_sub(1),
                     Line::from(Span::styled(
                         if read_only {
-                            " ↑↓ move · ⏎/v view · a all · r refresh · esc close"
+                            " ↑↓ move · ⏎ view · v tail · a all · r refresh · esc close"
                         } else {
-                            " ↑↓ move · ⏎ open · c chat · x stop · v view · a all · r refresh"
+                            " ↑↓ move · ⏎ view · o resume · c chat · x stop · v tail · a all · r refresh"
                         },
                         Style::default().fg(text_dim).bg(box_bg),
                     )),
@@ -415,27 +1149,126 @@ fn run_agents_panel(
                 continue;
             }
             use crossterm::event::KeyModifiers;
-            if chat_buf.is_some() {
+            if chat_in.is_some() {
                 match code {
-                    KeyCode::Esc => chat_buf = None,
+                    KeyCode::Esc => chat_in = None,
                     KeyCode::Enter => {
-                        let msg = chat_buf.take().unwrap_or_default();
-                        if msg.trim().is_empty() {
-                            status = "chat cancelled".into();
-                        } else if let Some(row) = rows.get(sel) {
-                            status = spawn_text(&argv, &["chat", &row.target, &msg])
+                        let Some(c) = chat_in.take() else {
+                            continue;
+                        };
+                        let msg = c.buf.trim().to_string();
+                        let receipt = if msg.is_empty() {
+                            Some("chat cancelled".to_string())
+                        } else {
+                            let r = spawn_text(&argv, &["chat", &c.target, &msg])
                                 .unwrap_or_else(|| "chat failed".into());
                             rows = fetch_rows(&argv, all);
+                            Some(r)
+                        };
+                        if let Some(vw) = viewer.as_mut() {
+                            vw.note = receipt;
+                            vw.running = true;
+                            let upd = rows.iter().find(|r| r.target == vw.target).cloned();
+                            vw.sync_row(upd.as_ref());
+                            // The viewer's box is a chat, not a one-shot:
+                            // stay focused for the next steer (Esc unfocuses).
+                            if !msg.is_empty() {
+                                chat_in = Some(ChatInput {
+                                    target: c.target,
+                                    name: c.name,
+                                    buf: String::new(),
+                                });
+                            }
+                        } else if let Some(r) = receipt {
+                            status = r;
+                        }
+                    }
+                    // Arrows keep scrolling while the box is focused — it's
+                    // an input row, not a mode that swallows the viewport.
+                    KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+                    | KeyCode::Home | KeyCode::End => {
+                        if let Some(vw) = viewer.as_mut() {
+                            let d = match code {
+                                KeyCode::Up => -1,
+                                KeyCode::Down => 1,
+                                KeyCode::PageUp => -i64::from(vw.view_h.max(1)),
+                                KeyCode::PageDown => i64::from(vw.view_h.max(1)),
+                                KeyCode::Home => -i64::from(vw.scroll),
+                                _ => i64::from(vw.max_scroll),
+                            };
+                            scroll_by(vw, d);
                         }
                     }
                     KeyCode::Backspace => {
-                        if let Some(b) = chat_buf.as_mut() {
-                            b.pop();
+                        if let Some(c) = chat_in.as_mut() {
+                            c.buf.pop();
                         }
                     }
-                    KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Some(b) = chat_buf.as_mut() {
-                            b.push(c)
+                    KeyCode::Char(ch) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(c) = chat_in.as_mut() {
+                            c.buf.push(ch)
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if let Some(vw) = viewer.as_mut() {
+                if matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
+                    viewer = None;
+                    continue;
+                }
+                match code {
+                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Up | KeyCode::Char('k') => scroll_by(vw, -1),
+                    KeyCode::Down | KeyCode::Char('j') => scroll_by(vw, 1),
+                    KeyCode::PageUp => scroll_by(vw, -i64::from(vw.view_h.max(1))),
+                    KeyCode::PageDown => scroll_by(vw, i64::from(vw.view_h.max(1))),
+                    KeyCode::Home => scroll_by(vw, -i64::from(vw.scroll)),
+                    KeyCode::End => scroll_by(vw, i64::from(vw.max_scroll)),
+                    KeyCode::Char('c') | KeyCode::Char('i') => {
+                        if read_only {
+                            vw.note = Some("read-only while a turn is running".into());
+                        } else if !vw.managed {
+                            vw.note = Some(format!(
+                                "{} is a raw worker — nothing to chat through",
+                                vw.name
+                            ));
+                        } else {
+                            chat_in = Some(ChatInput {
+                                target: vw.target.clone(),
+                                name: vw.name.clone(),
+                                buf: String::new(),
+                            });
+                        }
+                    }
+                    KeyCode::Char('x') => {
+                        if read_only {
+                            vw.note = Some("read-only while a turn is running".into());
+                        } else if vw.running {
+                            let receipt = spawn_text(&argv, &["stop", &vw.target])
+                                .unwrap_or_else(|| "stop failed".into());
+                            rows = fetch_rows(&argv, all);
+                            let upd = rows.iter().find(|r| r.target == vw.target).cloned();
+                            vw.note = Some(receipt);
+                            vw.sync_row(upd.as_ref());
+                        } else {
+                            vw.note = Some(format!("{} already {}", vw.name, vw.status));
+                        }
+                    }
+                    KeyCode::Char('o') => {
+                        if read_only {
+                            vw.note = Some("read-only while a turn is running".into());
+                        } else if !vw.running && vw.resumable {
+                            result = Some(PanelAction::Resume {
+                                session: vw.session.clone(),
+                                name: vw.name.clone(),
+                            });
+                            break;
+                        } else if vw.running {
+                            vw.note = Some(format!("{} is still running", vw.name));
+                        } else {
+                            vw.note = Some(format!("{} has no session to resume", vw.name));
                         }
                     }
                     _ => {}
@@ -457,25 +1290,25 @@ fn run_agents_panel(
                     let Some(row) = rows.get(sel) else {
                         continue;
                     };
+                    viewer = Some(Viewer::open(row));
+                }
+                KeyCode::Char('o') => {
                     if read_only {
-                        let text = spawn_text(&argv, &["view", &row.target, "--lines", "200"])
-                            .unwrap_or_else(|| "(no transcript)".into());
-                        result = Some(PanelAction::Say(text));
-                        break;
+                        status = "read-only while a turn is running".into();
+                    } else if let Some(row) = rows.get(sel) {
+                        if !row.running && row.resumable {
+                            result = Some(PanelAction::Resume {
+                                session: row.session.clone(),
+                                name: row.name.clone(),
+                            });
+                            break;
+                        }
+                        status = if row.running {
+                            format!("{} is still running", row.name)
+                        } else {
+                            format!("{} has no session to resume", row.name)
+                        };
                     }
-                    if !row.running && row.resumable {
-                        result = Some(PanelAction::Resume {
-                            session: row.session.clone(),
-                            name: row.name.clone(),
-                        });
-                        break;
-                    }
-                    // Running or session-less: the open card says what to
-                    // do next (chat/stop/view, or transcript tail).
-                    let text = spawn_text(&argv, &["open", &row.target])
-                        .unwrap_or_else(|| "open failed".into());
-                    result = Some(PanelAction::Say(text));
-                    break;
                 }
                 KeyCode::Char('v') => {
                     if let Some(row) = rows.get(sel) {
@@ -503,7 +1336,11 @@ fn run_agents_panel(
                         status = "read-only while a turn is running".into();
                     } else if let Some(row) = rows.get(sel) {
                         if row.managed {
-                            chat_buf = Some(String::new());
+                            chat_in = Some(ChatInput {
+                                target: row.target.clone(),
+                                name: row.name.clone(),
+                                buf: String::new(),
+                            });
                         } else {
                             status =
                                 format!("{} is a raw worker — nothing to chat through", row.name);
@@ -526,3 +1363,7 @@ fn run_agents_panel(
     out?;
     Ok(result)
 }
+
+#[path = "agents_panel_tests.rs"]
+#[cfg(test)]
+mod tests;
