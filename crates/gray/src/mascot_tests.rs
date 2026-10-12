@@ -184,7 +184,11 @@ fn welcome_sweep_draws_to_the_full_mark() {
     let glyphs = |reveal: f32| -> usize {
         plain(&welcome_lines_at(w, reveal, None))
             .iter()
-            .map(|l| l.chars().filter(|c| !c.is_whitespace()).count())
+            .map(|l| {
+                l.chars()
+                    .filter(|c| !c.is_whitespace() && *c != '\u{2800}')
+                    .count()
+            })
             .sum()
     };
     // The pens intro draws the mark progressively: blank at the start,

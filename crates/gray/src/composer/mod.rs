@@ -680,6 +680,7 @@ fn intro_frames() -> &'static [(Vec<String>, Vec<String>)] {
         std::sync::OnceLock::new();
     FRAMES.get_or_init(|| {
         INTRO_FRAMES_TXT
+            .replace("\r\n", "\n")
             .split("\n---\n")
             .filter_map(|block| {
                 let rows: Vec<String> = block
@@ -730,7 +731,8 @@ fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<L
         None => (progress.clamp(0.0, 1.0) * last as f32).round() as usize,
     }
     .min(last);
-    let (mark_rows, edge_rows) = &frames[frame_idx];
+    let empty = (Vec::new(), Vec::new());
+    let (mark_rows, edge_rows) = frames.get(frame_idx).unwrap_or(&empty);
     let l_rows = mark_rows.len().max(1) as f32;
     let max_logo_w = mark_rows
         .iter()
