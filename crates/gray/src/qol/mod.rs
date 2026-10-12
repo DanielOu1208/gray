@@ -1,5 +1,6 @@
 pub(crate) mod detect;
 pub(crate) mod setup;
+pub mod update;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

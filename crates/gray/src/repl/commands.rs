@@ -81,7 +81,7 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
     },
     CmdDef {
         name: "update",
-        desc: "install a new gray build",
+        desc: "install a new gray build (everything: + plugins & provider CLIs)",
         aliases: &["upgrade"],
         scope: CmdScope::Global,
         surface: CmdSurface::Text,

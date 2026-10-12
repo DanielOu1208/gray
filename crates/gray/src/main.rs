@@ -163,9 +163,12 @@ async fn run() -> anyhow::Result<()> {
             } => {
                 return run_resume_subcommand(&mut config, session_id.as_deref(), last, all).await;
             }
-            gray::Commands::Update { auto } => {
+            gray::Commands::Update { auto, everything } => {
                 if let Some(v) = auto.as_deref() {
                     return gray::auto_update::auto_cli(v);
+                }
+                if everything {
+                    return gray::qol::update::cli().await;
                 }
                 return gray::update::update_now().await;
             }
