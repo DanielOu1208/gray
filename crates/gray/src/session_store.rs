@@ -1015,7 +1015,7 @@ struct SessionSlices {
 /// Read both ends of a session file. Synchronous by design: it runs
 /// inside one blocking-pool task per file, so plain `std::fs` keeps the
 /// whole file to five cheap reads with no per-read task dispatch.
-fn read_session_ends(path: &Path) -> Option<SessionSlices> {
+fn read_session_ends(path: &Path, cwd: Option<&Path>) -> Option<SessionSlices> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut file = std::fs::File::open(path).ok().or_else(|| {
@@ -1032,6 +1032,13 @@ fn read_session_ends(path: &Path) -> Option<SessionSlices> {
     let head_len = SUMMARY_END_BYTES.min(len);
     let mut head_bytes = vec![0u8; head_len as usize];
     file.read_exact(&mut head_bytes).ok()?;
+    if let Some(cwd) = cwd
+        && let Some(end) = head_bytes.iter().position(|b| *b == b'\n')
+        && let Ok(header) = serde_json::from_slice::<Header>(&head_bytes[..end])
+        && header.cwd != cwd
+    {
+        return None;
+    }
     if head_len < len && !head_bytes.last().is_some_and(|b| *b == b'\n') {
         let mut scan = vec![0u8; BOUNDARY_SCAN_BYTES as usize];
         let mut got = 0usize;
@@ -1715,6 +1722,14 @@ impl JsonlSessionStore {
     }
 
     pub async fn list(&self) -> Vec<SessionSummary> {
+        self.list_matching(None).await
+    }
+
+    pub async fn list_in(&self, cwd: &Path) -> Vec<SessionSummary> {
+        self.list_matching(Some(cwd.to_path_buf())).await
+    }
+
+    async fn list_matching(&self, cwd: Option<PathBuf>) -> Vec<SessionSummary> {
         let mut read_dir = match tokio::fs::read_dir(&self.root_dir).await {
             Ok(rd) => rd,
             Err(e) => {
@@ -1764,10 +1779,11 @@ impl JsonlSessionStore {
         let mut reads = futures::stream::iter(paths)
             .map(|path| {
                 let path = path.clone();
+                let cwd = cwd.clone();
                 async move {
                     let read = tokio::task::spawn_blocking({
                         let path = path.clone();
-                        move || (read_session_ends(&path), path)
+                        move || (read_session_ends(&path, cwd.as_deref()), path)
                     })
                     .await;
                     read.ok()
