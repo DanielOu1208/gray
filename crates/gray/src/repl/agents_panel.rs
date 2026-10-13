@@ -2,8 +2,8 @@
 //! subagents widget. A plugin's `agent_picker` command outcome opens it;
 //! rows and every action ride that plugin's own CLI (`entries` for the
 //! list, `view`/`open`/`stop`/`chat` for the verbs), so the panel works
-//! for any plugin speaking that surface. Enter opens a floating window on
-//! the run's own session (live while it works); 'o' on a finished run hands
+//! for any plugin speaking that surface. Enter opens the run's own session
+//! in a borderless window (live while it works); 'o' on a finished run hands
 //! its child session to `/resume` — the subagent then chats as its own
 //! session, the same model opencode and Claude Code use.
 
@@ -11,7 +11,7 @@ use gray_core::message::{ContentBlock, Role};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -288,7 +288,7 @@ struct Viewer {
     max_scroll: u16,
     view_h: u16,
     last_tick: Instant,
-    /// One-shot footer note (verb receipts, read-only refusals).
+    /// One-shot note on the chat row (verb receipts, refusals).
     note: Option<String>,
 }
 
@@ -644,22 +644,19 @@ fn scroll_by(v: &mut Viewer, delta: i64) {
     v.stick = v.scroll >= v.max_scroll;
 }
 
-/// The run's own little window: dimmed backdrop, one bordered block ~80% of
-/// the screen titled with the run, the child session laid out inside.
-fn paint_viewer(
-    frame: &mut ratatui::Frame,
-    bg: &crate::setup::BackgroundSnapshot,
-    v: &mut Viewer,
-    chat: Option<&ChatInput>,
-    read_only: bool,
-) {
-    crate::setup::render_dimmed_background(frame, bg);
+/// The run's own window, borderless: a gray session iframe. The whole frame
+/// is the child session: a header line naming the run, the transcript filling
+/// the body (stuck to the tail until the user scrolls up), the chat row, and a
+/// dim key-hint footer. Chat and stop are plugin CLI calls, so the chat row is
+/// there for every run, including while the parent turn works.
+fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer, chat: Option<&ChatInput>) {
     let area = frame.area();
     let theme = crate::theme::theme();
-    let w = (area.width * 4 / 5).max(24).min(area.width);
-    let h = (area.height * 4 / 5).max(6).min(area.height);
-    let rect = Rect::new((area.width - w) / 2, (area.height - h) / 2, w, h);
-    frame.render_widget(Clear, rect);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.surface_bg)),
+        area,
+    );
 
     let state = if v.running {
         "running".to_string()
@@ -667,54 +664,40 @@ fn paint_viewer(
         v.status.clone()
     };
     let title = format!(" {} {} · {} · {} ", v.icon, v.name, state, v.stats);
-    let title: String = title.chars().take(w.saturating_sub(2) as usize).collect();
-    // A persistent chat row sits at the bottom of a mutable run — the
-    // viewer is a little "gray session iframe": transcript + input.
-    // Read-only runs get the row back as transcript space.
-    let input_rows = u16::from(!read_only);
-    let footer = if chat.is_some() {
-        " enter send · esc unfocus · ↑↓/PgUp/PgDn/Home/End scroll ".to_string()
-    } else if read_only {
-        match &v.note {
-            Some(n) => format!(" {n} "),
-            None => " ↑↓/jk scroll · PgUp/PgDn · Home/End · esc back — read-only ".to_string(),
-        }
+    let keys = if chat.is_some() {
+        " enter send · esc unfocus · ↑↓/PgUp/PgDn/Home/End scroll "
     } else {
-        " ↑↓/jk scroll · PgUp/PgDn · Home/End · c/i chat · x stop · o resume · esc ".to_string()
+        " ↑↓/jk scroll · PgUp/PgDn · Home/End · c/i chat · x stop · o resume · esc "
     };
-    let footer: String = footer.chars().take(w.saturating_sub(2) as usize).collect();
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.text_dim).bg(theme.surface_bg))
-        .style(Style::default().bg(theme.surface_bg))
-        .title(Line::from(Span::styled(
+    // Top to bottom: header, body, chat row, key hints. The body takes what
+    // the three fixed rows leave, so the transcript keeps the full height.
+    let body_h = area.height.saturating_sub(3);
+    let header = Rect::new(area.x, area.y, area.width, 1);
+    let body = Rect::new(area.x, area.y + 1, area.width, body_h);
+    let input = Rect::new(area.x, area.y + 1 + body_h, area.width, 1);
+    let hints = Rect::new(area.x, area.y + 2 + body_h, area.width, 1);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
             title,
             Style::default()
                 .fg(theme.text_bright)
                 .add_modifier(Modifier::BOLD)
                 .bg(theme.surface_bg),
-        )))
-        .title_bottom(Line::from(Span::styled(
-            footer,
+        ))),
+        header,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            keys,
             Style::default().fg(theme.text_dim).bg(theme.surface_bg),
-        )));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-
-    let body_h = inner.height.saturating_sub(input_rows);
-    let body = Rect {
-        height: body_h,
-        ..inner
-    };
-    let input = Rect {
-        y: inner.y + body_h,
-        height: input_rows,
-        ..inner
-    };
+        ))),
+        hints,
+    );
 
     v.view_h = body_h;
-    v.layout(inner.width as usize);
+    v.layout(body.width as usize);
     let max = v.lines.len().saturating_sub(body_h as usize);
     let max16 = u16::try_from(max).unwrap_or(u16::MAX);
     if v.stick {
@@ -745,41 +728,39 @@ fn paint_viewer(
         frame.render_widget(Paragraph::new(rows), body);
     }
 
-    if input_rows > 0 {
-        let spans = if let Some(c) = chat {
-            let mut spans = vec![
-                Span::styled(
-                    " chat ▸ ",
-                    Style::default().fg(theme.accent).bg(theme.surface_bg),
-                ),
-                Span::styled(
-                    c.buf.clone(),
-                    Style::default().fg(theme.text_body).bg(theme.surface_bg),
-                ),
-                Span::styled("_", Style::default().fg(theme.accent).bg(theme.surface_bg)),
-            ];
-            if let Some(n) = &v.note {
-                spans.push(Span::styled(
-                    format!("  {n}"),
-                    Style::default().fg(theme.text_dim).bg(theme.surface_bg),
-                ));
-            }
-            spans
-        } else {
-            let mut spans = vec![Span::styled(
+    let spans = if let Some(c) = chat {
+        let mut spans = vec![
+            Span::styled(
                 " chat ▸ ",
+                Style::default().fg(theme.accent).bg(theme.surface_bg),
+            ),
+            Span::styled(
+                c.buf.clone(),
+                Style::default().fg(theme.text_body).bg(theme.surface_bg),
+            ),
+            Span::styled("_", Style::default().fg(theme.accent).bg(theme.surface_bg)),
+        ];
+        if let Some(n) = &v.note {
+            spans.push(Span::styled(
+                format!("  {n}"),
                 Style::default().fg(theme.text_dim).bg(theme.surface_bg),
-            )];
-            if let Some(n) = &v.note {
-                spans.push(Span::styled(
-                    n.clone(),
-                    Style::default().fg(theme.text_dim).bg(theme.surface_bg),
-                ));
-            }
-            spans
-        };
-        frame.render_widget(Paragraph::new(Line::from(spans)), input);
-    }
+            ));
+        }
+        spans
+    } else {
+        let mut spans = vec![Span::styled(
+            " chat ▸ ",
+            Style::default().fg(theme.text_dim).bg(theme.surface_bg),
+        )];
+        if let Some(n) = &v.note {
+            spans.push(Span::styled(
+                n.clone(),
+                Style::default().fg(theme.text_dim).bg(theme.surface_bg),
+            ));
+        }
+        spans
+    };
+    frame.render_widget(Paragraph::new(Line::from(spans)), input);
 }
 
 /// Modal width: the terminal less a cell of margin each side, so rows get
@@ -881,9 +862,9 @@ fn picker_row_text(row: &Row, selected: bool, width: usize) -> String {
     format!("{line}{}", " ".repeat(pad))
 }
 
-/// The keyboard-navigable overlay: ↑↓/j/k move, Enter opens the floating
-/// run viewer (a small gray window on the child session, live while the
-/// run works), o resumes a finished run's session, c chats into the run,
+/// The keyboard-navigable overlay: ↑↓/j/k move, Enter opens the run viewer
+/// (the child session in a borderless window, live while the run works),
+/// o resumes a finished run's session, c chats into the run,
 /// x stops, v prints the transcript tail, a widens to every session, r
 /// refreshes. Synchronous like the other pickers — plugin calls are local
 /// CLI spawns, fast enough to run between key events.
@@ -894,8 +875,10 @@ pub(crate) fn run_agents_picker(
     run_agents_panel(plugin, bg, false)
 }
 
-/// The same picker as a turn-safe viewer: it can browse and print transcript
-/// tails, but every verb that mutates or steals the session is disabled.
+/// The same panel, opened while a parent turn is running. Browsing, chat,
+/// steer and stop all work: they are plugin CLI calls that never touch the
+/// parent session. Only `o` waits, because resuming a child switches the
+/// parent session, so it is refused until the turn finishes.
 pub(crate) fn run_agents_viewer(
     plugin: &str,
     bg: Option<&crate::setup::BackgroundSnapshot>,
@@ -906,7 +889,7 @@ pub(crate) fn run_agents_viewer(
 fn run_agents_panel(
     plugin: &str,
     bg: Option<&crate::setup::BackgroundSnapshot>,
-    read_only: bool,
+    in_turn: bool,
 ) -> anyhow::Result<Option<PanelAction>> {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, poll, read};
     use ratatui::layout::Rect;
@@ -914,6 +897,9 @@ fn run_agents_panel(
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Clear, Paragraph};
     use std::time::Duration;
+
+    /// `o` mid-turn: the parent session is busy, so resume waits.
+    const RESUME_AFTER_TURN: &str = "resume after the current turn";
 
     let Some(argv) = plugin_argv(plugin) else {
         return Ok(Some(PanelAction::Say(format!(
@@ -964,7 +950,7 @@ fn run_agents_panel(
                     return;
                 }
                 if let Some(vw) = viewer.as_mut() {
-                    paint_viewer(frame, &bg_snapshot, vw, chat_in.as_ref(), read_only);
+                    paint_viewer(frame, vw, chat_in.as_ref());
                     return;
                 }
                 crate::setup::render_dimmed_background(frame, &bg_snapshot);
@@ -1010,17 +996,7 @@ fn run_agents_panel(
                     .map(|label| format!("  {label}"))
                     .unwrap_or_default();
 
-                let title = if read_only {
-                    if all {
-                        "Agents — all sessions · read-only"
-                    } else {
-                        "Agents — read-only"
-                    }
-                } else if all {
-                    "Agents — all sessions"
-                } else {
-                    "Agents"
-                };
+                let title = if all { "Agents — all sessions" } else { "Agents" };
                 let esc_str = "esc";
                 let pad_len = (inner.width as usize).saturating_sub(
                     title.chars().count() + range.chars().count() + esc_str.chars().count() + 8,
@@ -1100,10 +1076,10 @@ fn run_agents_panel(
                     // Idle: the band spells out what the selected row can
                     // do — the affordance, not just the key names.
                     let hint = rows.get(sel).map_or("", |r| {
-                        if read_only {
-                            " read-only while a turn is running · ⏎ watch · v tail"
-                        } else if r.running {
+                        if r.running {
                             " ⏎ watch live · c follow-up · x stop · v tail"
+                        } else if r.resumable && in_turn {
+                            " ⏎ view · o resumes after this turn · c continues · v tail"
                         } else if r.resumable {
                             " ⏎ view · o steps into its session · c continues · v tail"
                         } else if r.managed {
@@ -1131,11 +1107,7 @@ fn run_agents_panel(
                 put(
                     inner.height.saturating_sub(1),
                     Line::from(Span::styled(
-                        if read_only {
-                            " ↑↓ move · ⏎ view · v tail · a all · r refresh · esc close"
-                        } else {
-                            " ↑↓ move · ⏎ view · o resume · c chat · x stop · v tail · a all · r refresh"
-                        },
+                        " ↑↓ move · ⏎ view · o resume · c chat · x stop · v tail · a all · r refresh",
                         Style::default().fg(text_dim).bg(box_bg),
                     )),
                 );
@@ -1239,9 +1211,7 @@ fn run_agents_panel(
                     KeyCode::Home => scroll_by(vw, -i64::from(vw.scroll)),
                     KeyCode::End => scroll_by(vw, i64::from(vw.max_scroll)),
                     KeyCode::Char('c') | KeyCode::Char('i') => {
-                        if read_only {
-                            vw.note = Some("read-only while a turn is running".into());
-                        } else if !vw.managed {
+                        if !vw.managed {
                             vw.note = Some(format!(
                                 "{} is a raw worker — nothing to chat through",
                                 vw.name
@@ -1255,9 +1225,7 @@ fn run_agents_panel(
                         }
                     }
                     KeyCode::Char('x') => {
-                        if read_only {
-                            vw.note = Some("read-only while a turn is running".into());
-                        } else if vw.running {
+                        if vw.running {
                             let receipt = spawn_text(&argv, &["stop", &vw.target])
                                 .unwrap_or_else(|| "stop failed".into());
                             rows = fetch_rows(&argv, all);
@@ -1269,8 +1237,8 @@ fn run_agents_panel(
                         }
                     }
                     KeyCode::Char('o') => {
-                        if read_only {
-                            vw.note = Some("read-only while a turn is running".into());
+                        if in_turn {
+                            vw.note = Some(RESUME_AFTER_TURN.into());
                         } else if !vw.running && vw.resumable {
                             result = Some(PanelAction::Resume {
                                 session: vw.session.clone(),
@@ -1305,21 +1273,22 @@ fn run_agents_panel(
                     viewer = Some(Viewer::open(row));
                 }
                 KeyCode::Char('o') => {
-                    if read_only {
-                        status = "read-only while a turn is running".into();
-                    } else if let Some(row) = rows.get(sel) {
-                        if !row.running && row.resumable {
+                    if let Some(row) = rows.get(sel) {
+                        if in_turn {
+                            status = RESUME_AFTER_TURN.into();
+                        } else if !row.running && row.resumable {
                             result = Some(PanelAction::Resume {
                                 session: row.session.clone(),
                                 name: row.name.clone(),
                             });
                             break;
-                        }
-                        status = if row.running {
-                            format!("{} is still running", row.name)
                         } else {
-                            format!("{} has no session to resume", row.name)
-                        };
+                            status = if row.running {
+                                format!("{} is still running", row.name)
+                            } else {
+                                format!("{} has no session to resume", row.name)
+                            };
+                        }
                     }
                 }
                 KeyCode::Char('v') => {
@@ -1331,9 +1300,7 @@ fn run_agents_panel(
                     }
                 }
                 KeyCode::Char('x') => {
-                    if read_only {
-                        status = "read-only while a turn is running".into();
-                    } else if let Some(row) = rows.get(sel).cloned() {
+                    if let Some(row) = rows.get(sel).cloned() {
                         if row.running {
                             status = spawn_text(&argv, &["stop", &row.target])
                                 .unwrap_or_else(|| "stop failed".into());
@@ -1344,9 +1311,7 @@ fn run_agents_panel(
                     }
                 }
                 KeyCode::Char('c') => {
-                    if read_only {
-                        status = "read-only while a turn is running".into();
-                    } else if let Some(row) = rows.get(sel) {
+                    if let Some(row) = rows.get(sel) {
                         if row.managed {
                             chat_in = Some(ChatInput {
                                 target: row.target.clone(),
