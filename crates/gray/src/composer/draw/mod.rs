@@ -96,10 +96,7 @@ pub(crate) fn attachment_cells(attachments: &[std::path::PathBuf], text: &str) -
             },
         )
         .map(|path| {
-            let kind = match crate::repl::attachments::attachment_kind(path) {
-                crate::repl::attachments::AttachmentKind::Image => "Image",
-                _ => "File",
-            };
+            let kind = crate::repl::attachments::attachment_kind(path).label();
             (kind, crate::repl::attachments::attachment_label(path))
         })
         .collect();

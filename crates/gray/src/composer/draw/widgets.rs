@@ -93,11 +93,7 @@ type WrapResult = (Vec<(usize, usize)>, Option<(usize, usize)>);
 /// `(row, col)` of `cursor` (a char index) when one is given. A cursor on a
 /// wrap point stays at the end of the row before it. An empty line is one
 /// empty row, so there is always a row to draw. Pure.
-pub(crate) fn wrap_line(
-    chars: &[char],
-    content_w: usize,
-    cursor: Option<usize>,
-) -> WrapResult {
+pub(crate) fn wrap_line(chars: &[char], content_w: usize, cursor: Option<usize>) -> WrapResult {
     let mut rows: Vec<(usize, usize)> = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {

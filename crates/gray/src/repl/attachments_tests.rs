@@ -119,3 +119,18 @@ fn a_typed_video_path_is_media_too() {
     let got = extract_inline_image_paths(&format!("look at {}", clip.display()), dir.path());
     assert_eq!(got, vec![clip], "a typed video path must be carried");
 }
+
+#[test]
+fn label_names_every_kind_and_markers_round_trip() {
+    assert_eq!(AttachmentKind::Video.label(), "Video");
+    assert_eq!(AttachmentKind::Pdf.label(), "PDF");
+    assert_eq!(AttachmentKind::Unsupported.label(), "File");
+    // A video marker must parse back to its name, or the chip is stripped
+    // from the draft and the attachment is orphaned.
+    let clip = Path::new("/tmp/clip.mp4");
+    let marker = attachment_marker(clip);
+    assert_eq!(marker, "[video: clip.mp4]");
+    let found = attachment_markers(&format!("look {marker} now"));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].1, "clip.mp4");
+}

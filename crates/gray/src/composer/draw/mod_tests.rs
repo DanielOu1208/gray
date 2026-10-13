@@ -338,3 +338,10 @@ fn widget_band_takes_two_fifths_of_the_screen() {
     assert_eq!(widget_row_cap(10), 4);
     assert_eq!(widget_row_cap(0), 4);
 }
+
+#[test]
+fn a_video_chip_says_video_not_file() {
+    let cells = attachment_cells(&[std::path::PathBuf::from("/tmp/clip.mp4")], "");
+    let text: String = cells.iter().map(|(c, _)| *c).collect();
+    assert!(text.starts_with(" Video "), "got {text:?}");
+}

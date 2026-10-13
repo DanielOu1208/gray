@@ -19,6 +19,19 @@ pub enum AttachmentKind {
     Unsupported,
 }
 
+impl AttachmentKind {
+    /// Human name for chips and markers.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Image => "Image",
+            Self::Pdf => "PDF",
+            Self::Video => "Video",
+            Self::Audio => "Audio",
+            Self::Unsupported => "File",
+        }
+    }
+}
+
 pub fn attachment_kind(path: &Path) -> AttachmentKind {
     match path
         .extension()
@@ -125,11 +138,11 @@ pub fn attachment_label(path: &Path) -> String {
         .collect()
 }
 
+/// Lowercased `label()` of every kind; `attachment_marker` writes one of these.
+const MARKER_PREFIXES: [&str; 5] = ["image: ", "video: ", "audio: ", "pdf: ", "file: "];
+
 pub fn attachment_marker(path: &Path) -> String {
-    let kind = match attachment_kind(path) {
-        AttachmentKind::Image => "image",
-        _ => "file",
-    };
+    let kind = attachment_kind(path).label().to_ascii_lowercase();
     format!("[{kind}: {}]", attachment_label(path))
 }
 
@@ -138,7 +151,7 @@ pub fn attachment_markers(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
     let mut search = 0usize;
     while let Some(rel) = text[search..].find('[') {
         let start = search + rel;
-        let name_start = ["image: ", "file: "].iter().find_map(|p| {
+        let name_start = MARKER_PREFIXES.iter().find_map(|p| {
             text[start + 1..]
                 .starts_with(p)
                 .then_some(start + 1 + p.len())
