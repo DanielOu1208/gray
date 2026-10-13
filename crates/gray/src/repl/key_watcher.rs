@@ -286,8 +286,14 @@ pub(crate) fn spawn_key_watcher_with_typing(
         // Shift+Enter typed *during* a turn arrives as a bare Enter and
         // submits instead of breaking the line. Popped with the task.
         let _keyboard_enhancement = crate::term_keys::KeyboardEnhancementGuard::push();
+        crate::composer::input::watch_dead_stdin();
         loop {
             if watcher_stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            // Dead tty: crossterm's poll would spin on EIO inside
+            // try_read and never return.
+            if crate::composer::input::stdin_gone() {
                 return;
             }
             match poll(std::time::Duration::from_millis(50)) {

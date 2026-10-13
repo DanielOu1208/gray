@@ -1134,6 +1134,10 @@ fn run_agents_panel(
                 );
             })?;
 
+            // Dead tty spins crossterm's poll on EIO (see stdin_gone).
+            if crate::composer::input::stdin_gone() {
+                return Ok(());
+            }
             if !poll(Duration::from_millis(250))? {
                 continue;
             }

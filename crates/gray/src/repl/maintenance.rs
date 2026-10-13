@@ -403,6 +403,10 @@ fn strip_resume_args(args: &[String]) -> Vec<String> {
 /// input events, so nobody else is reading stdin at this moment.
 async fn confirm_yn() -> bool {
     use crossterm::event::{self, Event, KeyCode, KeyEvent};
+    // A dead tty spins crossterm's read on EIO inside block_in_place.
+    if crate::composer::input::stdin_gone() {
+        return false;
+    }
     // Callers run under the multi-thread runtime `main` installs, which
     // `block_in_place` requires.
     let got = tokio::task::block_in_place(event::read);

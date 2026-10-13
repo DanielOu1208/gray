@@ -3,6 +3,7 @@
 //! This module owns attachment helpers and key-dispatch with popup short-circuit.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::Tui;
@@ -15,6 +16,52 @@ use keys::KeyOutcome;
 
 pub(crate) use attach::{try_attach_clipboard_image, try_attach_image_paste};
 pub(crate) use clipboard::paste_from_system_clipboard;
+
+/// True when the terminal behind stdin is gone — a pty whose master
+/// closed (a killed tmux pane) keeps a live fd but answers every poll
+/// with POLLERR|POLLHUP and every read with EIO, which crossterm's mio
+/// source retries forever inside `try_read` (its Err arm only breaks on
+/// WouldBlock). Checked before each crossterm wait; `is_terminal` can't
+/// see it — the fd still is one.
+#[cfg(unix)]
+pub(crate) fn stdin_gone() -> bool {
+    let mut pfd = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `pfd` is a valid stack pollfd for one fd; timeout 0 never blocks.
+    let r = unsafe { libc::poll(&mut pfd, 1, 0) };
+    r > 0 && pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
+}
+
+#[cfg(not(unix))]
+pub(crate) fn stdin_gone() -> bool {
+    false
+}
+
+/// Spawned once per interactive session. When the tty dies while a
+/// crossterm poll/read is in flight the caller is stuck inside `try_read`
+/// forever, so the watchdog raises SIGHUP on itself — the hangup policy
+/// (turn cancel + drain + exit 129) then runs; a hard exit covers the
+/// case where that never gets scheduled.
+pub(crate) fn watch_dead_stdin() {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::Relaxed)
+        || !std::io::IsTerminal::is_terminal(&std::io::stdin())
+    {
+        return;
+    }
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_millis(500));
+        if stdin_gone() {
+            // SAFETY: plain self-signal.
+            unsafe { libc::raise(libc::SIGHUP) };
+            std::thread::sleep(Duration::from_secs(2));
+            std::process::exit(129);
+        }
+    });
+}
 
 pub(crate) fn handle_paste(tui: &mut Tui, pasted: String) -> bool {
     let pasted = strip_escape_sequences(&clipboard::normalize_paste(&pasted));
@@ -157,8 +204,14 @@ pub(crate) fn read_line(
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(std::io::stdout(), crossterm::cursor::Show)?;
 
+    watch_dead_stdin();
     let mut needs_draw = true;
     loop {
+        // A dead tty spins crossterm's poll forever on EIO — exit like
+        // an empty-prompt Ctrl-C instead.
+        if stdin_gone() {
+            return Ok(None);
+        }
         // Phase 1 (locked): resize deadlines, completion recompute, draw.
         // The guard drops at the end of this block, freeing the lock while
         // we wait for input below so background painters can draw.
@@ -212,14 +265,16 @@ pub(crate) fn read_line(
         // Phase 2 (unlocked): wait — skipped when the intro's skip already
         // consumed a key for us. Keystrokes queue in the pty and nothing
         // else reads stdin, so no event is lost before the locked read.
-        if pending_ev.is_none() && !poll(timeout)? {
-            // Idle wake (cron delivery, finished background job, say line):
-            // hand the empty prompt back so the REPL can act. Never while the
-            // user has a draft — their typing wins, the wake waits.
-            if empty_draft && crate::host::wake_requested() {
-                return Ok(Some((String::new(), Vec::new())));
+        if pending_ev.is_none() {
+            if !poll(timeout)? {
+                // Idle wake (cron delivery, finished background job, say line):
+                // hand the empty prompt back so the REPL can act. Never while the
+                // user has a draft — their typing wins, the wake waits.
+                if empty_draft && crate::host::wake_requested() {
+                    return Ok(Some((String::new(), Vec::new())));
+                }
+                continue;
             }
-            continue;
         }
         needs_draw = true;
         // Phase 3 (locked): consume + handle exactly one event.

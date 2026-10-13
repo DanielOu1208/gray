@@ -677,6 +677,9 @@ pub async fn run_repl_mode(
     // to plain cooked reads (scripts, tests).
     use std::io::IsTerminal;
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    // A dead pty (a tmux pane killed under us) leaves crossterm's event
+    // reads spinning on EIO forever — the watchdog exits on the hangup.
+    crate::composer::input::watch_dead_stdin();
 
     // context window: user override > provider live > disk > litellm/models.dev > guess fallback
     crate::setup::set_user_context_window(config.context_window);
