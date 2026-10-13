@@ -398,7 +398,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                             // kind of submit: run turn-local ones now instead
                             // of queueing them behind the turn.
                             if t.attachments.is_empty()
-                                && turn_locals.is_some()
+                                && let Some(locals) = turn_locals.as_ref()
                                 && is_turn_local_command(&cmd)
                             {
                                 t.flush_markdown();
@@ -410,10 +410,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                                 t.sel = 0;
                                 let _ = t.draw();
                                 drop(t);
-                                run_turn_local_command(
-                                    turn_locals.as_ref().expect("checked above"),
-                                    &cmd,
-                                );
+                                run_turn_local_command(locals, &cmd);
                                 continue;
                             }
                             t.queued_inputs.push_back((cmd, Vec::new()));
