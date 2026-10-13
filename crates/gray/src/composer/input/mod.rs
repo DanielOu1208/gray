@@ -266,16 +266,14 @@ pub(crate) fn read_line(
         // Phase 2 (unlocked): wait — skipped when the intro's skip already
         // consumed a key for us. Keystrokes queue in the pty and nothing
         // else reads stdin, so no event is lost before the locked read.
-        if pending_ev.is_none() {
-            if !poll(timeout)? {
-                // Idle wake (cron delivery, finished background job, say line):
-                // hand the empty prompt back so the REPL can act. Never while the
-                // user has a draft — their typing wins, the wake waits.
-                if empty_draft && crate::host::wake_requested() {
-                    return Ok(Some((String::new(), Vec::new())));
-                }
-                continue;
+        if pending_ev.is_none() && !poll(timeout)? {
+            // Idle wake (cron delivery, finished background job, say line):
+            // hand the empty prompt back so the REPL can act. Never while the
+            // user has a draft — their typing wins, the wake waits.
+            if empty_draft && crate::host::wake_requested() {
+                return Ok(Some((String::new(), Vec::new())));
             }
+            continue;
         }
         needs_draw = true;
         // Phase 3 (locked): consume + handle exactly one event.

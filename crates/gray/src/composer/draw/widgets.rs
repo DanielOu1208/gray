@@ -163,13 +163,15 @@ fn restyle_attachment_markers(cells: &mut [InputCell]) {
             i += 1;
             continue;
         }
-        let name_start = ["image: ", "file: "].iter().find_map(|p| {
-            let fits = p
-                .chars()
-                .enumerate()
-                .all(|(k, c)| cells.get(i + 1 + k).is_some_and(|cell| cell.0 == c));
-            fits.then_some(i + 1 + p.len())
-        });
+        let name_start = crate::repl::attachments::MARKER_PREFIXES
+            .iter()
+            .find_map(|p| {
+                let fits = p
+                    .chars()
+                    .enumerate()
+                    .all(|(k, c)| cells.get(i + 1 + k).is_some_and(|cell| cell.0 == c));
+                fits.then_some(i + 1 + p.len())
+            });
         let Some(name_start) = name_start else {
             i += 1;
             continue;

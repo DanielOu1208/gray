@@ -139,7 +139,7 @@ pub fn attachment_label(path: &Path) -> String {
 }
 
 /// Lowercased `label()` of every kind; `attachment_marker` writes one of these.
-const MARKER_PREFIXES: [&str; 5] = ["image: ", "video: ", "audio: ", "pdf: ", "file: "];
+pub(crate) const MARKER_PREFIXES: [&str; 5] = ["image: ", "video: ", "audio: ", "pdf: ", "file: "];
 
 pub fn attachment_marker(path: &Path) -> String {
     let kind = attachment_kind(path).label().to_ascii_lowercase();

@@ -44,9 +44,10 @@ pub use query::{GrepMode, Query};
 #[cfg(unix)]
 mod diag {
     use std::sync::{Arc, RwLock};
-    static SINK: RwLock<Option<Arc<dyn Fn(&str) + Send + Sync>>> = RwLock::new(None);
+    type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
+    static SINK: RwLock<Option<LogSink>> = RwLock::new(None);
     /// Route every diagnostic line through `sink` (`None` restores stderr).
-    pub fn set_log_sink(sink: Option<Arc<dyn Fn(&str) + Send + Sync>>) {
+    pub fn set_log_sink(sink: Option<LogSink>) {
         *SINK.write().unwrap_or_else(|e| e.into_inner()) = sink;
     }
     /// One timestamped diagnostic line.

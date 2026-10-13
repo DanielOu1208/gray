@@ -6,10 +6,11 @@ use super::*;
 // Attachment helpers — verbatim from mod.rs 759-885
 // ---------------------------------------------------------------------------
 
+/// Attaches a file: the chip at the draft's start is the only marker, so
+/// the draft text stays exactly what was typed. Backspace at cursor 0
+/// removes the last chip (keys.rs).
 pub(crate) fn attach_image(tui: &mut Tui, path: PathBuf) {
-    let marker = crate::repl::attachments::attachment_marker(&path);
     tui.attachments.push(path);
-    tui.textarea.insert_element(&marker);
     let _ = tui.draw();
 }
 
