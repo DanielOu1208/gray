@@ -474,7 +474,7 @@ pub fn drain_outbox(home: &std::path::Path) -> Vec<String> {
 
 /// `<home>/cron/inbox/<session>`, or `None` when the id could escape the
 /// directory (it comes from an env var and a hand-editable jobs file).
-fn session_inbox(home: &std::path::Path, session: &str) -> Option<PathBuf> {
+pub(crate) fn session_inbox(home: &std::path::Path, session: &str) -> Option<PathBuf> {
     let safe = !session.is_empty()
         && session
             .chars()
@@ -512,7 +512,7 @@ fn post_to_session_inbox(
 }
 
 /// Atomic 0600 drop of one JSON entry into a spool dir (inbox or outbox).
-fn write_entry(dir: &std::path::Path, body: &str) -> anyhow::Result<()> {
+pub(crate) fn write_entry(dir: &std::path::Path, body: &str) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     // Name sorts by delivery time; the uuid keeps two fires in one ms apart.
     let stamp = std::time::SystemTime::now()
@@ -536,7 +536,15 @@ pub fn session_inbox_pending(home: &std::path::Path, session: &str) -> bool {
     session_inbox(home, session)
         .and_then(|d| std::fs::read_dir(d).ok())
         .is_some_and(|mut it| {
-            it.any(|e| e.is_ok_and(|e| !e.file_name().to_string_lossy().starts_with('.')))
+            it.any(|e| {
+                let Ok(e) = e else { return false };
+                if e.file_name().to_string_lossy().starts_with('.') {
+                    return false;
+                }
+                // A send put back after a turn could not run is not a wake-up
+                // until its retry time.
+                !std::fs::read_to_string(e.path()).is_ok_and(|t| crate::session_send::is_held(&t))
+            })
         })
 }
 
@@ -580,6 +588,13 @@ pub fn drain_session_inbox(home: &std::path::Path, session: &str) -> Vec<Session
     let mut out = Vec::new();
     for path in paths {
         let text = std::fs::read_to_string(&path);
+        // Direct `gray send` entries are claimed by `session_send` instead.
+        if text
+            .as_deref()
+            .is_ok_and(crate::session_send::is_send_entry)
+        {
+            continue;
+        }
         if let Err(e) = std::fs::remove_file(&path) {
             log::warn!("cron inbox: cannot remove {}: {e}", path.display());
             continue;

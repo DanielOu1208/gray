@@ -371,14 +371,17 @@ pub(super) fn cron_card_lines(
 /// waiting in this session's inbox, then background-job notices nobody has
 /// drained since the last turn. The cards paint first; the prompt (user-role,
 /// persisted like a typed one) starts a turn so the model reacts in chat.
+/// Claimed `gray send` messages come back whole, so the caller can show them
+/// and hold them again if no turn runs.
 pub(super) fn idle_wake(
     agent: Option<&gray_core::agent::Agent>,
     sid: Option<&str>,
     cwd: &Path,
-) -> Option<(Vec<WakeCard>, String)> {
+) -> Option<(Vec<WakeCard>, String, Vec<crate::session_send::SendMsg>)> {
     let sid = sid?;
     let mut cards = Vec::new();
     let mut prompts = Vec::new();
+    let mut sends = Vec::new();
     if let Ok(home) = crate::setup::gray_home() {
         for d in crate::cron_serve::drain_session_inbox(&home, sid) {
             cards.push(match d.cron {
@@ -386,6 +389,12 @@ pub(super) fn idle_wake(
                 None => WakeCard::Text(d.card),
             });
             prompts.push(d.prompt);
+        }
+        // `gray send` messages: the origin line leads the prompt, so the
+        // transcript shows who sent it.
+        for m in crate::session_send::claim_all(&home, sid) {
+            prompts.push(crate::session_send::prompt_for(&m.from, &m.text));
+            sends.push(m);
         }
     }
     if let Some(agent) = agent {
@@ -398,7 +407,7 @@ pub(super) fn idle_wake(
             prompts.push(format!("[Background task notification]\n{notice}"));
         }
     }
-    (!prompts.is_empty()).then(|| (cards, prompts.join("\n\n")))
+    (!prompts.is_empty()).then(|| (cards, prompts.join("\n\n"), sends))
 }
 
 /// Arms the idle wake for background jobs: while the session has unfinished

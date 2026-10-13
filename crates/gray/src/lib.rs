@@ -36,6 +36,7 @@ pub mod repl;
 pub mod resume;
 mod rotation;
 pub mod search;
+pub mod session_send;
 pub mod session_store;
 pub mod setup;
 pub mod shell_drain;
@@ -657,6 +658,24 @@ pub enum Commands {
         /// Show all sessions (disables cwd filtering)
         #[arg(long)]
         all: bool,
+    },
+    /// Message a running gray session (queued until it is live, if it is not)
+    Send {
+        /// Target session id (as shown on exit or by `gray sessions`)
+        #[arg(value_name = "SESSION_ID")]
+        session: String,
+        /// Message text
+        #[arg(value_name = "TEXT", default_value = "")]
+        text: String,
+        /// Attach a file (repeatable)
+        #[arg(long = "attach", value_name = "PATH")]
+        attach: Vec<std::path::PathBuf>,
+        /// Origin label shown in the transcript (default: $GRAY_SESSION_ID, else cli)
+        #[arg(long, value_name = "LABEL")]
+        from: Option<String>,
+        /// Block up to SECS until the session consumes the message
+        #[arg(long, value_name = "SECS")]
+        wait: Option<u64>,
     },
     /// Plugin tools (conformance check)
     #[command(visible_alias = "plugins")]

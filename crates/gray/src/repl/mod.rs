@@ -1217,7 +1217,9 @@ pub async fn run_repl_mode(
             }
             // Armed before draining: a job settling in between still wakes.
             bg_wake = cron::arm_background_wake(agent.as_ref(), sid.as_deref(), &cwd);
-            if let Some((cards, prompt)) = cron::idle_wake(agent.as_ref(), sid.as_deref(), &cwd) {
+            if let Some((cards, prompt, sends)) =
+                cron::idle_wake(agent.as_ref(), sid.as_deref(), &cwd)
+            {
                 for card in &cards {
                     match (card, tui.as_ref()) {
                         (cron::WakeCard::Cron(c), Some((shared, _))) => {
@@ -1244,14 +1246,33 @@ pub async fn run_repl_mode(
                         }
                     }
                 }
+                // A claimed send the turn cannot run for goes back to the inbox
+                // as queued, never dropped (`session_send::hold_back`).
                 if let Some(msg) =
                     crate::turn_caps::check_caps(config, session_totals.turns, session_totals.cost)
                 {
                     say(tui.as_ref().map(|(s, _)| s), &msg);
+                    crate::session_send::hold_back(&sends);
                 } else {
-                    prompt_turn::run_prompt_turn(
+                    // Each `gray send` shows as the user's line, origin first,
+                    // with chips for its attachments (as `steer_direct_send` does).
+                    let mut images = Vec::new();
+                    for m in &sends {
+                        let line = crate::session_send::prompt_for(&m.from, &m.text);
+                        match tui.as_ref() {
+                            Some((shared, _)) => {
+                                let mut t = shared.lock().expect("tui lock");
+                                t.push_user_prompt(&line, &m.attachments, true);
+                                let _ = t.draw();
+                            }
+                            None => println!("{line}"),
+                        }
+                        images.extend(m.attachments.iter().cloned());
+                    }
+                    crate::session_send::mark_delivered(&sends);
+                    let turn = prompt_turn::run_prompt_turn(
                         prompt,
-                        &mut Vec::new(),
+                        &mut images,
                         &mut agent,
                         config,
                         &cwd,
@@ -1264,7 +1285,14 @@ pub async fn run_repl_mode(
                         &mut unconfigured,
                         &mut last_turn_resumable,
                     )
-                    .await?;
+                    .await;
+                    // No agent afterwards means no turn ran (the connect picker
+                    // was dismissed). An error may come after the model call
+                    // too, so a retry can repeat a message in that case.
+                    if turn.is_err() || agent.is_none() {
+                        crate::session_send::hold_back(&sends);
+                    }
+                    turn?;
                 }
                 continue;
             }

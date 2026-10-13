@@ -111,6 +111,18 @@ async fn run() -> anyhow::Result<()> {
             }
         }
     }
+    // `gray send` touches only the session store and the inbox, so it runs
+    // before provider configuration: a broken config must not block it.
+    if let Some(gray::Commands::Send {
+        session,
+        text,
+        attach,
+        from,
+        wait,
+    }) = &cli.command
+    {
+        return gray::session_send::run_cli(session, text, attach, from.as_deref(), *wait).await;
+    }
     // Plugin terminal commands do not depend on provider configuration.
     if let Some(gray::Commands::External(args)) = &cli.command {
         let (name, rest) = args
@@ -177,6 +189,9 @@ async fn run() -> anyhow::Result<()> {
             }
             gray::Commands::Cron { cmd } => {
                 return run_cron(cmd, &config).await;
+            }
+            gray::Commands::Send { .. } => {
+                unreachable!("send dispatch happens before configuration")
             }
             gray::Commands::Gateway { cmd } => {
                 return gray::gateway::run_cli(cmd, &config).await;

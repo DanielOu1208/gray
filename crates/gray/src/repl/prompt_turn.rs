@@ -183,8 +183,12 @@ pub(crate) async fn run_prompt_turn(
     // this turn's Tui handle.
     if let Some(ag) = agent.as_mut() {
         let steer_tui = tui_stream.clone();
+        let steer_sid = session_state
+            .as_ref()
+            .map(|s| s.session_id.as_str().to_string());
         ag.set_steer(std::sync::Arc::new(move || {
             steer_queued_input(steer_tui.as_ref())
+                .or_else(|| steer_direct_send(steer_tui.as_ref(), steer_sid.as_deref()))
         }));
         let out_tui = tui_stream.clone();
         ag.set_tool_output_hook(Some(std::sync::Arc::new(move |id: &str, chunk: &[u8]| {
@@ -630,6 +634,23 @@ fn take_steerable(
 ) -> Option<String> {
     let position = queued.iter().position(|(_, images)| images.is_empty())?;
     queued.remove(position).map(|(text, _)| text)
+}
+
+/// A `gray send` waiting in this session's inbox, taken at a tool boundary.
+/// Text-only (attachments wait for the idle turn), shown with its origin line.
+fn steer_direct_send(
+    tui: Option<&crate::composer::SharedTui>,
+    sid: Option<&str>,
+) -> Option<String> {
+    let home = crate::setup::gray_home().ok()?;
+    let msg = crate::session_send::claim_steerable(&home, sid?)?;
+    let text = crate::session_send::prompt_for(&msg.from, &msg.text);
+    if let Some(shared) = tui {
+        let mut t = shared.lock().expect("tui lock");
+        t.push_user_prompt(&text, &[], true);
+        let _ = t.draw();
+    }
+    Some(text)
 }
 
 /// [`take_steerable`] against the live composer.
