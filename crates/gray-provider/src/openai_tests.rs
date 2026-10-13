@@ -2820,6 +2820,40 @@ async fn plan_usage_limit_mid_stream_is_single_attempt() {
 }
 
 #[tokio::test]
+async fn relay_quota_429_in_server_error_code_is_terminal() {
+    // claude-sub's relay reports every turn failure as
+    // `response.failed` with code `server_error` — the quota verdict
+    // lives only in the message. It must still classify terminal: a
+    // retried window-limit request re-bills the whole prompt into a
+    // quota that resets hours later.
+    use futures::StreamExt;
+    let server = wiremock::MockServer::start().await;
+    let failed = serde_json::json!({
+        "type": "response.failed",
+        "response": {"id": "resp_1", "error": {
+            "code": "server_error",
+            "message": "native API error 429: Claude usage limit reached (five_hour) · resets in ~227m"
+        }}
+    });
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!("data: {failed}\n\n")),
+        )
+        .mount(&server)
+        .await;
+    let provider = plan_usage_provider(server.uri());
+    let events: Vec<_> = provider.stream(empty_chat_req()).collect().await;
+    let received = server.received_requests().await.expect("requests recorded");
+    assert_eq!(received.len(), 1, "quota window must not retry: {events:?}");
+    assert!(
+        matches!(events.last(), Some(Err(e)) if matches!(e.class(), ProviderError::Auth(_))),
+        "ends with terminal Auth: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn responses_transient_403_then_success_delivers_text() {
     // Same carve-out on the Responses path: first POST 403s, the retry gets
     // the SSE body and the turn delivers text with no error events.

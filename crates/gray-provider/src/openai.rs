@@ -1507,7 +1507,7 @@ fn error_body_message(body: &str) -> Option<String> {
 // exhausted balance burns the full request body against zero quota (and
 // the 429 floor would stall the turn for nothing). Narrow phrases only —
 // bare "billing"/"plan" also appear in legit rate-limit upsell copy.
-const QUOTA_EXHAUSTED_HINTS: [&str; 11] = [
+const QUOTA_EXHAUSTED_HINTS: [&str; 14] = [
     "insufficient_quota",
     // ChatGPT plan usage (Sign in with ChatGPT): the plan's or this app's
     // cap is spent; only the user raising it in ChatGPT settings helps.
@@ -1521,6 +1521,11 @@ const QUOTA_EXHAUSTED_HINTS: [&str; 11] = [
     "quota_exceeded",
     "gousagelimiterror",
     "available balance",
+    // Subscription-window limits (Claude five_hour / session): the window
+    // is spent for minutes to hours — retrying re-bills the whole prompt.
+    "usage limit reached",
+    "session limit",
+    "resets in ~",
 ];
 
 /// `error.code` or `error.type` from a JSON error body, as text.
@@ -2223,7 +2228,9 @@ fn process_dynamic_event(
 /// A `response.failed`/`error` event as an error. Quota exhaustion is
 /// terminal exactly like its HTTP twin in [`classify_http_error`] (the code
 /// may arrive only here, after the stream opened); anything else stays a
-/// retryable stream failure.
+/// retryable stream failure. Relays that can't express a typed code
+/// (`server_error` for everything) still get classified on the message —
+/// a quota verdict rides the detail either way.
 fn stream_failure(event: &Value, detail: String) -> ProviderError {
     let code = event
         .get("response")
@@ -2234,7 +2241,11 @@ fn stream_failure(event: &Value, detail: String) -> ProviderError {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_lowercase();
-    if QUOTA_EXHAUSTED_HINTS.iter().any(|h| code.contains(h)) {
+    let lower = detail.to_lowercase();
+    if QUOTA_EXHAUSTED_HINTS
+        .iter()
+        .any(|h| code.contains(h) || lower.contains(h))
+    {
         ProviderError::Auth(detail)
     } else {
         ProviderError::Stream(detail)
