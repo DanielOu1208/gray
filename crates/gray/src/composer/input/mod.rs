@@ -13,7 +13,7 @@ pub(crate) mod keys;
 
 use keys::KeyOutcome;
 
-pub(crate) use attach::{sync_attachments, try_attach_clipboard_image, try_attach_image_paste};
+pub(crate) use attach::{try_attach_clipboard_image, try_attach_image_paste};
 pub(crate) use clipboard::paste_from_system_clipboard;
 
 pub(crate) fn handle_paste(tui: &mut Tui, pasted: String) -> bool {
@@ -291,10 +291,7 @@ pub(crate) fn read_line(
                         tui.history_idx = None;
                         tui.draft.clear();
                         tui.textarea.set_text("");
-                        let attached_with_ph: Vec<(String, PathBuf)> =
-                            std::mem::take(&mut tui.attachments);
-                        let attached: Vec<PathBuf> =
-                            attached_with_ph.into_iter().map(|(_, p)| p).collect();
+                        let attached: Vec<PathBuf> = std::mem::take(&mut tui.attachments);
                         if tui.is_task_running {
                             tui.queued_inputs
                                 .push_back((trimmed.clone(), attached.clone()));

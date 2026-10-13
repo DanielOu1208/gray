@@ -369,7 +369,8 @@ pub struct Tui {
     pub(crate) history: Vec<String>,
     pub(crate) history_idx: Option<usize>,
     pub(crate) draft: String,
-    pub(crate) attachments: Vec<(String, PathBuf)>,
+    /// Attached files, drawn as chips above the draft. Never part of its text.
+    pub(crate) attachments: Vec<PathBuf>,
     pub(crate) pending_pastes: Vec<(String, String)>,
     model_name: String,
     /// Footer label overriding the friendly model name (a composite
