@@ -92,8 +92,18 @@ pub struct ProviderRegistry {
 
 impl ProviderRegistry {
     pub fn load_cached(home: &Path) -> Self {
+        Self::load_cached_with_user_home(home, gray_core::paths::gray_user_home().as_deref())
+    }
+
+    /// `load_cached` with the real user home injected. The user home's
+    /// `global` entries are offered on top of the session home's own rows;
+    /// a name the session home already has wins. Nothing is spawned here.
+    fn load_cached_with_user_home(home: &Path, user_home: Option<&Path>) -> Self {
         let mut cache = ProviderCache::load(&cache_path(home));
         let _ = refresh_installed_argv(home, &mut cache);
+        if let Some(user) = user_home.filter(|user| differs(home, user)) {
+            merge_global_entries(user, &mut cache);
+        }
         Self { cache }
     }
 
@@ -147,6 +157,65 @@ impl ProviderRegistry {
         self.installed().into_iter().find(|installed| {
             installed.provider_id() == provider_id && installed.auth_ref() == auth_ref
         })
+    }
+}
+
+/// The home that owns `plugin` for a session at `home`: the session home when
+/// its own lock names it, else the real user home for a `global` entry there,
+/// else the session home. Its `plugins/` dir holds the install and its
+/// `auth.json` holds the plugin's credentials.
+pub fn plugin_home(home: &Path, plugin: &str) -> PathBuf {
+    plugin_home_with_user(home, gray_core::paths::gray_user_home().as_deref(), plugin)
+}
+
+fn plugin_home_with_user(home: &Path, user_home: Option<&Path>, plugin: &str) -> PathBuf {
+    let names_plugin = |dir: &Path| {
+        gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(dir))
+            .is_ok_and(|lock| lock.plugins.contains_key(plugin))
+    };
+    if names_plugin(home) {
+        return home.to_path_buf();
+    }
+    let Some(user) = user_home.filter(|user| differs(home, user)) else {
+        return home.to_path_buf();
+    };
+    let global = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(user))
+        .ok()
+        .and_then(|lock| lock.plugins.get(plugin).map(|e| e.global && e.enabled))
+        .unwrap_or(false);
+    if global {
+        user.to_path_buf()
+    } else {
+        home.to_path_buf()
+    }
+}
+
+/// Whether `user` names a different directory than `home`.
+fn differs(home: &Path, user: &Path) -> bool {
+    user != home && std::fs::canonicalize(user).ok() != std::fs::canonicalize(home).ok()
+}
+
+/// Add the user home's enabled `global` entries to a session cache. Names
+/// already cached for the session home are skipped. Real installs resolve
+/// their executable from the user home's `plugins/<name>`, so the resolved
+/// argv points at the user-home install.
+fn merge_global_entries(user: &Path, cache: &mut ProviderCache) {
+    let Ok(user_lock) = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(user))
+    else {
+        return;
+    };
+    for (name, entry) in &user_lock.plugins {
+        if !entry.global || !entry.enabled || cache.plugins.contains_key(name) {
+            continue;
+        }
+        let argv = spawn_argv(name, user, entry).unwrap_or_default();
+        cache.plugins.insert(
+            name.clone(),
+            CachedProviderPlugin {
+                argv,
+                ..cached_from_manifest(user, name, entry)
+            },
+        );
     }
 }
 

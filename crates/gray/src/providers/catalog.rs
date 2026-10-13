@@ -63,7 +63,9 @@ pub async fn connect_dynamic_provider(
     })?;
     let profile = profile_for_provider(&installed)?;
     let runtime = shared_runtime(installed.clone()).await?;
-    let store = CredentialStore::new(home.join("auth.json"));
+    let store = CredentialStore::new(
+        crate::providers::registry::plugin_home(home, &installed.plugin).join("auth.json"),
+    );
     let source: Arc<dyn CredentialSource> = shared_plugin_source_with_model(
         installed.clone(),
         store,
@@ -220,7 +222,9 @@ pub async fn fetch_models_for_config(config: &Config) -> Vec<(String, String)> {
             .expect("relay models envelope"),
         }
     } else {
-        let store = CredentialStore::new(home.join("auth.json"));
+        let store = CredentialStore::new(
+            crate::providers::registry::plugin_home(&home, &installed.plugin).join("auth.json"),
+        );
         let source = shared_plugin_source_with_model(
             installed.clone(),
             store.clone(),

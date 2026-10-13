@@ -151,3 +151,49 @@ async fn resolved_provider_carries_lock_spawn_argv() {
     assert_eq!(installed.argv, argv);
     assert!(!installed.argv.is_empty());
 }
+
+fn write_user_global_provider(user: &Path, global: bool) {
+    std::fs::create_dir_all(user.join("plugins")).unwrap();
+    std::fs::write(
+        user.join("plugins/global-provider-manifest.json"),
+        r#"{"name":"global-provider","providers":[{"id":"p","name":"P","transport":{"kind":"openai-responses","base_url":"https://127.0.0.1:1/","authorization":{"kind":"bearer","secret_name":"k"}},"auth_methods":[{"id":"a","kind":"api_key","name":"A","operations":["models"]}]}]}"#,
+    )
+    .unwrap();
+    let mut lock = LockFile {
+        schema: 1,
+        plugins: BTreeMap::new(),
+    };
+    lock.plugins.insert(
+        "global-provider".to_string(),
+        LockEntry {
+            global,
+            ..lock_entry(vec!["/user/plugins/global-provider/bin/plugin".to_string()])
+        },
+    );
+    lock.save(&lock_path(user)).unwrap();
+}
+
+#[test]
+fn global_user_home_provider_resolves_from_an_empty_session_home() {
+    let user = tempfile::tempdir().unwrap();
+    let session = tempfile::tempdir().unwrap();
+    let auth_ref = "plugin:global-provider:p:a";
+
+    write_user_global_provider(user.path(), true);
+    let registry = ProviderRegistry::load_cached_with_user_home(session.path(), Some(user.path()));
+    let installed = registry
+        .resolve("global-provider:p", auth_ref)
+        .expect("global user-home provider resolves from a session home");
+    assert_eq!(
+        installed.argv,
+        vec!["/user/plugins/global-provider/bin/plugin".to_string()]
+    );
+    assert_eq!(
+        super::plugin_home_with_user(session.path(), Some(user.path()), "global-provider"),
+        user.path()
+    );
+
+    write_user_global_provider(user.path(), false);
+    let registry = ProviderRegistry::load_cached_with_user_home(session.path(), Some(user.path()));
+    assert!(registry.resolve("global-provider:p", auth_ref).is_none());
+}
