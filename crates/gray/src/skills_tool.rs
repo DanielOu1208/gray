@@ -177,21 +177,31 @@ fn is_rationale_comment(line: &str) -> bool {
     let Some(rest) = rest.trim_start().strip_prefix('r') else {
         return false;
     };
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    !digits.is_empty() && rest[digits.len()..].trim_start().starts_with(':')
+    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    digits > 0 && rest[digits..].trim_start().starts_with(':')
 }
 
 /// Drop rationale comments before serving. Byte-identical when the file has
 /// none, so comment-free rule files render exactly as before, and the cap
 /// then applies to rules alone — rationale never eats the budget.
 pub(crate) fn strip_rationale_comments(body: &str) -> String {
-    if !body.lines().any(is_rationale_comment) {
-        return body.to_string();
+    let mut out = String::with_capacity(body.len());
+    let mut stripped = false;
+    for line in body.lines() {
+        if is_rationale_comment(line) {
+            stripped = true;
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
     }
-    body.lines()
-        .filter(|line| !is_rationale_comment(line))
-        .collect::<Vec<_>>()
-        .join("\n")
+    if stripped {
+        out
+    } else {
+        body.to_string()
+    }
 }
 
 /// Context-only builtin plugin serving the per-turn `<project_context>`
@@ -243,17 +253,12 @@ pub fn strip_frontmatter(content: &str) -> &str {
         return content;
     }
     let after = &trimmed[3..];
-    for (idx, line) in after.lines().enumerate() {
+    let mut off = 0usize;
+    for line in after.lines() {
         if line.trim() == "---" {
-            let mut off = 0usize;
-            for (i, l) in after.lines().enumerate() {
-                if i == idx {
-                    let body = &after[off + l.len()..];
-                    return body.trim_start_matches('\n');
-                }
-                off += l.len() + 1;
-            }
+            return after[off + line.len()..].trim_start_matches('\n');
         }
+        off += line.len() + 1;
     }
     content
 }

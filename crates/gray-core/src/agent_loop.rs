@@ -1501,27 +1501,26 @@ fn leaked_call_markup(text: &str) -> bool {
     {
         return true;
     }
-    let prose = outside_fences(text);
-    LEAKED_SPECIALS
-        .iter()
-        .filter(|t| prose.contains(**t))
-        .count()
-        >= 2
-}
-
-/// `text` with column-0 fenced code blocks removed. Specials quoted inside
-/// code are documentation, not leaked markup (GC-1).
-fn outside_fences(text: &str) -> String {
-    let mut out = String::new();
+    // Two distinct specials outside column-0 fences = leaked markup (GC-1 —
+    // quoted inside code they're documentation). Scan the non-fence lines
+    // directly instead of copying them, and stop at the second kind.
     let mut in_fence = false;
+    let mut seen = 0u16;
     for line in text.split_inclusive('\n') {
         if line.starts_with("```") {
             in_fence = !in_fence;
         } else if !in_fence {
-            out.push_str(line);
+            for (i, t) in LEAKED_SPECIALS.iter().enumerate() {
+                if line.contains(*t) {
+                    seen |= 1 << i;
+                }
+            }
+            if seen.count_ones() >= 2 {
+                return true;
+            }
         }
     }
-    out
+    false
 }
 
 /// `<|open|>` / `<|close|>` / `<|sep|>`-family specials, built without

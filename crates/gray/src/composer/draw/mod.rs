@@ -914,7 +914,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let builtin = |name: &str| -> Option<crate::statusline::Seg> {
+        let compute_builtin = |name: &str| -> Option<crate::statusline::Seg> {
             use crate::statusline::Seg;
             let t = crate::theme::theme();
             let pieces = |parts: Vec<(String, Color)>| Seg {
@@ -1007,6 +1007,35 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 },
             })
         };
+        // Segment values don't change within a draw and most ignore the
+        // width-pressure `level`: memoize per (name, level) so retrying a
+        // tighter level never re-locks mutexes or re-runs segment readers.
+        let seg_memo: std::cell::RefCell<
+            std::collections::HashMap<String, Vec<Option<crate::statusline::Seg>>>,
+        > = Default::default();
+        let builtin = |name: &str| -> Option<crate::statusline::Seg> {
+            let l = level.get() as usize;
+            if let Some(hit) = seg_memo
+                .borrow()
+                .get(name)
+                .and_then(|slots| slots.get(l))
+                .and_then(|slot| slot.as_ref())
+            {
+                return Some(hit.clone());
+            }
+            let seg = compute_builtin(name);
+            if let Some(seg) = &seg {
+                let mut memo = seg_memo.borrow_mut();
+                if let Some(slot) = memo
+                    .entry(name.to_string())
+                    .or_insert_with(|| vec![None; 5])
+                    .get_mut(l)
+                {
+                    *slot = Some(seg.clone());
+                }
+            }
+            seg
+        };
         let sep_color = crate::theme::theme().text_faint;
         let right_sep = line_cfg.right_separator();
         let seg_width = |segs: &[crate::statusline::Seg]| -> usize {
@@ -1032,6 +1061,30 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let left_segs =
             crate::statusline::clip(left_segs, w.saturating_sub(seg_width(&right_segs) + 5));
         if line_cfg.command.is_some() {
+            // The command runner snapshots FACTS; rebuilding and locking in
+            // an identical payload every draw is waste — republish on change.
+            static LAST_FACTS_KEY: std::sync::Mutex<Option<String>> =
+                std::sync::Mutex::new(None);
+            let branch = crate::statusline::git_branch(std::path::Path::new(&tui.cwd));
+            let key = format!(
+                "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                tui.cwd,
+                tui.model_name,
+                model_display,
+                tui.thinking_effort,
+                used_tokens,
+                max_label,
+                hit_rate.to_bits(),
+                branch,
+            );
+            let fresh = match LAST_FACTS_KEY.lock() {
+                Ok(mut g) if g.as_deref() != Some(key.as_str()) => {
+                    *g = Some(key);
+                    true
+                }
+                _ => false,
+            };
+            if fresh {
             crate::statusline::publish_facts(serde_json::json!({
                 "cwd": tui.cwd,
                 "workspace": { "current_dir": tui.cwd },
@@ -1039,9 +1092,10 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 "effort": tui.thinking_effort,
                 "context": { "used_tokens": used_tokens, "max": max_label },
                 "cache_hit_rate": hit_rate,
-                "branch": crate::statusline::git_branch(std::path::Path::new(&tui.cwd)),
+                "branch": branch,
                 "version": env!("CARGO_PKG_VERSION"),
             }));
+            }
         }
         let left_len = 1 + seg_width(&left_segs);
         let right_len = seg_width(&right_segs) + 1;

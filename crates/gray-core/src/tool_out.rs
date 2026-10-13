@@ -60,20 +60,32 @@ pub fn unknown_tool(name: &str, available: &[String]) -> String {
 pub fn truncate_output(text: &str) -> String {
     let mut notes: Vec<String> = Vec::new();
 
-    // Line cap: keep first half + last half of the allowed budget.
+    // Line cap: keep first half + last half of the allowed budget. Slice
+    // at newline offsets instead of collecting a Vec of every line.
     let total_lines = text.lines().count();
     let body = if total_lines > MAX_LINES {
         let dropped = total_lines - MAX_LINES;
         notes.push(format!("{dropped} lines"));
         let keep = MAX_LINES / 2;
-        let all: Vec<&str> = text.lines().collect();
-        let mut parts = all[..keep].to_vec();
-        parts.extend_from_slice(&all[all.len() - keep..]);
-        parts.join("\n")
-    } else if text.ends_with('\n') {
-        // `lines()` drops the trailing newline; preserve it verbatim.
-        text.to_string()
+        let nth_nl = |n: usize| {
+            text.match_indices('\n')
+                .nth(n)
+                .map(|(i, _)| i + 1)
+                .unwrap_or(text.len())
+        };
+        // Head = through the keep-th newline; tail = from the line that
+        // begins keep lines before the last. One copy, no rejoin.
+        let head_end = nth_nl(keep - 1);
+        let tail_start = nth_nl(total_lines - keep - 1);
+        let mut b = String::with_capacity(head_end + text.len() - tail_start);
+        b.push_str(&text[..head_end]);
+        b.push_str(&text[tail_start..]);
+        if b.ends_with('\n') {
+            b.pop();
+        }
+        b
     } else {
+        // `lines()` drops the trailing newline; preserve it verbatim.
         text.to_string()
     };
 
@@ -95,16 +107,17 @@ pub fn truncate_output(text: &str) -> String {
     } else {
         // Line-truncated but within byte budget: insert the annotation in
         // the middle without touching the rest of the content.
-        let lines: Vec<&str> = body.lines().collect();
-        let mid = lines.len() / 2;
-        let mut out = lines[..mid].join("\n");
-        out.push('\n');
+        let mid = body.lines().count() / 2;
+        let split = body
+            .match_indices('\n')
+            .nth(mid - 1)
+            .map(|(i, _)| i + 1)
+            .unwrap_or(body.len());
+        let mut out = String::with_capacity(body.len() + 40);
+        out.push_str(&body[..split]);
         out.push_str(&annotation(&notes));
         out.push('\n');
-        out.push_str(&lines[mid..].join("\n"));
-        if body.ends_with('\n') {
-            out.push('\n');
-        }
+        out.push_str(&body[split..]);
         out
     }
 }
