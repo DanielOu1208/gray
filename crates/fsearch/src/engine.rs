@@ -7,7 +7,7 @@ use crate::fsevents::{self, HISTORY_DONE, KERNEL_DROPPED, MUST_SCAN_SUBDIRS, USE
 use crate::index::Index;
 use crate::live::{Applied, Live};
 use crate::query::{Query, Searcher};
-use crate::walk::{self, KIND_DIR, Listing, NONE, RawEnt};
+use crate::walk::{self, KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,8 @@ use std::time::{Duration, Instant};
 const COMPACT_PENDING: usize = 50_000;
 const COMPACT_EVERY: Duration = Duration::from_secs(12 * 3600);
 const SCAN_THREADS: usize = 8;
+/// Matches a pruning query may return before its answer is called partial.
+const MATCH_CAP: usize = 1 << 20;
 const CONTENT_QUIET: Duration = Duration::from_secs(2);
 const CONTENT_MAX_WAIT: Duration = Duration::from_secs(300);
 /// How often a follower checks whether it can take over or reload.
@@ -497,6 +499,52 @@ impl Engine {
         Ok((content::verify(g, &paths, q.limit), false))
     }
 
+    /// Regular files under `scope` the content index does not hold as they
+    /// are now (size and mtime from the name index): every grep must read
+    /// these directly, whatever its pattern. `None` until the content index
+    /// holds `scope`. Only an answer once `status().content_pending == 0`.
+    pub fn unheld_files(&self, scope: &[u8]) -> Option<Vec<Vec<u8>>> {
+        if !self.s.content_holds(Some(scope)) {
+            return None;
+        }
+        let home = self.s.home.as_bytes();
+        let (out, early) = self.s.with_names(Some(scope), |live| {
+            let mut want = content::wanted(live, home, scope, true);
+            want.sort();
+            let c = self.s.content.read().unwrap();
+            let mut out: Vec<Vec<u8>> = c.unheld(scope, true, &want).into_iter().map(|k| want.path(k).to_vec()).collect();
+            out.extend(c.not_text(scope, true));
+            drop(c);
+            out.extend(files_under(live, scope).into_iter().filter(|p| want.find(p).is_none()));
+            out.sort_unstable();
+            out.dedup();
+            out
+        }).ok()?;
+        self.s.index_first(early);
+        Some(out)
+    }
+
+    /// Held files under `scope` whose content has one of `pats` (each taken
+    /// literally; `ignore_case` folds Unicode case). A superset of what a
+    /// grep for the same literals finds in the files the index holds as they
+    /// are. `None` when the answer may be incomplete or the index does not
+    /// hold `scope`.
+    pub fn held_matches(&self, scope: &[u8], pats: &[String], ignore_case: bool) -> Option<Vec<Vec<u8>>> {
+        if !self.s.content_holds(Some(scope)) {
+            return None;
+        }
+        let case = if ignore_case { content::Case::Insensitive } else { content::Case::Sensitive };
+        let mut g = Grep::any_of(pats, case).ok()?;
+        g.max_per_file = 1;
+        g.budget = None;
+        let q = Query { scope: Some(scope.to_vec()), limit: MATCH_CAP, size: (0, u64::MAX), mtime: (0, u32::MAX), ..Default::default() };
+        let (res, _) = self.grep(&q, &g).ok()?;
+        if !res.complete || res.next.is_some() || res.files.len() >= MATCH_CAP {
+            return None;
+        }
+        Some(res.files.into_iter().map(|f| f.path).collect())
+    }
+
     pub fn status(&self) -> Status {
         let l = self.s.live.read().unwrap();
         let c = self.s.content.read().unwrap();
@@ -727,6 +775,33 @@ fn rescan_unskipped(shared: &Shared) {
 }
 
 /// Is `path` `dir` or inside it?
+/// Regular files under `scope` in the name index, base and overlay, by path
+/// (unsorted, may repeat where the overlay shadows the base).
+fn files_under(live: &Live, scope: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut p = Vec::new();
+    if let Some(top) = live.base.lookup(scope).and_then(|e| live.base.dir_of(e)) {
+        let mut stack = vec![top];
+        while let Some(k) = stack.pop() {
+            for i in live.base.children(k) {
+                if live.is_dead(i as u32) {
+                    continue;
+                }
+                match live.base.kind(i) & 3 {
+                    KIND_DIR => stack.extend(live.base.dir_of(i as u32)),
+                    KIND_FILE => {
+                        live.base.path(i, &mut p);
+                        out.push(p.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    out.extend(live.over.range(scope.to_vec()..).take_while(|(p, _)| under(p, scope)).filter(|(_, o)| o.kind & 3 == KIND_FILE).map(|(p, _)| p.clone()));
+    out
+}
+
 fn under(path: &[u8], dir: &[u8]) -> bool {
     path.starts_with(dir) && (path.len() == dir.len() || path[dir.len()] == b'/')
 }
