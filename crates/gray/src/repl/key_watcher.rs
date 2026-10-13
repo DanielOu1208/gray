@@ -352,9 +352,6 @@ pub(crate) fn spawn_key_watcher_with_typing(
                     let mut t = if interrupts {
                         match try_lock_tui(shared) {
                             Some(t) => t,
-                            None if crate::composer::input::keys::chip_mode_hint() => {
-                                lock_tui(shared)
-                            }
                             None => {
                                 watch_cancel.cancel();
                                 return;
@@ -460,7 +457,6 @@ pub(crate) fn spawn_key_watcher_with_typing(
                                     .into_iter()
                                     .map(|(_, p)| p)
                                     .collect();
-                            crate::composer::input::keys::set_chip_sel(&mut t, None);
                             // Queued — fleeting, not transcript (becomes a
                             // real prompt when dequeued).
                             t.queued_inputs.push_back((text, attached));

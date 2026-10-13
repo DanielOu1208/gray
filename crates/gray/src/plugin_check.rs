@@ -23,6 +23,9 @@ fn outcome_text(o: &gray_core::agent::CommandOutcome) -> String {
         gray_core::agent::CommandOutcome::AgentPicker(plugin) => {
             format!("agent picker via {plugin}")
         }
+        gray_core::agent::CommandOutcome::SubagentSettings(plugin) => {
+            format!("subagent settings via {plugin}")
+        }
     }
 }
 

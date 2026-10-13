@@ -457,9 +457,9 @@ pub(crate) async fn dispatch_command(
                 match super::plugin_cmds::provider_command_outcome(&provider_id, &cmd, argv).await {
                     Some(CommandOutcome::ModelPicker(row)) => ReplCommand::ModelFocus(row),
                     Some(CommandOutcome::Prompt(prompt)) => ReplCommand::Prompt(prompt),
-                    Some(CommandOutcome::AgentPicker(_)) | None => {
-                        ReplCommand::ProviderLogin(provider_id)
-                    }
+                    Some(CommandOutcome::AgentPicker(_))
+                    | Some(CommandOutcome::SubagentSettings(_))
+                    | None => ReplCommand::ProviderLogin(provider_id),
                     Some(CommandOutcome::Say(text)) => {
                         say(tui.as_ref().map(|(s, _)| s), &text);
                         return Ok(Flow::Continue);
@@ -668,6 +668,18 @@ pub(crate) async fn dispatch_command(
                                 );
                             }
                         }
+                    }
+                    // `/subagents settings` opens the settings modal;
+                    // reads/saves ride the plugin's `settings` CLI.
+                    CommandOutcome::SubagentSettings(plugin) => {
+                        let msg = match tui.as_ref().map(|(s, _)| s) {
+                            Some(shared) => {
+                                super::agents_panel::run_subagent_settings(&plugin, shared)
+                                    .unwrap_or_else(|| "cancelled — nothing changed".to_string())
+                            }
+                            None => "subagents settings needs the TUI".to_string(),
+                        };
+                        say(tui.as_ref().map(|(s, _)| s), &msg);
                     }
                 }
                 handled = true;

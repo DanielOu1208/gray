@@ -1,4 +1,4 @@
-use super::{live_context_total, live_pill_suffix, live_turn_output_tokens, pill_context_tokens};
+use super::{live_context_total, live_pill_suffix, pill_context_tokens};
 use gray_core::event::Usage;
 
 #[test]

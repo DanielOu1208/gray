@@ -1075,7 +1075,8 @@ async fn plugin_command_result(
             fallback_text: format!("/{name} asked for a turn"),
         })),
         Some(gray_plugin::CommandOutcome::ModelPicker(_))
-        | Some(gray_plugin::CommandOutcome::AgentPicker(_)) => Err(CmdError::local(name)),
+        | Some(gray_plugin::CommandOutcome::AgentPicker(_))
+        | Some(gray_plugin::CommandOutcome::SubagentSettings(_)) => Err(CmdError::local(name)),
         None => Err(CmdError::local(name)),
     }
 }

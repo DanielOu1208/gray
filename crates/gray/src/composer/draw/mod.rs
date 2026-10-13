@@ -79,10 +79,7 @@ pub(crate) fn home_spacer_rows(
 /// (`Image`/`File`) plus the file's real name — repeating the `[Image #n]`
 /// placeholder would just say what the draft already says. Clipboard
 /// pastes land in `clipboard-XXXXXX.png`, which is a name too.
-fn attachment_chips(
-    attachments: &[(String, std::path::PathBuf)],
-    selected: Option<usize>,
-) -> Line<'static> {
+fn attachment_chips(attachments: &[(String, std::path::PathBuf)]) -> Line<'static> {
     let t = crate::theme::theme();
     let mut spans = vec![Span::styled("   ", Style::default().bg(t.surface_bg))];
     for (i, (ph, path)) in attachments.iter().enumerate() {
@@ -98,35 +95,14 @@ fn attachment_chips(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("clipboard");
-        let (pill, label) = if selected == Some(i) {
-            let on = Style::default()
-                .fg(t.input_bg)
-                .bg(t.text_bright)
-                .add_modifier(Modifier::BOLD);
-            (on, on)
-        } else {
-            (
-                Style::default().fg(t.text_bright).bg(t.input_bg),
-                Style::default().fg(t.text_muted).bg(t.surface_bg),
-            )
-        };
+        let (pill, label) = (
+            Style::default().fg(t.text_bright).bg(t.input_bg),
+            Style::default().fg(t.text_muted).bg(t.surface_bg),
+        );
         spans.push(Span::styled(format!(" {kind} "), pill));
         spans.push(Span::styled(format!(" {name} "), label));
     }
     Line::from(spans)
-}
-
-fn attachment_hint(selecting: bool) -> Line<'static> {
-    let t = crate::theme::theme();
-    let hint = if selecting {
-        "←→ select · backspace delete · ↓ close"
-    } else {
-        "↑ select"
-    };
-    Line::from(vec![
-        Span::styled("   ", Style::default().bg(t.surface_bg)),
-        Span::styled(hint, Style::default().fg(t.text_dim).bg(t.surface_bg)),
-    ])
 }
 
 /// Upper bound for the inline viewport.
@@ -269,9 +245,9 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     // for them (status dock + seam, queued follow-ups, live cards, the
     // streamed tail, the ask modal; the panel is 0 in home).
     let attach_h: u16 = 0;
-    // The two rows the attachments add to the box below (chips and hint).
-    // The terminal lifts the band only when they come back out.
-    let chip_rows: u16 = if tui.attachments.is_empty() { 0 } else { 2 };
+    // The one row the attachments add to the box below (chips). The
+    // terminal lifts the band only when it comes back out.
+    let chip_rows: u16 = if tui.attachments.is_empty() { 0 } else { 1 };
     // Seam (the one gap under the transcript) + shimmer status text + one
     // bare breathing row below it.
     let needs_seam = needs_seam(&tui.transcript);
@@ -314,12 +290,9 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     if !tui.attachments.is_empty() {
         // Chips ride inside the box, above the text and under its top pad,
         // so they read as part of the draft they belong to.
-        let chip_sel = tui.chip_sel.map(|s| s.min(tui.attachments.len() - 1));
-        ibox.lines
-            .insert(1, attachment_chips(&tui.attachments, chip_sel));
-        ibox.lines.insert(2, attachment_hint(chip_sel.is_some()));
-        ibox.band_h += 2;
-        ibox.cur_row += 2;
+        ibox.lines.insert(1, attachment_chips(&tui.attachments));
+        ibox.band_h += 1;
+        ibox.cur_row += 1;
     }
     if home.is_some() {
         // Fill the screen: spacer rows under the home rows center the

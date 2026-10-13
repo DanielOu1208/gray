@@ -448,6 +448,10 @@ pub enum CommandOutcome {
     /// (`<plugin> entries` rows; `open`/`view`/`stop`/`chat` verbs drive
     /// the actions). Carries the plugin name the panel should query.
     AgentPicker(String),
+    /// Open the subagent-settings modal fed by this plugin's CLI
+    /// (`<plugin> settings` reads current values; `settings --model/
+    /// --effort/--context/--max-running` writes). Carries the plugin name.
+    SubagentSettings(String),
 }
 
 /// Host-side view of a plugin's hooks: protocol-v1 (`prompt/context`,

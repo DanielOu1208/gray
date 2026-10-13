@@ -841,6 +841,7 @@ fn run_ask_modal(
                     // (opening them implicitly, like the deleted overlay's
                     // "typing jumps into notes").
                     if let Some(d) = c.to_digit(10)
+                        && !state.notes_open[i]
                         && (1..=9).contains(&d)
                         && (d as usize) <= state.options_len()
                     {

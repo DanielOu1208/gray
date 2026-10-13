@@ -107,6 +107,14 @@ fn spawn_text(argv: &[String], args: &[&str]) -> Option<String> {
 /// Read-only slash-command view used while a turn owns the agent. Bare
 /// `/subagents` opens the picker below; explicit read verbs print here.
 pub(crate) fn run_subagents_view(args: &[String]) -> Option<String> {
+    // Bare `settings` is the modal's job — mid-turn it declines politely;
+    // flagged `settings --x v` still writes and prints here.
+    if args == ["settings"] {
+        return Some(
+            "subagents settings: the modal opens when the turn finishes — rerun `/subagents settings`, or set directly with `settings --model/--effort/--context/--max-running`"
+                .into(),
+        );
+    }
     let argv = plugin_argv("subagents")?;
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     spawn_text(&argv, &refs)
@@ -1366,6 +1374,152 @@ fn run_agents_panel(
     })();
     out?;
     Ok(result)
+}
+
+/// `/subagents settings` pop-out: the current values are read through the
+/// plugin's CLI (`settings` prints its JSON), edited in the ask modal,
+/// and saved back through `settings --flags` — the same surface every
+/// panel verb rides. Esc closes with no write; "keep" answers change
+/// nothing. Returns the line to print, or None on Esc.
+pub(crate) fn run_subagent_settings(
+    plugin: &str,
+    shared: &crate::composer::SharedTui,
+) -> Option<String> {
+    use crate::ask::{AskOption, AskQuestion};
+    let argv = plugin_argv(plugin)?;
+    let raw = spawn_raw(&argv, &["settings"])?;
+    let Ok(cur) = serde_json::from_str::<Value>(raw.trim()) else {
+        return Some(format!("couldn't read {plugin} settings: {}", raw.trim()));
+    };
+    let cur_of = |k: &str| {
+        cur[k]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| "inherit".to_string())
+    };
+    let cur_max = cur["max_running"].as_u64().unwrap_or(128);
+
+    let opt = |label: &str, desc: &str| AskOption {
+        label: label.to_string(),
+        description: desc.to_string(),
+        opt_in: false,
+    };
+    let q = |id: &str, question: String, options: Vec<AskOption>| AskQuestion {
+        id: id.to_string(),
+        header: "subagents".to_string(),
+        question,
+        options,
+        multi: false,
+        default_all: false,
+    };
+    let inherit = || {
+        opt(
+            "inherit",
+            "no subagent default — children follow the session",
+        )
+    };
+    let questions = vec![
+        q(
+            "model",
+            format!("default subagent model? (now: {})", cur_of("model")),
+            vec![
+                opt("keep", "leave unchanged"),
+                inherit(),
+                // "None of the above" + notes carry a free-form model id.
+            ],
+        ),
+        q(
+            "effort",
+            format!("default reasoning effort? (now: {})", cur_of("effort")),
+            vec![
+                opt("keep", "leave unchanged"),
+                opt("off", ""),
+                opt("minimal", ""),
+                opt("low", ""),
+                opt("medium", ""),
+                opt("high", ""),
+                opt("xhigh", ""),
+                opt("max", ""),
+                inherit(),
+            ],
+        ),
+        q(
+            "context",
+            format!("context ceiling per child? (now: {})", cur_of("context")),
+            vec![
+                opt("keep", "leave unchanged"),
+                opt("auto", "model default"),
+                opt("64k", ""),
+                opt("90k", ""),
+                opt("128k", ""),
+                opt("200k", ""),
+                opt("256k", ""),
+                opt("300k", ""),
+                opt("1m", ""),
+                inherit(),
+            ],
+        ),
+        q(
+            "max_running",
+            format!("max concurrent subagents? (now: {cur_max})"),
+            vec![
+                opt("keep", "leave unchanged"),
+                opt("8", ""),
+                opt("16", ""),
+                opt("32", ""),
+                opt("64", ""),
+                opt("128", ""),
+                opt("256", ""),
+            ],
+        ),
+    ];
+    let answers = crate::ask::ask_questions_modal(shared, questions)?;
+
+    // A typed note ("Other") beats the picked label — typing means intent.
+    let mut flags: Vec<String> = Vec::new();
+    for a in &answers {
+        let flag = match a.id.as_str() {
+            "model" => "--model",
+            "effort" => "--effort",
+            "context" => "--context",
+            "max_running" => "--max-running",
+            _ => continue,
+        };
+        let note = a.answers.iter().find_map(|s| s.strip_prefix("user_note: "));
+        let pick = a.answers.iter().find(|s| !s.starts_with("user_note:"));
+        let value = note
+            .map(str::to_owned)
+            .or_else(|| match pick.map(String::as_str) {
+                Some("keep") | Some("None of the above") | None => None,
+                Some("inherit") => Some("none".to_string()),
+                Some(l) => Some(l.to_string()),
+            });
+        if let Some(v) = value {
+            flags.push(flag.to_string());
+            flags.push(v);
+        }
+    }
+    if flags.is_empty() {
+        return Some("subagents settings — unchanged".to_string());
+    }
+    let args: Vec<&str> = ["settings"]
+        .into_iter()
+        .chain(flags.iter().map(String::as_str))
+        .collect();
+    let out = spawn_raw(&argv, &args).unwrap_or_default();
+    match serde_json::from_str::<Value>(out.trim()) {
+        Ok(v) if v.is_object() => Some(format!(
+            "subagents settings saved — model {} · effort {} · context {} · max-running {}",
+            v["model"].as_str().unwrap_or("inherit"),
+            v["effort"].as_str().unwrap_or("inherit"),
+            v["context"].as_str().unwrap_or("inherit"),
+            v["max_running"]
+                .as_u64()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into())
+        )),
+        _ => Some(format!("settings failed: {}", out.trim())),
+    }
 }
 
 #[path = "agents_panel_tests.rs"]
