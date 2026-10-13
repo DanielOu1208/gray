@@ -38,6 +38,9 @@ pub struct TurnRequest {
     pub kind: Kind,
     pub cwd: PathBuf,
     pub timeout: Duration,
+    /// The turn's `running/` admission record: the child's pid is stamped
+    /// into it so a restart can kill an orphan instead of racing it.
+    pub running: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -118,6 +121,9 @@ impl TurnRunner for ChildRunner {
             }
         };
         let pid = child.id().unwrap_or(0);
+        if let Some(record) = req.running.as_deref().filter(|_| pid != 0) {
+            super::brain::stamp_child(record, super::brain::ChildProc::leader(pid));
+        }
         let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
             outcome.error = Some("agent spawn failed: no pipes".to_string());
             return outcome;

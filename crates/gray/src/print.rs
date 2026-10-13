@@ -943,6 +943,52 @@ impl Drop for RunningGuard {
     }
 }
 
+const STEER_LINE_CAP: usize = 2 * 1024 * 1024;
+
+#[derive(Debug, PartialEq)]
+enum BoundedLine {
+    Eof,
+    Line,
+    TooLong,
+}
+
+fn read_bounded_line<R: std::io::BufRead>(
+    r: &mut R,
+    buf: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<BoundedLine> {
+    use std::io::{BufRead, Read};
+    buf.clear();
+    if r.by_ref().take(cap as u64 + 1).read_until(b'\n', buf)? == 0 {
+        return Ok(BoundedLine::Eof);
+    }
+    if buf.len() <= cap || buf.ends_with(b"\n") {
+        return Ok(BoundedLine::Line);
+    }
+    buf.clear();
+    loop {
+        let chunk = match r.fill_buf() {
+            Ok(chunk) => chunk,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if chunk.is_empty() {
+            break;
+        }
+        match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                r.consume(i + 1);
+                break;
+            }
+            None => {
+                let len = chunk.len();
+                r.consume(len);
+            }
+        }
+    }
+    Ok(BoundedLine::TooLong)
+}
+
 async fn run_print_inner(
     config: &Config,
     prompt: Option<&str>,
@@ -975,15 +1021,17 @@ async fn run_print_inner(
         crate::ask::set_demux();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         tokio::task::spawn_blocking(move || {
-            use std::io::BufRead;
             let stdin = std::io::stdin();
-            let mut line = String::new();
+            let mut buf = Vec::new();
             loop {
-                line.clear();
-                match stdin.lock().read_line(&mut line) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
+                match read_bounded_line(&mut stdin.lock(), &mut buf, STEER_LINE_CAP) {
+                    Ok(BoundedLine::Eof) | Err(_) => break,
+                    Ok(BoundedLine::TooLong) => continue,
+                    Ok(BoundedLine::Line) => {}
                 }
+                let Ok(line) = std::str::from_utf8(&buf) else {
+                    continue;
+                };
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
                     continue;
                 };
@@ -996,7 +1044,7 @@ async fn run_print_inner(
                         let _ = tx.send(text.to_string());
                     }
                 } else if let Some(ask_id) = v.get("ask_id").and_then(|a| a.as_u64()) {
-                    crate::ask::deliver_json_answer(ask_id, &line);
+                    crate::ask::deliver_json_answer(ask_id, line);
                 }
             }
         });
@@ -1033,6 +1081,7 @@ async fn run_print_inner(
             store.maintain(sid).await?;
         }
     }
+    log::debug!(target: "gray_timing", "spawn session_resolved elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
     let history: Vec<Message> = match &resume_target {
         Some(sid) => {
             let (_, entries) = store
@@ -1043,6 +1092,7 @@ async fn run_print_inner(
         }
         None => Vec::new(),
     };
+    log::debug!(target: "gray_timing", "spawn history_loaded elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
     // Pin memory to the same durable identity for plain and JSON print mode.
     let session_id = match resume_target.clone() {
         Some(id) => id,
@@ -1085,6 +1135,7 @@ async fn run_print_inner(
         anyhow::bail!("max wall time {max}s reached — stopping (--max-wall-secs SECS)");
     }
     let mut agent = build_agent(config, &cwd, Some(session_id.as_str())).await?;
+    log::debug!(target: "gray_timing", "spawn agent_built elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
     // The effective compaction trigger is supervisor-facing metadata (a
     // parent choosing GRAY_COMPACT_AT for a child verifies what took).
     if let Some(out) = json.as_deref_mut() {
@@ -1187,6 +1238,7 @@ async fn run_print_inner(
     } else {
         user_message
     };
+    log::debug!(target: "gray_timing", "spawn_to_ready_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
     // SIGINT only signals the shared token — never wrap the run in a
     // select! that would drop it. Aborted once the run returns.
     let sigint_cancel = cancel.clone();

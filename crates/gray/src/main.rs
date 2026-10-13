@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
+    gray::turn_caps::init_process_start();
     gray::logging::init();
     install_panic_hook();
     let _ = crossterm::terminal::disable_raw_mode();
@@ -150,7 +151,7 @@ async fn run() -> anyhow::Result<()> {
     };
 
     let mut config = Config::resolve(&cli)?;
-    gray::turn_caps::init_process_start();
+    log::debug!(target: "gray_timing", "spawn config_loaded elapsed_ms={}", gray::turn_caps::process_start().elapsed().as_millis());
     if !config.bare {
         let saved_theme = gray::setup::saved_config_path()
             .ok()

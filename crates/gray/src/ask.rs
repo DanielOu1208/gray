@@ -163,16 +163,26 @@ pub fn set_demux() {
 }
 
 /// The demux's half of `drive_json`: route one stdin answer line to its
-/// pending ask. Lines for unknown/closed ids are dropped.
+/// pending ask. Lines for unknown/closed ids are dropped (logged).
 pub fn deliver_json_answer(ask_id: u64, line: &str) {
+    let excerpt = crate::repl::format::truncate_chars(line.trim(), 120);
     let svc = SERVICE.lock().expect("ask service").clone();
-    let Some(svc) = svc else { return };
+    let Some(svc) = svc else {
+        log::warn!("ask answer dropped: no ask service (ask_id {ask_id}): {excerpt}");
+        return;
+    };
     let mut pending = svc.pending.lock().expect("ask pending");
-    if let Some(p) = pending.get(&ask_id)
-        && let Some(answers) = parse_json_answer(line, ask_id, &p.questions)
-        && let Some(p) = pending.remove(&ask_id)
-    {
-        let _ = p.tx.send(answers);
+    let Some(p) = pending.get(&ask_id) else {
+        log::warn!("ask answer dropped: unknown or closed ask_id {ask_id}: {excerpt}");
+        return;
+    };
+    match parse_json_answer(line, ask_id, &p.questions) {
+        Some(answers) => {
+            if let Some(p) = pending.remove(&ask_id) {
+                let _ = p.tx.send(answers);
+            }
+        }
+        None => log::warn!("ask answer dropped: unparsable line for ask_id {ask_id}: {excerpt}"),
     }
 }
 

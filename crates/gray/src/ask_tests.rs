@@ -183,3 +183,18 @@ fn opt_in_option_starts_unchecked_under_default_all() {
     state.load(vec![q]);
     assert_eq!(state.checked[0], vec![true, true, false]);
 }
+
+#[test]
+fn deliver_json_answer_drops_unknown_id_and_long_lines() {
+    let _guard = ASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let long = format!(
+        "{{\"ask_id\":999,\"answers\":{{\"a\":[\"{}\"]}}}}",
+        "é".repeat(500)
+    );
+    crate::ask::shutdown();
+    crate::ask::deliver_json_answer(999, &long);
+    crate::ask::install(None, false);
+    crate::ask::deliver_json_answer(999, &long);
+    crate::ask::deliver_json_answer(999, "");
+    crate::ask::shutdown();
+}

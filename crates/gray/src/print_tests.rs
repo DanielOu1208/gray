@@ -856,3 +856,59 @@ fn progress_reasoning_is_gated_by_show_reasoning() {
         .all(|r| r["phase"] != "thinking")
     );
 }
+
+#[test]
+fn bounded_line_reads_lines_within_the_cap() {
+    let mut r = std::io::Cursor::new(b"abcd\nxy".to_vec());
+    let mut buf = Vec::new();
+    assert_eq!(
+        read_bounded_line(&mut r, &mut buf, 4).unwrap(),
+        BoundedLine::Line
+    );
+    assert_eq!(buf, b"abcd\n");
+    assert_eq!(
+        read_bounded_line(&mut r, &mut buf, 4).unwrap(),
+        BoundedLine::Line
+    );
+    assert_eq!(buf, b"xy");
+    assert_eq!(
+        read_bounded_line(&mut r, &mut buf, 4).unwrap(),
+        BoundedLine::Eof
+    );
+}
+
+#[test]
+fn bounded_line_skips_an_oversized_line_and_resumes_after_it() {
+    let mut data = vec![b'x'; 10_000];
+    data.extend_from_slice(b"\n{\"type\":\"steer\"}\n");
+    let mut r = std::io::BufReader::with_capacity(64, std::io::Cursor::new(data));
+    let mut buf = Vec::new();
+    assert_eq!(
+        read_bounded_line(&mut r, &mut buf, 16).unwrap(),
+        BoundedLine::TooLong
+    );
+    assert!(buf.is_empty());
+    assert_eq!(
+        read_bounded_line(&mut r, &mut buf, 16).unwrap(),
+        BoundedLine::Line
+    );
+    assert_eq!(buf, b"{\"type\":\"steer\"}\n");
+    assert_eq!(
+        read_bounded_line(&mut r, &mut buf, 16).unwrap(),
+        BoundedLine::Eof
+    );
+}
+
+#[test]
+fn bounded_line_oversized_tail_without_newline_ends_at_eof() {
+    let mut r = std::io::Cursor::new(vec![b'x'; 100]);
+    let mut buf = Vec::new();
+    assert_eq!(
+        read_bounded_line(&mut r, &mut buf, 8).unwrap(),
+        BoundedLine::TooLong
+    );
+    assert_eq!(
+        read_bounded_line(&mut r, &mut buf, 8).unwrap(),
+        BoundedLine::Eof
+    );
+}

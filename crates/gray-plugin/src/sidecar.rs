@@ -1554,6 +1554,7 @@ impl Tool for SidecarTool {
         let name = self.def.name.clone();
         let cwd = ctx.cwd.to_string_lossy();
         let sid = ctx.session_id.as_deref().unwrap_or("");
+        log::debug!(target: "gray_plugin", "plugin tool call: {name} (plugin-provided, session {sid})");
         let params = json!({"name": name, "args": args, "session": session_json(sid, &cwd)});
         let ttl = if self.transport_asks() {
             ASK_TTL

@@ -8,7 +8,9 @@
 //! `running/<turn>.json` admission record; the record is removed when the
 //! turn's reply has been handed to delivery. A record still there at boot is
 //! a turn a crash or restart cut short: it is re-admitted (bounded) instead
-//! of lost.
+//! of lost. The record carries the turn child's pid, so a child that outlived
+//! the daemon is killed first rather than left to finish the turn alongside
+//! its re-run.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -24,6 +26,8 @@ use crate::cron::store::Origin as Route;
 
 /// Times a cut-short turn is retried before the owner is told instead.
 pub const MAX_RECOVERY: u32 = 3;
+/// How long boot waits for a killed orphan to be gone before re-queueing.
+const ORPHAN_GRACE: Duration = Duration::from_secs(2);
 
 /// Admission record for a turn in flight.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -32,6 +36,65 @@ pub struct Running {
     pub key: String,
     pub events: Vec<Event>,
     pub started_at: i64,
+    /// The turn's child, stamped once it spawns; `None` before that and in
+    /// records from older builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<ChildProc>,
+}
+
+/// A spawned turn child: enough to find it again after a restart without
+/// mistaking a recycled pid for it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChildProc {
+    pub pid: u32,
+    /// The process group the child leads (unix `setpgid(0, 0)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgid: Option<u32>,
+    /// Start tick (see [`super::pid::proc_start_time`]); `None` where the
+    /// platform has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<u64>,
+}
+
+impl ChildProc {
+    /// A child just spawned as the leader of its own group.
+    pub fn leader(pid: u32) -> Self {
+        Self {
+            pid,
+            pgid: cfg!(unix).then_some(pid),
+            start_time: super::pid::proc_start_time(pid),
+        }
+    }
+
+    /// Still running and still the same process. A start time that was
+    /// recorded but can no longer be read means it is gone; a zombie is dead.
+    pub fn alive(&self) -> bool {
+        if !super::pid::pid_alive(self.pid) || zombie(self.pid) {
+            return false;
+        }
+        match self.start_time {
+            Some(then) => super::pid::proc_start_time(self.pid) == Some(then),
+            None => true,
+        }
+    }
+}
+
+/// Stamp a spawned child into its turn's admission record. Best-effort: an
+/// unstamped record is re-queued at boot exactly as before.
+pub fn stamp_child(record: &Path, child: ChildProc) {
+    let Some(mut running) = std::fs::read(record)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Running>(&b).ok())
+    else {
+        return;
+    };
+    running.child = Some(child);
+    if let Err(e) = crate::cron::store::atomic_write_json(record, &running) {
+        log::warn!(
+            "gateway: cannot stamp turn child into {}: {e:#}",
+            record.display()
+        );
+    }
 }
 
 /// A finished turn, sent back from its task to the loop.
@@ -85,9 +148,11 @@ impl Brain {
         self.busy.len()
     }
 
-    /// Boot: every `running/` record is a turn that never finished. Its
-    /// events go back in the queue with `attempt + 1`; past
-    /// [`MAX_RECOVERY`] they are dropped and the owner is told.
+    /// Boot: every `running/` record is a turn that never finished. A child
+    /// of it still alive is killed first, so it cannot finish the turn on
+    /// disk while the turn runs again. Its events go back in the queue with
+    /// `attempt + 1`; past [`MAX_RECOVERY`] they are dropped and the owner
+    /// is told.
     pub fn recover(&mut self) {
         for path in event::spool_files(&self.dir.join("running")) {
             let record = std::fs::read(&path)
@@ -95,6 +160,7 @@ impl Brain {
                 .and_then(|b| serde_json::from_slice::<Running>(&b).ok());
             let _ = std::fs::remove_file(&path);
             let Some(record) = record else { continue };
+            reap_orphan(&self.dir, &record);
             for mut ev in record.events {
                 ev.attempt += 1;
                 if ev.attempt > MAX_RECOVERY {
@@ -180,6 +246,7 @@ impl Brain {
             key: key.to_string(),
             events: events.clone(),
             started_at: now,
+            child: None,
         };
         let record_path = self.dir.join("running").join(format!("{turn}.json"));
         if let Err(e) = crate::cron::store::atomic_write_json(&record_path, &record) {
@@ -217,6 +284,7 @@ impl Brain {
                 .or_else(dirs_home)
                 .unwrap_or_else(|| PathBuf::from("/")),
             timeout: Duration::from_secs(self.settings.turn_timeout_secs.max(30)),
+            running: Some(record_path),
         };
         super::activity::log(
             &self.dir,
@@ -309,6 +377,72 @@ impl Brain {
             task.abort();
         }
     }
+}
+
+/// A turn child that outlived its daemon keeps appending to its session and
+/// can finish the turn on disk: SIGKILL it (and its group) before the turn is
+/// re-queued. A dead or recycled pid is left alone.
+fn reap_orphan(dir: &Path, record: &Running) {
+    let Some(child) = record.child.as_ref().filter(|c| c.alive()) else {
+        return;
+    };
+    let killed = kill_child(child);
+    let deadline = std::time::Instant::now() + ORPHAN_GRACE;
+    while killed && child.alive() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if !killed {
+        log::warn!(
+            "gateway: turn {} child {} outlived the last run and could not be killed",
+            record.turn,
+            child.pid
+        );
+    }
+    super::activity::log(
+        dir,
+        "orphan_killed",
+        serde_json::json!({"key": record.key, "turn": record.turn,
+            "pid": child.pid, "killed": killed, "gone": !child.alive()}),
+    );
+}
+
+/// The group goes only while the child still leads it and it is not the
+/// daemon's own; otherwise just the child.
+#[cfg(unix)]
+fn kill_child(child: &ChildProc) -> bool {
+    if child.pid <= 1 || child.pid > i32::MAX as u32 || child.pid == std::process::id() {
+        return false;
+    }
+    let pid = child.pid as libc::pid_t;
+    // SAFETY: plain signal syscalls on a pid whose start time was just matched
+    // to this turn's child.
+    unsafe {
+        let group = child
+            .pgid
+            .and_then(|g| libc::pid_t::try_from(g).ok())
+            .filter(|&g| g > 1 && libc::getpgid(pid) == g && g != libc::getpgrp());
+        match group {
+            Some(g) => libc::kill(-g, libc::SIGKILL) == 0,
+            None => libc::kill(pid, libc::SIGKILL) == 0,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_child(_child: &ChildProc) -> bool {
+    false
+}
+
+/// Killed but not yet reaped by its new parent: dead, though its pid still
+/// answers. Reads `/proc`; where there is none nothing is a zombie.
+fn zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            let state = stat.rsplit_once(')')?.1.split_whitespace().next()?;
+            Some(state == "Z" || state == "X")
+        })
+        .unwrap_or(false)
 }
 
 fn dirs_home() -> Option<PathBuf> {
