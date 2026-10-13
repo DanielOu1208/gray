@@ -1019,10 +1019,31 @@ impl Tui {
                 .render(buf.area, buf);
         });
 
+        Ok(Self::base(
+            terminal,
+            cols,
+            rows,
+            welcome_lines,
+            vec![TranscriptEntry::Welcome],
+            pending_input,
+        ))
+    }
+
+    /// Field wiring shared by `new` (TTY terminal, welcome scrollback) and
+    /// the headless `test_tui`: `transcript`/`history_entries` carry the
+    /// caller's already-painted seed block, if any.
+    fn base(
+        terminal: Term,
+        cols: u16,
+        rows: u16,
+        transcript: Vec<Line<'static>>,
+        history_entries: Vec<TranscriptEntry>,
+        pending_input: Option<crossterm::event::Event>,
+    ) -> Self {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        Ok(Self {
+        Self {
             terminal,
             background: None,
             background_closed: false,
@@ -1063,8 +1084,8 @@ impl Tui {
             thinking_effort: String::new(),
             turn_show_effort: None,
             background_work: None,
-            history_entries: vec![TranscriptEntry::Welcome],
-            transcript: welcome_lines,
+            history_entries,
+            transcript,
             last_width: cols,
             last_height: rows,
             latest_usage: None,
@@ -1094,7 +1115,29 @@ impl Tui {
             home_qol: None,
             left_home: false,
             pending_input,
-        })
+        }
+    }
+
+    /// A `Tui` on a synthetic terminal for transcript tests: a real
+    /// `CustomTerminal` over the captured test stdout — `at_row` skips the
+    /// TTY/cursor probe `with_options` needs, so `Tui::new` stays TTY-only
+    /// while ordering tests drive the same emit paths. Assert on
+    /// `transcript` / `history_entries`, not the painted cells.
+    #[cfg(test)]
+    pub(crate) fn test_tui(cols: u16, rows: u16) -> Self {
+        Self::base(
+            CustomTerminal::at_row(
+                CrosstermBackend::new(std::io::stdout()),
+                ratatui::layout::Size::new(cols, rows),
+                0,
+                terminal::Scrollback::Regions,
+            ),
+            cols,
+            rows,
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
     }
 
     /// Puts the band back after an alternate-screen modal (codex

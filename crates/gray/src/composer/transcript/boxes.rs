@@ -26,6 +26,14 @@ impl Tui {
     }
 
     fn insert_tool_box_lines(&mut self, header: Vec<Line<'static>>, body: Vec<Line<'static>>) {
+        // Emission order: stream text still in flight (reveal buffer, held
+        // punctuation, the unfrozen markdown tail) was emitted before this
+        // card, so it commits and paints first. Callers flush only at
+        // `ToolCallStart`, while same-step deltas can keep arriving until
+        // `ToolResult`; the `drain_reveal` inside `emit_rows` ran after the
+        // history push and never reached the renderer tail, so that text
+        // painted and replayed below the step's cards.
+        self.flush_markdown();
         self.ensure_gap();
         let w = self.width().max(10);
         let box_lines = format_tool_box_lines_multi(&header, &body, w);
@@ -35,6 +43,8 @@ impl Tui {
     }
 
     fn insert_tool_box(&mut self, header: Line<'static>, body: Vec<Line<'static>>) {
+        // Same ordering invariant as `insert_tool_box_lines`.
+        self.flush_markdown();
         self.ensure_gap();
         let w = self.width().max(10);
         let box_lines = format_tool_box_lines(header.clone(), &body, w);
