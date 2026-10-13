@@ -197,11 +197,7 @@ pub(crate) fn strip_rationale_comments(body: &str) -> String {
         }
         out.push_str(line);
     }
-    if stripped {
-        out
-    } else {
-        body.to_string()
-    }
+    if stripped { out } else { body.to_string() }
 }
 
 /// Context-only builtin plugin serving the per-turn `<project_context>`

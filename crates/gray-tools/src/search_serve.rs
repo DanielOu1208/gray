@@ -48,7 +48,10 @@ struct Server {
 #[cfg(unix)]
 pub fn serve(root: &Path, sock: &Path) -> std::io::Result<()> {
     let root = root.canonicalize()?;
-    let home = root.to_str().ok_or_else(|| std::io::Error::other("root is not UTF-8"))?.to_string();
+    let home = root
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("root is not UTF-8"))?
+        .to_string();
     let index_dir = tempfile::Builder::new().prefix("gray-serve-").tempdir()?;
     // The watch goes in before the engine scans: anything written after this
     // point is reported, and anything before it is in the scan.
@@ -100,7 +103,9 @@ fn answer(server: &Server, mut stream: UnixStream) -> std::io::Result<()> {
 fn decide(server: &Server, line: &str) -> Value {
     let started = Instant::now();
     let mut reply = match serve_line(server, line) {
-        Ok((argv, files)) => json!({ "served": true, "argv": argv, "candidates": files.len(), "files": files }),
+        Ok((argv, files)) => {
+            json!({ "served": true, "argv": argv, "candidates": files.len(), "files": files })
+        }
         Err(why) => json!({ "served": false, "reason": why }),
     };
     reply["server_ms"] = json!(started.elapsed().as_secs_f64() * 1000.0);
@@ -114,7 +119,11 @@ fn serve_line(server: &Server, line: &str) -> Result<Answer, &'static str> {
     let req: Value = serde_json::from_str(line).map_err(|_| "bad request")?;
     let argv = req["argv"]
         .as_array()
-        .and_then(|a| a.iter().map(|x| x.as_str().map(str::to_string)).collect::<Option<Vec<_>>>())
+        .and_then(|a| {
+            a.iter()
+                .map(|x| x.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+        })
         .ok_or("bad request")?;
     let cwd = Path::new(req["cwd"].as_str().ok_or("bad request")?);
     match req["tool"].as_str() {
@@ -150,10 +159,13 @@ fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static
         }
         cache.as_ref().unwrap().clone()
     };
-    let unheld = unheld.iter().filter(|p| {
-        p.starts_with(scope_bytes)
-            && (p.len() == scope_bytes.len() || p.get(scope_bytes.len()) == Some(&b'/'))
-    }).cloned();
+    let unheld = unheld
+        .iter()
+        .filter(|p| {
+            p.starts_with(scope_bytes)
+                && (p.len() == scope_bytes.len() || p.get(scope_bytes.len()) == Some(&b'/'))
+        })
+        .cloned();
     let matched = server
         .engine
         .held_matches(scope_bytes, &plan.needles, plan.ignore_case)
@@ -163,7 +175,9 @@ fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static
     let mut found = Vec::new();
     for p in all {
         let path = Path::new(OsStr::from_bytes(&p));
-        let Ok(rel) = path.strip_prefix(&scope) else { continue };
+        let Ok(rel) = path.strip_prefix(&scope) else {
+            continue;
+        };
         if !walked(&plan, rel) || !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
             continue;
         }
@@ -180,12 +194,18 @@ fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static
 /// each component in its directory's `readdir` order, outermost first. This
 /// is the order fts gives with no comparator. `order` caches one directory
 /// listing per directory.
-fn walk_key(order: &mut HashMap<PathBuf, Option<HashMap<OsString, usize>>>, scope: &Path, rel: &Path) -> Option<Vec<usize>> {
+fn walk_key(
+    order: &mut HashMap<PathBuf, Option<HashMap<OsString, usize>>>,
+    scope: &Path,
+    rel: &Path,
+) -> Option<Vec<usize>> {
     let mut dir = scope.to_path_buf();
     let mut key = Vec::new();
     for c in rel.components() {
         let name = c.as_os_str();
-        let listing = order.entry(dir.clone()).or_insert_with(|| readdir_order(&dir));
+        let listing = order
+            .entry(dir.clone())
+            .or_insert_with(|| readdir_order(&dir));
         key.push(*listing.as_ref()?.get(name)?);
         dir.push(name);
     }
@@ -195,7 +215,11 @@ fn walk_key(order: &mut HashMap<PathBuf, Option<HashMap<OsString, usize>>>, scop
 /// Names of `dir` in `readdir` order. `None` for a directory past fts's
 /// inode-sort threshold, whose order we do not reproduce.
 fn readdir_order(dir: &Path) -> Option<HashMap<OsString, usize>> {
-    let names: Vec<OsString> = std::fs::read_dir(dir).ok()?.map(|e| e.map(|e| e.file_name())).collect::<Result<_, _>>().ok()?;
+    let names: Vec<OsString> = std::fs::read_dir(dir)
+        .ok()?
+        .map(|e| e.map(|e| e.file_name()))
+        .collect::<Result<_, _>>()
+        .ok()?;
     if names.len() > FTS_INODE_SORT_ENTRIES {
         return None;
     }
@@ -217,7 +241,10 @@ fn operand(root: &Path, cwd: &Path, plan: &GrepPlan) -> Result<(PathBuf, String)
     if !scope.starts_with(root) {
         return Err("operand outside the index root");
     }
-    if scope.file_name().is_some_and(|n| plan.walk.skips_dir(n.as_bytes())) {
+    if scope
+        .file_name()
+        .is_some_and(|n| plan.walk.skips_dir(n.as_bytes()))
+    {
         return Err("operand excluded by --exclude-dir");
     }
     let trimmed = plan.operand.trim_end_matches('/');

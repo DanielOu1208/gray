@@ -57,16 +57,27 @@ impl Watch {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        let mut inner = Inner { fd, dirs: HashMap::new(), touched: BTreeSet::new(), broken: false };
+        let mut inner = Inner {
+            fd,
+            dirs: HashMap::new(),
+            touched: BTreeSet::new(),
+            broken: false,
+        };
         add_tree(&mut inner, root)?;
-        Ok(Watch { inner: Mutex::new(inner) })
+        Ok(Watch {
+            inner: Mutex::new(inner),
+        })
     }
 
     /// Keep the queue empty between queries. Never returns.
     pub fn drain_forever(&self) {
         loop {
             self.drain();
-            let mut pfd = libc::pollfd { fd: self.inner.lock().unwrap().fd, events: libc::POLLIN, revents: 0 };
+            let mut pfd = libc::pollfd {
+                fd: self.inner.lock().unwrap().fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             unsafe { libc::poll(&mut pfd, 1, 200) };
         }
     }
@@ -99,7 +110,8 @@ impl Watch {
 /// Add a watch on `dir` and on every directory below it, recording the
 /// paths. Symlinks are not followed, as grep's recursion does not.
 fn add_tree(inner: &mut Inner, dir: &Path) -> io::Result<()> {
-    let c = CString::new(dir.as_os_str().as_bytes()).map_err(|_| io::Error::other("nul in path"))?;
+    let c =
+        CString::new(dir.as_os_str().as_bytes()).map_err(|_| io::Error::other("nul in path"))?;
     let wd = unsafe { libc::inotify_add_watch(inner.fd, c.as_ptr(), MASK) };
     if wd < 0 {
         return Err(io::Error::last_os_error());
@@ -132,7 +144,8 @@ fn read_events(inner: &mut Inner) {
         let mut at = 0usize;
         let n = n as usize;
         while at + std::mem::size_of::<libc::inotify_event>() <= n {
-            let ev: libc::inotify_event = unsafe { std::ptr::read_unaligned(buf[at..].as_ptr().cast()) };
+            let ev: libc::inotify_event =
+                unsafe { std::ptr::read_unaligned(buf[at..].as_ptr().cast()) };
             let name_at = at + std::mem::size_of::<libc::inotify_event>();
             let name_len = ev.len as usize;
             let name = &buf[name_at..name_at + name_len];
@@ -152,8 +165,14 @@ fn apply(inner: &mut Inner, wd: i32, mask: u32, name: &[u8]) {
         inner.dirs.remove(&wd);
         return;
     }
-    let Some(dir) = inner.dirs.get(&wd).cloned() else { return };
-    let path = if name.is_empty() { dir } else { dir.join(std::ffi::OsStr::from_bytes(name)) };
+    let Some(dir) = inner.dirs.get(&wd).cloned() else {
+        return;
+    };
+    let path = if name.is_empty() {
+        dir
+    } else {
+        dir.join(std::ffi::OsStr::from_bytes(name))
+    };
     // A directory that appears (created, or moved in) may already hold files
     // the watch never saw: watch it and report all of them.
     if mask & libc::IN_ISDIR != 0 && mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0 {
@@ -164,7 +183,9 @@ fn apply(inner: &mut Inner, wd: i32, mask: u32, name: &[u8]) {
         let mut stack = vec![path.clone()];
         while let Some(d) = stack.pop() {
             inner.touched.insert(d.as_os_str().as_bytes().to_vec());
-            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
             for e in rd.flatten() {
                 if e.file_name().to_str().is_none() {
                     inner.broken = true;

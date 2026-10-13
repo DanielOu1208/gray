@@ -35,7 +35,9 @@ impl Walk {
     /// decides; with none matching, the file is kept unless the first rule
     /// is an include.
     pub fn keeps_file(&self, name: &[u8]) -> bool {
-        let Ok(name) = std::str::from_utf8(name) else { return false };
+        let Ok(name) = std::str::from_utf8(name) else {
+            return false;
+        };
         let mut verdict = None;
         for (include, m) in &self.rules {
             if m.is_match(name) {
@@ -108,7 +110,8 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
                     ignore_case = true;
                     argv.push(a.to_string());
                 }
-                "word-regexp" | "line-regexp" | "line-number" | "files-with-matches" | "only-matching" | "no-messages" | "quiet" | "silent" => {
+                "word-regexp" | "line-regexp" | "line-number" | "files-with-matches"
+                | "only-matching" | "no-messages" | "quiet" | "silent" => {
                     argv.push(a.to_string());
                 }
                 "with-filename" => {
@@ -228,7 +231,13 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
         argv.push("-e".into());
         argv.push(p);
     }
-    Ok(GrepPlan { argv, operand: operand.clone(), needles, ignore_case, walk })
+    Ok(GrepPlan {
+        argv,
+        operand: operand.clone(),
+        needles,
+        ignore_case,
+        walk,
+    })
 }
 
 fn glob(pat: &str) -> Result<GlobMatcher, &'static str> {
@@ -245,7 +254,11 @@ pub fn needles_for(pattern: &str, syntax: Syntax, ignore_case: bool) -> Option<V
     };
     let mut out = Vec::new();
     for b in branches {
-        let runs = if syntax == Syntax::Fixed { vec![b] } else { required_runs(&b, syntax == Syntax::Extended)? };
+        let runs = if syntax == Syntax::Fixed {
+            vec![b]
+        } else {
+            required_runs(&b, syntax == Syntax::Extended)?
+        };
         let best = runs
             .into_iter()
             .filter(|r| r.len() >= MIN_NEEDLE && (!ignore_case || folds_safely(r)))
@@ -259,7 +272,10 @@ pub fn needles_for(pattern: &str, syntax: Syntax, ignore_case: bool) -> Option<V
 /// ASCII only, and free of the letters whose folds reach beyond ASCII (or
 /// whose upper case a locale folds to them).
 fn folds_safely(needle: &str) -> bool {
-    needle.is_ascii() && !needle.chars().any(|c| matches!(c.to_ascii_lowercase(), 'i' | 'k' | 's'))
+    needle.is_ascii()
+        && !needle
+            .chars()
+            .any(|c| matches!(c.to_ascii_lowercase(), 'i' | 'k' | 's'))
 }
 
 /// Split an ERE at its top-level `|`. `None` if the parentheses do not
@@ -376,7 +392,8 @@ fn bracket_end(cs: &[char], open: usize) -> Option<usize> {
         match cs[i] {
             '[' if matches!(cs.get(i + 1), Some(':' | '.' | '=')) => {
                 let delim = cs[i + 1];
-                let close = (i + 2..cs.len().saturating_sub(1)).find(|&j| cs[j] == delim && cs[j + 1] == ']')?;
+                let close = (i + 2..cs.len().saturating_sub(1))
+                    .find(|&j| cs[j] == delim && cs[j + 1] == ']')?;
                 i = close + 2;
             }
             ']' => return Some(i),

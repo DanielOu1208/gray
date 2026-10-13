@@ -47,18 +47,19 @@ pub(crate) fn stdin_gone() -> bool {
 /// case where that never gets scheduled.
 pub(crate) fn watch_dead_stdin() {
     static STARTED: AtomicBool = AtomicBool::new(false);
-    if STARTED.swap(true, Ordering::Relaxed)
-        || !std::io::IsTerminal::is_terminal(&std::io::stdin())
+    if STARTED.swap(true, Ordering::Relaxed) || !std::io::IsTerminal::is_terminal(&std::io::stdin())
     {
         return;
     }
-    std::thread::spawn(|| loop {
-        std::thread::sleep(Duration::from_millis(500));
-        if stdin_gone() {
-            // SAFETY: plain self-signal.
-            unsafe { libc::raise(libc::SIGHUP) };
-            std::thread::sleep(Duration::from_secs(2));
-            std::process::exit(129);
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(Duration::from_millis(500));
+            if stdin_gone() {
+                // SAFETY: plain self-signal.
+                unsafe { libc::raise(libc::SIGHUP) };
+                std::thread::sleep(Duration::from_secs(2));
+                std::process::exit(129);
+            }
         }
     });
 }

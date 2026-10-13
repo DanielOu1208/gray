@@ -1070,8 +1070,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         if line_cfg.command.is_some() {
             // The command runner snapshots FACTS; rebuilding and locking in
             // an identical payload every draw is waste — republish on change.
-            static LAST_FACTS_KEY: std::sync::Mutex<Option<String>> =
-                std::sync::Mutex::new(None);
+            static LAST_FACTS_KEY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
             let branch = crate::statusline::git_branch(std::path::Path::new(&tui.cwd));
             let key = format!(
                 "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
@@ -1092,16 +1091,16 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 _ => false,
             };
             if fresh {
-            crate::statusline::publish_facts(serde_json::json!({
-                "cwd": tui.cwd,
-                "workspace": { "current_dir": tui.cwd },
-                "model": { "id": tui.model_name, "display_name": model_display },
-                "effort": tui.thinking_effort,
-                "context": { "used_tokens": used_tokens, "max": max_label },
-                "cache_hit_rate": hit_rate,
-                "branch": branch,
-                "version": env!("CARGO_PKG_VERSION"),
-            }));
+                crate::statusline::publish_facts(serde_json::json!({
+                    "cwd": tui.cwd,
+                    "workspace": { "current_dir": tui.cwd },
+                    "model": { "id": tui.model_name, "display_name": model_display },
+                    "effort": tui.thinking_effort,
+                    "context": { "used_tokens": used_tokens, "max": max_label },
+                    "cache_hit_rate": hit_rate,
+                    "branch": branch,
+                    "version": env!("CARGO_PKG_VERSION"),
+                }));
             }
         }
         let left_len = 1 + seg_width(&left_segs);

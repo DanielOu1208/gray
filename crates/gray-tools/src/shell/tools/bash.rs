@@ -852,9 +852,7 @@ fn noop_segment(seg: &str, live_jobs: bool) -> Option<NoopFamily> {
         "cat" if rest.is_empty() => Some(NoopFamily::Plain),
         // A literal print returns exactly what the model wrote, unless it
         // transforms the text (escapes, `%`, echo flags): then it does work.
-        "echo" | "printf"
-            if rest.iter().all(|w| literal_word(w)) && verbatim_print(head, rest) =>
-        {
+        "echo" | "printf" if rest.iter().all(|w| literal_word(w)) && verbatim_print(head, rest) => {
             Some(NoopFamily::Plain)
         }
         // A timed stall only matters when a job exists to await; with none,

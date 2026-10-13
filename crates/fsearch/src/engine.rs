@@ -508,18 +508,21 @@ impl Engine {
             return None;
         }
         let home = self.s.home.as_bytes();
-        let (out, early) = self.s.with_names(Some(scope), |live| {
-            let mut want = content::wanted(live, home, scope, true);
-            want.sort();
-            let c = self.s.content.read().unwrap();
-            let mut out: Vec<Vec<u8>> = c.unheld(scope, true, &want).into_iter().map(|k| want.path(k).to_vec()).collect();
-            out.extend(c.not_text(scope, true));
-            drop(c);
-            out.extend(files_under(live, scope).into_iter().filter(|p| want.find(p).is_none()));
-            out.sort_unstable();
-            out.dedup();
-            out
-        }).ok()?;
+        let (out, early) = self
+            .s
+            .with_names(Some(scope), |live| {
+                let mut want = content::wanted(live, home, scope, true);
+                want.sort();
+                let c = self.s.content.read().unwrap();
+                let mut out: Vec<Vec<u8>> = c.unheld(scope, true, &want).into_iter().map(|k| want.path(k).to_vec()).collect();
+                out.extend(c.not_text(scope, true));
+                drop(c);
+                out.extend(files_under(live, scope).into_iter().filter(|p| want.find(p).is_none()));
+                out.sort_unstable();
+                out.dedup();
+                out
+            })
+            .ok()?;
         self.s.index_first(early);
         Some(out)
     }
@@ -798,7 +801,9 @@ fn files_under(live: &Live, scope: &[u8]) -> Vec<Vec<u8>> {
             }
         }
     }
-    out.extend(live.over.range(scope.to_vec()..).take_while(|(p, _)| under(p, scope)).filter(|(_, o)| o.kind & 3 == KIND_FILE).map(|(p, _)| p.clone()));
+    out.extend(
+        live.over.range(scope.to_vec()..).take_while(|(p, _)| under(p, scope)).filter(|(_, o)| o.kind & 3 == KIND_FILE).map(|(p, _)| p.clone()),
+    );
     out
 }
 

@@ -982,7 +982,11 @@ async fn bare_find_and_grep_are_not_claimed() {
     // The shim serves bare `grep`/`rg`; the gray verb's answer is not theirs.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "needle one\n").unwrap();
-    for cmd in ["grep needle", "grep -i needle a.txt", "find . -name '*.txt'"] {
+    for cmd in [
+        "grep needle",
+        "grep -i needle a.txt",
+        "find . -name '*.txt'",
+    ] {
         assert!(
             search_command(cmd, dir.path(), &CancellationToken::new())
                 .await

@@ -228,7 +228,9 @@ async fn run() -> anyhow::Result<()> {
             | gray::Commands::Grep { .. }
             | gray::Commands::Spill { .. }
             | gray::Commands::SearchServe { .. } => {
-                unreachable!("find/grep/spill/search-serve CLI dispatch happens before configuration")
+                unreachable!(
+                    "find/grep/spill/search-serve CLI dispatch happens before configuration"
+                )
             }
         }
     }

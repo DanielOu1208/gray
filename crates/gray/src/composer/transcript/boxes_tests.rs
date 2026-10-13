@@ -151,5 +151,8 @@ fn home_receipt_rows_indent_to_the_box_edge() {
     // A narrow terminal whose column sits inside the gutter clamps to 0
     // rather than panicking on the subtraction.
     let (narrow_x, _) = crate::composer::home_column(10);
-    assert_eq!(home_receipt_indent(true, 10), narrow_x.saturating_sub(GUTTER));
+    assert_eq!(
+        home_receipt_indent(true, 10),
+        narrow_x.saturating_sub(GUTTER)
+    );
 }
