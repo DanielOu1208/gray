@@ -179,42 +179,20 @@ impl Tui {
         if all_wrapped.is_empty() {
             return;
         }
-        let total_h = all_wrapped.len() as u16;
+        let bg = Some(crate::theme::theme().window());
+        let rows: Vec<crate::composer::BatchedInsert> = all_wrapped
+            .into_iter()
+            .map(|(line, hls)| (line, hls, bg))
+            .collect();
+        if let Some(batch) = &mut self.insert_batch {
+            batch.extend(rows);
+            return;
+        }
+        let total_h = rows.len() as u16;
         let _ = self.atomic(|t| {
             let _ = crate::composer::draw::settle_band(t);
             t.terminal.insert_before(total_h, |buf| {
-                let area = buf.area;
-                for (i, (line, hls)) in all_wrapped.iter().enumerate() {
-                    let row_area = ratatui::layout::Rect {
-                        x: area.x,
-                        y: area.y + i as u16,
-                        width: area.width,
-                        height: 1,
-                    };
-                    Paragraph::new(line.clone())
-                        .style(Style::default().bg(crate::theme::theme().window()))
-                        .render(row_area, buf);
-                    for h in hls {
-                        for col in h.column_range.clone() {
-                            let padded_col = col + GUTTER;
-                            if padded_col >= area.width as usize {
-                                continue;
-                            }
-                            let x = area.x + padded_col as u16;
-                            let y = area.y + i as u16;
-                            if x >= area.x + area.width || y >= area.y + area.height {
-                                continue;
-                            }
-                            let cell = &mut buf[(x, y)];
-                            if cell.symbol().trim().is_empty() {
-                                continue;
-                            }
-                            let sym = cell.symbol().to_string();
-                            let new_sym = format!("\x1b]8;;{}\x07{}\x1b]8;;\x07", h.url, sym);
-                            cell.set_symbol(&new_sym);
-                        }
-                    }
-                }
+                paint_insert_rows(buf, &rows);
             })
         });
     }
@@ -379,6 +357,7 @@ impl Tui {
         display: crate::tool_fmt::ToolDisplay<'_>,
     ) {
         self.left_home = true;
+        self.begin_insert_batch();
         let mut tool_calls: HashMap<String, (String, serde_json::Value)> = HashMap::new();
         for entry in entries {
             match entry.message.role {
@@ -539,6 +518,7 @@ impl Tui {
             .map(|e| crate::compact::estimate_tokens(&e.message))
             .sum();
         self.seed_estimate_usage(replay_estimate);
+        self.end_insert_batch();
         // pi-style: seam gap provided by viewport box padding, not transcript trailing blank
     }
 }

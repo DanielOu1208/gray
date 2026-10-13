@@ -356,6 +356,11 @@ pub struct Tui {
     /// queue flushes in order when the flag drops; a resize reflow drops it
     /// instead — its clear + re-emit already repaints the stored rows.
     pub(crate) modal_pending: Vec<PendingInsert>,
+    /// Replay/reflow insert batch: while `Some`, the emit funnels collect
+    /// painted rows here instead of running an `insert_before` per block,
+    /// so a long transcript lands as one scroll instead of a visible
+    /// top-to-bottom cascade. [`Tui::end_insert_batch`] flushes it.
+    pub(crate) insert_batch: Option<Vec<BatchedInsert>>,
     /// Palette the scrollback was last painted under. Rows bake the window
     /// color into their cells, so a palette switch needs one re-emit (see
     /// [`Tui::repaint_for_palette`]).
@@ -560,6 +565,16 @@ pub(crate) enum PendingInsert {
     Rows(Vec<Line<'static>>, Option<ratatui::style::Color>),
     Styled(Vec<(Line<'static>, Vec<HyperlinkTarget>)>),
 }
+
+/// One row of a batched scrollback insert ([`Tui::insert_batch`]): the
+/// painted line, its OSC8 hyperlink targets, and the background its own
+/// block would have used (`None` = unstyled, the plain `insert_paragraph`
+/// pass with no card bg).
+pub(crate) type BatchedInsert = (
+    Line<'static>,
+    Vec<HyperlinkTarget>,
+    Option<ratatui::style::Color>,
+);
 
 #[derive(Clone, Debug)]
 pub enum TranscriptEntry {
@@ -1216,6 +1231,7 @@ impl Tui {
             allow_empty_submit: false,
             modal_open: false,
             modal_pending: Vec::new(),
+            insert_batch: None,
             painted_palette: crate::theme::theme(),
             queued_inputs: std::collections::VecDeque::new(),
             local_command: None,
@@ -1407,6 +1423,10 @@ impl Tui {
                 .push(PendingInsert::Rows(lines.to_vec(), bg));
             return;
         }
+        if let Some(batch) = &mut self.insert_batch {
+            batch.extend(lines.iter().cloned().map(|line| (line, Vec::new(), bg)));
+            return;
+        }
         let height = lines.len() as u16;
         self.atomic(|t| {
             let _ = draw::settle_band(t);
@@ -1496,6 +1516,7 @@ impl Tui {
         let w = new_cols as usize;
         self.transcript.clear();
         self.gap_owed = false;
+        self.begin_insert_batch();
         let entries = std::mem::take(&mut self.history_entries);
         for entry in &entries {
             match entry {
@@ -1549,6 +1570,7 @@ impl Tui {
             }
         }
         self.history_entries = entries;
+        self.end_insert_batch();
 
         let _ = self.draw();
     }
@@ -1929,6 +1951,33 @@ impl Tui {
             }
         }
         let _ = self.draw();
+    }
+
+    /// Batch scrollback inserts: while `insert_batch` is `Some`, the emit
+    /// funnels collect their rows instead of flushing an `insert_before`
+    /// per block, so replaying or re-emitting a long transcript lands as
+    /// one scroll rather than a visible top-to-bottom cascade.
+    pub(crate) fn begin_insert_batch(&mut self) {
+        self.insert_batch.get_or_insert_with(Vec::new);
+    }
+
+    /// One `insert_before` for everything `begin_insert_batch` collected:
+    /// rows in emit order, each with the bg and hyperlink targets its own
+    /// block would have painted. The band settles once, at the end.
+    pub(crate) fn end_insert_batch(&mut self) {
+        let Some(rows) = self.insert_batch.take() else {
+            return;
+        };
+        if rows.is_empty() {
+            return;
+        }
+        self.atomic(|t| {
+            let _ = draw::settle_band(t);
+            let total_h = rows.len() as u16;
+            let _ = t.terminal.insert_before(total_h, |buf| {
+                transcript::paint_insert_rows(buf, &rows);
+            });
+        });
     }
 
     pub(crate) fn draw(&mut self) -> anyhow::Result<()> {

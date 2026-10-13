@@ -26,6 +26,49 @@ pub(crate) use rows::{
     word_flush_cut, wrap_styled_line, wrap_styled_line_with_ranges,
 };
 
+/// Shared row paint for `insert_styled_rows` and `Tui::end_insert_batch`:
+/// each `(line, hyperlink targets, bg)` triple renders into `buf`'s
+/// matching row, then OSC8 targets patch at `GUTTER`-shifted columns.
+pub(crate) fn paint_insert_rows(
+    buf: &mut ratatui::buffer::Buffer,
+    rows: &[crate::composer::BatchedInsert],
+) {
+    let area = buf.area;
+    for (i, (line, hls, bg)) in rows.iter().enumerate() {
+        let row_area = ratatui::layout::Rect {
+            x: area.x,
+            y: area.y + i as u16,
+            width: area.width,
+            height: 1,
+        };
+        let mut p = Paragraph::new(line.clone());
+        if let Some(bg) = bg {
+            p = p.style(Style::default().bg(*bg));
+        }
+        p.render(row_area, buf);
+        for h in hls {
+            for col in h.column_range.clone() {
+                let padded_col = col + GUTTER;
+                if padded_col >= area.width as usize {
+                    continue;
+                }
+                let x = area.x + padded_col as u16;
+                let y = area.y + i as u16;
+                if x >= area.x + area.width || y >= area.y + area.height {
+                    continue;
+                }
+                let cell = &mut buf[(x, y)];
+                if cell.symbol().trim().is_empty() {
+                    continue;
+                }
+                let sym = cell.symbol().to_string();
+                let new_sym = format!("\x1b]8;;{}\x07{}\x1b]8;;\x07", h.url, sym);
+                cell.set_symbol(&new_sym);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tui transcript methods (batch insert_before)
 // ---------------------------------------------------------------------------
