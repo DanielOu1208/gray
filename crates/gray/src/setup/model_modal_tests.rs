@@ -850,6 +850,39 @@ fn composite_rows_lead_and_the_plain_rows_keep_their_order() {
 }
 
 #[test]
+fn a_composite_leads_the_sorted_list_above_the_active_model() {
+    // A composite can sit in the recents head: a Fusion pick is saved as the
+    // model, and switching away records it. Recency must not park it under
+    // the active model; the composite leads whether or not it is recent.
+    let fusion = "picker-test/fusion-lead";
+    let shape = fusion_shape();
+    cache_row_shape(fusion, shape.variants, shape.slots);
+    let list = || {
+        vec![
+            ("a/sonnet".to_string(), "Sonnet".to_string()),
+            (fusion.to_string(), "Fusion".to_string()),
+            ("a/opus".to_string(), "Opus".to_string()),
+        ]
+    };
+    let recent: SavedConfig = serde_json::from_value(serde_json::json!({
+        "base_url": "https://a/v1", "model": "a/opus",
+        "recent_models": {"https://a/v1": ["a/opus", fusion]}
+    }))
+    .unwrap();
+    let bare: SavedConfig = serde_json::from_value(serde_json::json!({
+        "base_url": "https://a/v1", "model": "a/opus"
+    }))
+    .unwrap();
+    for saved in [&recent, &bare] {
+        let mut models = list();
+        saved.sort_models("https://a/v1", &mut models);
+        let ids: Vec<&str> = models.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, [fusion, "a/opus", "a/sonnet"], "{ids:?}");
+    }
+    cache_row_shape(fusion, Vec::new(), Vec::new());
+}
+
+#[test]
 fn the_blank_gap_takes_a_slot_and_never_a_row() {
     for gap in [None, Some(1), Some(4)] {
         for row in 0..5 {
