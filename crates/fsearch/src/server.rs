@@ -955,4 +955,3 @@ pub fn connect(dir: &Path) -> std::io::Result<UnixStream> {
     }
     UnixStream::connect(&sock)
 }
-

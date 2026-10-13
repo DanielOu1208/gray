@@ -514,9 +514,7 @@ impl Engine {
             // Until the first sync finishes there is pending work its
             // counter doesn't hold yet: report it so `pending == 0` means settled.
             content_pending: self.s.content_pending.load(Ordering::Relaxed) + usize::from(!self.s.content_ready.load(Ordering::Acquire)),
-            root_missing: l
-                .as_ref()
-                .is_some_and(|l| l.root_missing.load(Ordering::Relaxed)),
+            root_missing: l.as_ref().is_some_and(|l| l.root_missing.load(Ordering::Relaxed)),
             full_disk_access: walk::SKIP.get().is_none(),
             owner: self.s.owner(),
         }
@@ -1094,11 +1092,7 @@ fn relist_changed(shared: &Shared, why: &str, flags: u32) {
         let live = g.as_ref().unwrap();
         let missing = crate::live::lstat(&live.root).is_none();
         let was = live.root_missing.fetch_or(missing, Ordering::Relaxed);
-        let from = if missing || was {
-            0
-        } else {
-            live.synced_at.saturating_sub(SYNC_MARGIN)
-        };
+        let from = if missing || was { 0 } else { live.synced_at.saturating_sub(SYNC_MARGIN) };
         (from, live.changed_dirs(from))
     };
     dirs.extend(shared.content.read().unwrap().changed_dirs(from));
@@ -1229,8 +1223,7 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
         // A replaced stream can still have batches in flight; the stream
         // that took over replays what they carried, so they are dropped —
         // an old stream's HISTORY_DONE must not end the new one's replay.
-        let stale =
-            drop_stale_events(&mut events, shared.streams.load(Ordering::Relaxed));
+        let stale = drop_stale_events(&mut events, shared.streams.load(Ordering::Relaxed));
         if stale > 0 {
             log(format!("dropped {stale} events from a replaced stream"));
         }
@@ -1383,12 +1376,7 @@ mod tests {
 
     #[test]
     fn drops_replaced_stream_events() {
-        let ev = |stream: u32| fsevents::Event {
-            path: b"/x".to_vec(),
-            flags: 0,
-            id: 0,
-            stream,
-        };
+        let ev = |stream: u32| fsevents::Event { path: b"/x".to_vec(), flags: 0, id: 0, stream };
         // Stream 1 was replaced by 2; its queued events die. 0 is synthetic.
         let mut v = vec![ev(1), ev(0), ev(2), ev(1)];
         assert_eq!(drop_stale_events(&mut v, 2), 2);

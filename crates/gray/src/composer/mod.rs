@@ -1745,7 +1745,6 @@ impl Tui {
 
     /// opencode `prompt.paste` (ctrl+v): image attach first, then OS
 
-
     pub fn begin_turn(&mut self, label: &str) {
         // The first real turn ends the home screen — slash commands and
         // their modals never reach here.
