@@ -37,15 +37,14 @@ pub(crate) fn exit_session() -> Option<String> {
 
 /// Which session is live and the shell line that reattaches to it. The
 /// Ctrl+C exit hint's contents, shown by `/sessions` before the picker.
-pub(crate) fn current_session_line(session_state: &Option<SessionState>) -> String {
-    match session_state.as_ref() {
-        Some(s) => format!(
+pub(crate) fn current_session_line(session_state: &Option<SessionState>) -> Option<String> {
+    session_state.as_ref().map(|s| {
+        format!(
             "session {} · {}",
             s.session_id,
             exit_hint_line(s.session_id.as_str(), false)
-        ),
-        None => "no session yet — the first turn creates one".into(),
-    }
+        )
+    })
 }
 
 pub(crate) fn exit_hint_line(session_id: &str, styled: bool) -> String {
@@ -112,8 +111,8 @@ pub(crate) async fn handle_resume(
         // While the home screen is up the box lead already paints this row;
         // a transcript copy would stack once per `/sessions`.
         let at_home = tui.is_some_and(|s| s.lock().expect("tui lock").is_home());
-        if !at_home {
-            say(tui, &current_session_line(session_state));
+        if !at_home && let Some(line) = current_session_line(session_state) {
+            say(tui, &line);
         }
     }
     let bg = tui.as_ref().map(|s| s.lock().expect("tui lock").snapshot());

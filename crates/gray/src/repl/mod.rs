@@ -926,8 +926,8 @@ pub async fn run_repl_mode(
         t.set_hide_thinking(config.reasoning_hidden());
         t.set_cwd(cwd.display().to_string());
         // The session row over the home box — the same line `/sessions`
-        // reports ("no session yet" until the first turn mints one).
-        t.set_home_session(Some(session::current_session_line(&session_state)));
+        // reports. Nothing shows until the first turn mints a session.
+        t.set_home_session(session::current_session_line(&session_state));
         if let Some((ref sid, ref entries)) = resumed_session_info {
             // Paint the band before the replay inserts: the composer is
             // on screen while the transcript builds above it instead of
