@@ -1279,6 +1279,22 @@ pub async fn run_repl_mode(
                         }
                         images.extend(m.attachments.iter().cloned());
                     }
+                    // Claimed sends left the inbox: refresh the queued
+                    // preview so any send that just arrived stays visible.
+                    if let Some((shared, _)) = tui.as_ref() {
+                        let mut t = shared.lock().expect("tui lock");
+                        if let (Ok(home), Some(sid)) = (crate::setup::gray_home(), sid.as_deref()) {
+                            t.queued_sends = crate::session_send::peek_sends(&home, sid)
+                                .into_iter()
+                                .map(|m| {
+                                    (
+                                        crate::session_send::prompt_for(&m.from, &m.text),
+                                        m.attachments,
+                                    )
+                                })
+                                .collect();
+                        }
+                    }
                     crate::session_send::mark_delivered(&sends);
                     let turn = prompt_turn::run_prompt_turn(
                         prompt,

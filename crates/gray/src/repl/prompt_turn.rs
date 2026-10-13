@@ -653,14 +653,33 @@ fn steer_direct_send(
     sid: Option<&str>,
 ) -> Option<String> {
     let home = crate::setup::gray_home().ok()?;
-    let msg = crate::session_send::claim_steerable(&home, sid?)?;
-    let text = crate::session_send::prompt_for(&msg.from, &msg.text);
+    let sid = sid?;
+    let msg = crate::session_send::claim_steerable(&home, sid);
     if let Some(shared) = tui {
+        // Show every send still waiting, claimed or not — a send must never
+        // be invisible until it lands.
+        let pending: Vec<(String, Vec<std::path::PathBuf>)> =
+            crate::session_send::peek_sends(&home, sid)
+                .into_iter()
+                .map(|m| {
+                    (
+                        crate::session_send::prompt_for(&m.from, &m.text),
+                        m.attachments,
+                    )
+                })
+                .collect();
         let mut t = shared.lock().expect("tui lock");
-        t.push_user_prompt(&text, &[], true);
-        let _ = t.draw();
+        if t.queued_sends != pending {
+            t.queued_sends = pending;
+            let _ = t.draw();
+        }
+        if let Some(msg) = &msg {
+            let text = crate::session_send::prompt_for(&msg.from, &msg.text);
+            t.push_user_prompt(&text, &[], true);
+            let _ = t.draw();
+        }
     }
-    Some(text)
+    msg.map(|m| crate::session_send::prompt_for(&m.from, &m.text))
 }
 
 /// [`take_steerable`] against the live composer.

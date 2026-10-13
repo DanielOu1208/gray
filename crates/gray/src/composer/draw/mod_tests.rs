@@ -138,10 +138,10 @@ fn the_tail_margin_is_the_one_gap_above_the_status_line() {
 fn queued_preview_renders_header_and_entries() {
     let mut q: std::collections::VecDeque<(String, Vec<std::path::PathBuf>)> =
         std::collections::VecDeque::new();
-    assert!(queued_preview_lines(&q, 80).is_empty());
+    assert!(queued_preview_lines(&q, &[], 80).is_empty());
     q.push_back(("hello".to_string(), vec![]));
     q.push_back(("second\nline".to_string(), vec![]));
-    let lines = queued_preview_lines(&q, 80);
+    let lines = queued_preview_lines(&q, &[], 80);
     assert_eq!(lines.len(), 4); // header + 2 entries + separator
     assert!(lines.last().is_some_and(|line| line.spans.is_empty()));
     let text: String = lines

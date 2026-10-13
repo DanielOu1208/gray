@@ -486,9 +486,11 @@ pub(crate) fn tail_block_h(kept: u16, gap: u16) -> u16 {
 /// One row per queued message, first line only, truncated to `w`.
 pub(crate) fn queued_preview_lines(
     queued: &std::collections::VecDeque<(String, Vec<std::path::PathBuf>)>,
+    sends: &[(String, Vec<std::path::PathBuf>)],
     w: usize,
 ) -> Vec<Line<'static>> {
-    if queued.is_empty() {
+    let total = queued.len() + sends.len();
+    if total == 0 {
         return Vec::new();
     }
     let dim = Style::default().fg(crate::theme::theme().text_muted);
@@ -498,11 +500,11 @@ pub(crate) fn queued_preview_lines(
         .add_modifier(Modifier::ITALIC);
     let mut lines = vec![Line::from(vec![
         Span::styled("• ", dim),
-        Span::styled(format!("Queued follow-up inputs ({})", queued.len()), dim),
+        Span::styled(format!("Queued follow-up inputs ({total})"), dim),
     ])];
     // Viewport is only 10 rows — cap preview so input + footer stay visible.
     let max_show = 3usize;
-    for (text, attached) in queued.iter().take(max_show) {
+    for (text, attached) in queued.iter().chain(sends.iter()).take(max_show) {
         let first = text.lines().next().unwrap_or("").trim();
         let mut preview: String = first.chars().take(w.saturating_sub(6).max(8)).collect();
         if first.chars().count() > preview.chars().count() {

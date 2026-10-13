@@ -251,6 +251,28 @@ pub fn claim_all(home: &Path, session: &str) -> Vec<SendMsg> {
     out
 }
 
+/// Every ready send for `session`, oldest first, without claiming — the
+/// rows the TUI shows as queued while a turn runs. Held and cron entries
+/// are skipped exactly as the claim paths skip them.
+pub fn peek_sends(home: &Path, session: &str) -> Vec<SendMsg> {
+    let Some(dir) = cron_serve::session_inbox(home, session) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for path in pending_files(&dir) {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !is_send_entry(&text) || is_held(&text) {
+            continue;
+        }
+        if let Some(msg) = parse_send(&text, session) {
+            out.push(msg);
+        }
+    }
+    out
+}
+
 /// Claims the oldest ready text-only send for `session` to steer a running
 /// turn. Sends with attachments stay queued for the idle turn that can carry them.
 pub fn claim_steerable(home: &Path, session: &str) -> Option<SendMsg> {

@@ -74,6 +74,7 @@ async fn run() -> anyhow::Result<()> {
     if let Some(gray::Commands::Spill { cmd }) = &cli.command {
         return gray::spill::run_cli(cmd);
     }
+    #[cfg(unix)]
     if let Some(gray::Commands::SearchServe { root, sock }) = &cli.command {
         return Ok(gray_tools::search_serve::serve(root, sock)?);
     }

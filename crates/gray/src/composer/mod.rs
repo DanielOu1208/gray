@@ -366,6 +366,10 @@ pub struct Tui {
     /// [`Tui::repaint_for_palette`]).
     pub(crate) painted_palette: crate::theme::UiTheme,
     pub queued_inputs: std::collections::VecDeque<(String, Vec<PathBuf>)>,
+    /// `gray send` entries still waiting in this session's inbox, shown in
+    /// the queued preview so a send is never invisible until it lands.
+    /// Display-only: claiming lives in session_send, not here.
+    pub queued_sends: Vec<(String, Vec<PathBuf>)>,
     /// Slash command submitted via Esc mid-turn: cancel + run locally, never to the AI.
     pub local_command: Option<String>,
     pending: String,
@@ -1235,6 +1239,7 @@ impl Tui {
             insert_batch: None,
             painted_palette: crate::theme::theme(),
             queued_inputs: std::collections::VecDeque::new(),
+            queued_sends: Vec::new(),
             local_command: None,
             pending: String::new(),
             thinking: false,

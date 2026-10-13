@@ -256,7 +256,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let status_h: u16 = status_dock_h(tui.status.is_some(), needs_seam);
     // Row offset of the status text inside its dock: below the seam.
     let seam_h: u16 = u16::from(needs_seam);
-    let n = tui.queued_inputs.len();
+    let n = tui.queued_inputs.len() + tui.queued_sends.len();
     let queued_est: u16 = if n == 0 {
         0
     } else {
@@ -473,7 +473,8 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
 
         let status_y = area.y;
         // Queued preview sits between status and input.
-        let mut queued_preview: Vec<Line<'static>> = queued_preview_lines(&tui.queued_inputs, w);
+        let mut queued_preview: Vec<Line<'static>> =
+            queued_preview_lines(&tui.queued_inputs, &tui.queued_sends, w);
         // Live tool cards (pi pending cards): wrapped at the frame width
         // like every other viewport row; `live_h` reserves their space.
         let mut live_rows: Vec<Line<'static>> = Vec::new();

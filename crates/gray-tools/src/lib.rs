@@ -18,8 +18,11 @@ pub mod search_cmd;
 #[cfg(unix)]
 pub mod search_index_fs;
 pub mod search_plan;
+#[cfg(unix)]
 pub mod search_serve;
+#[cfg(unix)]
 pub mod search_shim;
+#[cfg(unix)]
 pub mod search_watch;
 pub mod shell;
 pub mod stats;
