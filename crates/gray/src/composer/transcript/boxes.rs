@@ -320,8 +320,19 @@ impl Tui {
                 Style::default().fg(crate::theme::theme().text_muted),
             ));
         }
-        let line = Line::from(spans);
+        let line = self.indent_home_receipt(Line::from(spans));
         self.push_styled_lines_with_hyperlinks(vec![line], &[], 0);
+    }
+
+    /// Shifts a receipt row (`push_action` / `push_warning`) onto the home
+    /// column's left edge while the home screen owns the layout — see
+    /// [`home_receipt_indent`]. Identity off home.
+    fn indent_home_receipt(&self, mut line: Line<'static>) -> Line<'static> {
+        let indent = home_receipt_indent(self.is_home(), self.width());
+        if indent > 0 {
+            line.spans.insert(0, Span::raw(" ".repeat(indent)));
+        }
+        line
     }
 
     /// One warning row (⚠ …): the warning twin of
@@ -341,6 +352,7 @@ impl Tui {
                 Style::default().fg(crate::theme::theme().text_soft),
             ),
         ]);
+        let line = self.indent_home_receipt(line);
         self.push_styled_lines_with_hyperlinks(vec![line], &[], 0);
     }
 
@@ -599,6 +611,21 @@ pub(crate) fn rebase_hyperlinks_for_slice(
             Some(hc)
         })
         .collect()
+}
+
+/// Extra left indent for a receipt row (`push_action`, `push_warning`)
+/// while the home screen owns the layout. Receipts paint in the transcript,
+/// whose rows start at `GUTTER`; the home screen instead centers its block on
+/// `home_column`, so an announcement about the box landed at screen-left while
+/// the box sat ~30% in. Pad content to the box's left edge — the emit path
+/// adds `left_pad()` (GUTTER) on top, so the content pad is `x - GUTTER`.
+/// Off home (or when the column sits inside the gutter) returns zero and the
+/// row keeps the usual transcript column.
+pub(crate) fn home_receipt_indent(home: bool, width: usize) -> usize {
+    if !home {
+        return 0;
+    }
+    crate::composer::home_column(width).0.saturating_sub(GUTTER)
 }
 
 /// Rows for a turn-ending error: first line (`✗ Rate limited (retryable):

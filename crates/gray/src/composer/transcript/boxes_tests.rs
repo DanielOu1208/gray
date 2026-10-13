@@ -139,3 +139,17 @@ fn other_header_details_stay_inline_when_they_fit() {
     let rows = super::cards::header_rows(header, 80);
     assert_eq!(rows.len(), 1);
 }
+
+#[test]
+fn home_receipt_rows_indent_to_the_box_edge() {
+    // Off home the indent is zero — receipts keep the transcript gutter.
+    assert_eq!(home_receipt_indent(false, 160), 0);
+    // On home the row lands on the home column's left edge; the emit
+    // path adds `left_pad()` itself, so content pad is x - GUTTER.
+    let (x, _) = crate::composer::home_column(160);
+    assert_eq!(home_receipt_indent(true, 160), x - GUTTER);
+    // A narrow terminal whose column sits inside the gutter clamps to 0
+    // rather than panicking on the subtraction.
+    let (narrow_x, _) = crate::composer::home_column(10);
+    assert_eq!(home_receipt_indent(true, 10), narrow_x.saturating_sub(GUTTER));
+}
