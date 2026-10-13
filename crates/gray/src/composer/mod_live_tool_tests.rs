@@ -175,3 +175,75 @@ fn multi_line_card_draws_both_header_rows_then_body() {
         "body missing: {texts:?}"
     );
 }
+
+/// Emission order across one step: assistant text streamed between
+/// `ToolCallStart` and `ToolResult` is still in the reveal buffer / unfrozen
+/// markdown tail when the result card commits. `insert_tool_box_lines` must
+/// drain it first so `transcript` (live rows) and `history_entries` (reflow
+/// replay) both keep text-before-cards, and stay ordered when a later
+/// step's card arrives.
+#[test]
+fn tool_card_commit_keeps_emission_order_with_stream_text() {
+    let mut tui = Tui::test_tui(80, 30);
+    tui.is_task_running = true;
+    tui.enable_reveal_pacing();
+
+    let card = |tag: &str| vec![Line::from(vec![Span::raw(format!("bash {tag} card"))])];
+    let row_idx = |tui: &Tui, needle: &str| {
+        tui.transcript.iter().position(|l| row_text(l).contains(needle))
+    };
+    let entry_idx = |tui: &Tui, needle: &str| {
+        tui.history_entries.iter().position(|e| match e {
+            TranscriptEntry::StyledLines { lines, .. } => {
+                lines.iter().any(|l| row_text(l).contains(needle))
+            }
+            TranscriptEntry::ToolBoxLines { header, .. } => {
+                header.iter().any(|l| row_text(l).contains(needle))
+            }
+            _ => false,
+        })
+    };
+
+    // Prose, then the ToolCallStart arm (flush + boundary + live card).
+    tui.stream_text("alpha paragraph\n\n");
+    tui.flush_markdown();
+    tui.end_thinking();
+    tui.mark_stream_round_boundary();
+    tui.upsert_live_tool("t1", "bash", card("one"), false);
+    // The same message keeps emitting text while the tool runs; it is still
+    // uncommitted when ToolResult pushes the scrollback card.
+    tui.stream_text("beta paragraph");
+    tui.remove_live_tool("t1");
+    tui.push_tool_box_lines(card("one"), vec![Line::from("done")]);
+
+    // A later step repeats the shape; ordering must hold across both.
+    tui.stream_text("gamma paragraph");
+    tui.remove_live_tool("t2");
+    tui.push_tool_box_lines(card("two"), vec![Line::from("done")]);
+
+    let needles = [
+        "alpha paragraph",
+        "beta paragraph",
+        "one card",
+        "gamma paragraph",
+        "two card",
+    ];
+    let rows: Vec<usize> = needles
+        .iter()
+        .map(|n| row_idx(&tui, n).unwrap_or_else(|| panic!("transcript row missing: {n}")))
+        .collect();
+    let entries: Vec<usize> = needles
+        .iter()
+        .map(|n| {
+            entry_idx(&tui, n).unwrap_or_else(|| panic!("history entry missing: {n}"))
+        })
+        .collect();
+    assert!(
+        rows.windows(2).all(|w| w[0] < w[1]),
+        "transcript rows out of emission order: {rows:?}"
+    );
+    assert!(
+        entries.windows(2).all(|w| w[0] < w[1]),
+        "history entries out of emission order: {entries:?}"
+    );
+}
