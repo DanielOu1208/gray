@@ -83,6 +83,10 @@ pub(crate) fn chip_cells(
     cells
 }
 
+/// `wrap_line`'s return: each visual row's `start..end` char range plus
+/// the cursor's `(row, col)` when a cursor position was given.
+type WrapResult = (Vec<(usize, usize)>, Option<(usize, usize)>);
+
 /// Splits one logical input line into visual rows no wider than `content_w`,
 /// word-aware (break after the last space in the window, hard-cut only a word
 /// too long for a row). Returns each row as a `start..end` char range, and the
@@ -93,7 +97,7 @@ pub(crate) fn wrap_line(
     chars: &[char],
     content_w: usize,
     cursor: Option<usize>,
-) -> (Vec<(usize, usize)>, Option<(usize, usize)>) {
+) -> WrapResult {
     let mut rows: Vec<(usize, usize)> = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {

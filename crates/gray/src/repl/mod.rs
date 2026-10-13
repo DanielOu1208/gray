@@ -1052,8 +1052,12 @@ pub async fn run_repl_mode(
                 && let Some(line) = outcome.notice()
                 && let Ok(mut t) = shared.lock()
             {
-                t.push_dim(line);
-                t.ensure_gap();
+                if t.is_home() {
+                    t.set_home_update(Some(line));
+                } else {
+                    t.push_dim(line);
+                    t.ensure_gap();
+                }
             }
         });
     }
