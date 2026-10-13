@@ -6,49 +6,11 @@ use super::*;
 // Attachment helpers — verbatim from mod.rs 759-885
 // ---------------------------------------------------------------------------
 
-/// Placeholder index across both `[Image #n]` (images) and `[File #n]` (pdf/video/other).
-fn placeholder_index(ph: &str) -> Option<usize> {
-    ph.strip_prefix("[Image #")
-        .or_else(|| ph.strip_prefix("[File #"))
-        .and_then(|s| s.strip_suffix(']'))
-        .and_then(|n| n.parse::<usize>().ok())
-}
-
+/// Attaches a file as a chip above the draft. The chip is the only thing
+/// that marks it, so the draft text stays exactly what was typed.
 pub(crate) fn attach_image(tui: &mut Tui, path: PathBuf) {
-    let mut max_idx = 0;
-    for (ph, _) in &tui.attachments {
-        if let Some(n) = placeholder_index(ph) {
-            max_idx = max_idx.max(n);
-        }
-    }
-    let text = tui.textarea.text().to_string();
-    for prefix in ["[Image #", "[File #"] {
-        for cap in text.match_indices(prefix) {
-            let substr = &text[cap.0..];
-            if let Some(end) = substr.find(']') {
-                let num_str = &substr[prefix.len()..end];
-                if let Ok(n) = num_str.parse::<usize>() {
-                    max_idx = max_idx.max(n);
-                }
-            }
-        }
-    }
-    let idx = max_idx + 1;
-    let placeholder = if crate::repl::attachments::attachment_kind(&path)
-        == crate::repl::attachments::AttachmentKind::Image
-    {
-        format!("[Image #{idx}]")
-    } else {
-        format!("[File #{idx}]")
-    };
-    tui.textarea.insert_element(&placeholder);
-    tui.attachments.push((placeholder.clone(), path));
+    tui.attachments.push(path);
     let _ = tui.draw();
-}
-
-pub(crate) fn sync_attachments(tui: &mut Tui) {
-    let text = tui.textarea.text().to_string();
-    tui.attachments.retain(|(ph, _)| text.contains(ph));
 }
 
 /// Max attachable file size. `repl::attachments` caps only oversized

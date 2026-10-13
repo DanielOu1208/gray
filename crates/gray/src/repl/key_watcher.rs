@@ -453,10 +453,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                                 continue;
                             }
                             let attached: Vec<std::path::PathBuf> =
-                                std::mem::take(&mut t.attachments)
-                                    .into_iter()
-                                    .map(|(_, p)| p)
-                                    .collect();
+                                std::mem::take(&mut t.attachments);
                             // Queued — fleeting, not transcript (becomes a
                             // real prompt when dequeued).
                             t.queued_inputs.push_back((text, attached));

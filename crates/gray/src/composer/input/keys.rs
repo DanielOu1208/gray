@@ -98,7 +98,7 @@ fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
             edited
         }
         Action::Clear => Some(Clear),
-        Action::Exit => tui.textarea.is_empty().then_some(Exit),
+        Action::Exit => (!super::has_draft(tui)).then_some(Exit),
         Action::Interrupt => Some(Interrupt),
         Action::PasteClipboard => {
             super::paste_from_system_clipboard(tui);
@@ -173,7 +173,17 @@ fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
             tui.textarea.set_cursor(p);
             edited
         }
-        Action::DeleteCharBackward => edit(tui, |t| t.textarea.delete_backward()),
+        Action::DeleteCharBackward => {
+            // Chips live outside the text, so Backspace at the very start
+            // (or on an empty draft) takes the last chip instead.
+            if tui.textarea.cursor() == 0 && !tui.attachments.is_empty() {
+                tui.attachments.pop();
+                tui.sel = 0;
+                edited
+            } else {
+                edit(tui, |t| t.textarea.delete_backward())
+            }
+        }
         Action::DeleteCharForward => edit(tui, |t| t.textarea.delete_forward()),
         Action::DeleteWordBackward => edit(tui, |t| t.textarea.delete_word_backward()),
         Action::DeleteWordForward => edit(tui, |t| t.textarea.delete_word_forward()),
@@ -203,7 +213,6 @@ fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
 
 fn edit(tui: &mut Tui, f: impl FnOnce(&mut Tui)) -> Option<KeyOutcome> {
     f(tui);
-    super::sync_attachments(tui);
     tui.sel = 0;
     Some(KeyOutcome::Edited)
 }

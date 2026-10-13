@@ -76,21 +76,19 @@ pub(crate) fn home_spacer_rows(
 }
 
 /// The draft's attachment chips, one input-box row: a kind pill
-/// (`Image`/`File`) plus the file's real name — repeating the `[Image #n]`
-/// placeholder would just say what the draft already says. Clipboard
-/// pastes land in `clipboard-XXXXXX.png`, which is a name too.
-fn attachment_chips(attachments: &[(String, std::path::PathBuf)]) -> Line<'static> {
+/// (`Image`/`File`) plus the file's real name. Clipboard pastes land in
+/// `clipboard-XXXXXX.png`, which is a name too.
+fn attachment_chips(attachments: &[std::path::PathBuf]) -> Line<'static> {
     let t = crate::theme::theme();
     let mut spans = vec![Span::styled("   ", Style::default().bg(t.surface_bg))];
-    for (i, (ph, path)) in attachments.iter().enumerate() {
+    for (i, path) in attachments.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" ", Style::default().bg(t.surface_bg)));
         }
-        let kind = ph
-            .trim_start_matches('[')
-            .split(' ')
-            .next()
-            .unwrap_or("File");
+        let kind = match crate::repl::attachments::attachment_kind(path) {
+            crate::repl::attachments::AttachmentKind::Image => "Image",
+            _ => "File",
+        };
         let name = path
             .file_name()
             .and_then(|n| n.to_str())

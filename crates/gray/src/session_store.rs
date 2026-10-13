@@ -1032,6 +1032,26 @@ enum SessionFileRead {
     Corrupt(PathBuf),
 }
 
+/// The text a user message contributes to a session summary (the picker
+/// preview, `--last`, the "has a user turn" test). Text wins. A message
+/// with only attachments gets a bracketed label, so its session is not
+/// hidden as empty. Only the summary uses this: the model and the stored
+/// message are unchanged.
+fn user_summary_text(message: &Message) -> String {
+    let text = message.text_content();
+    if !text.is_empty() {
+        return text;
+    }
+    let has = |f: fn(&ContentBlock) -> bool| message.content.iter().any(f);
+    if has(|b| matches!(b, ContentBlock::Image { .. })) {
+        "[Image]".to_string()
+    } else if has(|b| matches!(b, ContentBlock::Media { .. })) {
+        "[File]".to_string()
+    } else {
+        String::new()
+    }
+}
+
 /// One session file → its summary: the whole per-file work of a `list`
 /// scan (read both ends, parse, resolve the sidecars), packaged so it can
 /// run inside a single blocking-pool task per file.
@@ -1110,7 +1130,7 @@ fn summarize_session_file(root: &Path, path: &Path, cwd: Option<&Path>) -> Optio
                 Role::System => last_end,
             };
             if entry.message.role == Role::User {
-                let text = entry.message.text_content();
+                let text = user_summary_text(&entry.message);
                 if !text.is_empty() {
                     if first_user_text.is_none() && !in_tail {
                         first_user_text = Some(text.clone());
