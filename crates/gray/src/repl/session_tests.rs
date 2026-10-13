@@ -195,9 +195,9 @@ fn stream_clock_bills_batch_delivery_its_generation_window() {
 #[test]
 fn repl_tool_header_renders_label_and_template_second_line() {
     let labels =
-        std::collections::HashMap::from([("rlm_spawn".to_string(), "Started agent".to_string())]);
+        std::collections::HashMap::from([("subagent_spawn".to_string(), "Started agent".to_string())]);
     let previews = std::collections::HashMap::from([(
-        "rlm_spawn".to_string(),
+        "subagent_spawn".to_string(),
         "{name} · {model|model} · {effort}\n{prompt|firstline}".to_string(),
     )]);
     let args = serde_json::json!({
@@ -210,7 +210,7 @@ fn repl_tool_header_renders_label_and_template_second_line() {
         labels: Some(&labels),
         previews: Some(&previews),
     };
-    let rows = super::tool_header(display, "rlm_spawn", &args, None);
+    let rows = super::tool_header(display, "subagent_spawn", &args, None);
     let texts: Vec<String> = rows
         .iter()
         .map(|l| {

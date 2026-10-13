@@ -126,8 +126,8 @@ fn template_second_line_stays_plain_under_a_running_headline() {
     // A template preview's second line is its own row under the headline.
     // The running shimmer marks the headline (the first row) only.
     let tool = LiveTool {
-        id: "rlm".into(),
-        name: "rlm_spawn".into(),
+        id: "subagent".into(),
+        name: "subagent_spawn".into(),
         header: vec![
             Line::from(vec![
                 Span::raw("\u{2b22} ".to_string()),
