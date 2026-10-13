@@ -104,7 +104,14 @@ impl FsearchPool {
     /// A failed start sticks at `None` and every caller falls back.
     fn engine(&self) -> Option<&Engine> {
         self.engine
-            .get_or_init(|| Engine::start(self.opts.clone()).ok())
+            .get_or_init(|| {
+                // Engine diagnostics default to stderr; under the TUI they
+                // paint into the transcript. Route them into gray's log.
+                fsearch::set_log_sink(Some(std::sync::Arc::new(|line: &str| {
+                    log::info!(target: "fsearch", "{line}");
+                })));
+                Engine::start(self.opts.clone()).ok()
+            })
             .as_ref()
     }
 

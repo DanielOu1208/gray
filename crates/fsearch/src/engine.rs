@@ -143,7 +143,7 @@ fn try_lock(f: &std::fs::File) -> bool {
 }
 
 fn log(msg: impl AsRef<str>) {
-    eprintln!("{} {}", crate::query::now_secs(), msg.as_ref());
+    crate::diag::line(msg);
 }
 
 /// Never let indexing download iCloud placeholders: on the calling thread,

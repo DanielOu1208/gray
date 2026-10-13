@@ -120,7 +120,7 @@ impl Frecency {
             }
             let tmp = me.file.with_extension("new");
             if let Err(e) = std::fs::write(&tmp, out).and_then(|_| std::fs::rename(&tmp, &me.file)) {
-                eprintln!("{now} frecency: save failed: {e}");
+                fsearch::diag_line(format!("frecency: save failed: {e}"));
             }
         });
     }

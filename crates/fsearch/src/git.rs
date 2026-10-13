@@ -425,7 +425,7 @@ impl Git {
         let first = !std::mem::replace(&mut *r.loaded.0.lock().unwrap(), true);
         r.loaded.1.notify_all();
         if first || t.elapsed() > Duration::from_millis(500) {
-            eprintln!("{} git: read {} in {:.2?}", fsearch::query::now_secs(), String::from_utf8_lossy(&r.root), t.elapsed());
+            fsearch::diag_line(format!("git: read {} in {:.2?}", String::from_utf8_lossy(&r.root), t.elapsed()));
         }
     }
 
@@ -450,7 +450,7 @@ impl Git {
     fn trusted(&self, root: &[u8]) -> bool {
         let filters = self.run(root, &["config", "--local", "--includes", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"], &[]);
         if filters.as_ref().is_some_and(|f| !f.is_empty()) {
-            eprintln!("{} git: {} configures its own filters; not reading its status", fsearch::query::now_secs(), String::from_utf8_lossy(root));
+            fsearch::diag_line(format!("git: {} configures its own filters; not reading its status", String::from_utf8_lossy(root)));
             return false;
         }
         true
