@@ -207,6 +207,7 @@ pub async fn run_onboarding(config: &mut Config) -> anyhow::Result<bool> {
         );
         use crossterm::event::{Event, KeyCode, KeyEventKind, read};
         let _ = crossterm::terminal::enable_raw_mode();
+        drain_queued_events();
         let key = loop {
             match read() {
                 Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => break Some(k),
