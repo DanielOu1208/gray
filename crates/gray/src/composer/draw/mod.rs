@@ -11,8 +11,8 @@ use crate::text_width::display_width;
 mod widgets;
 
 pub(crate) use widgets::{
-    HomeRows, build_input_box, home_band_h, needs_seam, queued_preview_lines, shimmer_spans,
-    status_dock_h, tail_block_h, tail_gap_h,
+    HomeRows, InputCell, build_input_box, chip_cells, home_band_h, needs_seam,
+    queued_preview_lines, shimmer_spans, status_dock_h, tail_block_h, tail_gap_h,
 };
 
 /// Exact-fit viewport height for the given content, clamped to
@@ -75,32 +75,32 @@ pub(crate) fn home_spacer_rows(
         .saturating_sub(box_rows)
 }
 
-/// The draft's attachment chips, one input-box row: a kind pill
-/// (`Image`/`File`) plus the file's real name. Clipboard pastes land in
-/// `clipboard-XXXXXX.png`, which is a name too.
-fn attachment_chips(attachments: &[std::path::PathBuf]) -> Line<'static> {
+/// The draft's attachment chips as input cells: a kind pill (`Image`/`File`)
+/// plus the file's real name. Clipboard pastes land in `clipboard-XXXXXX.png`,
+/// which is a name too.
+fn attachment_cells(attachments: &[std::path::PathBuf]) -> Vec<InputCell> {
     let t = crate::theme::theme();
-    let mut spans = vec![Span::styled("   ", Style::default().bg(t.surface_bg))];
-    for (i, path) in attachments.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" ", Style::default().bg(t.surface_bg)));
-        }
-        let kind = match crate::repl::attachments::attachment_kind(path) {
-            crate::repl::attachments::AttachmentKind::Image => "Image",
-            _ => "File",
-        };
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("clipboard");
-        let (pill, label) = (
-            Style::default().fg(t.text_bright).bg(t.input_bg),
-            Style::default().fg(t.text_muted).bg(t.surface_bg),
-        );
-        spans.push(Span::styled(format!(" {kind} "), pill));
-        spans.push(Span::styled(format!(" {name} "), label));
-    }
-    Line::from(spans)
+    let parts: Vec<(&str, String)> = attachments
+        .iter()
+        .map(|path| {
+            let kind = match crate::repl::attachments::attachment_kind(path) {
+                crate::repl::attachments::AttachmentKind::Image => "Image",
+                _ => "File",
+            };
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("clipboard");
+            (kind, name.to_string())
+        })
+        .collect();
+    let chips: Vec<(&str, &str)> = parts.iter().map(|(k, n)| (*k, n.as_str())).collect();
+    chip_cells(
+        &chips,
+        Style::default().fg(t.text_bright).bg(t.input_bg),
+        Style::default().fg(t.text_muted).bg(t.surface_bg),
+        Style::default().bg(t.surface_bg),
+    )
 }
 
 /// Upper bound for the inline viewport.
@@ -243,9 +243,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     // for them (status dock + seam, queued follow-ups, live cards, the
     // streamed tail, the ask modal; the panel is 0 in home).
     let attach_h: u16 = 0;
-    // The one row the attachments add to the box below (chips). The
-    // terminal lifts the band only when it comes back out.
-    let chip_rows: u16 = if tui.attachments.is_empty() { 0 } else { 1 };
     // Seam (the one gap under the transcript) + shimmer status text + one
     // bare breathing row below it.
     let needs_seam = needs_seam(&tui.transcript);
@@ -289,14 +286,10 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     // frame paints.
     let tail_gap = tail_gap_h(tui.status.is_some(), &stream_tail);
     let tail_est = stream_tail.len() as u16 + tail_gap;
-    let mut ibox = build_input_box(&text, cursor, w, ghost, home);
-    if !tui.attachments.is_empty() {
-        // Chips ride inside the box, above the text and under its top pad,
-        // so they read as part of the draft they belong to.
-        ibox.lines.insert(1, attachment_chips(&tui.attachments));
-        ibox.band_h += 1;
-        ibox.cur_row += 1;
-    }
+    // Chips open the first input row, right after the `❯`, and wrap with the
+    // draft, so they add no row of their own.
+    let chips = attachment_cells(&tui.attachments);
+    let mut ibox = build_input_box(&text, cursor, w, ghost, home, &chips);
     if home.is_some() {
         // Fill the screen: spacer rows under the home rows center the
         // block and pin the status bar to the bottom row. The count that
@@ -407,10 +400,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     // Viewport geometry is a precondition for the frame: a swallowed failure
     // would commit a frame against stale geometry (audit 24.01). Close the
     // synchronized-update bracket before bailing out.
-    if let Err(e) = tui
-        .terminal
-        .set_viewport_height(desired, screen_size, paint, chip_rows)
-    {
+    if let Err(e) = tui.terminal.set_viewport_height(desired, screen_size) {
         tui.end_sync();
         return Err(e.into());
     }

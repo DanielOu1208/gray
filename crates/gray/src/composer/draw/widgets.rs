@@ -59,15 +59,110 @@ pub(crate) struct InputBox {
     pub(crate) cur_col: usize,
 }
 
+/// One styled char of an input row: a chip's pill or label cell, or a draft
+/// char. The layout runs on these, so chips wrap and take the cursor with the
+/// draft text they sit in front of.
+pub(crate) type InputCell = (char, Style);
+
+/// Cells for the attachment chips, in order: a ` {kind} ` pill, a ` {name} `
+/// label, and one gap cell between chips. Pure; the caller brings the styles.
+pub(crate) fn chip_cells(
+    chips: &[(&str, &str)],
+    pill: Style,
+    label: Style,
+    gap: Style,
+) -> Vec<InputCell> {
+    let mut cells: Vec<InputCell> = Vec::new();
+    for (i, (kind, name)) in chips.iter().enumerate() {
+        if i > 0 {
+            cells.push((' ', gap));
+        }
+        cells.extend(format!(" {kind} ").chars().map(|c| (c, pill)));
+        cells.extend(format!(" {name} ").chars().map(|c| (c, label)));
+    }
+    cells
+}
+
+/// Splits one logical input line into visual rows no wider than `content_w`,
+/// word-aware (break after the last space in the window, hard-cut only a word
+/// too long for a row). Returns each row as a `start..end` char range, and the
+/// `(row, col)` of `cursor` (a char index) when one is given. A cursor on a
+/// wrap point stays at the end of the row before it. An empty line is one
+/// empty row, so there is always a row to draw. Pure.
+pub(crate) fn wrap_line(
+    chars: &[char],
+    content_w: usize,
+    cursor: Option<usize>,
+) -> (Vec<(usize, usize)>, Option<(usize, usize)>) {
+    let mut rows: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    while start < chars.len() {
+        let end = crate::text_width::word_window_end(chars, start, content_w);
+        rows.push((start, end));
+        start = end;
+    }
+    if rows.is_empty() {
+        rows.push((0, 0));
+    }
+    let at = cursor.map(|c| {
+        let row = rows
+            .iter()
+            .position(|&(_, end)| c <= end)
+            .unwrap_or(rows.len() - 1);
+        let (s, e) = rows[row];
+        (row, c.clamp(s, e) - s)
+    });
+    (rows, at)
+}
+
+/// The draft's logical line and char index under `cursor` (a byte offset): the
+/// first line whose end reaches it, else the last.
+fn draft_cursor(text: &str, cursor: usize) -> (usize, usize) {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut line_start = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        let line_end = line_start + line.len();
+        if cursor <= line_end || i + 1 == lines.len() {
+            let within = cursor.saturating_sub(line_start).min(line.len());
+            let chars = line.char_indices().take_while(|(b, _)| *b < within).count();
+            return (i, chars);
+        }
+        line_start = line_end + 1;
+    }
+    (0, 0)
+}
+
+/// Groups cells into spans, one per run of equal style.
+fn styled_runs(cells: &[InputCell]) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut style: Option<Style> = None;
+    for &(ch, st) in cells {
+        if style != Some(st) {
+            if let Some(prev) = style {
+                spans.push(Span::styled(std::mem::take(&mut run), prev));
+            }
+            style = Some(st);
+        }
+        run.push(ch);
+    }
+    if let Some(prev) = style {
+        spans.push(Span::styled(run, prev));
+    }
+    spans
+}
+
 /// Builds the prompt box lines from textarea state. Hoisted out of the draw
 /// closure so the dock height (and thus the viewport) can be sized before
-/// `terminal.draw` runs.
+/// `terminal.draw` runs. `chips` open the first logical line, right after the
+/// `❯`, and wrap with the draft; an empty draft shows the ghost hint after them.
 pub(crate) fn build_input_box(
     text: &str,
     cursor: usize,
     w: usize,
     ghost: Option<&str>,
     home: Option<HomeRows>,
+    chips: &[InputCell],
 ) -> InputBox {
     let (x, w) = home.map_or((0, w), |_| crate::composer::home_column(w));
     let content_w = w.saturating_sub(4).max(1);
@@ -83,124 +178,55 @@ pub(crate) fn build_input_box(
     // `❯` row, so the prompt never sits flush against the row above it.
     box_lines.push(Line::from(""));
 
-    // Prompt input rows
-    let prompt_arrow = " ❯ ";
+    // Prompt input rows. Continuation rows indent under the glyph.
     let arrow_span = Span::styled(
-        prompt_arrow,
+        " ❯ ",
         Style::default()
             .fg(prompt_color)
             .add_modifier(Modifier::BOLD),
     );
+    let draft_style = Style::default().fg(text_primary);
+    let ghost_style = Style::default().fg(text_dim);
 
+    let (cur_line, cur_char) = draft_cursor(text, cursor);
     let mut cur_row = 0usize;
     let mut cur_col = 0usize;
 
-    if text.is_empty() {
-        // Ghost hint (display-only, never submitted): e.g. "Please continue…"
-        // while a resume is pending. Same single row either way.
-        let mut spans = vec![arrow_span.clone()];
-        if let Some(hint) = ghost {
-            spans.push(Span::styled(
-                hint.to_string(),
-                Style::default().fg(text_dim),
-            ));
+    for (i, raw_line) in text.split('\n').enumerate() {
+        let mut cells: Vec<InputCell> = Vec::new();
+        if i == 0 {
+            cells.extend_from_slice(chips);
         }
-        box_lines.push(Line::from(spans));
-    } else {
-        let lines_raw: Vec<&str> = text.split('\n').collect();
-        let mut cursor_found = false;
-        let mut current_byte_pos = 0usize;
-        let mut row_count = 0usize;
+        let lead = cells.len();
+        if i == 0 && text.is_empty() {
+            // Ghost hint (display-only, never submitted): e.g. "Please continue…"
+            // while a resume is pending.
+            if let Some(hint) = ghost {
+                cells.extend(hint.chars().map(|c| (c, ghost_style)));
+            }
+        } else {
+            cells.extend(raw_line.chars().map(|c| (c, draft_style)));
+        }
 
-        for (i, raw_line) in lines_raw.iter().enumerate() {
-            let prefix_span = if i == 0 {
+        // Word-aware wrap (question-panel `wrap_plain` parity): words never
+        // split across rows. The chips count against the first row's room.
+        let chars: Vec<char> = cells.iter().map(|c| c.0).collect();
+        let at_here = (i == cur_line).then_some(lead + cur_char);
+        let (rows, at) = wrap_line(&chars, content_w, at_here);
+        let first_row = box_lines.len();
+        for (r, &(s, e)) in rows.iter().enumerate() {
+            let prefix = if i == 0 && r == 0 {
                 arrow_span.clone()
             } else {
                 Span::raw("   ")
             };
-
-            let line_len_bytes = raw_line.len();
-            let line_end_bytes = current_byte_pos + line_len_bytes;
-            let has_cursor =
-                !cursor_found && (cursor <= line_end_bytes || i == lines_raw.len() - 1);
-
-            if raw_line.is_empty() {
-                box_lines.push(Line::from(vec![prefix_span]));
-                if has_cursor {
-                    cur_row = row_count;
-                    cur_col = 0;
-                    cursor_found = true;
-                }
-                row_count += 1;
-            } else {
-                // Word-aware wrap (question-panel `wrap_plain` parity): break
-                // at the last space in the window, hard-cut only a single
-                // overlong word — words never split across rows.
-                let chars: Vec<char> = raw_line.chars().collect();
-                let mut windows: Vec<(usize, usize)> = Vec::new();
-                let mut start = 0usize;
-                while start < chars.len() {
-                    let end = crate::text_width::word_window_end(&chars, start, content_w);
-                    windows.push((start, end));
-                    start = end;
-                }
-                // Byte offset of each char start (plus total at the end).
-                let mut byte_at: Vec<usize> = Vec::with_capacity(chars.len() + 1);
-                let mut b = 0usize;
-                for ch in &chars {
-                    byte_at.push(b);
-                    b += ch.len_utf8();
-                }
-                byte_at.push(b);
-
-                let mut line_byte_offset = byte_at[0];
-                let last_idx = windows.len().saturating_sub(1);
-
-                for (chunk_idx, (cs, ce)) in windows.iter().enumerate() {
-                    let chunk: Vec<char> = chars[*cs..*ce].to_vec();
-                    let s: String = chunk.iter().collect();
-                    let chunk_byte_len = byte_at[*ce] - byte_at[*cs];
-
-                    if chunk_idx == 0 {
-                        box_lines.push(Line::from(vec![
-                            prefix_span.clone(),
-                            Span::styled(s, Style::default().fg(text_primary)),
-                        ]));
-                    } else {
-                        box_lines.push(Line::from(vec![
-                            Span::raw("   "),
-                            Span::styled(s, Style::default().fg(text_primary)),
-                        ]));
-                    }
-
-                    if has_cursor && !cursor_found {
-                        let cursor_in_line_bytes = cursor.saturating_sub(current_byte_pos);
-                        if cursor_in_line_bytes <= line_byte_offset + chunk_byte_len
-                            || chunk_idx == last_idx
-                        {
-                            cur_row = row_count;
-                            let bytes_into_chunk =
-                                cursor_in_line_bytes.saturating_sub(line_byte_offset);
-                            let mut col = 0usize;
-                            let mut b = 0usize;
-                            for ch in chunk {
-                                if b >= bytes_into_chunk {
-                                    break;
-                                }
-                                b += ch.len_utf8();
-                                col += 1;
-                            }
-                            cur_col = col;
-                            cursor_found = true;
-                        }
-                    }
-
-                    line_byte_offset += chunk_byte_len;
-                    row_count += 1;
-                }
-            }
-
-            current_byte_pos = line_end_bytes + 1;
+            let mut spans = vec![prefix];
+            spans.extend(styled_runs(&cells[s..e]));
+            box_lines.push(Line::from(spans));
+        }
+        if let Some((r, col)) = at {
+            cur_row = first_row + r;
+            cur_col = col;
         }
     }
 
@@ -228,9 +254,8 @@ pub(crate) fn build_input_box(
         lead_h,
         x,
         width: w,
-        // Content rows were counted from the `❯` row; the lead and top
-        // pad shift every one of them down.
-        cur_row: cur_row + 1 + lead_h,
+        // Rows were counted from the top of the box; the lead shifts them down.
+        cur_row: cur_row + lead_h,
         cur_col,
     }
 }
@@ -350,7 +375,7 @@ fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
 /// The home band's height before its spacer: the empty box, the home
 /// rows and the status bar.
 pub(crate) fn home_band_h(w: usize) -> usize {
-    build_input_box("", 0, w, None, Some(HomeRows::default()))
+    build_input_box("", 0, w, None, Some(HomeRows::default()), &[])
         .lines
         .len()
         + 1

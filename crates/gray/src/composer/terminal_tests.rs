@@ -258,14 +258,8 @@ fn insert(term: &mut Term, rows: &[&str]) {
 /// One frame of a `height`-row band: row `i` reads `band{i}`, and the
 /// prompt row (the second to last, as in the real input box) reads `❯`.
 fn band(term: &mut Term, height: u16) {
-    band_with_chips(term, height, 0);
-}
-
-/// `band` on a frame whose input box shows `chips` attachment rows.
-fn band_with_chips(term: &mut Term, height: u16, chips: u16) {
     let screen = term.last_known_screen_size;
-    term.set_viewport_height(height, screen, true, chips)
-        .unwrap();
+    term.set_viewport_height(height, screen).unwrap();
     term.draw(|frame| {
         let area = frame.area();
         for i in 0..area.height {
@@ -280,13 +274,6 @@ fn band_with_chips(term: &mut Term, height: u16, chips: u16) {
         }
     })
     .unwrap();
-}
-
-/// The settle path: the band gives its rows up without a paint, as a
-/// history insert does before it writes (`settle_band`).
-fn settle(term: &mut Term, height: u16) {
-    let screen = term.last_known_screen_size;
-    term.set_viewport_height(height, screen, false, 0).unwrap();
 }
 
 fn band_rows(height: u16) -> Vec<String> {
@@ -550,71 +537,9 @@ fn a_frame_on_a_shrunken_screen_does_not_scroll_history() {
     insert(&mut term, &refs);
     band(&mut term, 4);
     let mark = tape.len();
-    term.set_viewport_height(4, Size::new(W, 8), true, 0)
-        .unwrap();
+    term.set_viewport_height(4, Size::new(W, 8)).unwrap();
     assert_eq!(term.viewport_area, Rect::new(0, 4, W, 4));
     assert!(!tape.since(mark).contains("\r\n"), "history was scrolled");
-}
-
-/// The reported bug: the band sat on the screen bottom, a paste grew it past
-/// the bottom (two transcript rows scrolled into scrollback), and removing
-/// the paste shrank it back. The shrink gives those rows back, so the footer
-/// lands on the last row at once and nothing blank sits under it. The rows
-/// the growth scrolled away stay in scrollback, so the blank rows the lift
-/// opens sit above the transcript.
-#[test]
-fn grow_then_shrink_puts_the_footer_back_on_the_last_row() {
-    for mode in [Scrollback::Regions, Scrollback::FullScreen] {
-        let (mut term, tape) = term(10, 0, mode);
-        let transcript = rows(0..6);
-        let refs: Vec<&str> = transcript.iter().map(String::as_str).collect();
-        insert(&mut term, &refs);
-        band(&mut term, 4);
-        band_with_chips(&mut term, 6, 2);
-        assert_eq!(term.viewport_area, Rect::new(0, 4, W, 6), "{mode:?}");
-
-        band(&mut term, 4);
-        assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4), "{mode:?}");
-        let screen = Screen::replay(&tape, W, 10);
-        assert_eq!(screen.scrollback, rows(0..2), "{mode:?}");
-        assert!(screen.lines()[..2].iter().all(String::is_empty), "{mode:?}");
-        assert_eq!(screen.lines()[2..6], rows(2..6)[..], "{mode:?}");
-        assert_eq!(screen.lines()[6..], band_rows(4)[..], "{mode:?}");
-    }
-}
-
-/// A settle (a committed card right before its insert) gives its rows up
-/// without a lift. The insert writes into them and the band moves down under
-/// the new rows, so the footer is back on the last row with nothing blank
-/// left above it, and the next attachment growth and removal still lift
-/// exactly what their own growth scrolled.
-#[test]
-fn a_settle_shrink_is_spent_by_the_insert_and_never_lifted() {
-    for mode in [Scrollback::Regions, Scrollback::FullScreen] {
-        let (mut term, tape) = term(10, 0, mode);
-        let transcript = rows(0..6);
-        let refs: Vec<&str> = transcript.iter().map(String::as_str).collect();
-        insert(&mut term, &refs);
-        band(&mut term, 4);
-        band_with_chips(&mut term, 6, 2);
-        settle(&mut term, 4);
-        assert_eq!(term.viewport_area, Rect::new(0, 4, W, 4), "{mode:?}");
-
-        insert(&mut term, &["r6", "r7"]);
-        band(&mut term, 4);
-        assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4), "{mode:?}");
-        let screen = Screen::replay(&tape, W, 10);
-        assert_eq!(screen.scrollback, rows(0..2), "{mode:?}");
-        assert_eq!(screen.transcript(6), rows(0..8), "{mode:?}");
-        assert_eq!(screen.lines()[6..], band_rows(4)[..], "{mode:?}");
-
-        band_with_chips(&mut term, 6, 2);
-        band(&mut term, 4);
-        assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4), "{mode:?}");
-        let screen = Screen::replay(&tape, W, 10);
-        assert_eq!(screen.lines()[6..], band_rows(4)[..], "{mode:?}");
-        assert_eq!(screen.scrollback, rows(0..4), "{mode:?}");
-    }
 }
 
 /// A popup or the status dock grows and shrinks the band the same way, but
