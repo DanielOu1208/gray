@@ -868,12 +868,12 @@ impl Docs {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
-    fn sort(&mut self) {
+    pub(crate) fn sort(&mut self) {
         let buf = &self.buf;
         self.items.sort_by(|a, b| buf[a.0 as usize..(a.0 + a.1) as usize].cmp(&buf[b.0 as usize..(b.0 + b.1) as usize]));
         self.items.dedup_by(|a, b| buf[a.0 as usize..(a.0 + a.1) as usize] == buf[b.0 as usize..(b.0 + b.1) as usize]);
     }
-    fn find(&self, path: &[u8]) -> Option<usize> {
+    pub(crate) fn find(&self, path: &[u8]) -> Option<usize> {
         let i = self.items.partition_point(|&(o, l, _, _)| &self.buf[o as usize..(o + l) as usize] < path);
         (i < self.items.len() && self.path(i) == path).then_some(i)
     }
@@ -2806,9 +2806,22 @@ impl Content {
         self.segs.iter().any(|s| s.with_prefix(&lo).next().is_some())
     }
 
+    /// Live docs under `dir` held as not text: the index keeps no content
+    /// for them, so a search for any literal must still read them (grep
+    /// reports a binary file's match without printing the line).
+    pub(crate) fn not_text(&self, dir: &[u8], recursive: bool) -> Vec<Vec<u8>> {
+        let lo = join(dir, b"");
+        let mut out = Vec::new();
+        for s in &self.segs {
+            let ids = if recursive { s.with_prefix(&lo).collect::<Vec<_>>() } else { s.direct_children(&lo) };
+            out.extend(ids.into_iter().filter(|&d| s.doc_gid()[d as usize] == NONE).map(|d| s.path(d)));
+        }
+        out
+    }
+
     /// Which of `want` (what should be indexed under `dir`) no live doc
     /// holds as it is now: what a sync of it would index.
-    fn unheld(&self, dir: &[u8], recursive: bool, want: &Docs) -> Vec<usize> {
+    pub(crate) fn unheld(&self, dir: &[u8], recursive: bool, want: &Docs) -> Vec<usize> {
         let mut held = vec![false; want.len()];
         let lo = join(dir, b"");
         for s in &self.segs {

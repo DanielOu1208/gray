@@ -551,31 +551,23 @@ const MAX_IMAGE_CLAIM_BYTES: usize = 20 * 1024 * 1024;
 /// over [`crate::search_cmd`] — the index, or the tool's own lane, decided
 /// there.
 ///
-/// Bare `find` / `grep` land here too, in the one form each the lane can
-/// answer exactly (`grep [-i] [-F] [-n] PATTERN [PATH]`,
-/// `find [PATH] -name 'GLOB'`). Anything richer — `grep -r/-v/-E/-A`,
-/// `find -type/-iname/-exec`, a path the shell would rewrite — returns
-/// `None` and the real command runs; the claim never gives a different
-/// answer than the shell would have.
+/// Bare `grep` / `find` are not claimed: their output is the real tool's
+/// (the shim serves them, see `search_shim`), and the shell runs them as
+/// written.
 async fn search_command(
     command: &str,
     cwd: &Path,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Option<ToolOutput> {
     let words = search_words(command)?;
-    let (sub, rest) = match words.first().map(String::as_str) {
-        Some("gray") => (words.get(1).map(String::as_str)?, &words[2..]),
-        Some(first @ ("find" | "grep")) => (first, &words[1..]),
-        _ => return None,
-    };
+    if words.first().map(String::as_str) != Some("gray") {
+        return None;
+    }
+    let sub = words.get(1).map(String::as_str)?;
     if sub != "find" && sub != "grep" {
         return None;
     }
-    let args = if words[0] == "gray" {
-        verb_search_args(rest, cwd)?
-    } else {
-        bare_search_args(sub, rest, cwd)?
-    };
+    let args = verb_search_args(&words[2..], cwd)?;
     let ctx = ToolContext {
         cwd: cwd.to_path_buf(),
         cancel: cancel.clone(),
@@ -637,100 +629,6 @@ fn verb_search_args(rest: &[String], cwd: &Path) -> Option<crate::search_cmd::Se
         ignore_case,
         literal,
         context,
-    })
-}
-
-/// Bare `find` / `grep` → [`crate::search_cmd::SearchArgs`], or `None` for
-/// any shape the lane cannot answer exactly: `grep -r/-v/-E/-A/-B/-l…`,
-/// `find` with no expression or `-type`/`-iname`/`-exec`/`-o`/`!`, more
-/// than one path, a glob or `~` the shell would expand before the command
-/// saw it. `search_words` already refused pipes, redirects, substitution
-/// and unclosed quotes.
-fn bare_search_args(
-    sub: &str,
-    rest: &[String],
-    cwd: &Path,
-) -> Option<crate::search_cmd::SearchArgs> {
-    // A path the shell rewrites before `find`/`grep` sees it — glob
-    // expansion, a leading `~`, `-` for stdin — resolves differently here
-    // than it would have under the shell, so the claim must not touch it.
-    let rewritten = |p: &str| p == "-" || p.starts_with('~') || p.contains(['*', '?', '[']);
-    if sub == "grep" {
-        let mut positional: Vec<&str> = Vec::new();
-        let (mut ignore_case, mut literal) = (false, false);
-        for arg in rest {
-            match arg.as_str() {
-                "--ignore-case" => ignore_case = true,
-                "--fixed-strings" => literal = true,
-                "--line-number" => {}
-                // `-i`/`-F`/`-n` (clusters like `-iF` included): the only
-                // bare-grep flags the lane maps exactly. `-n` is a no-op —
-                // output always carries line numbers.
-                a if a.len() > 1 && a.starts_with('-') && !a.starts_with("--") => {
-                    for c in a[1..].chars() {
-                        match c {
-                            'i' => ignore_case = true,
-                            'F' => literal = true,
-                            'n' => {}
-                            _ => return None,
-                        }
-                    }
-                }
-                a if a.starts_with('-') => return None,
-                a => positional.push(a),
-            }
-        }
-        let (&pattern, path) = (positional.first()?, positional.get(1));
-        if positional.len() > 2 || path.is_some_and(|p| rewritten(p)) {
-            return None;
-        }
-        return Some(crate::search_cmd::SearchArgs {
-            pattern: pattern.to_string(),
-            path: path.map(|p| cwd.join(*p)),
-            ignore_case,
-            literal,
-            ..crate::search_cmd::SearchArgs::default()
-        });
-    }
-    // `find [PATH] -name 'GLOB'`: a single basename glob is the only bare
-    // find the lane mirrors — `-name` is a basename match and the tool's
-    // own `fd --glob` basename semantics agree; `-type`, `-iname`, `-exec`
-    // and friends have no SearchArgs shape, so they stay with the shell.
-    let mut positional: Vec<&str> = Vec::new();
-    let mut glob: Option<String> = None;
-    let mut seen_expr = false;
-    let mut i = 0;
-    while i < rest.len() {
-        let arg = rest[i].as_str();
-        match arg {
-            "-name" => {
-                if glob.is_some() {
-                    return None; // `-name a -name b` is an impossible AND
-                }
-                seen_expr = true;
-                i += 1;
-                glob = Some(rest.get(i)?.clone());
-            }
-            _ if arg.starts_with('-') || arg == "!" || arg == "," => return None,
-            _ if seen_expr => return None, // paths must precede the expression
-            a => positional.push(a),
-        }
-        i += 1;
-    }
-    let pattern = glob?;
-    // A `-name` glob never matches a `/` (basenames cannot contain one),
-    // while the tool would read it as a full-path glob — a real difference.
-    if pattern.contains('/') || positional.len() > 1 {
-        return None;
-    }
-    let path = positional.first().copied();
-    if path.is_some_and(rewritten) {
-        return None;
-    }
-    Some(crate::search_cmd::SearchArgs {
-        pattern,
-        path: path.map(|p| cwd.join(p)),
-        ..crate::search_cmd::SearchArgs::default()
     })
 }
 

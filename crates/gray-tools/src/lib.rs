@@ -15,8 +15,12 @@ pub mod index_filter;
 pub mod ledger;
 pub mod read;
 pub mod search_cmd;
+pub mod search_serve;
+pub mod search_shim;
+pub mod search_watch;
 #[cfg(unix)]
 pub mod search_index_fs;
+pub mod search_plan;
 pub mod shell;
 pub mod stats;
 pub mod truncate;
