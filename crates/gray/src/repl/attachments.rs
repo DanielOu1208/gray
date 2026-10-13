@@ -108,3 +108,53 @@ pub fn extract_inline_image_paths(text: &str, cwd: &Path) -> Vec<PathBuf> {
 #[path = "attachments_tests.rs"]
 #[cfg(test)]
 mod tests;
+
+pub fn attachment_label(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("clipboard");
+    name.chars()
+        .map(|c| {
+            if matches!(c, '[' | ']' | '\n' | '\r') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+pub fn attachment_marker(path: &Path) -> String {
+    let kind = match attachment_kind(path) {
+        AttachmentKind::Image => "image",
+        _ => "file",
+    };
+    format!("[{kind}: {}]", attachment_label(path))
+}
+
+pub fn attachment_markers(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let mut out = Vec::new();
+    let mut search = 0usize;
+    while let Some(rel) = text[search..].find('[') {
+        let start = search + rel;
+        let name_start = ["image: ", "file: "].iter().find_map(|p| {
+            text[start + 1..]
+                .starts_with(p)
+                .then_some(start + 1 + p.len())
+        });
+        let Some(name_start) = name_start else {
+            search = start + 1;
+            continue;
+        };
+        let Some(end_rel) = text[name_start..].find(']') else {
+            break;
+        };
+        let end = name_start + end_rel;
+        if end > name_start {
+            out.push((start..end + 1, text[name_start..end].to_string()));
+        }
+        search = end + 1;
+    }
+    out
+}

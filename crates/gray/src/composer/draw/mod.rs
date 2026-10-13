@@ -78,20 +78,29 @@ pub(crate) fn home_spacer_rows(
 /// The draft's attachment chips as input cells: a kind pill (`Image`/`File`)
 /// plus the file's real name. Clipboard pastes land in `clipboard-XXXXXX.png`,
 /// which is a name too.
-fn attachment_cells(attachments: &[std::path::PathBuf]) -> Vec<InputCell> {
+pub(crate) fn attachment_cells(attachments: &[std::path::PathBuf], text: &str) -> Vec<InputCell> {
     let t = crate::theme::theme();
+    let mut open = std::collections::HashMap::<String, usize>::new();
+    for (_, name) in crate::repl::attachments::attachment_markers(text) {
+        *open.entry(name).or_default() += 1;
+    }
     let parts: Vec<(&str, String)> = attachments
         .iter()
+        .filter(
+            |path| match open.get_mut(&crate::repl::attachments::attachment_label(path)) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    false
+                }
+                _ => true,
+            },
+        )
         .map(|path| {
             let kind = match crate::repl::attachments::attachment_kind(path) {
                 crate::repl::attachments::AttachmentKind::Image => "Image",
                 _ => "File",
             };
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("clipboard");
-            (kind, name.to_string())
+            (kind, crate::repl::attachments::attachment_label(path))
         })
         .collect();
     let chips: Vec<(&str, &str)> = parts.iter().map(|(k, n)| (*k, n.as_str())).collect();
@@ -236,6 +245,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         stats: tui.plugin_stats.as_deref(),
         above: tui.home_update.as_deref(),
         qol: tui.home_qol.as_deref(),
+        session: tui.home_session.as_deref(),
     });
     let home_mode = home.is_some();
     // Rows the band always spends beside the input box and the footer:
@@ -288,7 +298,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let tail_est = stream_tail.len() as u16 + tail_gap;
     // Chips open the first input row, right after the `❯`, and wrap with the
     // draft, so they add no row of their own.
-    let chips = attachment_cells(&tui.attachments);
+    let chips = attachment_cells(&tui.attachments, &text);
     let mut ibox = build_input_box(&text, cursor, w, ghost, home, &chips);
     if home.is_some() {
         // Fill the screen: spacer rows under the home rows center the

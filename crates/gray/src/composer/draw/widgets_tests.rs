@@ -55,6 +55,7 @@ fn home_box_is_the_flat_band_with_hints_stats_tip_and_notice_under_it() {
         ),
         stats: Some("65 plugins · 65 loaded"),
         above: None,
+        session: None,
         qol: None,
     };
     let w = 100;

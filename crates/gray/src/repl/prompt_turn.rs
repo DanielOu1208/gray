@@ -215,7 +215,17 @@ pub(crate) async fn run_prompt_turn(
     };
     let mut images = std::mem::take(&mut *pending_images);
     // Typed/pasted-text file links (never paste-attached) still carry vision.
-    for p in super::attachments::extract_inline_image_paths(&prompt_text, cwd) {
+    let link_scan: String = {
+        let mut s = String::with_capacity(prompt_text.len());
+        let mut last = 0usize;
+        for (range, _) in super::attachments::attachment_markers(&prompt_text) {
+            s.push_str(&prompt_text[last..range.start]);
+            last = range.end;
+        }
+        s.push_str(&prompt_text[last..]);
+        s
+    };
+    for p in super::attachments::extract_inline_image_paths(&link_scan, cwd) {
         if !images.contains(&p) {
             images.push(p);
         }

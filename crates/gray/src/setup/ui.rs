@@ -11,6 +11,13 @@ pub struct BackgroundSnapshot {
     pub prompt_text: String,
     pub used_tokens: usize,
     pub cache_hit_rate: f64,
+    pub home: bool,
+    pub home_notice: Option<String>,
+    pub plugin_stats: Option<String>,
+    pub home_update: Option<String>,
+    pub home_qol: Option<String>,
+    pub home_session: Option<String>,
+    pub attachments: Vec<std::path::PathBuf>,
 }
 
 impl BackgroundSnapshot {
@@ -30,6 +37,13 @@ impl BackgroundSnapshot {
             prompt_text: String::new(),
             used_tokens: 0,
             cache_hit_rate: 0.0,
+            home: true,
+            home_notice: None,
+            plugin_stats: None,
+            home_update: None,
+            home_qol: None,
+            home_session: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -292,6 +306,52 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
     .style(Style::default().bg(backdrop_bg()));
 
     let transcript = bg.rebuild_transcript(w);
+
+    if bg.home {
+        let home = crate::composer::draw::HomeRows {
+            notice: bg.home_notice.as_deref(),
+            stats: bg.plugin_stats.as_deref(),
+            above: bg.home_update.as_deref(),
+            session: bg.home_session.as_deref(),
+            qol: bg.home_qol.as_deref(),
+        };
+        let chips = crate::composer::draw::attachment_cells(&bg.attachments, &bg.prompt_text);
+        let ibox =
+            crate::composer::draw::build_input_box(&bg.prompt_text, 0, w, None, Some(home), &chips);
+        let band = ibox.lines;
+        let bx = ibox.x;
+        let transcript_avail_h = h.saturating_sub(band.len() + 1);
+        let tail: &[Line<'static>] = if transcript.len() <= transcript_avail_h {
+            &transcript
+        } else {
+            &transcript[transcript.len() - transcript_avail_h..]
+        };
+
+        let mut full_screen_lines: Vec<Line<'static>> = Vec::with_capacity(h);
+        for l in tail {
+            full_screen_lines.push(pad_backdrop_line(dim_line(l), w));
+        }
+        let left_pad = Span::styled(" ".repeat(bx), Style::default().bg(backdrop_bg()));
+        for l in band {
+            let mut line = dim_line(&l);
+            line.spans.insert(0, left_pad.clone());
+            full_screen_lines.push(pad_backdrop_line(line, w));
+        }
+        while full_screen_lines.len() + 1 < h {
+            full_screen_lines.push(pad_backdrop_line(Line::from(""), w));
+        }
+        full_screen_lines.push(pad_backdrop_line(footer_line, w));
+        full_screen_lines.truncate(h);
+
+        for (i, line) in full_screen_lines.into_iter().enumerate() {
+            let y = area.y + i as u16;
+            if y >= area.y + area.height {
+                break;
+            }
+            frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+        }
+        return;
+    }
 
     // Live TUI parity: ensure breathing room (a gap row) between transcript and
     // composer input box whenever transcript does not already end blank.

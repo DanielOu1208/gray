@@ -152,6 +152,43 @@ fn styled_runs(cells: &[InputCell]) -> Vec<Span<'static>> {
     spans
 }
 
+fn restyle_attachment_markers(cells: &mut [InputCell]) {
+    let st = Style::default()
+        .fg(crate::theme::theme().text_muted)
+        .bg(crate::theme::theme().surface_bg);
+    let n = cells.len();
+    let mut i = 0;
+    while i < n {
+        if cells[i].0 != '[' {
+            i += 1;
+            continue;
+        }
+        let name_start = ["image: ", "file: "].iter().find_map(|p| {
+            let fits = p
+                .chars()
+                .enumerate()
+                .all(|(k, c)| cells.get(i + 1 + k).is_some_and(|cell| cell.0 == c));
+            fits.then_some(i + 1 + p.len())
+        });
+        let Some(name_start) = name_start else {
+            i += 1;
+            continue;
+        };
+        let mut j = name_start;
+        while j < n && cells[j].0 != ']' && cells[j].0 != '\n' {
+            j += 1;
+        }
+        if j < n && cells[j].0 == ']' && j > name_start {
+            for cell in &mut cells[i..=j] {
+                cell.1 = st;
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// Builds the prompt box lines from textarea state. Hoisted out of the draw
 /// closure so the dock height (and thus the viewport) can be sized before
 /// `terminal.draw` runs. `chips` open the first logical line, right after the
@@ -206,6 +243,7 @@ pub(crate) fn build_input_box(
             }
         } else {
             cells.extend(raw_line.chars().map(|c| (c, draft_style)));
+            restyle_attachment_markers(&mut cells[lead..]);
         }
 
         // Word-aware wrap (question-panel `wrap_plain` parity): words never
@@ -233,16 +271,21 @@ pub(crate) fn build_input_box(
     // Bottom padding inside the box
     box_lines.push(Line::from(""));
 
-    let mut lead_h = 0usize;
-    if let Some(above) = home.and_then(|h| h.above) {
-        box_lines.insert(
-            0,
-            Line::from(Span::styled(
-                above.to_string(),
+    // Lead rows above the box — the transient update notice first, then
+    // the session line — flush with the box's left edge and no bottom
+    // margin, so the last one sticks right against the box's top row.
+    let mut lead: Vec<Line<'static>> = Vec::new();
+    if let Some(home) = home {
+        for text in [home.above, home.session].into_iter().flatten() {
+            lead.push(Line::from(Span::styled(
+                text.to_string(),
                 Style::default().fg(text_dim),
-            )),
-        );
-        lead_h = 1;
+            )));
+        }
+    }
+    let lead_h = lead.len();
+    for (i, line) in lead.into_iter().enumerate() {
+        box_lines.insert(i, line);
     }
     let band_h = box_lines.len() - lead_h;
     if let Some(home) = home {
@@ -271,6 +314,10 @@ pub(crate) struct HomeRows<'a> {
     /// A dim row directly above the box (the update notice), flush with
     /// the box's left edge.
     pub(crate) above: Option<&'a str>,
+    /// The current-session line in the same lead slot, under `above` so it
+    /// stays adjacent to the box: one live band row, never a transcript
+    /// copy that could stack.
+    pub(crate) session: Option<&'a str>,
 }
 
 fn spans_width(spans: &[Span<'static>]) -> usize {

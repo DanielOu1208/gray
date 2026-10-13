@@ -33,7 +33,7 @@ pub(crate) use terminal::CustomTerminal;
 
 type Term = CustomTerminal<CrosstermBackend<Stdout>>;
 
-mod draw;
+pub(crate) mod draw;
 pub(crate) mod input;
 pub(crate) mod transcript;
 
@@ -456,6 +456,10 @@ pub struct Tui {
     /// screen is up.
     pub(crate) home_update: Option<String>,
     pub(crate) home_qol: Option<String>,
+    /// The current-session line (`session <id> · To resume…`, or the
+    /// no-session note): a home row in the box lead — one live row the
+    /// band redraws, so it can't stack the way a transcript `say` could.
+    pub(crate) home_session: Option<String>,
     /// Slash commands and their modals keep the welcome up; the first real
     /// turn (`begin_turn`) or a replayed session ends it.
     pub(crate) left_home: bool,
@@ -1259,6 +1263,7 @@ impl Tui {
             plugin_stats: None,
             home_update: None,
             home_qol: None,
+            home_session: None,
             left_home: false,
             pending_input,
         }
@@ -1607,6 +1612,11 @@ impl Tui {
     /// home screen is up.
     pub fn set_home_update(&mut self, notice: Option<String>) {
         self.home_update = notice;
+    }
+
+    /// The session line the box lead paints while the home screen is up.
+    pub fn set_home_session(&mut self, line: Option<String>) {
+        self.home_session = line;
     }
 
     /// devin's home screen: it stays up through slash commands — their
@@ -2181,6 +2191,13 @@ impl Tui {
             prompt_text: self.textarea.text().to_string(),
             used_tokens,
             cache_hit_rate,
+            home: self.is_home(),
+            home_notice: self.home_notice.clone(),
+            plugin_stats: self.plugin_stats.clone(),
+            home_update: self.home_update.clone(),
+            home_qol: self.home_qol.clone(),
+            home_session: self.home_session.clone(),
+            attachments: self.attachments.clone(),
         }
     }
     pub fn tick_status(&mut self) {

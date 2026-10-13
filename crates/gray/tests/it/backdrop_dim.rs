@@ -16,6 +16,13 @@ fn draw_bg(w: u16, h: u16) -> ratatui::buffer::Buffer {
         prompt_text: "/model".to_string(),
         used_tokens: 0,
         cache_hit_rate: 0.0,
+        home: false,
+        home_notice: None,
+        plugin_stats: None,
+        home_update: None,
+        home_qol: None,
+        home_session: None,
+        attachments: Vec::new(),
     };
     terminal
         .draw(|f| render_dimmed_background(f, &bg))

@@ -174,10 +174,19 @@ fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
             edited
         }
         Action::DeleteCharBackward => {
-            // Chips live outside the text, so Backspace at the very start
-            // (or on an empty draft) takes the last chip instead.
             if tui.textarea.cursor() == 0 && !tui.attachments.is_empty() {
-                tui.attachments.pop();
+                let markers = crate::repl::attachments::attachment_markers(tui.textarea.text());
+                let idx = tui
+                    .attachments
+                    .iter()
+                    .rposition(|p| {
+                        !markers
+                            .iter()
+                            .any(|(_, n)| *n == crate::repl::attachments::attachment_label(p))
+                    })
+                    .unwrap_or(tui.attachments.len() - 1);
+                let path = tui.attachments.remove(idx);
+                super::attach::strip_attachment_marker(tui, &path);
                 tui.sel = 0;
                 edited
             } else {

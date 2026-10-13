@@ -473,30 +473,57 @@ pub(crate) fn build_user_message_with_attachments(
     paths: &[std::path::PathBuf],
 ) -> Message {
     use gray_core::message::ContentBlock;
-    use gray_tools::view::Attached;
     if paths.is_empty() {
         return Message::user(text);
     }
-    let mut blocks = Vec::new();
-    if !text.is_empty() {
-        blocks.push(ContentBlock::text(text.to_string()));
-    }
-    for path in paths {
-        if !gray_tools::images::is_viewable_extension(path) {
-            blocks.push(ContentBlock::text(format!(
-                "(attached file {} skipped: unsupported type)",
-                path.display()
-            )));
-            continue;
+    let mut used = vec![false; paths.len()];
+    let mut anchors: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+    for (range, name) in super::attachments::attachment_markers(text) {
+        if let Some(i) = paths
+            .iter()
+            .enumerate()
+            .find(|(i, p)| !used[*i] && super::attachments::attachment_label(p) == name)
+            .map(|(i, _)| i)
+        {
+            used[i] = true;
+            anchors.push((range, i));
         }
-        blocks.push(match gray_tools::view::attach(path) {
-            Ok(Attached::Image(img, _)) => ContentBlock::image(img.media_type, img.data),
-            Ok(Attached::Media(m, _)) => ContentBlock::media(m.media_type, m.data, m.fallback),
-            Ok(Attached::Text(t, _)) => ContentBlock::text(t),
-            Err(e) => ContentBlock::text(format!("(attachment skipped: {e})")),
-        });
+    }
+    let mut blocks = Vec::new();
+    let mut last = 0usize;
+    for (range, i) in anchors {
+        if last < range.end {
+            blocks.push(ContentBlock::text(text[last..range.end].to_string()));
+        }
+        blocks.push(attach_block(&paths[i]));
+        last = range.end;
+    }
+    if last < text.len() {
+        blocks.push(ContentBlock::text(text[last..].to_string()));
+    }
+    for (i, path) in paths.iter().enumerate() {
+        if !used[i] {
+            blocks.push(attach_block(path));
+        }
     }
     Message::new(gray_core::message::Role::User, blocks)
+}
+
+fn attach_block(path: &std::path::Path) -> gray_core::message::ContentBlock {
+    use gray_core::message::ContentBlock;
+    use gray_tools::view::Attached;
+    if !gray_tools::images::is_viewable_extension(path) {
+        return ContentBlock::text(format!(
+            "(attached file {} skipped: unsupported type)",
+            path.display()
+        ));
+    }
+    match gray_tools::view::attach(path) {
+        Ok(Attached::Image(img, _)) => ContentBlock::image(img.media_type, img.data),
+        Ok(Attached::Media(m, _)) => ContentBlock::media(m.media_type, m.data, m.fallback),
+        Ok(Attached::Text(t, _)) => ContentBlock::text(t),
+        Err(e) => ContentBlock::text(format!("(attachment skipped: {e})")),
+    }
 }
 
 /// ANSI dim + italic — pi's styling for rendered thinking blocks

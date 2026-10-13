@@ -84,6 +84,12 @@ pub(crate) async fn handle_resume(
     if args.dismiss {
         let scope = if args.all { None } else { Some(cwd) };
         let n = crate::resume::dismiss_interrupted(scope).await;
+        // The startup notice doesn't re-scan on its own: rebuild it now so
+        // the "N interrupted sessions" home row clears (or recounts) here.
+        if let Some(shared) = &tui {
+            let hint = crate::resume::startup_interrupted_hint(cwd).await;
+            shared.lock().expect("tui lock").set_home_notice(hint);
+        }
         let msg = match (n, args.all) {
             (0, _) => "no interrupted sessions to dismiss".to_string(),
             (n, false) => format!("dismissed {n} interrupted session{}", plural(n)),
@@ -103,7 +109,12 @@ pub(crate) async fn handle_resume(
         return;
     }
     if args.target.is_none() {
-        say(tui, &current_session_line(session_state));
+        // While the home screen is up the box lead already paints this row;
+        // a transcript copy would stack once per `/sessions`.
+        let at_home = tui.is_some_and(|s| s.lock().expect("tui lock").is_home());
+        if !at_home {
+            say(tui, &current_session_line(session_state));
+        }
     }
     let bg = tui.as_ref().map(|s| s.lock().expect("tui lock").snapshot());
     // Recall-first resolution for cwd-scoped `--last` (`--all` keeps the

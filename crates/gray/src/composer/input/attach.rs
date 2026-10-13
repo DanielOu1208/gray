@@ -6,11 +6,21 @@ use super::*;
 // Attachment helpers — verbatim from mod.rs 759-885
 // ---------------------------------------------------------------------------
 
-/// Attaches a file as a chip above the draft. The chip is the only thing
-/// that marks it, so the draft text stays exactly what was typed.
 pub(crate) fn attach_image(tui: &mut Tui, path: PathBuf) {
+    let marker = crate::repl::attachments::attachment_marker(&path);
     tui.attachments.push(path);
+    tui.textarea.insert_element(&marker);
     let _ = tui.draw();
+}
+
+pub(crate) fn strip_attachment_marker(tui: &mut Tui, path: &std::path::Path) {
+    let label = crate::repl::attachments::attachment_label(path);
+    let hit = crate::repl::attachments::attachment_markers(tui.textarea.text())
+        .into_iter()
+        .find(|(_, name)| *name == label);
+    if let Some((range, _)) = hit {
+        tui.textarea.replace_range(range, "");
+    }
 }
 
 /// Max attachable file size. `repl::attachments` caps only oversized
