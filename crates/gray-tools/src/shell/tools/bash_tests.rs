@@ -978,61 +978,18 @@ async fn search_command_reads_flag_values_once() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn bare_find_and_grep_claim_the_simple_forms() {
+async fn bare_find_and_grep_are_not_claimed() {
+    // The shim serves bare `grep`/`rg`; the gray verb's answer is not theirs.
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "needle one\nNEEDLE two\n").unwrap();
-    std::fs::write(dir.path().join("b.rs"), "fn main() {}\n").unwrap();
-    std::fs::write(dir.path().join("c.txt"), "l+teral\n").unwrap();
-    let run = |cmd: &'static str| {
-        let d = dir.path().to_path_buf();
-        async move { search_command(cmd, &d, &CancellationToken::new()).await }
-    };
-
-    // `find PATH -name GLOB`, and `find -name GLOB` with the cwd implied.
-    let out = run("find . -name '*.txt'")
-        .await
-        .expect("bare find must be claimed")
-        .content;
-    assert!(out.contains("a.txt"), "{out}");
-    assert!(!out.contains("b.rs"), "glob must hold: {out}");
-    let out = run("find -name '*.rs'")
-        .await
-        .expect("path-less find must be claimed")
-        .content;
-    assert!(out.contains("b.rs"), "{out}");
-
-    // `grep [-i] [-F] [-n] PATTERN [PATH]` — flags map onto SearchArgs.
-    let out = run("grep needle")
-        .await
-        .expect("bare grep must be claimed")
-        .content;
-    assert!(out.contains("a.txt:1: needle one"), "{out}");
-    assert!(
-        !out.contains("NEEDLE two"),
-        "case must hold without -i: {out}"
-    );
-    let out = run("grep -i needle").await.unwrap().content;
-    assert!(
-        out.contains("a.txt:2: NEEDLE two"),
-        "-i must reach the search: {out}"
-    );
-    let out = run("grep -n needle").await.unwrap().content;
-    assert!(out.contains("a.txt:1:"), "{out}");
-    let out = run("grep -F l+teral").await.unwrap().content;
-    assert!(
-        out.contains("c.txt:1: l+teral"),
-        "-F must make the pattern literal: {out}"
-    );
-    let out = run("grep l+teral").await.unwrap().content;
-    assert!(
-        !out.contains("c.txt"),
-        "without -F the regex must not match: {out}"
-    );
-    let out = run("grep -iF NEEDLE a.txt").await.unwrap().content;
-    assert!(
-        out.contains("NEEDLE two"),
-        "clustered flags + a file path: {out}"
-    );
+    std::fs::write(dir.path().join("a.txt"), "needle one\n").unwrap();
+    for cmd in ["grep needle", "grep -i needle a.txt", "find . -name '*.txt'"] {
+        assert!(
+            search_command(cmd, dir.path(), &CancellationToken::new())
+                .await
+                .is_none(),
+            "bare form must reach the shell: {cmd}"
+        );
+    }
 }
 
 #[tokio::test]
