@@ -12,7 +12,7 @@ mod widgets;
 
 pub(crate) use widgets::{
     HomeRows, build_input_box, home_band_h, needs_seam, queued_preview_lines, shimmer_spans,
-    status_dock_h,
+    status_dock_h, tail_block_h, tail_gap_h,
 };
 
 /// Exact-fit viewport height for the given content, clamped to
@@ -285,7 +285,12 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         .sum::<u16>()
         .saturating_add(u16::from(tui.live_tool_overflow() > 0));
     let stream_tail: Vec<Line<'static>> = tui.stream_tail_rows(w);
-    let tail_est = stream_tail.len() as u16;
+    // The margin under the tail when one is owed (see `tail_gap_h`) is
+    // counted in the tail block, so the spacer, widget budget, band
+    // allowance and desired height below all pay for the same row the
+    // frame paints.
+    let tail_gap = tail_gap_h(tui.status.is_some(), &stream_tail);
+    let tail_est = stream_tail.len() as u16 + tail_gap;
     let mut ibox = build_input_box(&text, cursor, w, ghost, home);
     if !tui.attachments.is_empty() {
         // Chips ride inside the box, above the text and under its top pad,
@@ -370,7 +375,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         reserved[1],
         reserved[2],
         reserved[3],
-        reserved[4],
+        tail_block_h(reserved[4], tail_gap),
     );
     let desired = desired_viewport_h(
         status_h,
@@ -539,7 +544,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
             queued_preview.len() as u16,
             widget_rows.len() as u16,
             live_rows.len() as u16,
-            tail_rows.len() as u16,
+            tail_rows.len() as u16 + tail_gap,
         ];
         trim_to_allowance(&mut rows_h, band_allowance);
         ask_rows.truncate(rows_h[0] as usize);
@@ -554,11 +559,14 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 live_is_tail.pop();
             }
         }
-        let tail_drop = tail_rows.len().saturating_sub(rows_h[4] as usize);
-        tail_rows.drain(..tail_drop);
+        let tail_h = tail_block_h(rows_h[4], tail_gap);
+        // Text rows are the block minus its margin: the margin itself is
+        // the unpainted row the status line's offset (`+ tail_h`) leaves
+        // between the last tail row and the shimmer text.
+        let tail_text = tail_h.saturating_sub(tail_gap);
+        tail_rows.drain(..tail_rows.len() - tail_text as usize);
         let show_live_overflow = reserve_overflow_row;
         let live_h = rows_h[3] + u16::from(show_live_overflow);
-        let tail_h = rows_h[4].min(tail_rows.len() as u16);
         let queued_h = rows_h[1];
         let ask_h = rows_h[0];
         let widget_h = rows_h[2];
