@@ -23,36 +23,14 @@ fn editor_program(editor: Option<&str>) -> &str {
 /// `"/c/Program Files/Notepad++/notepad++.exe" -multiInst` and any quoted
 /// argument. An unterminated quote runs to the end of the value.
 pub fn split_editor_words(editor: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut quote: Option<char> = None;
-    let mut has_token = false;
-    for c in editor.chars() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => cur.push(c),
-            None => match c {
-                '\'' | '"' => {
-                    quote = Some(c);
-                    has_token = true;
-                }
-                c if c.is_whitespace() => {
-                    if has_token {
-                        out.push(std::mem::take(&mut cur));
-                        has_token = false;
-                    }
-                }
-                _ => {
-                    cur.push(c);
-                    has_token = true;
-                }
-            },
-        }
-    }
-    if has_token {
-        out.push(cur);
-    }
-    out
+    // shlex covers POSIX quoting; an unterminated quote is a config error,
+    // for which whitespace-split is the honest fallback.
+    shlex::split(editor).unwrap_or_else(|| {
+        editor
+            .split_whitespace()
+            .map(|w| w.trim_matches(['\'', '"']).to_string())
+            .collect()
+    })
 }
 
 pub fn parse_editor_cmd(editor: &str) -> (String, Vec<String>) {

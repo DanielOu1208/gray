@@ -250,6 +250,25 @@ pub(crate) struct SessionState {
 
 /// Command feedback: through the composer when it owns the terminal, else stdout.
 /// Raw println! while the composer viewport is live collides with the next draw (ghost input).
+/// Queued `host/say` lines: plain text arrives pre-styled (dim + the
+/// command indent) from [`crate::host::queue_say`]; styled blocks keep
+/// their colors. One call per queued message so a framed block isn't
+/// gapped row-by-row.
+pub(crate) fn say_lines(
+    tui: Option<&crate::composer::SharedTui>,
+    lines: Vec<ratatui::text::Line<'static>>,
+) {
+    if let Some(t) = tui {
+        let mut t = t.lock().expect("tui lock");
+        t.push_styled_lines_with_hyperlinks(lines, &[], 0);
+        t.ensure_gap();
+    } else {
+        for line in lines {
+            println!("{line}");
+        }
+    }
+}
+
 pub(crate) fn say(tui: Option<&crate::composer::SharedTui>, msg: &str) {
     if let Some(t) = tui {
         let mut t = t.lock().expect("tui lock");
@@ -538,6 +557,61 @@ async fn shutdown_hooks(agent: Option<&gray_core::agent::Agent>) {
 /// without this the next Tui::draw renders off-screen and the input box vanishes.
 /// Width unchanged → just re-anchor (LeaveAlternateScreen already restored the
 /// scrollback; clearing/re-emitting here destroyed it). Width changed → full reflow.
+/// A cron tick earns a transcript row only on errors — a clean tick
+/// announces nothing at all (the wake countdown rolling forward already
+/// says it ran). `cron · 2 fired · 1 error`, file-only job names appended
+/// (failed names tint red; chat-bound fires already framed their own boxes).
+fn cron_tick_line(rep: &crate::cron_serve::TickReport) -> ratatui::text::Line<'static> {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    let th = crate::theme::theme();
+    let dim = Style::default().fg(th.text_dim);
+    let mut spans = vec![
+        Span::styled(
+            "  cron",
+            Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ·  ", dim),
+        Span::styled(
+            format!("{} fired", rep.fired),
+            Style::default().fg(th.text_body),
+        ),
+        Span::styled("  ·  ", dim),
+        Span::styled(
+            format!(
+                "{} error{}",
+                rep.errors,
+                if rep.errors == 1 { "" } else { "s" }
+            ),
+            Style::default()
+                .fg(th.error_soft)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let shown: Vec<&crate::cron_serve::DeliveredFire> = rep
+        .delivered
+        .iter()
+        .filter(|d| !d.to_chat)
+        .take(4)
+        .collect();
+    for (i, d) in shown.iter().enumerate() {
+        spans.push(Span::styled(if i == 0 { "   " } else { ", " }, dim));
+        spans.push(Span::styled(
+            d.name.clone(),
+            Style::default().fg(if d.failed {
+                th.error_soft
+            } else {
+                th.text_muted
+            }),
+        ));
+    }
+    let extra = rep.delivered.iter().filter(|d| !d.to_chat).count() - shown.len();
+    if extra > 0 {
+        spans.push(Span::styled(format!(", +{extra}"), dim));
+    }
+    Line::from(spans)
+}
+
 fn restore_viewport(tui: Option<&crate::composer::SharedTui>) {
     if let Some(shared) = tui {
         let mut t = shared.lock().expect("tui lock");
@@ -609,12 +683,19 @@ pub async fn run_repl_mode(
     crate::setup::set_user_reserve_tokens(config.context_reserve);
     crate::setup::set_user_keep_recent_tokens(config.context_keep);
     crate::setup::set_active_model_provider(&config.base_url);
-    // Discovery also feeds completion, even with a cached/overridden context window.
-    let base = config.base_url.clone();
-    let key = config.api_key.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::setup::fetch_live_provider_models(&base, key.as_deref());
-    });
+    // Discovery also feeds completion, even with a cached/overridden
+    // context window. Skip the live fetch where it cannot work or is not
+    // wanted: a plugin-credentialed provider's base_url is a relay
+    // placeholder no HTTP fetch can satisfy (the plugin RPC path is
+    // `fetch_plugin_provider_models`), and bare/lean runs stick to the 24h
+    // disk cache the pickers read anyway.
+    if !config.uses_plugin_credentials() && !config.bare && !config.lean {
+        let base = config.base_url.clone();
+        let key = config.api_key.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::setup::fetch_live_provider_models(&base, key.as_deref());
+        });
+    }
     tokio::spawn(crate::setup::fetch_models_dev_context());
     tokio::spawn(crate::setup::fetch_recommended_models());
     if crate::setup::get_user_context_window().is_none() {
@@ -655,7 +736,7 @@ pub async fn run_repl_mode(
         crate::setup::set_user_context_window(config.context_window);
         crate::setup::set_user_reserve_tokens(config.context_reserve);
         crate::setup::set_user_keep_recent_tokens(config.context_keep);
-        // reasoning efforts already fetched unconditionally at boot (see above).
+        // reasoning efforts came in at boot via the live or plugin catalog (see above).
         if crate::setup::get_user_context_window().is_none() {
             tokio::spawn(crate::setup::fetch_litellm_context_windows());
             if let Some(m) = config.model.clone()
@@ -764,10 +845,11 @@ pub async fn run_repl_mode(
             println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
         }
         let history: Vec<Message> = entries.iter().map(|e| e.message.clone()).collect();
-        pending_history = history.clone();
-        if let Ok(built) = build_agent(config, &cwd, Some(sid.as_str())).await {
-            agent = Some(built.with_messages(history));
-        }
+        // The agent builds lazily at the first turn (see dispatch's
+        // `agent.is_none()` arm, the same path a fresh session takes): an
+        // eager build here kept the resumed composer off the screen for
+        // seconds while plugins and provider lookups answered.
+        pending_history = history;
         // T3.4 lifecycle: resumed sessions start with no ledger state
         // (fresh builds start empty; clear anyway — see dispatch /new).
         if let Some(ledger) = gray_plugin::builder::current_file_ledger() {
@@ -821,38 +903,69 @@ pub async fn run_repl_mode(
                  (could not query terminal size); pipe input or run under a TTY"
             );
         }
-        let shared = std::sync::Arc::new(std::sync::Mutex::new({
-            let mut t = crate::composer::Tui::new().map_err(|e| {
-                anyhow::anyhow!(
-                    "not a terminal — the interactive composer needs a real terminal \
-                     (cursor position could not be read: {e:#}); pipe input or run under a TTY"
+        let mut t = crate::composer::Tui::new(resumed_session_info.is_some()).map_err(|e| {
+            anyhow::anyhow!(
+                "not a terminal — the interactive composer needs a real terminal \
+                 (cursor position could not be read: {e:#}); pipe input or run under a TTY"
+            )
+        })?;
+        if let Some(m) = &config.model {
+            t.set_model(m.clone());
+            t.set_model_label(crate::setup::composite_label_for(config));
+            t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
+        }
+        // A level this model no longer offers (a step-family `off` saved
+        // before family truth won) must not ride into the footer.
+        let _ = clamp_thinking_to_model(config);
+        if let Some(eff) = &config.thinking_effort {
+            t.set_thinking_effort(eff.clone());
+        }
+        t.set_hide_thinking(config.reasoning_hidden());
+        t.set_cwd(cwd.display().to_string());
+        if let Some((ref sid, ref entries)) = resumed_session_info {
+            // Paint the band before the replay inserts: the composer is
+            // on screen while the transcript builds above it instead of
+            // appearing only when the first prompt draws.
+            let _ = t.draw();
+            // Replayed cards' labels/previews live on the tool defs, but
+            // the agent builds lazily now — source the same defs from
+            // the shared plugin boot (same registry merge `build_agent`
+            // runs). The wait is bounded: a slow sidecar spawn must not
+            // stall the transcript paint, it just falls back to wire
+            // names.
+            let tool_defs = if config.bare {
+                Vec::new()
+            } else {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    crate::plugin_status::booted_tool_defs(
+                        Some(crate::host::default_handler(cwd.to_path_buf())),
+                        crate::extra_surface_plugins(config, true),
+                    ),
                 )
-            })?;
-            if let Some(m) = &config.model {
-                t.set_model(m.clone());
-                t.set_model_label(crate::setup::composite_label_for(config));
-                t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
-            }
-            // A level this model no longer offers (a step-family `off` saved
-            // before family truth won) must not ride into the footer.
-            let _ = clamp_thinking_to_model(config);
-            if let Some(eff) = &config.thinking_effort {
-                t.set_thinking_effort(eff.clone());
-            }
-            t.set_hide_thinking(config.reasoning_hidden());
-            t.set_cwd(cwd.display().to_string());
-            if let Some((ref sid, ref entries)) = resumed_session_info {
-                t.replay_session_history(entries, &cwd);
-                t.ensure_gap();
-                t.push_dim(format!(
-                    "\u{2b22} Resumed session {} ({} messages)",
-                    sid.as_str(),
-                    entries.len()
-                ));
-                t.ensure_gap();
-            }
-            t
-        }));
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+            };
+            let (tool_labels, tool_previews) = session::tool_display_maps(&tool_defs);
+            t.replay_session_history_with_tools(
+                entries,
+                &cwd,
+                crate::tool_fmt::ToolDisplay {
+                    labels: Some(&tool_labels),
+                    previews: Some(&tool_previews),
+                },
+            );
+            t.ensure_gap();
+            t.push_dim(format!(
+                "\u{2b22} Resumed session {} ({} messages)",
+                sid.as_str(),
+                entries.len()
+            ));
+            t.ensure_gap();
+        }
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(t));
         crate::host::register_tui(&shared);
         if let Some(task) = startup_hint {
             let shared = shared.clone();
@@ -1006,7 +1119,7 @@ pub async fn run_repl_mode(
                         interval.tick().await;
                         match crate::cron_serve::tick_once(&store, &runner, &deliver, "repl").await
                         {
-                            Ok(rep) if rep.fired > 0 => {
+                            Ok(rep) if rep.fired > 0 || rep.errors > 0 => {
                                 // One hermes-framed box per chat-bound
                                 // delivery (file-only jobs stay on the count
                                 // line); display-only — the model never sees
@@ -1016,10 +1129,13 @@ pub async fn run_repl_mode(
                                         saved,
                                     ));
                                 }
-                                crate::host::queue_say(format!(
-                                    "⏰ cron tick: fired={} errors={}",
-                                    rep.fired, rep.errors
-                                ));
+                                // Clean ticks announce nothing — the
+                                // wake countdown rolling forward already
+                                // says it ran. Errors still earn a row:
+                                // silent failure is worse than noise.
+                                if rep.errors > 0 {
+                                    crate::host::queue_say_lines(vec![cron_tick_line(&rep)]);
+                                }
                             }
                             Ok(_) => {}
                             Err(e) => log::warn!("repl cron tick failed: {e:#}"),
@@ -1080,8 +1196,8 @@ pub async fn run_repl_mode(
         session::remember_exit_session(session_state.as_ref().map(|s| s.session_id.as_str()));
         // Plugin-initiated `host/say` lines queued while a turn ran (cron
         // reports) surface here, through the composer when it owns the screen.
-        for line in crate::host::take_host_say() {
-            say(tui.as_ref().map(|(s, _)| s), &line);
+        for lines in crate::host::take_host_say() {
+            say_lines(tui.as_ref().map(|(s, _)| s), lines);
         }
         // Idle point (no queued input): a cron delivery for this session or a
         // finished background job paints a card and starts a turn on its own,
@@ -1221,12 +1337,19 @@ pub async fn run_repl_mode(
                 (buf.trim().to_string(), Vec::new())
             };
             pending_images = images;
-            expand_skill_command(
-                parse_command(&line_text),
-                cwd.as_path(),
-                tui.as_ref().map(|(s, _)| s),
-                false,
-            )
+            let parsed = parse_command(&line_text);
+            // Local commands leave no `› /cmd` card behind: they never reach
+            // the model, so the echo is noise — only the command's own
+            // feedback stays.
+            if parsed.runs_local()
+                && let Some((shared, _)) = tui.as_ref()
+            {
+                shared
+                    .lock()
+                    .expect("tui lock")
+                    .retract_slash_echo(&line_text);
+            }
+            expand_skill_command(parsed, cwd.as_path(), tui.as_ref().map(|(s, _)| s), false)
         };
         // Clear pending images for non-prompt commands (keep for Prompt/Empty+images)
         if !matches!(&cmd, ReplCommand::Prompt(_) | ReplCommand::Empty) {

@@ -11,8 +11,12 @@
 //!
 //! - **A height change keeps its top.** Growth past the screen bottom
 //!   scrolls the transcript above it into scrollback by the overflow; a
-//!   shrink clears the rows it gave up. The band repaints in full either
-//!   way (`set_viewport_height`).
+//!   shrink clears the rows it gave up. One shrink is lifted instead: when
+//!   an attachment's rows come back out of a band that sits on the screen
+//!   bottom, the screen scrolls down by what those rows' growth scrolled
+//!   away, so the transcript returns above the band and the footer is on
+//!   the last row at once (`set_viewport_height`). The band repaints in
+//!   full either way.
 //! - **A history insert never touches the band's cells.** While there are
 //!   free rows under it, the band is shifted down into them (reverse index
 //!   inside a scroll region from its top to the screen bottom) and the new
@@ -90,6 +94,15 @@ where
     pub viewport_area: Rect,
     pub last_known_screen_size: Size,
     scrollback: Scrollback,
+    /// Rows that growth of the attachment rows scrolled past the screen
+    /// bottom into scrollback and no shrink has given back yet: the
+    /// transcript sits this far above where the band's rows put it. Their
+    /// removal gives back at most this much, and an insert that shifts the
+    /// band down into free rows spends it.
+    displaced: u16,
+    /// Attachment rows the last paint frame drew in the input box. Only a
+    /// change in them lifts a shrink or earns growth its credit.
+    chip_rows: u16,
 }
 
 impl<B> Drop for CustomTerminal<B>
@@ -137,6 +150,8 @@ where
             viewport_area,
             last_known_screen_size: screen_size,
             scrollback,
+            displaced: 0,
+            chip_rows: 0,
         };
         term.set_viewport_area(viewport_area);
         term
@@ -149,25 +164,66 @@ where
     }
 
     /// Gives the band `height` rows (codex `Tui::draw`). Its top stays put,
-    /// so it keeps sitting under the last transcript row: growth past the
+    /// so it keeps sitting under the last transcript row. Growth past the
     /// screen bottom scrolls the transcript above it into scrollback by the
-    /// overflow, a shrink leaves blank rows below the footer for the next
-    /// inserts to shift it into. Any change clears from the band's top, so
-    /// the frame repaints it whole and no stale row survives the move.
-    pub fn set_viewport_height(&mut self, height: u16, screen_size: Size) -> io::Result<()> {
+    /// overflow, and the band rises with it. A shrink keeps its top too,
+    /// leaving blank rows under the footer for the next inserts to shift the
+    /// band into. The exception is the attachment rows: a paint frame that
+    /// takes them back out of a band on the screen bottom scrolls the screen
+    /// down by what their growth scrolled away, so the transcript returns
+    /// above the band and the footer lands on the last row at once. Popups,
+    /// the status dock and settles keep their top, so they leave no blank
+    /// rows in history. Any change clears from the band's new top, so the
+    /// frame repaints it whole. `chip_rows` is the attachment rows the input
+    /// box shows on this frame.
+    pub fn set_viewport_height(
+        &mut self,
+        height: u16,
+        screen_size: Size,
+        paint: bool,
+        chip_rows: u16,
+    ) -> io::Result<()> {
         // A shorter screen is about to be reflowed from the top
         // (`Tui::reflow_on_resize`); scrolling now would push rows into
         // scrollback that the reflow writes again.
         let screen_shrank = screen_size.height < self.last_known_screen_size.height;
         self.last_known_screen_size = screen_size;
+        // Only a paint frame moves the count: a settle is followed by an
+        // insert, and the paint after it must still see the change.
+        let chips_delta = if paint {
+            let delta = i32::from(chip_rows) - i32::from(self.chip_rows);
+            self.chip_rows = chip_rows;
+            delta
+        } else {
+            0
+        };
 
-        let mut area = self.viewport_area;
+        let old = self.viewport_area;
+        let mut area = old;
         area.height = height.min(screen_size.height);
         area.width = screen_size.width;
         area.y = area.y.min(screen_size.height.saturating_sub(area.height));
-        let wanted_bottom = self.viewport_area.y.saturating_add(area.height);
+        let wanted_bottom = old.y.saturating_add(area.height);
         if wanted_bottom > screen_size.height && !screen_shrank {
-            self.scroll_history_up(self.viewport_area.y, wanted_bottom - screen_size.height)?;
+            let overflow = wanted_bottom - screen_size.height;
+            self.scroll_history_up(old.y, overflow)?;
+            if old.y > 0 && chips_delta > 0 {
+                self.displaced = self.displaced.saturating_add(overflow);
+            }
+        }
+
+        // Only the attachment rows lift, and never on a settle: the insert
+        // that follows spends the rows (`insert_before`).
+        let shrink = old.height.saturating_sub(area.height);
+        let on_bottom = old.bottom() == screen_size.height;
+        let lifts = paint && on_bottom && !screen_shrank && chips_delta < 0;
+        if lifts && shrink > 0 && self.displaced > 0 {
+            let lift = shrink.min(self.displaced);
+            self.scroll_screen_down(lift)?;
+            self.displaced -= lift;
+            area.y = old.y + lift;
+            self.set_viewport_area(area);
+            return self.clear_after_position(area.as_position());
         }
 
         if area != self.viewport_area {
@@ -212,6 +268,7 @@ where
         Backend::flush(&mut self.backend)?;
         self.last_known_screen_size = screen_size;
         self.set_viewport_area(Rect::new(0, 0, screen_size.width, 0));
+        self.displaced = 0;
         self.buffers[1 - self.current].reset();
         Ok(())
     }
@@ -291,6 +348,7 @@ where
         if height == 0 || self.last_known_screen_size.height == 0 {
             return Ok(());
         }
+        let top_before = self.viewport_area.y;
         let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
         draw_fn(&mut buffer);
         let all_rows: Vec<&[Cell]> = buffer.content.chunks(width as usize).collect();
@@ -330,6 +388,10 @@ where
         if !rows.is_empty() {
             self.insert_full_screen(rows)?;
         }
+        // Rows the band moved down into were free, so the transcript above
+        // it moved down too: that much less is displaced.
+        let moved = self.viewport_area.y.saturating_sub(top_before);
+        self.displaced = self.displaced.saturating_sub(moved);
         Backend::flush(&mut self.backend)?;
         Ok(())
     }
@@ -402,6 +464,23 @@ where
             .set_cursor_position(Position::new(0, last_row))?;
         for _ in 0..n {
             write!(self.backend, "\r\n")?;
+        }
+        Ok(())
+    }
+
+    /// Moves the whole screen down by `n` rows: reverse index from row 0
+    /// with the margins reset. The bottom `n` rows fall off, and they are
+    /// the band's own cells, which the caller clears and repaints. Reverse
+    /// index never feeds scrollback, so the top `n` rows come up blank and
+    /// nothing is added to history.
+    fn scroll_screen_down(&mut self, n: u16) -> io::Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        write!(self.backend, "\x1b[r")?;
+        self.backend.set_cursor_position(Position::new(0, 0))?;
+        for _ in 0..n {
+            write!(self.backend, "\x1bM")?;
         }
         Ok(())
     }

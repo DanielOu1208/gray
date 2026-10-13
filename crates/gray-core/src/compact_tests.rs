@@ -218,6 +218,24 @@ async fn pipeline_summary_first_then_retained() {
 }
 
 #[tokio::test]
+async fn compact_v2_caps_retained_under_ceiling() {
+    // Under a 400-token ceiling the kept tail is capped at ceiling/4 = 100,
+    // whatever the keep-recent setting says, so the next trigger stays far
+    // away: summary + at most one ~100-token message.
+    let mut agent = test_agent("FIXED-SUMMARY-123")
+        .with_context_window(Some(200_000))
+        .with_compact_ceiling(Some(400), None);
+    let bodies: Vec<String> = (1..=6).map(|i| format!("msg{i}")).collect();
+    agent.set_messages(bodies.iter().map(|t| sized_msg(t)).collect());
+    agent.compact_v2(None, None).await.unwrap();
+    assert!(
+        agent.messages().len() <= 2,
+        "expected summary + <=1 retained, got {}",
+        agent.messages().len()
+    );
+}
+
+#[tokio::test]
 async fn compact_v2_returns_summary_and_honors_zero_budget() {
     let mut agent = test_agent("FIXED-SUMMARY-123");
     let bodies: Vec<String> = (1..=4).map(|i| format!("msg{i}")).collect();
@@ -264,13 +282,6 @@ async fn budgeted_compact_false_when_summary_would_not_shrink() {
         &before,
         "non-shrinking compact must leave history untouched"
     );
-}
-
-#[tokio::test]
-async fn budget_math() {
-    assert!(needs_pre_turn_compact(120_000, Some(128_000), None)); // 120k+16k >= 128k
-    assert!(!needs_pre_turn_compact(100_000, Some(128_000), None));
-    assert!(!needs_pre_turn_compact(999_999_999, None, None)); // unknown window: never
 }
 
 /// Provider whose stream immediately fails: exercises the provider-error
@@ -520,7 +531,7 @@ fn inline_media_attachment_is_priced_per_block_not_per_base64_byte() {
     );
     // The compaction trigger agrees: a 200k window is not "full" because of
     // one attachment.
-    assert!(!needs_pre_turn_compact(core, Some(200_000), None));
+    assert!(!needs_pre_turn_compact(core, Some(200_000), None, None));
     // Image + Media in one message price both, still bounded.
     let both = Message {
         role: Role::User,

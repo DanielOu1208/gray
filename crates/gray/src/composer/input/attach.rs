@@ -49,9 +49,6 @@ pub(crate) fn attach_image(tui: &mut Tui, path: PathBuf) {
 pub(crate) fn sync_attachments(tui: &mut Tui) {
     let text = tui.textarea.text().to_string();
     tui.attachments.retain(|(ph, _)| text.contains(ph));
-    if tui.attachments.is_empty() {
-        keys::set_chip_sel(tui, None);
-    }
 }
 
 /// Max attachable file size. `repl::attachments` caps only oversized

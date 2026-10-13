@@ -881,6 +881,7 @@ async fn plugin_models_rpc(
                 variants: m.variants.clone(),
                 slots: m.slots.clone(),
                 declared: true,
+                price_cliff_tokens: m.price_cliff_tokens,
             })
         })
         .collect();
@@ -1040,6 +1041,49 @@ pub(crate) fn ollama_running() -> bool {
         .join()
         .unwrap_or(false)
     })
+}
+
+/// Provider-declared price cliffs (`price_cliff_tokens` on catalog rows):
+/// model id → prompt tokens above which a higher price tier bills. Fed by
+/// `CachedRow::register` like the effort/shape caches.
+static MODEL_PRICE_CLIFFS: std::sync::OnceLock<
+    std::sync::RwLock<std::collections::HashMap<String, u32>>,
+> = std::sync::OnceLock::new();
+
+fn price_cliff_map() -> &'static std::sync::RwLock<std::collections::HashMap<String, u32>> {
+    MODEL_PRICE_CLIFFS.get_or_init(Default::default)
+}
+
+/// Record a row's declared cliff; `None` clears it (a fresh catalog row
+/// without a cliff is authoritative, same rule as efforts/shapes).
+pub fn cache_model_price_cliff(model_id: &str, cliff: Option<u32>) {
+    if let Ok(mut m) = price_cliff_map().write() {
+        match cliff {
+            Some(c) => {
+                m.insert(model_id.to_string(), c);
+            }
+            None => {
+                m.remove(model_id);
+            }
+        }
+    }
+}
+
+/// The declared price cliff for a model id, when its provider said one.
+/// Normalizes like [`get_cached_model_context`]: exact, lowercase, then the
+/// tail of a `provider/model` id.
+pub fn get_cached_model_price_cliff(model_id: &str) -> Option<u32> {
+    let g = price_cliff_map().read().ok()?;
+    if let Some(v) = g.get(model_id).copied() {
+        return Some(v);
+    }
+    let lower = model_id.to_lowercase();
+    if let Some(v) = g.get(&lower).copied() {
+        return Some(v);
+    }
+    model_id
+        .rsplit_once('/')
+        .and_then(|(_, suffix)| g.get(suffix).copied())
 }
 
 static MODEL_CONTEXT_CACHE: std::sync::OnceLock<
@@ -1255,10 +1299,7 @@ impl CacheEntry {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
+    u64::try_from(gray_core::spill::now_secs()).unwrap_or_default()
 }
 
 /// The raw cache map with expired entries already dropped; missing or

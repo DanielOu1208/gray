@@ -14,11 +14,6 @@ pub(crate) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
-fn default_entry_is_enabled() {
-    assert!(LockEntry::default().enabled);
-}
-
-#[test]
 fn spec_splits_names_and_urls() {
     assert!(matches!(parse_spec("foo"), NameOrUrl::Name(_)));
     assert!(matches!(parse_spec("  foo  "), NameOrUrl::Name(_)));

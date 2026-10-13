@@ -1642,6 +1642,9 @@ fn attach_media(name: &str, out: &mut ToolOutput, reply: &Value) {
 /// `text` too — a fallback for hosts that predate the outcome, ignored here.
 pub(crate) fn command_outcome(v: &Value) -> Option<CommandOutcome> {
     let field = |k: &str| v.get(k).and_then(|t| t.as_str()).filter(|t| !t.is_empty());
+    if let Some(plugin) = field("subagent_settings") {
+        return Some(CommandOutcome::SubagentSettings(plugin.to_string()));
+    }
     if let Some(plugin) = field("agent_picker") {
         return Some(CommandOutcome::AgentPicker(plugin.to_string()));
     }

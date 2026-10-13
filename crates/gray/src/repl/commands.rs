@@ -322,15 +322,6 @@ pub(crate) fn completion_matches(filter: &str) -> Vec<(&'static str, &'static st
         .collect()
 }
 
-thread_local! {
-    static COMPLETER_CMD: std::cell::RefCell<String> =
-        const { std::cell::RefCell::new(String::new()) };
-}
-
-pub(crate) fn current_completer_cmd() -> String {
-    COMPLETER_CMD.with(|c| c.borrow().clone())
-}
-
 /// Completion for the composer prompt: static commands, skill names after
 /// `/skills ` (alias `/skill `), or per-command suffixes after `/cmd `
 /// (Minecraft-style). Owned here so every read_loop call site stays in sync.
@@ -338,11 +329,9 @@ pub(crate) fn completion_matches_dyn(
     cur_text: &str,
     cwd: &std::path::Path,
 ) -> Vec<(String, String)> {
-    COMPLETER_CMD.with(|c| c.borrow_mut().clear());
     if let Some(inner) = cur_text.strip_prefix('/') {
         if let Some(idx) = inner.find(char::is_whitespace) {
             let (cmd, _) = inner.split_at(idx);
-            COMPLETER_CMD.with(|c| *c.borrow_mut() = cmd.to_lowercase());
             if cmd.is_empty() || cmd.contains(':') {
                 return Vec::new();
             }
@@ -728,6 +717,27 @@ pub enum ReplCommand {
     Prompt(String),
     /// Blank line, should be ignored.
     Empty,
+}
+
+impl ReplCommand {
+    /// True when dispatch never hands text to the model: the submit echo
+    /// (`› /cmd`) is retracted so only the command's own feedback stays.
+    /// Unknown/provider commands keep their echo — `command/run` can
+    /// still escalate into a `Prompt`, and a silent model turn is worse.
+    pub(crate) fn runs_local(&self) -> bool {
+        match self {
+            ReplCommand::Prompt(_)
+            | ReplCommand::Empty
+            | ReplCommand::Compact(_)
+            | ReplCommand::Retry
+            | ReplCommand::Unknown(_)
+            | ReplCommand::ProviderCommand { .. } => false,
+            // `/skills <name>` expands into a prompt; bare `/skills` only
+            // opens the manager.
+            ReplCommand::Skill(payload) => payload.is_none(),
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

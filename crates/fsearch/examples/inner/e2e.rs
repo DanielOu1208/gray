@@ -27,15 +27,8 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 enum Conn {
-    Stdio {
-        child: std::process::Child,
-        w: std::process::ChildStdin,
-        r: BufReader<std::process::ChildStdout>,
-    },
-    Sock {
-        w: UnixStream,
-        r: BufReader<UnixStream>,
-    },
+    Stdio { child: std::process::Child, w: std::process::ChildStdin, r: BufReader<std::process::ChildStdout> },
+    Sock { w: UnixStream, r: BufReader<UnixStream> },
 }
 
 impl Conn {
@@ -44,29 +37,19 @@ impl Conn {
             // stdio:<bin>[@<HOME>][#extra#args]
             let mut parts = spec.split('#');
             let bin = parts.next().unwrap();
-            let (bin, home) = bin
-                .split_once('@')
-                .map_or((bin, None), |(b, h)| (b, Some(h)));
+            let (bin, home) = bin.split_once('@').map_or((bin, None), |(b, h)| (b, Some(h)));
             let mut cmd = std::process::Command::new(bin);
             if let Some(h) = home {
                 cmd.env("HOME", h);
             }
-            let mut child = cmd
-                .arg("stdio")
-                .args(parts)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .expect("spawn stdio");
+            let mut child =
+                cmd.arg("stdio").args(parts).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().expect("spawn stdio");
             let w = child.stdin.take().unwrap();
             let r = BufReader::new(child.stdout.take().unwrap());
             Conn::Stdio { child, w, r }
         } else if let Some(p) = t.strip_prefix("sock:") {
             let s = UnixStream::connect(p).expect("connect");
-            Conn::Sock {
-                w: s.try_clone().unwrap(),
-                r: BufReader::new(s),
-            }
+            Conn::Sock { w: s.try_clone().unwrap(), r: BufReader::new(s) }
         } else {
             panic!("transport must be stdio:<bin> or sock:<path>")
         }
@@ -128,10 +111,7 @@ fn digest(line: &str) -> (Option<u64>, u64) {
         && let Some(p) = line.find("\"ms\":")
     {
         let after = &line[p + 5..];
-        let n = after
-            .bytes()
-            .take_while(|b| b.is_ascii_digit() || *b == b'.')
-            .count();
+        let n = after.bytes().take_while(|b| b.is_ascii_digit() || *b == b'.').count();
         took = after[..n].parse::<f64>().ok().map(|ms| (ms * 1e3) as u64);
     }
     (took, h)
@@ -150,15 +130,9 @@ impl Rec {
             .res
             .entry(format!("{kind} {q}"))
             .or_insert_with(|| json!({"kind": kind, "cat": cat, "ms": [], "took_ms": [], "digest": format!("{d:016x}"), "ok": ok}));
-        e["ms"]
-            .as_array_mut()
-            .unwrap()
-            .push((wall.as_secs_f64() * 1e3).into());
+        e["ms"].as_array_mut().unwrap().push((wall.as_secs_f64() * 1e3).into());
         if let Some(t) = took {
-            e["took_ms"]
-                .as_array_mut()
-                .unwrap()
-                .push((t as f64 / 1e3).into());
+            e["took_ms"].as_array_mut().unwrap().push((t as f64 / 1e3).into());
         }
         if e["digest"] != format!("{d:016x}") {
             e["unstable"] = true.into();
@@ -179,16 +153,7 @@ fn dual(a: &[String]) {
     let list = |k: &str| -> Vec<(String, String)> {
         corpus[k]
             .as_array()
-            .map(|v| {
-                v.iter()
-                    .map(|v| {
-                        (
-                            v["cat"].as_str().unwrap().into(),
-                            v["q"].as_str().unwrap().into(),
-                        )
-                    })
-                    .collect()
-            })
+            .map(|v| v.iter().map(|v| (v["cat"].as_str().unwrap().into(), v["q"].as_str().unwrap().into())).collect())
             .unwrap_or_default()
     };
     let (names, greps) = (list("names"), list("grep"));
@@ -215,24 +180,13 @@ fn dual(a: &[String]) {
                 // Back to back keystrokes, the run taking turns on A and B.
                 for _ in 0..n {
                     for run in corpus["typing"].as_array().unwrap() {
-                        let keys: Vec<&str> = run
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(|k| k.as_str().unwrap())
-                            .collect();
+                        let keys: Vec<&str> = run.as_array().unwrap().iter().map(|k| k.as_str().unwrap()).collect();
                         turn += 1;
                         for k in [turn % 2, 1 - turn % 2] {
                             conns[k].ask(&req("zzzz qqqq"), &mut line);
                             for (i, key) in keys.iter().enumerate() {
                                 let w = conns[k].ask(&req(key), &mut line);
-                                recs[k].add(
-                                    "key",
-                                    if i == 0 { "first" } else { "next" },
-                                    key,
-                                    w,
-                                    &line,
-                                );
+                                recs[k].add("key", if i == 0 { "first" } else { "next" }, key, w, &line);
                             }
                         }
                     }
@@ -243,11 +197,7 @@ fn dual(a: &[String]) {
         };
         for _ in 0..n {
             for (cat, q) in &set {
-                let r = if kind == "ping" {
-                    "{\"op\":\"ping\"}\n".to_string()
-                } else {
-                    req(q)
-                };
+                let r = if kind == "ping" { "{\"op\":\"ping\"}\n".to_string() } else { req(q) };
                 turn += 1;
                 for k in [turn % 2, 1 - turn % 2] {
                     let w = conns[k].ask(&r, &mut line);
@@ -274,12 +224,7 @@ fn cli(a: &[String]) {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| {
-            (
-                v["cat"].as_str().unwrap().to_string(),
-                v["q"].as_str().unwrap().to_string(),
-            )
-        })
+        .map(|v| (v["cat"].as_str().unwrap().to_string(), v["q"].as_str().unwrap().to_string()))
         .filter(|(c, _)| cats.is_empty() || cats.contains(&c.as_str()))
         .collect();
     let mut recs = [Rec::default(), Rec::default()];
@@ -292,10 +237,7 @@ fn cli(a: &[String]) {
             .stderr(std::process::Stdio::null())
             .output()
             .unwrap();
-        (
-            t.elapsed(),
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-        )
+        (t.elapsed(), String::from_utf8_lossy(&out.stdout).into_owned())
     };
     for k in 0..2 {
         for (_, q) in &names {
@@ -321,45 +263,24 @@ fn cli(a: &[String]) {
 
 fn compare(ra: &serde_json::Map<String, Value>, rb: &serde_json::Map<String, Value>) {
     let med = |v: &Value| {
-        let mut t: Vec<f64> = v["ms"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|x| x.as_f64().unwrap())
-            .collect();
+        let mut t: Vec<f64> = v["ms"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
         t.sort_by(f64::total_cmp);
         t[t.len() / 2]
     };
-    let mut cats: std::collections::BTreeMap<(String, String), Vec<(f64, f64)>> =
-        Default::default();
+    let mut cats: std::collections::BTreeMap<(String, String), Vec<(f64, f64)>> = Default::default();
     let mut diff = Vec::new();
     for (k, va) in ra {
         let Some(vb) = rb.get(k) else { continue };
-        cats.entry((
-            va["kind"].as_str().unwrap().into(),
-            va["cat"].as_str().unwrap().into(),
-        ))
-        .or_default()
-        .push((med(va), med(vb)));
+        cats.entry((va["kind"].as_str().unwrap().into(), va["cat"].as_str().unwrap().into())).or_default().push((med(va), med(vb)));
         if va["digest"] != vb["digest"] {
             diff.push(k.clone());
         }
     }
     let geo = |v: &[f64]| (v.iter().map(|m| m.max(1e-3).ln()).sum::<f64>() / v.len() as f64).exp();
-    println!(
-        "{:9} {:8} {:>3}  {:>8} {:>8}  {:>6}",
-        "kind", "cat", "n", "A ms", "B ms", "B/A"
-    );
+    println!("{:9} {:8} {:>3}  {:>8} {:>8}  {:>6}", "kind", "cat", "n", "A ms", "B ms", "B/A");
     for ((kind, cat), p) in cats {
-        let (ga, gb) = (
-            geo(&p.iter().map(|x| x.0).collect::<Vec<_>>()),
-            geo(&p.iter().map(|x| x.1).collect::<Vec<_>>()),
-        );
-        println!(
-            "{kind:9} {cat:8} {:3}  {ga:8.3} {gb:8.3}  {:6.3}",
-            p.len(),
-            gb / ga
-        );
+        let (ga, gb) = (geo(&p.iter().map(|x| x.0).collect::<Vec<_>>()), geo(&p.iter().map(|x| x.1).collect::<Vec<_>>()));
+        println!("{kind:9} {cat:8} {:3}  {ga:8.3} {gb:8.3}  {:6.3}", p.len(), gb / ga);
     }
     println!("{} requests with different responses", diff.len());
     for k in diff.iter().take(10) {
@@ -398,12 +319,7 @@ fn launch(a: &[String]) {
     for (c, mut v) in a[1..].iter().zip(t) {
         v.sort_by(f64::total_cmp);
         let n = v.len();
-        println!(
-            "{:>8.1} us p50 {:>8.1} p10 {:>8.1} p90  {c}",
-            v[n / 2],
-            v[n / 10],
-            v[n * 9 / 10]
-        );
+        println!("{:>8.1} us p50 {:>8.1} p10 {:>8.1} p90  {c}", v[n / 2], v[n / 10], v[n * 9 / 10]);
     }
 }
 
@@ -421,41 +337,13 @@ pub fn main() {
     }
     let transport = &a[0];
     let corpus: Value = serde_json::from_str(&std::fs::read_to_string(&a[1]).unwrap()).unwrap();
-    let names: Vec<(String, String)> = corpus["names"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| {
-            (
-                v["cat"].as_str().unwrap().into(),
-                v["q"].as_str().unwrap().into(),
-            )
-        })
-        .collect();
-    let greps: Vec<(String, String)> = corpus["grep"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| {
-            (
-                v["cat"].as_str().unwrap().into(),
-                v["q"].as_str().unwrap().into(),
-            )
-        })
-        .collect();
+    let names: Vec<(String, String)> =
+        corpus["names"].as_array().unwrap().iter().map(|v| (v["cat"].as_str().unwrap().into(), v["q"].as_str().unwrap().into())).collect();
+    let greps: Vec<(String, String)> =
+        corpus["grep"].as_array().unwrap().iter().map(|v| (v["cat"].as_str().unwrap().into(), v["q"].as_str().unwrap().into())).collect();
     let typing: Vec<Vec<String>> = corpus["typing"]
         .as_array()
-        .map(|t| {
-            t.iter()
-                .map(|r| {
-                    r.as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|k| k.as_str().unwrap().to_string())
-                        .collect()
-                })
-                .collect()
-        })
+        .map(|t| t.iter().map(|r| r.as_array().unwrap().iter().map(|k| k.as_str().unwrap().to_string()).collect()).collect())
         .unwrap_or_default();
     let mut conn = Conn::open(transport);
     let mut rec = Rec::default();
@@ -495,27 +383,15 @@ pub fn main() {
                                 first = w;
                             }
                             total += w;
-                            rec.add(
-                                &format!("key{}", gap.as_millis()),
-                                if i == 0 { "first" } else { "next" },
-                                k,
-                                w,
-                                &line,
-                            );
+                            rec.add(&format!("key{}", gap.as_millis()), if i == 0 { "first" } else { "next" }, k, w, &line);
                         }
                         let key = format!("typing{} {}", gap.as_millis(), run.last().unwrap());
                         rec.res.entry(key.clone()).or_insert_with(
                             || json!({"kind": "typing", "cat": format!("gap{}", gap.as_millis()), "ms": [], "first_ms": [], "digest": ""}),
                         );
                         let e = rec.res.get_mut(&key).unwrap();
-                        e["ms"]
-                            .as_array_mut()
-                            .unwrap()
-                            .push((total.as_secs_f64() * 1e3).into());
-                        e["first_ms"]
-                            .as_array_mut()
-                            .unwrap()
-                            .push((first.as_secs_f64() * 1e3).into());
+                        e["ms"].as_array_mut().unwrap().push((total.as_secs_f64() * 1e3).into());
+                        e["first_ms"].as_array_mut().unwrap().push((first.as_secs_f64() * 1e3).into());
                     }
                 }
             }
@@ -534,9 +410,7 @@ pub fn main() {
                 }
             }
             "connping" => {
-                let p = transport
-                    .strip_prefix("sock:")
-                    .expect("connping needs sock:");
+                let p = transport.strip_prefix("sock:").expect("connping needs sock:");
                 for _ in 0..num(1, 200) {
                     let t = Instant::now();
                     let mut s = UnixStream::connect(p).unwrap();
@@ -567,23 +441,14 @@ pub fn main() {
 }
 
 fn summarize(res: &serde_json::Map<String, Value>) {
-    let mut cats: std::collections::BTreeMap<(String, String), (Vec<f64>, Vec<f64>)> =
-        Default::default();
+    let mut cats: std::collections::BTreeMap<(String, String), (Vec<f64>, Vec<f64>)> = Default::default();
     for v in res.values() {
         let med = |k: &str| {
-            let mut t: Vec<f64> = v[k]
-                .as_array()
-                .map(|a| a.iter().map(|x| x.as_f64().unwrap()).collect())
-                .unwrap_or_default();
+            let mut t: Vec<f64> = v[k].as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap()).collect()).unwrap_or_default();
             t.sort_by(f64::total_cmp);
             t.get(t.len() / 2).copied()
         };
-        let e = cats
-            .entry((
-                v["kind"].as_str().unwrap().into(),
-                v["cat"].as_str().unwrap().into(),
-            ))
-            .or_default();
+        let e = cats.entry((v["kind"].as_str().unwrap().into(), v["cat"].as_str().unwrap().into())).or_default();
         if let Some(m) = med("ms") {
             e.0.push(m);
         }
@@ -591,19 +456,8 @@ fn summarize(res: &serde_json::Map<String, Value>) {
             e.1.push(m);
         }
     }
-    let geo = |v: &[f64]| {
-        if v.is_empty() {
-            f64::NAN
-        } else {
-            (v.iter().map(|m| m.max(1e-3).ln()).sum::<f64>() / v.len() as f64).exp()
-        }
-    };
+    let geo = |v: &[f64]| if v.is_empty() { f64::NAN } else { (v.iter().map(|m| m.max(1e-3).ln()).sum::<f64>() / v.len() as f64).exp() };
     for ((kind, cat), (wall, took)) in cats {
-        println!(
-            "{kind:9} {cat:8} n={:3}  wall {:8.3} ms  daemon {:8.3} ms",
-            wall.len(),
-            geo(&wall),
-            geo(&took)
-        );
+        println!("{kind:9} {cat:8} n={:3}  wall {:8.3} ms  daemon {:8.3} ms", wall.len(), geo(&wall), geo(&took));
     }
 }

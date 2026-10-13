@@ -38,9 +38,8 @@ fn line_to_ansi(l: &Line<'_>) -> String {
     line_str
 }
 
-/// Plain ANSI string formatting for one-shot / non-TUI output header.
-// Thin wrapper over `format_tool_call_header`; kept as `String`
-// because print.rs + repl/mod.rs callers (outside this file) need `String`.
+/// Plain ANSI string formatting of a tool card's headline (line one only).
+/// Callers that print the whole card use [`format_tool_call_lines_plain`].
 pub fn format_tool_call_header_plain(
     name: &str,
     args: &serde_json::Value,
@@ -48,6 +47,22 @@ pub fn format_tool_call_header_plain(
     preview_path: Option<&str>,
 ) -> String {
     line_to_ansi(&format_tool_call_header(name, args, cwd, preview_path))
+}
+
+/// Plain ANSI formatting for a tool call card's header: every line, the
+/// headline first and a template preview's second line after it, joined with
+/// `\n` (no trailing newline).
+pub fn format_tool_call_lines_plain(
+    name: &str,
+    args: &serde_json::Value,
+    cwd: Option<&Path>,
+    preview_path: Option<&str>,
+) -> String {
+    format_tool_call_lines(name, args, cwd, preview_path)
+        .iter()
+        .map(line_to_ansi)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Plain ANSI string formatting for tool output lines with context.

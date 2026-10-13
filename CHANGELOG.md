@@ -1,5 +1,53 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **`/plugins` filters as you type.** The manager no longer waits for
+  `/` — letters go straight into the query (like `/models`), so typing
+  a plugin name can't fire the old bare-letter shortcuts: `u` used to
+  run an update mid-word, and closing the panel then reported "plugins
+  updated" even when nothing was. Toggle moved to Tab, list update to
+  `ctrl+u`, and `space`/`u`/`U` now act inside the Enter detail pane.
+  An "up to date" result no longer counts as a change.
+- **Modals no longer eat keystrokes queued before they paint.** A fast
+  second Enter or a typed character landed on the modal's first
+  `read()` — `/theme` flashed open and instantly applied a theme on a
+  double-Enter; the same leak could open plugin detail panes or close
+  pickers without a keypress ever reaching them. `open_modal` now
+  drains the input queue before the modal's first poll.
+- **`/theme` palette rows show each theme's color swatch.**
+  `theme_row_swatch` gated on the completer's thread-local command,
+  which is unset on threads that draw — so the swatch column never
+  rendered. The gate now reads the row's own `theme <name>` shape, so
+  every theme row carries the same 16-cell color strip.
+- **The cron tick summary is a real notice now.** `⏰ cron · 2 fired ·
+  0 errors` — the counts tint by status (green fired, red-bold errors
+  when nonzero, dim when clean) and file-only deliveries list their job
+  names. `host/say` gained a styled-line path (`queue_say_lines`); plain
+  strings still render exactly as before (dim + indent), and multi-line
+  frames stay ungapped.
+- **The `/theme` picker is a flat panel.** The rounded border ring and
+  the `:` query prefix are gone; the position counter moved to the top
+  right of the filter row.
+- **The built-in gray look is transparent again.** A new `window_bg`
+  theme role owns the window background: the built-in palette leaves
+  it `Reset` (the terminal's own black shows through, as before),
+  while file themes default `window_bg` to their `surface_bg` so
+  light palettes keep owning the whole window — including behind
+  the transcript, scrollback inserts, and every modal's dimmed
+  backdrop. Set `"window_bg": "default"` (or `"reset"`,
+  `"transparent"`, `"none"`) in a theme file to opt back out.
+- **The `/theme` picker reads like a panel, not a prompt.** "Themes"
+  title at the top, wider side padding, filter row underneath,
+  counter still top-right.
+- **Local slash commands on the home screen no longer trip the
+  transcript margin invariant.** `junction_blank_run` counted the
+  welcome banner's leading centering rows as a doubled block margin, so
+  any reflow replaying into an empty transcript (e.g. the `/plugins`
+  echo retract) asserted "two blank rows between blocks" in debug
+  builds. A document's leading blanks are a top margin, not a seam.
+
 ## [0.2.0] - 2026-10-12
 
 ### Added

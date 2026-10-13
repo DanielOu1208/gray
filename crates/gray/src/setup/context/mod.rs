@@ -1,9 +1,9 @@
 mod providers;
 
 pub(crate) use providers::{
-    EndpointProbe, LocalEndpointSuggestion, cache_model_efforts, ensure_disk_loaded,
-    fetch_plugin_provider_models, load_provider_model_list, ollama_running, probe_custom_endpoint,
-    probe_local_endpoints, provider_model_lists, save_provider_model_list,
+    EndpointProbe, LocalEndpointSuggestion, cache_model_efforts, cache_model_price_cliff,
+    ensure_disk_loaded, fetch_plugin_provider_models, load_provider_model_list, ollama_running,
+    probe_custom_endpoint, probe_local_endpoints, provider_model_lists, save_provider_model_list,
     warm_rates_from_disk_cache,
 };
 pub use providers::{
@@ -12,10 +12,10 @@ pub use providers::{
     clamp_thinking_level, context_source, curated_recommended, fetch_litellm_context_windows,
     fetch_live_provider_models, fetch_models_dev_context, fetch_openrouter_rates,
     fetch_recommended_models, format_cost, friendly_model_name, get_cached_model_context,
-    get_model_rate, load_models_cache_to_memory, model_meta, model_supports_reasoning,
-    parse_litellm_context_json, parse_models_dev_json, parse_openrouter_models_json,
-    save_models_cache_to_disk, set_active_model_provider, supported_efforts,
-    supported_thinking_levels, turn_cost, uncached_cost, verify_api_key,
+    get_cached_model_price_cliff, get_model_rate, load_models_cache_to_memory, model_meta,
+    model_supports_reasoning, parse_litellm_context_json, parse_models_dev_json,
+    parse_openrouter_models_json, save_models_cache_to_disk, set_active_model_provider,
+    supported_efforts, supported_thinking_levels, turn_cost, uncached_cost, verify_api_key,
 };
 
 static USER_CONTEXT_WINDOW: std::sync::OnceLock<std::sync::RwLock<Option<usize>>> =
@@ -104,6 +104,60 @@ pub fn user_keep_for(window: usize) -> usize {
 /// `k` = 1_000, `m` = 1_000_000. Commas/underscores/spaces are thousand
 /// separators; dots are too when grouped (`1.000.000`) — a single dot stays
 /// a decimal point (`1.5m`), and bare decimals (`1.5`) are rejected.
+/// User's explicit auto-compact trigger (`--compact-at` / `GRAY_COMPACT_AT` /
+/// `"compact_at_tokens"` in config.json): a token count, or `Auto` for the
+/// provider price-cliff default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactAt {
+    /// The cliff-aware default: the provider-declared cliff's ceiling when
+    /// the model declares one, else just the window bound.
+    Auto,
+    /// An explicit trigger; still clamped to `window − reserve`.
+    Tokens(usize),
+}
+
+/// Parse a `--compact-at`/`GRAY_COMPACT_AT`/`compact_at_tokens` value:
+/// `"auto"`, or the [`parse_context_window`] grammar (`90000`, `90k`, `1.5m`).
+pub fn parse_compact_at(s: &str) -> Option<CompactAt> {
+    if s.trim().eq_ignore_ascii_case("auto") {
+        return Some(CompactAt::Auto);
+    }
+    parse_context_window(s).map(CompactAt::Tokens)
+}
+
+impl serde::Serialize for CompactAt {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => ser.serialize_str("auto"),
+            Self::Tokens(n) => ser.serialize_u64(*n as u64),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CompactAt {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = CompactAt;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a token count or \"auto\"")
+            }
+            fn visit_u64<E>(self, n: u64) -> Result<CompactAt, E> {
+                Ok(CompactAt::Tokens(n as usize))
+            }
+            fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<CompactAt, E> {
+                u64::try_from(n)
+                    .map(|n| CompactAt::Tokens(n as usize))
+                    .map_err(|_| E::custom("compact_at must be positive"))
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<CompactAt, E> {
+                parse_compact_at(s).ok_or_else(|| E::custom("expected \"auto\" or a token count"))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
 pub fn parse_context_window(s: &str) -> Option<usize> {
     let t = s.trim().to_lowercase().replace([',', '_', ' '], "");
     if t.is_empty() {
@@ -233,6 +287,15 @@ pub fn resolve_model_context_length(model_name: &str) -> usize {
         return user;
     }
     model_max_context(model_name)
+}
+
+/// The provider-declared price cliff for a model (prompt tokens above which
+/// a higher price tier bills), from its plugin catalog. `None` = the provider
+/// declared none or the row isn't known — auto-compaction stays on the
+/// window bound then, never guessing a cliff.
+pub fn model_price_cliff(model_name: &str) -> Option<u32> {
+    ensure_disk_loaded();
+    get_cached_model_price_cliff(model_name)
 }
 
 /// Model max ignoring the user override: live cache → hardcoded fallback.

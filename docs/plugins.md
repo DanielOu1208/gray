@@ -173,6 +173,43 @@ sidecar keeps each item under the native media cap (8 MiB).
 
 For a complete 1.3 sidecar, see [gray-mcp](https://github.com/vstaln/gray-mcp).
 
+## Tool display: `label` and `preview`
+
+A tool entry (in the manifest's `tools`, or in a 1.3 `plugin/tools` reply)
+may set two display-only fields. Neither reaches the model, and the wire args
+of a call are never changed.
+
+- `label` is the transcript headline. Without one, the wire name is
+  humanized: `rlm_spawn` shows as `Rlm Spawn`.
+- `preview` is the muted text after the headline. It takes one of two forms.
+  - A **dot path** with no `{`, such as `"document.title"`, shows that string
+    from the args, trimmed.
+  - A **template**, any preview containing `{`, renders the args:
+    - `{a.b}` reads a dot path. Strings are trimmed, numbers and booleans
+      print as text, arrays join their scalar items with `, `, and objects,
+      null, and missing paths are empty.
+    - `{x|model}` shows a model id the way gray's footer names it, without the
+      vendor word: `claude-haiku-5-5` shows as `Haiku 5.5`.
+    - `{x|firstline}` keeps the first non-empty line, capped at 80 cells with
+      `…`. An unknown filter reads as no filter.
+    - Segments split on ` · `. A segment whose placeholders all come out empty
+      is dropped along with its literal text; the rest join with ` · `.
+    - A line break, a real newline or the two characters `\n`, starts a second
+      line. It shows muted under the headline and is omitted when empty.
+
+A template owns the whole suffix. When it renders empty, the headline stands
+alone, with no raw `key=value` dump after it.
+
+```json
+{"name": "rlm_spawn", "label": "Started agent",
+ "preview": "{name} · {model|model} · {effort}\n{prompt|firstline}"}
+```
+
+For the args `{"name": "e2e-theme", "model": "claude-haiku-5-5",
+"effort": "max", "prompt": "verify the theme fixes\nmore"}` the header reads
+`Started agent e2e-theme · Haiku 5.5 · max`, with `verify the theme fixes` on
+the line under it.
+
 ## Semantics
 
 - `blocking: false` resolves empty immediately in v1 (no follow-up

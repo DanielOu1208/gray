@@ -89,6 +89,12 @@ pub(crate) fn admit(owed: &mut bool, transcript: &[Line<'static>], shaped: &Shap
 /// tail's trailing blanks plus the new rows' leading ones. The funnel keeps
 /// this at one or less; anything more is the doubled margin.
 pub(crate) fn junction_blank_run(tail: &[Line<'static>], rows: &[Line<'static>]) -> usize {
+    // An empty tail is no junction: a block's leading blanks at the top of
+    // the transcript are its top margin (the welcome banner's centering
+    // pad), not a doubled gap between blocks.
+    if tail.is_empty() {
+        return 0;
+    }
     let trailing = tail
         .iter()
         .rev()

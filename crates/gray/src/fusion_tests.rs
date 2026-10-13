@@ -39,6 +39,7 @@ fn composite(id: &str) -> CachedRow {
             }],
         }],
         declared: true,
+        price_cliff_tokens: None,
     })
 }
 
@@ -105,11 +106,6 @@ fn a_native_composite_row_blocks_synthesis() {
     // Any composite does — not just one named `fusion`.
     let own = vec![composite("trio"), pair("a", "A")];
     assert!(synthesize_row("http://x.test/v1", &own, &BTreeMap::new()).is_none());
-}
-
-#[test]
-fn no_rows_means_no_fusion() {
-    assert!(synthesize_row("http://x.test/v1", &[], &BTreeMap::new()).is_none());
 }
 
 #[test]

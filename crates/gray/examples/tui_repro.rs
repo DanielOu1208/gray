@@ -21,7 +21,7 @@ fn is_blank(l: &Line<'static>) -> bool {
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut tui = Tui::new()?;
+    let mut tui = Tui::new(false)?;
     tui.push_user_prompt("do the thing", &[], true);
     tui.begin_turn("Thinking");
 

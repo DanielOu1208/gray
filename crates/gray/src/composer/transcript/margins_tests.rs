@@ -76,6 +76,14 @@ fn junction_counts_blanks_across_the_seam() {
     );
 }
 
+#[test]
+fn junction_ignores_a_documents_leading_margin() {
+    // The welcome banner's top-centering blanks replay into an empty
+    // transcript on reflow (and after `retract_slash_echo` at home): a top
+    // margin is not a seam, so it cannot double.
+    assert_eq!(junction_blank_run(&[], &[text(""), text(""), text("x")]), 0);
+}
+
 /// The `Tui` funnel without a terminal: `ensure_gap` is `boundary`, every
 /// commit is `block`, and both decide through the same `admit`.
 #[derive(Default)]

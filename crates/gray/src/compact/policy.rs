@@ -4,6 +4,15 @@ use super::*;
 
 pub struct CompactionSettings {
     pub reserve_tokens: usize,
+    /// Pre-turn ceiling beyond the window bound: an explicit `--compact-at` /
+    /// `GRAY_COMPACT_AT` / `"compact_at_tokens"` choice, or the ceiling
+    /// `gray_core::price_cliff_ceiling` derives from the model's
+    /// declared price cliff. The window bound always applies on top.
+    pub ceiling_tokens: Option<usize>,
+    /// The provider-declared cliff `ceiling_tokens` came from, for the "why"
+    /// on compaction notices. `None` when the ceiling is an explicit user
+    /// value.
+    pub price_cliff_tokens: Option<usize>,
 }
 
 /// Master switch for *automatic* compaction only (`should_compact` callers and
@@ -39,12 +48,86 @@ pub fn init_auto_compact_from_env() {
 
 pub fn should_compact(tokens: usize, window: usize, s: &CompactionSettings) -> bool {
     tokens > window.saturating_sub(s.reserve_tokens)
+        || s.ceiling_tokens.is_some_and(|c| tokens >= c)
+}
+
+/// Why a firing at `tokens` was the ceiling rather than the window bound —
+/// `None` means the window bound (or nothing) fired.
+pub fn binding_reason(tokens: usize, s: &CompactionSettings) -> Option<CompactReason> {
+    s.ceiling_tokens
+        .filter(|&c| tokens >= c)
+        .map(|_| match s.price_cliff_tokens {
+            Some(cliff) => CompactReason::PriceCliff { cliff },
+            None => CompactReason::UserCeiling,
+        })
+}
+
+/// Display suffix for a compaction trigger: the empty string for the plain
+/// window bound so existing lines read unchanged.
+pub fn compact_reason_note(reason: CompactReason) -> String {
+    match reason {
+        CompactReason::Window => String::new(),
+        CompactReason::Overflow => " · overflow".to_string(),
+        CompactReason::UserCeiling => " · --compact-at".to_string(),
+        CompactReason::PriceCliff { cliff } => {
+            format!(
+                " · price cliff {}",
+                crate::setup::format_context_length(cliff)
+            )
+        }
+    }
+}
+
+/// Effective (ceiling, price_cliff) for one model: an explicit `compact_at`
+/// is the user's choice — it clamps to `window − reserve` and keeps no cliff
+/// reason; `Auto`/unset derives the ceiling from the declared cliff.
+pub fn ceiling_for(
+    compact_at: Option<crate::setup::CompactAt>,
+    window: usize,
+    reserve: usize,
+    price_cliff: Option<usize>,
+) -> (Option<usize>, Option<usize>) {
+    match compact_at {
+        Some(crate::setup::CompactAt::Tokens(n)) => (
+            Some(n.min(window.saturating_sub(reserve))).filter(|&c| c > 0),
+            None,
+        ),
+        _ => (
+            price_cliff.and_then(|c| gray_core::price_cliff_ceiling(c, reserve)),
+            price_cliff,
+        ),
+    }
+}
+
+/// The estimate at which auto-compaction fires for `config`'s model right now
+/// (the ceiling when one is declared, else the window bound) — what
+/// `run_print_inner`'s registration and `--json` metadata report.
+pub fn effective_compact_ceiling(config: &crate::Config) -> usize {
+    let model = config.model.as_deref().unwrap_or("");
+    let window = crate::setup::resolve_model_context_length(model);
+    let reserve = crate::setup::user_reserve_tokens_for(window);
+    ceiling_for(
+        config.compact_at,
+        window,
+        reserve,
+        crate::setup::model_price_cliff(model).map(|c| c as usize),
+    )
+    .0
+    .unwrap_or_else(|| window.saturating_sub(reserve))
 }
 
 /// Window-aware variant — prefer this where the model window is known.
-pub fn compaction_settings_for(window: usize) -> CompactionSettings {
+/// `ceiling`/`price_cliff` come from the built agent
+/// ([`Agent::compact_ceiling`], [`Agent::price_cliff`]).
+pub fn compaction_settings_for(
+    window: usize,
+    ceiling: Option<usize>,
+    price_cliff: Option<usize>,
+) -> CompactionSettings {
     CompactionSettings {
         reserve_tokens: crate::setup::user_reserve_tokens_for(window),
+        ceiling_tokens: ceiling,
+        price_cliff_tokens: price_cliff,
     }
 }
 

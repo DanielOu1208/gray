@@ -14,6 +14,26 @@ impl Tui {
         let _ = std::io::stdout().flush();
     }
 
+    /// [`Self::push_tool_box`] for a header that runs to several rows (a
+    /// template preview with a second line).
+    pub fn push_tool_box_lines(&mut self, header: Vec<Line<'static>>, body: Vec<Line<'static>>) {
+        self.atomic(|t| {
+            t.insert_tool_box_lines(header, body);
+            t.ensure_gap();
+        });
+        cap_history_entries(&mut self.history_entries);
+        let _ = std::io::stdout().flush();
+    }
+
+    fn insert_tool_box_lines(&mut self, header: Vec<Line<'static>>, body: Vec<Line<'static>>) {
+        self.ensure_gap();
+        let w = self.width().max(10);
+        let box_lines = format_tool_box_lines_multi(&header, &body, w);
+        self.history_entries
+            .push(crate::composer::TranscriptEntry::ToolBoxLines { header, body });
+        self.emit_rows(box_lines, Some(crate::theme::theme().surface_bg));
+    }
+
     fn insert_tool_box(&mut self, header: Line<'static>, body: Vec<Line<'static>>) {
         self.ensure_gap();
         let w = self.width().max(10);
@@ -126,8 +146,30 @@ impl Tui {
                 all_wrapped.push((l, hl_owned));
             }
         }
-        let total_h = all_wrapped.len() as u16;
         let lines_only: Vec<Line<'static>> = all_wrapped.iter().map(|(l, _)| l.clone()).collect();
+        if self.modal_open {
+            // Deferred: `record_rows` below still commits the same rows, the
+            // paint queues for the modal's close.
+            self.modal_pending
+                .push(crate::composer::PendingInsert::Styled(all_wrapped));
+            return lines_only;
+        }
+        self.insert_styled_rows(all_wrapped);
+        lines_only
+    }
+
+    /// `insert_before` + per-row render for wrapped styled rows — the same
+    /// paint `render_and_insert_styled_lines` does live and
+    /// `flush_modal_pending` replays after a modal. OSC8 hyperlinks are
+    /// patched per row against the padded column range.
+    pub(crate) fn insert_styled_rows(
+        &mut self,
+        all_wrapped: Vec<(Line<'static>, Vec<HyperlinkTarget>)>,
+    ) {
+        if all_wrapped.is_empty() {
+            return;
+        }
+        let total_h = all_wrapped.len() as u16;
         let _ = self.atomic(|t| {
             let _ = crate::composer::draw::settle_band(t);
             t.terminal.insert_before(total_h, |buf| {
@@ -139,7 +181,9 @@ impl Tui {
                         width: area.width,
                         height: 1,
                     };
-                    Paragraph::new(line.clone()).render(row_area, buf);
+                    Paragraph::new(line.clone())
+                        .style(Style::default().bg(crate::theme::theme().window()))
+                        .render(row_area, buf);
                     for h in hls {
                         for col in h.column_range.clone() {
                             let padded_col = col + GUTTER;
@@ -163,7 +207,6 @@ impl Tui {
                 }
             })
         });
-        lines_only
     }
 
     pub fn push_styled_lines_with_hyperlinks(
@@ -297,6 +340,22 @@ impl Tui {
         entries: &[crate::session_store::SessionEntry],
         cwd: &std::path::Path,
     ) {
+        self.replay_session_history_with_tools(
+            entries,
+            cwd,
+            crate::tool_fmt::ToolDisplay::default(),
+        );
+    }
+
+    /// [`Self::replay_session_history`] with the agent's tool display maps, so
+    /// resumed cards name their tools the way the live cards did. Labels are
+    /// not persisted: the caller takes them from the agent's tool defs.
+    pub fn replay_session_history_with_tools(
+        &mut self,
+        entries: &[crate::session_store::SessionEntry],
+        cwd: &std::path::Path,
+        display: crate::tool_fmt::ToolDisplay<'_>,
+    ) {
         self.left_home = true;
         let mut tool_calls: HashMap<String, (String, serde_json::Value)> = HashMap::new();
         for entry in entries {
@@ -344,6 +403,7 @@ impl Tui {
                                 content,
                                 *is_error,
                                 cwd,
+                                display,
                             ),
                             _ => {}
                         }
@@ -421,15 +481,29 @@ impl Tui {
                             is_error,
                         } = block
                         {
-                            replay_tool_result(self, &mut tool_calls, id, content, *is_error, cwd);
+                            replay_tool_result(
+                                self,
+                                &mut tool_calls,
+                                id,
+                                content,
+                                *is_error,
+                                cwd,
+                                display,
+                            );
                         }
                     }
                 }
             }
         }
         for (_id, (name, args)) in tool_calls {
-            let header = crate::tool_fmt::format_tool_call_header(&name, &args, Some(cwd), None);
-            self.push_tool_box(header, Vec::new());
+            let header = crate::tool_fmt::format_tool_card_lines(
+                &name,
+                &args,
+                Some(cwd),
+                display.label(&name),
+                display.preview(&name),
+            );
+            self.push_tool_box_lines(header, Vec::new());
         }
         // NOTE: persisted turn usage is billed Σ-per-round (the cost basis),
         // NOT context size — restoring it into the gauge repainted the
@@ -457,15 +531,28 @@ fn replay_tool_result(
     content: &str,
     is_error: bool,
     cwd: &std::path::Path,
+    display: crate::tool_fmt::ToolDisplay<'_>,
 ) {
     let (name, args) = tool_calls
         .remove(id)
         .map(|(n, a)| (n, Some(a)))
         .unwrap_or_else(|| ("tool".to_string(), None));
-    let header = args
-        .as_ref()
-        .map(|a| crate::tool_fmt::format_tool_call_header(&name, a, Some(cwd), None))
-        .unwrap_or_else(|| Line::from(name.clone()));
+    let header = match args.as_ref() {
+        Some(a) => crate::tool_fmt::format_tool_card_lines(
+            &name,
+            a,
+            Some(cwd),
+            display.label(&name),
+            display.preview(&name),
+        ),
+        None => crate::tool_fmt::format_live_tool_header(
+            &name,
+            "",
+            Some(cwd),
+            display.label(&name),
+            display.preview(&name),
+        ),
+    };
     let lines = crate::tool_fmt::format_tool_result_lines_with_context(
         &name,
         args.as_ref(),
@@ -473,7 +560,7 @@ fn replay_tool_result(
         is_error,
         Some(cwd),
     );
-    tui.push_tool_box(header, lines);
+    tui.push_tool_box_lines(header, lines);
 }
 
 /// Rebase absolute hyperlink targets onto a committed slice.

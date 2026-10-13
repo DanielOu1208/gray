@@ -9,6 +9,7 @@ fn register_memory(home: &Path, cwd: &Path) {
         .expect("build gray-memory and set GRAY_MEMORY_TEST_BIN for the plugin integration tests");
     let out = Command::new(env!("CARGO_BIN_EXE_gray"))
         .env("GRAY_HOME", home)
+        .env("GRAY_USER_HOME", home)
         .env_remove("GRAY_PLUGIN_PATH")
         .current_dir(cwd)
         .args(["plugin", "install"])
@@ -26,6 +27,7 @@ fn command(home: &Path, cwd: &Path, args: &[&str]) -> Output {
     register_memory(home, cwd);
     Command::new(env!("CARGO_BIN_EXE_gray"))
         .env("GRAY_HOME", home)
+        .env("GRAY_USER_HOME", home)
         .env_remove("GRAY_NO_MEMORY")
         .env_remove("GRAY_API_KEY")
         .env_remove("OPENAI_API_KEY")
@@ -152,6 +154,7 @@ fn concurrent_processes_preserve_different_entries() {
         children.push(
             Command::new(env!("CARGO_BIN_EXE_gray"))
                 .env("GRAY_HOME", tmp.path())
+                .env("GRAY_USER_HOME", tmp.path())
                 .env_remove("GRAY_NO_MEMORY")
                 .current_dir(tmp.path())
                 .args([
@@ -192,6 +195,7 @@ fn opt_out_prevents_saves_but_allows_inspection_and_removal() {
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_gray"))
             .env("GRAY_HOME", tmp.path())
+            .env("GRAY_USER_HOME", tmp.path())
             .env("GRAY_NO_MEMORY", "1")
             .current_dir(tmp.path())
             .args(args)

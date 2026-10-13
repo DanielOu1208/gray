@@ -56,14 +56,30 @@ pub(crate) fn latched_viewport_floor(
     with_dock.max(no_status).max(live_overrun).min(max_h)
 }
 
+/// Spacer rows the home band pads itself with so its bottom edge lands on
+/// the screen's last row: what is left once the rows that always render —
+/// `reserved` (status dock, queued/live/tail/ask/panel/attachment rows and
+/// the footer's one) — and the transcript visible above the band are paid
+/// for. Pure for testability; the caller picks `visible_above` (the
+/// transcript height for a mid-emit settle, `min(transcript, band top)`
+/// for a paint frame, where scrolled-off rows must not count).
+pub(crate) fn home_spacer_rows(
+    visible_above: u16,
+    reserved: u16,
+    box_rows: u16,
+    screen_rows: u16,
+) -> u16 {
+    screen_rows
+        .saturating_sub(visible_above)
+        .saturating_sub(reserved)
+        .saturating_sub(box_rows)
+}
+
 /// The draft's attachment chips, one input-box row: a kind pill
 /// (`Image`/`File`) plus the file's real name — repeating the `[Image #n]`
 /// placeholder would just say what the draft already says. Clipboard
 /// pastes land in `clipboard-XXXXXX.png`, which is a name too.
-fn attachment_chips(
-    attachments: &[(String, std::path::PathBuf)],
-    selected: Option<usize>,
-) -> Line<'static> {
+fn attachment_chips(attachments: &[(String, std::path::PathBuf)]) -> Line<'static> {
     let t = crate::theme::theme();
     let mut spans = vec![Span::styled("   ", Style::default().bg(t.surface_bg))];
     for (i, (ph, path)) in attachments.iter().enumerate() {
@@ -79,35 +95,14 @@ fn attachment_chips(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("clipboard");
-        let (pill, label) = if selected == Some(i) {
-            let on = Style::default()
-                .fg(t.input_bg)
-                .bg(t.text_bright)
-                .add_modifier(Modifier::BOLD);
-            (on, on)
-        } else {
-            (
-                Style::default().fg(t.text_bright).bg(t.input_bg),
-                Style::default().fg(t.text_muted).bg(t.surface_bg),
-            )
-        };
+        let (pill, label) = (
+            Style::default().fg(t.text_bright).bg(t.input_bg),
+            Style::default().fg(t.text_muted).bg(t.surface_bg),
+        );
         spans.push(Span::styled(format!(" {kind} "), pill));
         spans.push(Span::styled(format!(" {name} "), label));
     }
     Line::from(spans)
-}
-
-fn attachment_hint(selecting: bool) -> Line<'static> {
-    let t = crate::theme::theme();
-    let hint = if selecting {
-        "←→ select · backspace delete · ↓ close"
-    } else {
-        "↑ select"
-    };
-    Line::from(vec![
-        Span::styled("   ", Style::default().bg(t.surface_bg)),
-        Span::styled(hint, Style::default().fg(t.text_dim).bg(t.surface_bg)),
-    ])
 }
 
 /// Upper bound for the inline viewport.
@@ -122,6 +117,14 @@ fn attachment_hint(selecting: bool) -> Line<'static> {
 /// takes the whole-screen path and repaints the band.
 pub(crate) fn viewport_cap(rows: u16) -> u16 {
     rows.saturating_sub(2).max(MIN_VIEWPORT_H)
+}
+
+/// Rows the plugin widget band may take on a screen this tall: two-fifths of
+/// it. A tall agent list then fits with its overflow line and affordance on a
+/// normal terminal, a short one still leaves the composer its rows, and no
+/// band is cut at a fixed count. Never below four.
+pub(crate) fn widget_row_cap(screen_h: u16) -> u16 {
+    (screen_h.saturating_mul(2) / 5).max(4)
 }
 
 /// The row the footer gauge paints on, clamped into the frame.
@@ -237,43 +240,20 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         qol: tui.home_qol.as_deref(),
     });
     let home_mode = home.is_some();
-    let mut ibox = build_input_box(&text, cursor, w, ghost, home);
-    if !tui.attachments.is_empty() {
-        // Chips ride inside the box, above the text and under its top pad,
-        // so they read as part of the draft they belong to.
-        let chip_sel = tui.chip_sel.map(|s| s.min(tui.attachments.len() - 1));
-        ibox.lines
-            .insert(1, attachment_chips(&tui.attachments, chip_sel));
-        ibox.lines.insert(2, attachment_hint(chip_sel.is_some()));
-        ibox.band_h += 2;
-        ibox.cur_row += 2;
-    }
-    if home.is_some() {
-        // Fill the screen: spacer rows under the home rows center the
-        // block and pin the status bar to the bottom row.
-        let above: usize = tui
-            .transcript
-            .iter()
-            .map(|l| l.width().max(1).div_ceil(w.max(1)))
-            .sum();
-        let spacer = (rows as usize).saturating_sub(above + ibox.lines.len() + 1);
-        ibox.lines
-            .extend(std::iter::repeat_n(Line::default(), spacer));
-    }
-    let box_h = ibox.lines.len().max(1) as u16;
-    // Attachments render inside the input box (see `attachment_chips`).
+    // Rows the band always spends beside the input box and the footer:
+    // hoisted ahead of the box so the home spacer below can leave room
+    // for them (status dock + seam, queued follow-ups, live cards, the
+    // streamed tail, the ask modal; the panel is 0 in home).
     let attach_h: u16 = 0;
+    // The one row the attachments add to the box below (chips). The
+    // terminal lifts the band only when it comes back out.
+    let chip_rows: u16 = if tui.attachments.is_empty() { 0 } else { 1 };
     // Seam (the one gap under the transcript) + shimmer status text + one
     // bare breathing row below it.
     let needs_seam = needs_seam(&tui.transcript);
     let status_h: u16 = status_dock_h(tui.status.is_some(), needs_seam);
     // Row offset of the status text inside its dock: below the seam.
     let seam_h: u16 = u16::from(needs_seam);
-
-    // Exact-fit viewport with in-place resizing (codex parity):
-    // Grow and shrink are applied directly to the terminal's viewport area without
-    // recreating the terminal or re-probing cursor position via CPR, preventing
-    // prompt doubling and cursor drift.
     let n = tui.queued_inputs.len();
     let queued_est: u16 = if n == 0 {
         0
@@ -292,7 +272,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         .as_ref()
         .map(|m| m.rows.len().min(12) as u16)
         .unwrap_or(0);
-    let box_rows_est: u16 = box_h;
     // Live tool cards above the input box (pi pending cards): measured,
     // not estimated — the rows are already wrapped for `w`.
     let live_est: u16 = tui
@@ -307,11 +286,62 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         .saturating_add(u16::from(tui.live_tool_overflow() > 0));
     let stream_tail: Vec<Line<'static>> = tui.stream_tail_rows(w);
     let tail_est = stream_tail.len() as u16;
+    let mut ibox = build_input_box(&text, cursor, w, ghost, home);
+    if !tui.attachments.is_empty() {
+        // Chips ride inside the box, above the text and under its top pad,
+        // so they read as part of the draft they belong to.
+        ibox.lines.insert(1, attachment_chips(&tui.attachments));
+        ibox.band_h += 1;
+        ibox.cur_row += 1;
+    }
+    if home.is_some() {
+        // Fill the screen: spacer rows under the home rows center the
+        // block and pin the status bar to the bottom row. The count that
+        // belongs here is the transcript height visible above the band —
+        // a settle sizes it before the pending insert has pushed the band
+        // down, so it reads the transcript; a paint frame can read the
+        // band's own top instead, which is the same number minus the rows
+        // since scrolled into scrollback. Trusting the painted count on
+        // a settled screen left the band short of the bottom: after a
+        // `/theme` card pushed two transcript rows off the top it sized
+        // the spacer by 19 rows where 17 showed, and the footer ended on
+        // the second-to-last row until the next insert slid it down.
+        let above: usize = {
+            let transcript_h: usize = tui
+                .transcript
+                .iter()
+                .map(|l| l.width().max(1).div_ceil(w.max(1)))
+                .sum();
+            if paint {
+                transcript_h.min(usize::from(tui.terminal.viewport_area.y))
+            } else {
+                transcript_h
+            }
+        };
+        // `desired_viewport_h` adds these rows plus the footer's one on
+        // top of the box; the spacer is what is left once they are paid
+        // for, so the frame height lands exactly on the screen bottom.
+        let spacer = usize::from(home_spacer_rows(
+            above as u16,
+            status_h + queued_est + live_est + tail_est + panel_est + ask_est + attach_h + 1,
+            ibox.lines.len() as u16,
+            rows,
+        ));
+        ibox.lines
+            .extend(std::iter::repeat_n(Line::default(), spacer));
+    }
+    let box_h = ibox.lines.len().max(1) as u16;
+
+    // Exact-fit viewport with in-place resizing (codex parity):
+    // Grow and shrink are applied directly to the terminal's viewport area without
+    // recreating the terminal or re-probing cursor position via CPR, preventing
+    // prompt doubling and cursor drift.
+    let box_rows_est: u16 = box_h;
     let widget_budget = rows
         .saturating_sub(
             box_h + status_h + queued_est + live_est + tail_est + panel_est + attach_h + 2,
         )
-        .min(12);
+        .min(widget_row_cap(rows));
     let mut widget_rows = tui.plugin_widget.rows(widget_budget as usize, w);
     let max_viewport_h = viewport_cap(rows);
 
@@ -374,7 +404,10 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     // Viewport geometry is a precondition for the frame: a swallowed failure
     // would commit a frame against stale geometry (audit 24.01). Close the
     // synchronized-update bracket before bailing out.
-    if let Err(e) = tui.terminal.set_viewport_height(desired, screen_size) {
+    if let Err(e) = tui
+        .terminal
+        .set_viewport_height(desired, screen_size, paint, chip_rows)
+    {
         tui.end_sync();
         return Err(e.into());
     }
@@ -428,6 +461,14 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
 
     let res = tui.terminal.draw(|frame| {
         let area = frame.area();
+        // The theme owns the window background: light palettes break
+        // wherever the terminal's default color shows through, so flood
+        // the viewport with window_bg before any content lands. For the
+        // built-in palette window_bg is Reset — the transparent look.
+        frame.render_widget(
+            Block::default().style(Style::default().bg(crate::theme::theme().window())),
+            area,
+        );
         let w = area.width as usize;
 
         let status_y = area.y;
@@ -1094,16 +1135,12 @@ fn chrome_row(line: Line<'static>) -> Paragraph<'static> {
 }
 
 fn theme_row_swatch(name: &str) -> Option<Vec<Span<'static>>> {
-    if !matches!(
-        crate::repl::commands::current_completer_cmd().as_str(),
-        "theme" | "themes"
-    ) {
-        return None;
-    }
+    // Gate on the row's own name, not the completer's thread-local state:
+    // draws can run on a different thread than completion, where the
+    // completer's command is never set.
     let theme_name = name
         .strip_prefix("theme ")
-        .or_else(|| name.strip_prefix("themes "))
-        .unwrap_or(name);
+        .or_else(|| name.strip_prefix("themes "))?;
     let t = if crate::theme::is_builtin_name(theme_name) {
         crate::theme::GRAY_UI_THEME
     } else {

@@ -87,10 +87,18 @@ impl Jobs {
         (id, tx, worker_ctx)
     }
 
+    /// This session owns the job — or the job predates its session: work
+    /// started while `ctx.session_id` was still `None` (the id is minted
+    /// mid-first-turn) is still this process's work, so the live session
+    /// counts it, stops it, and hears it finish.
+    fn in_session(job: &Job, ctx: &ToolContext) -> bool {
+        job.session == ctx.session_id || job.session.is_none()
+    }
+
     pub(super) fn notifications(&self, ctx: &ToolContext) -> Vec<String> {
         let mut jobs = self.0.lock().unwrap_or_else(|e| e.into_inner());
         jobs.iter_mut().filter_map(|(id, job)| {
-            if job.session != ctx.session_id || job.notified { return None; }
+            if !Self::in_session(job, ctx) || job.notified { return None; }
             if job.result.borrow().is_none() && job.result.has_changed().is_ok() { return None; }
             job.notified = true;
             // Never promote process output (or command-derived exit notes) to
@@ -113,7 +121,7 @@ impl Jobs {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .filter(|(_, j)| j.session == ctx.session_id && j.result.borrow().is_none())
+            .filter(|(_, j)| Self::in_session(j, ctx) && j.result.borrow().is_none())
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -123,7 +131,7 @@ impl Jobs {
         let jobs = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let mut out: Vec<_> = jobs
             .iter()
-            .filter(|(_, j)| j.session == ctx.session_id && j.result.borrow().is_none())
+            .filter(|(_, j)| Self::in_session(j, ctx) && j.result.borrow().is_none())
             .map(|(id, j)| {
                 (
                     j.started,
@@ -144,7 +152,7 @@ impl Jobs {
     pub(super) fn cancel_running(&self, ctx: &ToolContext, id: &str) -> bool {
         let jobs = self.0.lock().unwrap_or_else(|e| e.into_inner());
         match jobs.get(id) {
-            Some(j) if j.session == ctx.session_id && j.result.borrow().is_none() => {
+            Some(j) if Self::in_session(j, ctx) && j.result.borrow().is_none() => {
                 j.cancel.cancel();
                 true
             }
@@ -157,7 +165,7 @@ impl Jobs {
     pub(super) fn has_unfinished(&self, ctx: &ToolContext) -> bool {
         let jobs = self.0.lock().unwrap_or_else(|e| e.into_inner());
         jobs.values()
-            .any(|j| j.session == ctx.session_id && j.result.borrow().is_none())
+            .any(|j| Self::in_session(j, ctx) && j.result.borrow().is_none())
     }
 
     /// Bounded wait until ANY unfinished session job settles (or the timeout
@@ -169,7 +177,7 @@ impl Jobs {
         let rxs: Vec<_> = {
             let jobs = self.0.lock().unwrap_or_else(|e| e.into_inner());
             jobs.values()
-                .filter(|j| j.session == ctx.session_id && j.result.borrow().is_none())
+                .filter(|j| Self::in_session(j, ctx) && j.result.borrow().is_none())
                 .map(|j| j.result.clone())
                 .collect()
         };
@@ -226,7 +234,7 @@ impl Jobs {
             let jobs = self.0.lock().unwrap_or_else(|e| e.into_inner());
             let (id, job) = jobs
                 .iter()
-                .find(|(_, j)| j.session == ctx.session_id && j.stop == want)?;
+                .find(|(_, j)| Self::in_session(j, ctx) && j.stop == want)?;
             if job.result.borrow().is_some() {
                 return Some(fail(format!(
                     "job {id} had already finished (no such process group)"
@@ -291,7 +299,7 @@ impl Jobs {
         let mut rows: Vec<_> = jobs
             .iter()
             .filter(|(id, j)| {
-                ids.contains(id) && j.session == ctx.session_id && j.result.borrow().is_none()
+                ids.contains(id) && Self::in_session(j, ctx) && j.result.borrow().is_none()
             })
             .collect();
         if rows.is_empty() {

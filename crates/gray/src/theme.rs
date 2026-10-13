@@ -32,6 +32,14 @@ use ratatui::style::Color;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiTheme {
     // Surfaces
+    /// `Reset` leaves the terminal's own background in place: the
+    /// built-in gray look is transparent over the terminal's black. File
+    /// themes that name no `window_bg` get one derived from their
+    /// `surface_bg` (see `derive_window`): darker than a dark surface and
+    /// lighter than a light one, so cards and the composer band stand out
+    /// from the window. Pure black and pure white have no room on that side
+    /// and keep an equal window. `"window_bg": "default"` opts back out.
+    pub window_bg: Color,
     pub surface_bg: Color,
     pub raised_bg: Color,
     pub input_bg: Color,
@@ -95,6 +103,7 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
 /// Default `gray` theme: today's exact colors, pixel-identical. The neutral
 /// gray ramp plus the peach accent and TokyoNight tool/diff slots.
 pub const GRAY_UI_THEME: UiTheme = UiTheme {
+    window_bg: Color::Reset,
     surface_bg: rgb(22, 22, 22),
     raised_bg: rgb(28, 28, 28),
     input_bg: rgb(32, 32, 32),
@@ -173,6 +182,7 @@ pub fn set_theme(theme: UiTheme, name: Option<&str>) {
 
 /// Every role name a theme file may set, in struct order.
 pub const ROLE_NAMES: &[&str] = &[
+    "window_bg",
     "surface_bg",
     "raised_bg",
     "input_bg",
@@ -224,6 +234,7 @@ impl UiTheme {
     /// Mutable access to one role by its theme-file name.
     pub fn role_mut(&mut self, name: &str) -> Option<&mut Color> {
         Some(match name {
+            "window_bg" => &mut self.window_bg,
             "surface_bg" => &mut self.surface_bg,
             "raised_bg" => &mut self.raised_bg,
             "input_bg" => &mut self.input_bg,
@@ -278,6 +289,13 @@ impl UiTheme {
     pub fn role(&self, name: &str) -> Option<Color> {
         let mut copy = *self;
         copy.role_mut(name).map(|c| *c)
+    }
+
+    /// The window background, `Reset` when the theme leaves the
+    /// terminal's own background in place (the built-in gray look).
+    #[must_use]
+    pub fn window(&self) -> Color {
+        self.window_bg
     }
 }
 
@@ -378,6 +396,55 @@ pub fn color_to_string(c: Color) -> serde_json::Value {
     }
 }
 
+/// The window a file theme gets when it names no `window_bg`: its surface
+/// pushed away from the middle, so cards and the composer band read as
+/// panels against the window. A dark surface sinks to 55% of each channel
+/// (22-gray cards get a 12-gray window); a light one rises 55% of the way
+/// to white. Near-black and near-white surfaces, where that shift is too
+/// small to read, step a further `MIN_WINDOW_STEP` the same way, clamped at
+/// each channel's end: the window never flips to the other side of its
+/// surface. Pure black and white have nowhere to go and keep an equal
+/// window. Only RGB surfaces have channels to move: `Reset`, indexed and
+/// named colors come back unchanged.
+pub(crate) fn derive_window(surface: Color) -> Color {
+    let Color::Rgb(r, g, b) = surface else {
+        return surface;
+    };
+    let luma = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
+    let dark = luma < 128.0;
+    let shift = |c: u8| {
+        let c = f64::from(c);
+        let moved = if dark {
+            c * 0.55
+        } else {
+            c + (255.0 - c) * 0.55
+        };
+        moved.round().clamp(0.0, 255.0) as u8
+    };
+    let (wr, wg, wb) = (shift(r), shift(g), shift(b));
+    // Near-white / near-black surfaces have no room to move outward
+    // (#fafafa -> #fdfdfd is invisible): step further the same way instead.
+    let gap = [(r, wr), (g, wg), (b, wb)]
+        .iter()
+        .map(|(a, w)| a.abs_diff(*w))
+        .max()
+        .unwrap_or(0);
+    if gap >= MIN_WINDOW_STEP {
+        return Color::Rgb(wr, wg, wb);
+    }
+    let step = |c: u8| {
+        if dark {
+            c.saturating_sub(MIN_WINDOW_STEP)
+        } else {
+            c.saturating_add(MIN_WINDOW_STEP)
+        }
+    };
+    Color::Rgb(step(r), step(g), step(b))
+}
+
+/// Smallest per-channel distance between a derived window and its cards.
+const MIN_WINDOW_STEP: u8 = 12;
+
 /// Build a palette from theme-file JSON on top of [`GRAY_UI_THEME`].
 /// Bad entries are skipped and reported; only a non-object file fails.
 pub fn parse_theme(text: &str) -> Result<(UiTheme, Vec<String>), String> {
@@ -397,6 +464,13 @@ pub fn parse_theme(text: &str) -> Result<(UiTheme, Vec<String>), String> {
     let mut theme = GRAY_UI_THEME;
     let mut warnings = Vec::new();
     for (role, value) in colors {
+        if role == "window_bg"
+            && let Some(v) = value.as_str()
+            && matches!(v.trim(), "reset" | "none" | "transparent")
+        {
+            theme.window_bg = Color::Reset;
+            continue;
+        }
         let Some(slot) = theme.role_mut(role) else {
             warnings.push(format!("unknown role `{role}`"));
             continue;
@@ -405,6 +479,9 @@ pub fn parse_theme(text: &str) -> Result<(UiTheme, Vec<String>), String> {
             Ok(c) => *slot = c,
             Err(e) => warnings.push(format!("{role}: {e}")),
         }
+    }
+    if !colors.contains_key("window_bg") {
+        theme.window_bg = derive_window(theme.surface_bg);
     }
     let hue_fallbacks = [
         ("hue_red", theme.error),

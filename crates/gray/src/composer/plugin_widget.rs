@@ -20,15 +20,21 @@ pub(crate) fn lines(
     max_rows: usize,
     width: usize,
 ) -> Vec<Line<'static>> {
-    if snapshot.version != 1 {
+    if snapshot.version != 1 || max_rows == 0 {
         return Vec::new();
     }
     let dim = ratatui::style::Style::default().fg(crate::theme::theme().text_dim);
     let text = |chars: &[char]| chars.iter().collect::<String>();
-    snapshot
+    // A band shorter than the widget keeps its top rows and spends its last
+    // row on how many lines it cut, so a short screen never hides agents
+    // without saying so.
+    let total = snapshot.text.lines().count();
+    let cut = total > max_rows;
+    let keep = if cut { max_rows - 1 } else { total };
+    let mut rows: Vec<Line<'static>> = snapshot
         .text
         .lines()
-        .take(max_rows.min(12))
+        .take(keep)
         .enumerate()
         .map(|(index, line)| {
             let mut chars: Vec<char> = line
@@ -76,7 +82,14 @@ pub(crate) fn lines(
             }
             Line::from(spans)
         })
-        .collect()
+        .collect();
+    if cut {
+        rows.push(Line::from(ratatui::text::Span::styled(
+            format!(" \u{2193} {} more lines", total - keep),
+            dim,
+        )));
+    }
+    rows
 }
 
 pub(crate) struct Widget {
@@ -98,14 +111,39 @@ impl Widget {
                 return;
             };
             rt.block_on(async move {
+                let mut gate = SpecGate {
+                    stamps: [None; 3],
+                    argv: None,
+                };
+                let mut active = false;
+                let mut last_spawn = Instant::now() - IDLE_POLL;
                 while !flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    let snapshot = read_widget(&cwd).await.unwrap_or_default();
-                    if tx.try_send(snapshot).is_err()
-                        && flag.load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        break;
+                    if let Ok(home) = crate::plugin_cli::home() {
+                        let resolved_fresh = gate.refresh(&home);
+                        let interval = if active { TICK } else { IDLE_POLL };
+                        if let Some(argv) = gate.argv() {
+                            if resolved_fresh || last_spawn.elapsed() >= interval {
+                                last_spawn = Instant::now();
+                                let snapshot = spawn_widget(argv, &cwd).await.unwrap_or_default();
+                                active = !snapshot.text.is_empty();
+                                if tx.try_send(snapshot).is_err()
+                                    && flag.load(std::sync::atomic::Ordering::Relaxed)
+                                {
+                                    break;
+                                }
+                            }
+                        } else if resolved_fresh {
+                            // The slot went away or was disabled: clear the
+                            // rows once instead of every tick.
+                            active = false;
+                            if tx.try_send(Snapshot::default()).is_err()
+                                && flag.load(std::sync::atomic::Ordering::Relaxed)
+                            {
+                                break;
+                            }
+                        }
                     }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::time::sleep(TICK).await;
                 }
             });
         });
@@ -137,13 +175,57 @@ impl Drop for Widget {
     }
 }
 
-async fn read_widget(cwd: &std::path::Path) -> anyhow::Result<Snapshot> {
-    let home = crate::plugin_cli::home()?;
-    read_widget_at(&home, cwd).await
+/// Poll cadence: file stats are per tick, subprocess spawns are gated below.
+const TICK: Duration = Duration::from_millis(500);
+/// How often an empty widget re-asks its plugin for rows. A widget showing
+/// rows keeps the per-tick refresh so live state stays live; an empty band
+/// only needs to notice work appearing, so it polls far slower — and the
+/// slot spec itself is mtime-gated either way, so idle ticks never touch
+/// `widgets.json` or the ~42KB lockfile.
+const IDLE_POLL: Duration = Duration::from_secs(5);
+
+/// The mtime gate in front of the widget's file reads and lockfile parses.
+/// The inputs that decide who runs the slot are `widgets.json` plus the
+/// user and project locks `enabled()` consults; while their mtimes stand,
+/// the resolved argv stands and the poll skips straight to the subprocess.
+struct SpecGate {
+    stamps: [Option<std::time::SystemTime>; 3],
+    argv: Option<Vec<String>>,
 }
 
-async fn read_widget_at(home: &std::path::Path, cwd: &std::path::Path) -> anyhow::Result<Snapshot> {
-    let raw = tokio::fs::read(home.join("plugins/widgets.json")).await?;
+impl SpecGate {
+    fn refresh(&mut self, home: &std::path::Path) -> bool {
+        let mtime =
+            |path: std::path::PathBuf| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        // `enabled()` resolves the project lock against the live cwd, so
+        // the stamp follows it rather than the dir the widget started in.
+        let project = std::env::current_dir()
+            .ok()
+            .map(|cwd| gray_plugin::lock::project_lock_path(&cwd));
+        let stamps = [
+            mtime(home.join("plugins/widgets.json")),
+            mtime(gray_plugin::lock::lock_path(home)),
+            project.and_then(mtime),
+        ];
+        if stamps == self.stamps {
+            return false;
+        }
+        self.stamps = stamps;
+        self.argv = resolve_widget_argv(home).ok();
+        true
+    }
+
+    fn argv(&self) -> Option<&[String]> {
+        self.argv.as_deref()
+    }
+}
+
+/// The registered argv of the plugin that owns the widget slot:
+/// `widgets.json` selects the owner — never arbitrary argv edited into
+/// JSON, the lock entry supplies the command — and the owner must be
+/// `enabled`. Sync file reads only; `SpecGate` keeps it off the idle path.
+fn resolve_widget_argv(home: &std::path::Path) -> anyhow::Result<Vec<String>> {
+    let raw = std::fs::read(home.join("plugins/widgets.json"))?;
     let spec: serde_json::Value = serde_json::from_slice(&raw)?;
     let name = spec["name"]
         .as_str()
@@ -157,8 +239,12 @@ async fn read_widget_at(home: &std::path::Path, cwd: &std::path::Path) -> anyhow
         crate::plugin_cli::enabled(home, name, entry),
         "widget owner is disabled"
     );
-    // The slot can select the owner only, never arbitrary argv edited into JSON.
-    let argv = entry.cli_argv.as_ref().unwrap_or(&entry.argv);
+    Ok(entry.cli_argv.clone().unwrap_or_else(|| entry.argv.clone()))
+}
+
+/// `<argv> widget` emits one snapshot object and exits — the only source of
+/// widget content, so spawning stays the model.
+async fn spawn_widget(argv: &[String], cwd: &std::path::Path) -> anyhow::Result<Snapshot> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("empty widget argv"))?;
@@ -168,6 +254,12 @@ async fn read_widget_at(home: &std::path::Path, cwd: &std::path::Path) -> anyhow
     let snapshot: Snapshot = serde_json::from_slice(&bytes)?;
     anyhow::ensure!(snapshot.version == 1, "unsupported widget snapshot version");
     Ok(snapshot)
+}
+
+#[cfg(test)]
+async fn read_widget_at(home: &std::path::Path, cwd: &std::path::Path) -> anyhow::Result<Snapshot> {
+    let argv = resolve_widget_argv(home)?;
+    spawn_widget(&argv, cwd).await
 }
 
 #[cfg(test)]
@@ -235,6 +327,61 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].to_string().contains('\x1b'));
     }
+    /// The subagents plugin's text for eight running runs, as `lines()` reads
+    /// it: a blank lead row, the count header, five agents at two rows each,
+    /// the overflow line, a blank and the affordance (15 rows).
+    fn eight_running() -> Snapshot {
+        let mut rows = vec![String::new(), "8 subagents \u{b7} 8 running".to_string()];
+        for n in 1..=5 {
+            rows.push(format!("  \u{25cf} agent-{n}  Haiku 5.5  1m  Task {n}"));
+            rows.push(format!("      step {n}"));
+        }
+        rows.push("  +3 more".into());
+        rows.push(String::new());
+        rows.push("   /subagents \u{2014} open \u{b7} chat \u{b7} stop".into());
+        Snapshot {
+            version: 1,
+            text: rows.join("\n") + "\n",
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_band_shorter_than_the_widget_says_how_much_it_cut() {
+        let rows = lines(&eight_running(), Duration::ZERO, 9, 80);
+        assert_eq!(rows.len(), 9);
+        assert_eq!(rows[1].to_string(), " 8 subagents \u{b7} 8 running");
+        // Eight rows of the widget are shown; the ninth names the other seven.
+        assert_eq!(rows[8].to_string(), " \u{2193} 7 more lines");
+        assert!(lines(&eight_running(), Duration::ZERO, 0, 80).is_empty());
+    }
+
+    #[test]
+    fn a_band_tall_enough_shows_the_whole_widget_without_an_indicator() {
+        let rows = lines(&eight_running(), Duration::ZERO, 16, 80);
+        assert_eq!(rows.len(), 15);
+        assert!(rows[12].to_string().contains("+3 more"));
+        assert!(rows[14].to_string().contains("/subagents"));
+        assert!(rows.iter().all(|r| !r.to_string().contains('\u{2193}')));
+    }
+
+    #[test]
+    fn rows_use_the_real_width_and_cut_with_an_ellipsis() {
+        let snapshot = Snapshot {
+            version: 1,
+            text: format!("{}\n", "word ".repeat(30).trim_end()),
+            ..Default::default()
+        };
+        // 149 cells fit a 200-column band (one cell of inset): no cut.
+        let wide = lines(&snapshot, Duration::ZERO, 4, 200)[0].to_string();
+        assert!(wide.ends_with("word"), "{wide}");
+        assert!(!wide.contains('\u{2026}'), "{wide}");
+        // At 80 columns the same row is cut to exactly the width.
+        let narrow = lines(&snapshot, Duration::ZERO, 4, 80)[0].to_string();
+        assert!(narrow.ends_with('\u{2026}'), "{narrow}");
+        assert_eq!(crate::text_width::display_width(&narrow), 80);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn widget_uses_registered_owner_and_honors_disable() {
@@ -267,5 +414,41 @@ fi
         lock.save(&lock_path).unwrap();
         assert!(read_widget_at(home.path(), home.path()).await.is_err());
         assert!(lines(&snapshot, Duration::ZERO, 0, 80).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spec_gate_holds_resolution_until_inputs_move() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let exe = home.path().join("sample");
+        let program = r#"#!/bin/sh
+if [ "$1" = manifest ]; then
+ printf '%s\n' '{"name":"sample","version":"1","widget":true,"commands":["/sample"]}'
+else
+ printf '%s\n' '{"version":1,"text":"hi","shimmer_lines":[]}'
+fi
+"#;
+        std::fs::write(&exe, program).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::plugin_cli::register_native(home.path(), Some("sample"), &exe, false)
+            .await
+            .unwrap();
+        let mut gate = SpecGate {
+            stamps: [None; 3],
+            argv: None,
+        };
+        // First look resolves the slot; nothing moving means no re-resolve
+        // and no re-read of widgets.json or lock.json.
+        assert!(gate.refresh(home.path()));
+        assert!(gate.argv().is_some());
+        assert!(!gate.refresh(home.path()));
+        // Disable bumps the lockfile: the argv is dropped on the next look.
+        let lock_path = gray_plugin::lock::lock_path(home.path());
+        let mut lock = gray_plugin::lock::LockFile::load(&lock_path).unwrap();
+        lock.plugins.get_mut("sample").unwrap().enabled = false;
+        lock.save(&lock_path).unwrap();
+        assert!(gate.refresh(home.path()));
+        assert!(gate.argv().is_none());
     }
 }

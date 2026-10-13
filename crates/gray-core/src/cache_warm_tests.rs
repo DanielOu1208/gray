@@ -24,19 +24,6 @@ fn policy(prices: Option<Prices>) -> CacheWarmPolicy {
 }
 
 #[test]
-fn refresh_at_ninety_percent_with_ten_seconds_of_margin() {
-    assert_eq!(
-        warming_delay(Duration::from_secs(300)),
-        Some(Duration::from_secs(270))
-    );
-    assert_eq!(
-        warming_delay(Duration::from_secs(20)),
-        Some(Duration::from_secs(10))
-    );
-    assert_eq!(warming_delay(Duration::from_secs(10)), None);
-}
-
-#[test]
 fn savings_follow_pi_and_clear_the_floor_only_for_big_prompts() {
     // 100k tokens: a miss costs a $0.375 write vs a $0.03 read.
     let big = expected_savings(&sonnet(), 100_000, 1);

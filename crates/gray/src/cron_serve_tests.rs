@@ -68,6 +68,7 @@ fn test_config() -> crate::config::Config {
         max_wall_secs: None,
         bare: false,
         lean: false,
+        compact_at: None,
     }
 }
 

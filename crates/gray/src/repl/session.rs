@@ -312,7 +312,17 @@ pub(crate) async fn handle_resume(
                     *totals = SessionTotals::from_entries(&entries, model);
                     if let Some(shared) = &tui {
                         let mut t = shared.lock().expect("tui lock");
-                        t.replay_session_history(&entries, cwd);
+                        let (tool_labels, tool_previews) = tool_display_maps(
+                            agent.as_ref().map(|a| a.tool_defs()).unwrap_or_default(),
+                        );
+                        t.replay_session_history_with_tools(
+                            &entries,
+                            cwd,
+                            crate::tool_fmt::ToolDisplay {
+                                labels: Some(&tool_labels),
+                                previews: Some(&tool_previews),
+                            },
+                        );
                         t.ensure_gap();
                         // Keep the status-bar model (and its context window)
                         // on the same effective model as the resumed agent.
@@ -556,30 +566,46 @@ impl TurnStreamClock {
     }
 }
 
-/// Label-aware tool header: the agent's display-only headline (plugin
-/// `label`) rides inside args so `tool_fmt` names the card; the wire name
-/// stays the executor key and events stay unchanged.
+/// Every line of a tool card's header, from the agent's display-only `label`
+/// and `preview` (plugin metadata). The wire args and the executor key are
+/// unchanged. Live and final cards both come through here.
 fn tool_header(
-    labels: Option<&HashMap<String, String>>,
-    previews: Option<&HashMap<String, String>>,
+    display: crate::tool_fmt::ToolDisplay<'_>,
     name: &str,
     args: &serde_json::Value,
     cwd: Option<&std::path::Path>,
-) -> ratatui::text::Line<'static> {
-    let owned;
-    let args = match labels.and_then(|m| m.get(name)) {
-        Some(label) => {
-            owned = crate::tool_fmt::with_tool_label(args, Some(label));
-            &owned
-        }
-        None => args,
-    };
-    crate::tool_fmt::format_tool_call_header(
+) -> Vec<ratatui::text::Line<'static>> {
+    crate::tool_fmt::format_tool_card_lines(
         name,
         args,
         cwd,
-        previews.and_then(|m| m.get(name)).map(String::as_str),
+        display.label(name),
+        display.preview(name),
     )
+}
+
+/// The display-only `label` / `preview` per wire tool name, from the agent's
+/// tool defs (the live turn reads the same fields). A resumed transcript
+/// replays with these, so its cards name their tools as the live ones did.
+pub(crate) fn tool_display_maps(
+    defs: &[gray_core::message::ToolDef],
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut labels = HashMap::new();
+    let mut previews = HashMap::new();
+    for t in defs {
+        if let Some(label) = t.label.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+            labels.insert(t.name.clone(), label.to_string());
+        }
+        if let Some(preview) = t
+            .preview
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            previews.insert(t.name.clone(), preview.to_string());
+        }
+    }
+    (labels, previews)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -619,6 +645,10 @@ pub(crate) fn dispatch_agent_event(
     if let Some(shared) = tui_stream
         && let Ok(mut t) = shared.lock()
     {
+        let display = crate::tool_fmt::ToolDisplay {
+            labels: tool_labels,
+            previews: tool_previews,
+        };
         match ev {
             AgentEvent::ThinkingDelta { delta } => {
                 t.stream_thinking(delta);
@@ -635,7 +665,13 @@ pub(crate) fn dispatch_agent_event(
                 // viewport-anchored live card, same header family as the
                 // final scrollback card. Single scrollback commit stays at
                 // `ToolResult`, so this never duplicates.
-                let header = crate::tool_fmt::format_live_tool_header(name, "", None);
+                let header = crate::tool_fmt::format_live_tool_header(
+                    name,
+                    "",
+                    Some(cwd),
+                    display.label(name),
+                    display.preview(name),
+                );
                 t.atomic(|t| {
                     t.upsert_live_tool(id, name, header, false);
                     t.set_status(Some(&format!("Preparing tool: {name}")));
@@ -651,7 +687,13 @@ pub(crate) fn dispatch_agent_event(
                 // (No token accounting: the pill carries no estimate — exact
                 // counts come from usage reports, never chars/4.)
                 pending_tools.insert(id.clone(), (name.clone(), None));
-                let header = crate::tool_fmt::format_live_tool_header(name, args_so_far, None);
+                let header = crate::tool_fmt::format_live_tool_header(
+                    name,
+                    args_so_far,
+                    Some(cwd),
+                    display.label(name),
+                    display.preview(name),
+                );
                 let preview = args_so_far.split_whitespace().collect::<Vec<_>>().join(" ");
                 let preview = crate::repl::format::truncate_chars(&preview, 60);
                 // Card + status label repaint as one frame per delta (was two).
@@ -683,7 +725,7 @@ pub(crate) fn dispatch_agent_event(
                 // card uses its full header with a leading execution shimmer. No
                 // transcript line here: the result card below is the single
                 // scrollback render, so a duplicate never lands.
-                let header = tool_header(tool_labels, tool_previews, &name, args, Some(cwd));
+                let header = tool_header(display, &name, args, Some(cwd));
                 t.atomic(|t| {
                     t.upsert_live_tool(id, &name, header, true);
                     t.set_status(Some("Working"));
@@ -717,11 +759,17 @@ pub(crate) fn dispatch_agent_event(
                     // separately (that gap was the visible tool-call flash).
                     t.atomic(|t| {
                         t.remove_live_tool(id);
-                        let header = args
-                            .as_ref()
-                            .map(|a| tool_header(tool_labels, tool_previews, &name, a, Some(cwd)))
-                            .unwrap_or_else(|| ratatui::text::Line::from(name.clone()));
-                        t.push_tool_box(header, lines);
+                        let header = match args.as_ref() {
+                            Some(a) => tool_header(display, &name, a, Some(cwd)),
+                            None => crate::tool_fmt::format_live_tool_header(
+                                &name,
+                                "",
+                                Some(cwd),
+                                display.label(&name),
+                                display.preview(&name),
+                            ),
+                        };
+                        t.push_tool_box_lines(header, lines);
                     });
                 }
             }
@@ -752,16 +800,18 @@ pub(crate) fn dispatch_agent_event(
                 tokens_after,
                 messages_before,
                 messages_after,
+                reason,
             } => {
                 t.flush_markdown();
                 t.end_thinking();
                 t.mark_stream_round_boundary();
                 t.push_dim(format!(
-                    "↻ compacted {} → {} tok ({} → {} messages)",
+                    "↻ compacted {} → {} tok ({} → {} messages){}",
                     crate::repl::fmt_usage(*tokens_before),
                     crate::repl::fmt_usage(*tokens_after),
                     messages_before,
-                    messages_after
+                    messages_after,
+                    crate::compact::compact_reason_note(*reason)
                 ));
             }
             // Reconnecting rides the shimmer status dock (`⬡ Reconnecting…`)
@@ -853,7 +903,7 @@ pub(crate) fn dispatch_agent_event(
                     };
                     println!(
                         "\n{}",
-                        crate::tool_fmt::format_tool_call_header_plain(
+                        crate::tool_fmt::format_tool_call_lines_plain(
                             name,
                             args,
                             Some(cwd),
@@ -895,13 +945,15 @@ pub(crate) fn dispatch_agent_event(
                 tokens_after,
                 messages_before,
                 messages_after,
+                reason,
             } => {
                 eprintln!(
-                    "\n\x1b[2m↻ compacted {} → {} tok ({} → {} messages)\x1b[0m",
+                    "\n\x1b[2m↻ compacted {} → {} tok ({} → {} messages){}\x1b[0m",
                     crate::repl::fmt_usage(*tokens_before),
                     crate::repl::fmt_usage(*tokens_after),
                     messages_before,
-                    messages_after
+                    messages_after,
+                    crate::compact::compact_reason_note(*reason)
                 );
             }
             // Two messages, two paragraphs — the composer's markdown
@@ -1081,13 +1133,15 @@ pub(crate) async fn maybe_threshold_compact(
     AUTO_COMPACT_ENV_ONCE.get_or_init(crate::compact::init_auto_compact_from_env);
     let window = crate::setup::resolve_model_context_length(config.model.as_deref().unwrap_or(""));
     let tokens = crate::compact::estimate_context_tokens(agent.messages(), latest);
-    if !crate::compact::should_compact(
-        tokens,
+    let settings = crate::compact::compaction_settings_for(
         window,
-        &crate::compact::compaction_settings_for(window),
-    ) {
+        agent.compact_ceiling(),
+        agent.price_cliff(),
+    );
+    if !crate::compact::should_compact(tokens, window, &settings) {
         return;
     }
+    let reason = crate::compact::binding_reason(tokens, &settings);
     // Codex parity (`compaction.rs::on_context_compaction_started`): raise a
     // dedicated `Compacting context` status with its own clock BEFORE the
     // summarization call. The input box stays mounted — only the status dock
@@ -1113,9 +1167,12 @@ pub(crate) async fn maybe_threshold_compact(
                 })
                 .unwrap_or_default();
             let detail = format!(
-                "{}/{} tokens",
+                "{}/{} tokens{}",
                 crate::setup::format_context_length(tokens),
-                crate::setup::format_context_length(window)
+                crate::setup::format_context_length(window),
+                reason
+                    .map(crate::compact::compact_reason_note)
+                    .unwrap_or_default()
             );
             super::status::push_compaction_card(
                 tui,

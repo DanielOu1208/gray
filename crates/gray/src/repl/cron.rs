@@ -73,14 +73,6 @@ pub(crate) fn items(
                 crate::cron::store::JobState::Active => ("\u{25cb}", " [disabled]", false, false),
                 crate::cron::store::JobState::Paused => ("\u{25cb}", " [paused]", false, true),
                 crate::cron::store::JobState::Done => ("\u{b7}", " [done]", false, false),
-                // The picker is the user's own keyboard, so approving here
-                // is the user's decision — no second terminal needed.
-                crate::cron::store::JobState::AwaitingApproval => (
-                    "?",
-                    " [awaiting approval \u{b7} space approves \u{b7} u rejects]",
-                    false,
-                    true,
-                ),
             };
             let next = j
                 .next_run_at
@@ -90,7 +82,7 @@ pub(crate) fn items(
                 .last_status
                 .map(|s| format!("{s:?}"))
                 .unwrap_or_else(|| "-".to_string());
-            let mut row = format!(
+            let row = format!(
                 "{glyph} {} ({}) \u{2014} {} \u{2014} next {} \u{2014} last {}{tag}",
                 j.name,
                 &j.id[..8.min(j.id.len())],
@@ -98,13 +90,6 @@ pub(crate) fn items(
                 next,
                 last,
             );
-            // Approval is only informed if the user sees what will run.
-            if j.state == crate::cron::store::JobState::AwaitingApproval {
-                row.push_str(&format!(
-                    " \u{2014} \"{}\"",
-                    crate::cron_tool::visible(&j.prompt)
-                ));
-            }
             ManagerItem {
                 name: j.id.clone(),
                 row,
@@ -133,8 +118,8 @@ pub(crate) fn items(
 }
 
 /// The job picker: `space` pauses/resumes via the store's own toggle (which
-/// recomputes `next_run_at` on resume) and approves a job the model asked
-/// for; `u` twice removes (rejects) a job. Adding stays on the CLI.
+/// recomputes `next_run_at` on resume); `u` twice removes a job. Adding
+/// stays on the CLI.
 pub(crate) fn run_cron_modal(
     bg: Option<&crate::setup::BackgroundSnapshot>,
     home: &Path,
@@ -160,14 +145,7 @@ pub(crate) fn run_cron_modal(
         },
         |id, on| {
             let store = crate::cron::CronStore::open(home.join("cron"))?;
-            let awaiting = store
-                .get(id)?
-                .is_some_and(|j| j.state == crate::cron::store::JobState::AwaitingApproval);
-            let known = if awaiting {
-                store.approve(id)?
-            } else {
-                store.set_paused(id, !on)?
-            };
+            let known = store.set_paused(id, !on)?;
             anyhow::ensure!(
                 known,
                 "unknown cron job {id:?} \u{2014} it may have been removed"
@@ -337,8 +315,13 @@ pub(super) fn cron_card_lines(
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
     let th = crate::theme::theme();
+    // Subagent-completion deliveries name themselves `subagent/<run>` —
+    // they get their own header word instead of "Cron".
+    let subagent = card.name.strip_prefix("subagent/");
     let mut spans = if card.reminder && !card.failed {
         card_header_spans("Reminder", String::new(), false)
+    } else if let Some(name) = subagent {
+        card_header_spans("Subagent ", name.to_string(), card.failed)
     } else {
         card_header_spans("Cron ", card.name.clone(), card.failed)
     };

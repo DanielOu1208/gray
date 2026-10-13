@@ -111,6 +111,11 @@ pub struct SavedConfig {
     /// Tail budget kept alongside the summary after compaction.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_keep: Option<usize>,
+    /// Explicit auto-compact trigger: a token count, or `"auto"` for the
+    /// provider price-cliff default. `--compact-at` / `GRAY_COMPACT_AT` win
+    /// over this.
+    #[serde(rename = "compact_at_tokens", skip_serializing_if = "Option::is_none")]
+    pub compact_at: Option<crate::setup::CompactAt>,
     /// Program that runs the model's shell commands somewhere else, e.g.
     /// `docker exec -i dev sh -s` or `ssh box sh -s`. The command crosses as
     /// text on that program's stdin, so no host-side quoting rules apply.
@@ -332,6 +337,7 @@ fn partial_saved_config(obj: &serde_json::Map<String, serde_json::Value>) -> Sav
         skills_auto: opt_field(obj, "skills_auto"),
         context_reserve: opt_field(obj, "context_reserve"),
         context_keep: opt_field(obj, "context_keep"),
+        compact_at: opt_field(obj, "compact_at_tokens"),
         exec_prefix: opt_field(obj, "exec_prefix"),
         disabled_skills: opt_field(obj, "disabled_skills").unwrap_or_default(),
         memory_auto: opt_field(obj, "memory_auto"),

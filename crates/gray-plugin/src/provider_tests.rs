@@ -251,6 +251,7 @@ fn provider_model_fusion_row_round_trips() {
         name: "Fusion".into(),
         context_window: None,
         reasoning_efforts: vec!["high".into()],
+        price_cliff_tokens: None,
         variants: vec![
             ModelVariant {
                 id: "fusion-claude-opus-5-5-high-sidekick-swe-2-high".into(),

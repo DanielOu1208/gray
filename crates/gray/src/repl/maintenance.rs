@@ -133,6 +133,7 @@ pub(crate) async fn restart_with(tui: &TuiOpt, resume: bool) {
         GatewayRestart::NotRunning => {
             super::say(shared, "gateway is not running — nothing to restart there")
         }
+        GatewayRestart::Skipped => super::say(shared, "gateway: skipped (scratch GRAY_HOME)"),
         GatewayRestart::Failed(e) => super::say(shared, &format!("gateway restart failed: {e}")),
     }
 
@@ -154,7 +155,7 @@ pub(crate) async fn restart_with(tui: &TuiOpt, resume: bool) {
     let args = if !resume {
         strip_resume_args(&original)
     } else {
-        restart_argv(original)
+        restart_argv(original, crate::host::live_session().as_deref())
     };
     let resumed = args.first().map(|a| a == "resume").unwrap_or(false);
 
@@ -196,7 +197,26 @@ pub(crate) async fn restart_with(tui: &TuiOpt, resume: bool) {
 enum GatewayRestart {
     Restarted(String),
     NotRunning,
+    /// `$GRAY_HOME` is a scratch home: the system gateway is not ours to touch.
+    Skipped,
     Failed(String),
+}
+
+/// True when `$GRAY_HOME` is set to a home other than `$HOME/.gray`.
+fn scratch_gray_home() -> bool {
+    let Some(set) =
+        std::env::var_os("GRAY_HOME").filter(|v| !v.to_string_lossy().trim().is_empty())
+    else {
+        return false;
+    };
+    let default = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".gray"));
+    is_scratch_home(std::path::Path::new(&set), default.as_deref())
+}
+
+/// `set` is scratch unless it is the default home. With no `HOME` to compare
+/// against, stay on the safe side and call it scratch.
+fn is_scratch_home(set: &std::path::Path, default: Option<&std::path::Path>) -> bool {
+    default != Some(set)
 }
 
 /// Restart the gateway, and only ever leave it in a better state than we
@@ -214,6 +234,11 @@ enum GatewayRestart {
 /// 3. **Not running** — say so and move on; `/restart` is about picking up a
 ///    new build, not about resurrecting a daemon the user did not start.
 async fn restart_gateway() -> GatewayRestart {
+    // A scratch home (tests, a second checkout) must never reach the system
+    // gateway: `service::detect` finds the installed unit whatever home is set.
+    if scratch_gray_home() {
+        return GatewayRestart::Skipped;
+    }
     let supervised = matches!(
         service::detect(),
         service::Supervisor::Runit { .. } | service::Supervisor::SystemdUser { .. }
@@ -302,12 +327,35 @@ fn relaunch(home: &std::path::Path, old_pid: u32) -> anyhow::Result<String> {
 /// `-p` prompt, `resume --last`, a subcommand — is passed through verbatim,
 /// because re-running a one-shot prompt or a subcommand is the caller's
 /// business, not ours.
-pub(crate) fn restart_argv(original: Vec<String>) -> Vec<String> {
-    if original.is_empty() {
-        vec!["resume".into(), "--last".into()]
-    } else {
-        original
+/// Rebuild argv for the post-restart process. An argv that already names a
+/// session (`resume`, `-r`, `-c`, `--session`) keeps it. Anything else lands
+/// back on THIS session — plain `--last` resumes whatever was touched most
+/// recently, and a sibling window's newer session wins that race and holds
+/// a live lock, so the restart would refuse itself into a fresh session.
+pub(crate) fn restart_argv(original: Vec<String>, current: Option<&str>) -> Vec<String> {
+    let Some(sid) = current else {
+        return if original.is_empty() {
+            vec!["resume".into(), "--last".into()]
+        } else {
+            original
+        };
+    };
+    if has_session_selector(&original) {
+        return original;
     }
+    vec!["resume".into(), sid.to_string()]
+}
+
+/// Does the argv already name a session to reopen?
+fn has_session_selector(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "resume" | "-c" | "--continue" | "-r" | "--resume" | "--session"
+        ) || a.starts_with("--session=")
+            || a.starts_with("--resume=")
+            || (a.starts_with("-r") && a.len() > 2)
+    })
 }
 
 fn strip_resume_args(args: &[String]) -> Vec<String> {
@@ -388,20 +436,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_scratch_gray_home_never_reaches_the_system_gateway() {
+        let default = std::path::Path::new("/home/me/.gray");
+        // A GRAY_HOME elsewhere, including a trailing-slash spelling of the default.
+        assert!(is_scratch_home(
+            std::path::Path::new("/tmp/vp_home"),
+            Some(default)
+        ));
+        assert!(is_scratch_home(std::path::Path::new("/tmp/vp_home"), None));
+        assert!(!is_scratch_home(
+            std::path::Path::new("/home/me/.gray/"),
+            Some(default)
+        ));
+    }
+
+    #[test]
     fn a_bare_session_resumes_its_own_conversation() {
-        // The conversation is the session; a restart that dropped it would be
-        // worse than not shipping the command.
-        assert_eq!(restart_argv(vec![]), vec!["resume", "--last"]);
+        // The conversation is the session: restart must land back on THIS
+        // one — `--last` can pick a sibling window's newer session and hit
+        // its live lock (the "already open in another process" refusal).
+        assert_eq!(
+            restart_argv(vec![], Some("viscous-lithium-meridian")),
+            vec!["resume", "viscous-lithium-meridian"]
+        );
+        // No live session yet (first launch before any prompt): `--last`
+        // is the best pointer available.
+        assert_eq!(restart_argv(vec![], None), vec!["resume", "--last"]);
     }
 
     #[test]
     fn anything_the_user_typed_is_passed_through() {
+        // An argv that already names a session is kept verbatim.
         for args in [
-            vec!["-p".to_string(), "hello".to_string()],
             vec!["resume".to_string(), "--last".to_string()],
-            vec!["gateway".to_string(), "status".to_string()],
+            vec!["-r".to_string(), "other-session".to_string()],
+            vec!["--session=x".to_string()],
+            vec!["-c".to_string()],
         ] {
-            assert_eq!(restart_argv(args.clone()), args);
+            assert_eq!(
+                restart_argv(args.clone(), Some("viscous-lithium-meridian")),
+                args
+            );
         }
+        // No session to return to: selector-less argv still passes through.
+        assert_eq!(
+            restart_argv(vec!["-p".to_string(), "hello".to_string()], None),
+            vec!["-p", "hello"]
+        );
     }
 }

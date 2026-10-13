@@ -940,19 +940,36 @@ impl JsonlSessionStore {
         let Ok(open_path) = self.session_open_path(id) else {
             return false;
         };
-        let Ok(file) = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&open_path)
-        else {
-            return false;
-        };
-        match file.try_lock() {
-            // Free — the probe's own lock releases when `file` drops.
-            Ok(()) => false,
-            Err(std::fs::TryLockError::WouldBlock) => true,
-            Err(std::fs::TryLockError::Error(_)) => false,
+        open_lock_held_at(&open_path)
+    }
+
+    /// Which of `ids` a live process holds open right now — the per-id
+    /// `open`+flock probes run a bounded batch at a time on the blocking
+    /// pool rather than serially behind the caller. Same advisory
+    /// semantics as [`Self::open_lock_held`]: never creates the file, and
+    /// this process's own sessions count.
+    pub async fn held_open_locks(&self, ids: Vec<SessionId>) -> std::collections::HashSet<String> {
+        use futures::StreamExt as _;
+        let mut probes = futures::stream::iter(
+            ids.into_iter()
+                .filter_map(|id| self.session_open_path(&id).ok()),
+        )
+        .map(|path| {
+            tokio::task::spawn_blocking(move || {
+                if !open_lock_held_at(&path) {
+                    return None;
+                }
+                path.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
+            })
+        })
+        .buffer_unordered(32);
+        let mut held = std::collections::HashSet::new();
+        while let Some(joined) = probes.next().await {
+            if let Ok(Some(stem)) = joined {
+                held.insert(stem);
+            }
         }
+        held
     }
 
     /// The holder PID recorded in `<id>.open`, for `Locked` detail on
@@ -991,6 +1008,257 @@ impl JsonlSessionStore {
             }
         }
     }
+}
+
+/// What a streamed [`JsonlSessionStore::scan`] yields. Summaries land as
+/// each file parses — arrival order, not the sorted order `list` returns —
+/// and `Done` ends the stream (the channel closes right after).
+pub(crate) enum SessionScanEvent {
+    /// Ids whose `<id>.open` flock a live process holds, this one
+    /// included. Sent once after the directory pass, usually well before
+    /// the last summary.
+    Running(std::collections::HashSet<String>),
+    /// One parsed session summary.
+    Summary(SessionSummary),
+    /// The scan is finished.
+    Done,
+}
+
+/// The per-file outcome a scan worker returns.
+enum SessionFileRead {
+    Summary(SessionSummary),
+    /// A complete first line that will not parse. Quarantine candidates
+    /// go back to the async side — `quarantine_corrupt_file` awaits.
+    Corrupt(PathBuf),
+}
+
+/// One session file → its summary: the whole per-file work of a `list`
+/// scan (read both ends, parse, resolve the sidecars), packaged so it can
+/// run inside a single blocking-pool task per file.
+fn summarize_session_file(root: &Path, path: &Path, cwd: Option<&Path>) -> Option<SessionFileRead> {
+    let slices = read_session_ends(path, cwd)?;
+    let stem = path.file_stem().and_then(|s| s.to_str())?;
+
+    // A first line with no newline is a creator mid-write.
+    let complete_first_line = slices.head.contains('\n');
+
+    let header_str = match slices.head.lines().find(|l| !l.trim().is_empty()) {
+        Some(h) => h,
+        None => {
+            log::warn!("skipping empty session file: {}", path.display());
+            return None;
+        }
+    };
+
+    let header: Header = match serde_json::from_str(header_str) {
+        Ok(h) => h,
+        Err(e) => {
+            log::warn!("skipping corrupt header in {}: {}", path.display(), e);
+            // Quarantine only a *complete* first line that will not parse.
+            // A file whose first line has no terminating newline is a
+            // creator mid-write (create streams the header into a
+            // `create_new` file), so renaming it away would steal a
+            // session that is about to be valid.
+            if complete_first_line {
+                return Some(SessionFileRead::Corrupt(path.to_path_buf()));
+            }
+            return None;
+        }
+    };
+    if header.id.as_str() != stem {
+        log::warn!(
+            "skipping session whose header id does not match its filename: {}",
+            path.display()
+        );
+        return None;
+    }
+
+    // A header-only session still has a usable "last active" time.
+    let mut last_message_at = header.timestamp;
+    let mut first_user_text = None;
+    let mut last_user_text = None;
+    let mut last_end = SessionEnd::Done;
+    // Head first, then tail. `in_tail` means "this line came from the tail
+    // slice", not "a boundary was seen": a post-boundary turn inside the
+    // head is still the session's first turn, while a tail turn never is.
+    for (in_tail, chunk) in [(false, &slices.head), (true, &slices.tail)] {
+        for line in chunk.lines().filter(|l| !l.trim().is_empty()) {
+            let Ok(entry) = serde_json::from_str::<SessionEntry>(line) else {
+                continue;
+            };
+            last_message_at = last_message_at.max(entry.timestamp);
+            if entry.compaction_boundary {
+                // Replacement follows: the pre-compact messages no longer
+                // describe the session (both ends move).
+                first_user_text = None;
+                last_user_text = None;
+                continue;
+            }
+            let blocks = &entry.message.content;
+            let has_block = |f: fn(&ContentBlock) -> bool| blocks.iter().any(f);
+            last_end = match entry.message.role {
+                Role::Assistant if has_block(|b| matches!(b, ContentBlock::ToolUse { .. })) => {
+                    SessionEnd::ToolUse
+                }
+                Role::Assistant => SessionEnd::Done,
+                Role::User if has_block(|b| matches!(b, ContentBlock::ToolResult { .. })) => {
+                    SessionEnd::ToolResult
+                }
+                Role::User => SessionEnd::UserUnanswered,
+                Role::System => last_end,
+            };
+            if entry.message.role == Role::User {
+                let text = entry.message.text_content();
+                if !text.is_empty() {
+                    if first_user_text.is_none() && !in_tail {
+                        first_user_text = Some(text.clone());
+                    }
+                    last_user_text = Some(text);
+                }
+            }
+        }
+    }
+
+    Some(SessionFileRead::Summary(SessionSummary {
+        id: header.id,
+        started_at: header.timestamp,
+        last_message_at,
+        cwd: header.cwd,
+        first_user_text,
+        last_user_text,
+        last_end,
+        dismissed_at: if last_end == SessionEnd::Done {
+            None
+        } else {
+            read_dismissal(root, stem)
+        },
+        title: read_title(root, stem),
+        origin: header.origin,
+    }))
+}
+
+/// The body of [`JsonlSessionStore::scan`]: walks the session dir, kicks
+/// the `.open` lock probes off in parallel with the file reads, and
+/// forwards each summary as soon as its worker answers.
+async fn scan_session_dir(
+    root: PathBuf,
+    cwd: Option<PathBuf>,
+    probe_locks: bool,
+    tx: tokio::sync::mpsc::UnboundedSender<SessionScanEvent>,
+) {
+    let mut read_dir = match tokio::fs::read_dir(&root).await {
+        Ok(rd) => rd,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("failed to read session directory {}: {}", root.display(), e);
+            }
+            let _ = tx.send(SessionScanEvent::Done);
+            return;
+        }
+    };
+
+    // Pass one: the directory itself. Cheap, and it collects the paths so
+    // the reads below can overlap instead of serializing behind one
+    // another on a slow disk. `.open` files ride the same pass: a session
+    // can only be flock-held when its file exists, so the probes below
+    // never touch ids without one.
+    let mut paths = Vec::new();
+    let mut open_paths = Vec::new();
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        let path = entry.path();
+        let ext = path.extension().and_then(|ext| ext.to_str());
+        if ext == Some("open") {
+            if probe_locks
+                && path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(valid_session_id)
+            {
+                open_paths.push(path);
+            }
+            continue;
+        }
+        if ext != Some("jsonl") {
+            continue;
+        }
+        // Real file, not a symlink; stem must be a valid session id.
+        if !entry
+            .file_type()
+            .await
+            .map(|t| t.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !valid_session_id(stem) {
+            log::warn!("skipping session with invalid id: {}", path.display());
+            continue;
+        }
+        paths.push(path);
+    }
+
+    // The lock probes overlap the reads: one open+flock per existing
+    // `.open` file, a bounded batch at a time on the blocking pool. This
+    // process's own sessions answer from the registry without a syscall.
+    if probe_locks {
+        let probe_tx = tx.clone();
+        tokio::spawn(async move {
+            use futures::StreamExt as _;
+            let mut probes = futures::stream::iter(open_paths)
+                .map(|path| {
+                    tokio::task::spawn_blocking(move || {
+                        if !open_lock_held_at(&path) {
+                            return None;
+                        }
+                        path.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
+                    })
+                })
+                .buffer_unordered(32);
+            let mut held = std::collections::HashSet::new();
+            while let Some(joined) = probes.next().await {
+                if let Ok(Some(stem)) = joined {
+                    held.insert(stem);
+                }
+            }
+            let _ = probe_tx.send(SessionScanEvent::Running(held));
+        });
+    }
+
+    // Pass two: read+parse each file on the blocking pool, a bounded
+    // number at a time — one task per file, and each finished summary is
+    // sent downstream the moment it lands.
+    use futures::StreamExt as _;
+    let mut reads = futures::stream::iter(paths)
+        .map(|path| {
+            let root = root.clone();
+            let cwd = cwd.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    summarize_session_file(&root, &path, cwd.as_deref())
+                })
+                .await
+            }
+        })
+        .buffer_unordered(64);
+    while let Some(joined) = reads.next().await {
+        let Ok(Some(read)) = joined else {
+            continue;
+        };
+        match read {
+            SessionFileRead::Summary(s) => {
+                if tx.send(SessionScanEvent::Summary(s)).is_err() {
+                    return;
+                }
+            }
+            SessionFileRead::Corrupt(path) => {
+                JsonlSessionStore::quarantine_corrupt_file(&path).await;
+            }
+        }
+    }
+    let _ = tx.send(SessionScanEvent::Done);
 }
 
 /// Bytes read from each end of a session file to build its summary. The
@@ -1730,192 +1998,43 @@ impl JsonlSessionStore {
     }
 
     async fn list_matching(&self, cwd: Option<PathBuf>) -> Vec<SessionSummary> {
-        let mut read_dir = match tokio::fs::read_dir(&self.root_dir).await {
-            Ok(rd) => rd,
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    log::warn!(
-                        "failed to read session directory {}: {}",
-                        self.root_dir.display(),
-                        e
-                    );
-                }
-                return Vec::new();
-            }
-        };
-
-        // Pass one: the directory itself. Cheap, and it collects the paths
-        // so the reads below can overlap instead of serializing behind one
-        // another on a slow disk.
-        let mut paths = Vec::new();
-        while let Ok(Some(entry)) = read_dir.next_entry().await {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                continue;
-            }
-            // Real file, not a symlink; stem must be a valid session id.
-            if !entry
-                .file_type()
-                .await
-                .map(|t| t.is_file())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if !valid_session_id(stem) {
-                log::warn!("skipping session with invalid id: {}", path.display());
-                continue;
-            }
-            paths.push(path);
-        }
-
-        // Pass two: read both ends of each file on the blocking pool, a
-        // bounded number at a time. One task per file (not per read) keeps
-        // the dispatch count down and lets the disk work in parallel.
-        use futures::StreamExt as _;
-        let mut reads = futures::stream::iter(paths)
-            .map(|path| {
-                let path = path.clone();
-                let cwd = cwd.clone();
-                async move {
-                    let read = tokio::task::spawn_blocking({
-                        let path = path.clone();
-                        move || (read_session_ends(&path, cwd.as_deref()), path)
-                    })
-                    .await;
-                    read.ok()
-                        .and_then(|(slices, path)| slices.map(|s| (path, s)))
-                }
-            })
-            .buffer_unordered(64);
-        let mut ends = Vec::new();
-        while let Some(pair) = reads.next().await {
-            if let Some(pair) = pair {
-                ends.push(pair);
-            }
-        }
-        // Directory order is arbitrary; sort for a stable summary order
-        // before the activity sort below decides the list.
-        ends.sort_by(|a, b| a.0.cmp(&b.0));
-
+        let mut rx = self.scan(cwd, false);
         let mut summaries = Vec::new();
-        for (path, slices) in ends {
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-
-            // A first line with no newline is a creator mid-write.
-            let complete_first_line = slices.head.contains('\n');
-
-            let header_str = match slices.head.lines().find(|l| !l.trim().is_empty()) {
-                Some(h) => h,
-                None => {
-                    log::warn!("skipping empty session file: {}", path.display());
-                    continue;
-                }
-            };
-
-            let header: Header = match serde_json::from_str(header_str) {
-                Ok(h) => h,
-                Err(e) => {
-                    log::warn!("skipping corrupt header in {}: {}", path.display(), e);
-                    // Quarantine only a *complete* first line that will
-                    // not parse. A file whose first line has no terminating
-                    // newline is a creator mid-write (create streams the
-                    // header into a `create_new` file), so renaming it away
-                    // would steal a session that is about to be valid.
-                    if complete_first_line {
-                        Self::quarantine_corrupt_file(&path).await;
-                    }
-                    continue;
-                }
-            };
-            if header.id.as_str() != stem {
-                log::warn!(
-                    "skipping session whose header id does not match its filename: {}",
-                    path.display()
-                );
-                continue;
+        while let Some(event) = rx.recv().await {
+            match event {
+                SessionScanEvent::Summary(s) => summaries.push(s),
+                SessionScanEvent::Done => break,
+                SessionScanEvent::Running(_) => {}
             }
-
-            // A header-only session still has a usable "last active" time.
-            let mut last_message_at = header.timestamp;
-            let mut first_user_text = None;
-            let mut last_user_text = None;
-            let mut last_end = SessionEnd::Done;
-            // Head first, then tail. `in_tail` means "this line came from
-            // the tail slice", not "a boundary was seen": a post-boundary
-            // turn inside the head is still the session's first turn, while
-            // a tail turn never is (the head owns the real beginning).
-            for (in_tail, chunk) in [(false, &slices.head), (true, &slices.tail)] {
-                for line in chunk.lines().filter(|l| !l.trim().is_empty()) {
-                    let Ok(entry) = serde_json::from_str::<SessionEntry>(line) else {
-                        continue;
-                    };
-                    last_message_at = last_message_at.max(entry.timestamp);
-                    if entry.compaction_boundary {
-                        // Replacement follows: the pre-compact messages no
-                        // longer describe the session (both ends move).
-                        first_user_text = None;
-                        last_user_text = None;
-                        continue;
-                    }
-                    let blocks = &entry.message.content;
-                    let has_block = |f: fn(&ContentBlock) -> bool| blocks.iter().any(f);
-                    last_end = match entry.message.role {
-                        Role::Assistant
-                            if has_block(|b| matches!(b, ContentBlock::ToolUse { .. })) =>
-                        {
-                            SessionEnd::ToolUse
-                        }
-                        Role::Assistant => SessionEnd::Done,
-                        Role::User
-                            if has_block(|b| matches!(b, ContentBlock::ToolResult { .. })) =>
-                        {
-                            SessionEnd::ToolResult
-                        }
-                        Role::User => SessionEnd::UserUnanswered,
-                        Role::System => last_end,
-                    };
-                    if entry.message.role == Role::User {
-                        let text = entry.message.text_content();
-                        if !text.is_empty() {
-                            if first_user_text.is_none() && !in_tail {
-                                first_user_text = Some(text.clone());
-                            }
-                            last_user_text = Some(text);
-                        }
-                    }
-                }
-            }
-
-            summaries.push(SessionSummary {
-                id: header.id,
-                started_at: header.timestamp,
-                last_message_at,
-                cwd: header.cwd,
-                first_user_text,
-                last_user_text,
-                last_end,
-                dismissed_at: if last_end == SessionEnd::Done {
-                    None
-                } else {
-                    read_dismissal(&self.root_dir, stem)
-                },
-                title: read_title(&self.root_dir, stem),
-                origin: header.origin,
-            });
         }
-
         // Newest activity first — the same key the row prints, so the list
         // reads monotonically instead of mixing "when it started" with
-        // "when it was last used".
-        summaries.sort_by_key(|s| s.last_message_at);
-        summaries.reverse();
+        // "when it was last used". Ties fall to the id, which reproduces the
+        // old path-ordered build plus `.reverse()` exactly.
+        summaries.sort_by(|a, b| {
+            b.last_message_at
+                .cmp(&a.last_message_at)
+                .then_with(|| b.id.as_str().cmp(a.id.as_str()))
+        });
         summaries
+    }
+
+    /// Progressive [`Self::list`]: one scan whose events a UI can paint as
+    /// they arrive instead of blocking first paint on the whole directory.
+    /// Spawns the work — call from a Tokio context. With `probe_locks`,
+    /// `.open` files found in the directory pass are flock-probed on the
+    /// blocking pool and the held ids arrive as one
+    /// [`SessionScanEvent::Running`]; a session without an `.open` file
+    /// cannot be held, so it is never probed.
+    pub(crate) fn scan(
+        &self,
+        cwd: Option<PathBuf>,
+        probe_locks: bool,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<SessionScanEvent> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let root = self.root_dir.clone();
+        tokio::spawn(scan_session_dir(root, cwd, probe_locks, tx));
+        rx
     }
 
     pub async fn delete(&self, id: &SessionId) -> Result<()> {
@@ -2148,6 +2267,35 @@ fn write_open_holder(file: &mut std::fs::File, path: &Path) {
         {
             let _ = hint.persist(hint_path);
         }
+    }
+}
+
+/// The open-lock probe shared by every "is this session held" caller.
+/// This process's registry answers first — a live entry means we hold it,
+/// no syscall — then a real `open`+flock attempt on `<id>.open`. Advisory
+/// like the writer path: never creates the file, and a filesystem without
+/// flock answers false.
+fn open_lock_held_at(open_path: &Path) -> bool {
+    if let Ok(held) = OPEN_LOCKS.lock()
+        && held
+            .get(open_path)
+            .and_then(std::sync::Weak::upgrade)
+            .is_some()
+    {
+        return true;
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(open_path)
+    else {
+        return false;
+    };
+    match file.try_lock() {
+        // Free — the probe's own lock releases when `file` drops.
+        Ok(()) => false,
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(_)) => false,
     }
 }
 

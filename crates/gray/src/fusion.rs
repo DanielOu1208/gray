@@ -228,6 +228,7 @@ pub(crate) fn synthesize_row(
             },
         ],
         declared: false,
+        price_cliff_tokens: None,
     })
 }
 

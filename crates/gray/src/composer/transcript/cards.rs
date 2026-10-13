@@ -7,6 +7,17 @@ pub(crate) fn format_tool_box_lines(
     body: &[Line<'static>],
     width: usize,
 ) -> Vec<Line<'static>> {
+    format_tool_box_lines_multi(std::slice::from_ref(&header), body, width)
+}
+
+/// [`format_tool_box_lines`] for a header that runs to several rows (a
+/// template `preview` with a second line). The first line keeps
+/// `header_rows`' ` · ` split; each later line wraps by width under it.
+pub(crate) fn format_tool_box_lines_multi(
+    headers: &[Line<'static>],
+    body: &[Line<'static>],
+    width: usize,
+) -> Vec<Line<'static>> {
     let bg_color = crate::theme::theme().surface_bg;
     let bg_style = Style::default().bg(bg_color);
     let max_w = width.saturating_sub(4).max(1);
@@ -29,7 +40,17 @@ pub(crate) fn format_tool_box_lines(
     let mut box_lines: Vec<Line<'static>> = Vec::new();
     box_lines.push(margin_row());
 
-    let wrapped_header = header_rows(header, max_w);
+    let wrapped_header: Vec<Line<'static>> = headers
+        .iter()
+        .enumerate()
+        .flat_map(|(i, h)| {
+            if i == 0 {
+                header_rows(h.clone(), max_w)
+            } else {
+                wrap_styled_line(h.clone(), max_w)
+            }
+        })
+        .collect();
     for mut l in wrapped_header {
         l.style = l.style.patch(bg_style);
         l.spans

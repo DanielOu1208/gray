@@ -284,7 +284,28 @@ pub enum AgentEvent {
         tokens_after: usize,
         messages_before: usize,
         messages_after: usize,
+        /// Why this rewrite fired. Absent in older recordings = window bound.
+        #[serde(default)]
+        reason: CompactReason,
     },
+}
+
+/// Why an in-loop compaction fired, carried on [`AgentEvent::Compacted`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactReason {
+    /// `estimate + reserve` reached the context window (the only bound older
+    /// recordings knew).
+    #[default]
+    Window,
+    /// Overflow recovery after a provider context-length error.
+    Overflow,
+    /// An explicit user ceiling fired (`--compact-at` / `GRAY_COMPACT_AT` /
+    /// `compact_at_tokens`), clamped to the window bound.
+    UserCeiling,
+    /// The provider-declared price cliff's ceiling fired; `cliff` is the
+    /// prompt-token count above which the higher price tier bills.
+    PriceCliff { cliff: usize },
 }
 
 impl AgentEvent {
@@ -351,12 +372,14 @@ impl AgentEvent {
         tokens_after: usize,
         messages_before: usize,
         messages_after: usize,
+        reason: CompactReason,
     ) -> Self {
         Self::Compacted {
             tokens_before,
             tokens_after,
             messages_before,
             messages_after,
+            reason,
         }
     }
 

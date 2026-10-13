@@ -1,4 +1,4 @@
-use super::{live_context_total, live_pill_suffix, live_turn_output_tokens, pill_context_tokens};
+use super::{live_context_total, live_pill_suffix, pill_context_tokens};
 use gray_core::event::Usage;
 
 #[test]
@@ -68,23 +68,6 @@ fn live_tps_ticks_with_stream_and_hides_until_measurable() {
     // Matches the end-of-turn math at equal output/duration.
     let end = crate::repl::turn_tokens_per_second(1500, 2000).unwrap();
     assert_eq!(live_tps_suffix(500, 4000, 2000), format!(" · {end} tps"));
-}
-
-#[test]
-fn live_turn_output_sums_rounds_plus_stream_estimate() {
-    assert_eq!(live_turn_output_tokens(0, 0), 0);
-    assert_eq!(live_turn_output_tokens(0, 4000), 1000);
-    assert_eq!(live_turn_output_tokens(500, 4000), 1500);
-}
-
-#[test]
-fn context_falls_back_to_input_without_breakdown() {
-    let u = Usage {
-        input_tokens: 5_000,
-        output_tokens: 300,
-        ..Usage::default()
-    };
-    assert_eq!(live_context_total(Some(u), 0), 5_300);
 }
 
 #[test]

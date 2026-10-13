@@ -297,3 +297,47 @@ fn connect_receipt_falls_back_to_the_endpoint_host_not_provider() {
     );
     assert_eq!(super::endpoint_host(""), None);
 }
+
+fn delivered(name: &str, to_chat: bool, failed: bool) -> crate::cron_serve::DeliveredFire {
+    crate::cron_serve::DeliveredFire {
+        id: "x".into(),
+        name: name.into(),
+        path: std::path::PathBuf::new(),
+        excerpt: String::new(),
+        to_chat,
+        reminder: false,
+        failed,
+        elapsed_ms: 0,
+    }
+}
+
+#[test]
+fn cron_tick_line_reads_as_a_notice() {
+    // The line only ever paints when a tick had errors — a clean tick
+    // flashes `cron · N fired` in the footer's work segment instead
+    // (jobs::note_cron_tick). No emoji, no "0 errors" filler.
+    let rep = crate::cron_serve::TickReport {
+        fired: 1,
+        errors: 1,
+        delivered: vec![
+            delivered("flaky-job", false, true),
+            delivered("chat-drop", true, false),
+        ],
+    };
+    let line = super::cron_tick_line(&rep);
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(text.contains("cron"), "{text}");
+    assert!(text.contains("1 fired"), "{text}");
+    assert!(text.contains("1 error"), "{text}");
+    assert!(!text.contains("errors"), "singular for one: {text}");
+    // File-only fires get named; chat-bound ones already framed a box.
+    assert!(text.contains("flaky-job"), "{text}");
+    assert!(!text.contains("chat-drop"), "{text}");
+    // The error count is the loud span.
+    let errors = line
+        .spans
+        .iter()
+        .find(|s| s.content == "1 error")
+        .expect("error span");
+    assert_eq!(errors.style.fg, Some(crate::theme::theme().error_soft));
+}

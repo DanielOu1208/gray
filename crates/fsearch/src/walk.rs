@@ -23,14 +23,43 @@ pub static SKIP: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
 /// tracked, i.e. while SKIP is set.
 pub static DENIED: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
-/// Entries listed by scans so far: the first scan's progress.
+/// Entries the first run's whole-disk crawl has listed so far.
 pub static LISTED: AtomicUsize = AtomicUsize::new(0);
 
+/// Work a search is waiting on (listing or reading one folder): while any
+/// runs, background work (the whole-disk crawl, content builds) waits in
+/// `yield_to_searches`, so the search gets the cores and the kernel to
+/// itself (they are bound by the same per-file kernel costs).
+static HOLD: AtomicUsize = AtomicUsize::new(0);
+
+/// Holds background work off while it lives (see `HOLD`).
+pub struct Hold(());
+
+impl Hold {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Hold {
+        HOLD.fetch_add(1, Ordering::Relaxed);
+        Hold(())
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        HOLD.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Background work's turn: wait while a `Hold` lives, but at most 2 s, so
+/// searches back to back never stall it for good.
+pub fn yield_to_searches() {
+    let t = std::time::Instant::now();
+    while HOLD.load(Ordering::Relaxed) > 0 && t.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::sleep(std::time::Duration::from_micros(500));
+    }
+}
+
 pub fn blocked(path: &[u8]) -> bool {
-    SKIP.get().is_some_and(|v| {
-        v.iter()
-            .any(|s| path.starts_with(s) && (path.len() == s.len() || path[s.len()] == b'/'))
-    })
+    SKIP.get().is_some_and(|v| v.iter().any(|s| path.starts_with(s) && (path.len() == s.len() || path[s.len()] == b'/')))
 }
 
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
@@ -63,6 +92,7 @@ pub struct RawEnt {
     pub child: u32,
 }
 
+#[derive(Default)]
 pub struct Listing {
     pub id: u32,
     pub names: Vec<u8>,
@@ -72,6 +102,8 @@ pub struct Listing {
 struct Ctx {
     next_id: AtomicU32,
     out: Vec<Mutex<Vec<Listing>>>,
+    /// The whole-disk crawl: counts LISTED, yields to searches.
+    disk: bool,
 }
 
 thread_local! {
@@ -80,32 +112,44 @@ thread_local! {
 
 /// Scan `root` recursively. Listing id 0 is `root` itself.
 pub fn scan(root: &[u8], threads: usize) -> Vec<Listing> {
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .start_handler(|_| crate::no_materialize())
-        .build()
-        .unwrap();
-    let ctx = Ctx {
-        next_id: AtomicU32::new(1),
-        out: (0..threads + 1).map(|_| Mutex::new(Vec::new())).collect(),
-    };
+    scan_with(root, threads, false)
+}
+
+/// The first run's crawl of the whole disk (see `LISTED`, `HOLD`).
+pub fn scan_disk(threads: usize) -> Vec<Listing> {
+    scan_with(b"/", threads, true)
+}
+
+fn scan_with(root: &[u8], threads: usize, disk: bool) -> Vec<Listing> {
     raise_fd_limit();
-    let fd = if blocked(root) {
-        -1
-    } else {
-        CString::new(root).map_or(-1, |c| unsafe { libc::open(c.as_ptr(), OPEN_DIR) })
-    };
+    let fd = if blocked(root) { -1 } else { CString::new(root).map_or(-1, |c| unsafe { libc::open(c.as_ptr(), OPEN_DIR) }) };
     // Paths are only tracked when there is something to skip.
-    let path = SKIP
-        .get()
-        .is_some_and(|v| !v.is_empty())
-        .then(|| root.to_vec());
-    pool.scope(|s| finish_dir(s, fd, path, 0, &ctx));
-    let parts: Vec<Vec<Listing>> = ctx
-        .out
-        .into_iter()
-        .map(|m| m.into_inner().unwrap())
-        .collect();
+    let path = SKIP.get().is_some_and(|v| !v.is_empty()).then(|| root.to_vec());
+    let mut l = Listing { id: 0, names: Vec::new(), ents: Vec::new() };
+    if fd >= 0 {
+        if disk {
+            yield_to_searches();
+        }
+        list_fd(fd, &mut l);
+    }
+    // A folder holding no folder (most new ones) needs no pool: its threads
+    // cost ~120 us of CPU a scan, most of what a burst of new folders costs.
+    if !l.ents.iter().any(|e| e.kind & 3 == KIND_DIR && e.kind & FLAG_MOUNT == 0) {
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
+        }
+        for e in &mut l.ents {
+            e.kind &= !MAYBE_EMPTY;
+        }
+        if disk {
+            LISTED.fetch_add(l.ents.len(), Ordering::Relaxed);
+        }
+        return vec![l];
+    }
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).start_handler(|_| crate::no_materialize()).build().unwrap();
+    let ctx = Ctx { next_id: AtomicU32::new(1), out: (0..threads + 1).map(|_| Mutex::new(Vec::new())).collect(), disk };
+    pool.scope(|s| descend(s, fd, path, l, &ctx));
+    let parts: Vec<Vec<Listing>> = ctx.out.into_iter().map(|m| m.into_inner().unwrap()).collect();
     let mut out = Vec::with_capacity(parts.iter().map(Vec::len).sum());
     for p in parts {
         out.extend(p);
@@ -126,11 +170,7 @@ pub fn list_one(path: &[u8]) -> Option<Listing> {
     if blocked(path) {
         return None;
     }
-    let mut l = Listing {
-        id: 0,
-        names: Vec::new(),
-        ents: Vec::new(),
-    };
+    let mut l = Listing { id: 0, names: Vec::new(), ents: Vec::new() };
     if !list_into(path, &mut l) {
         return None;
     }
@@ -140,7 +180,14 @@ pub fn list_one(path: &[u8]) -> Option<Listing> {
     Some(l)
 }
 
-const OPEN_DIR: i32 = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+// O_NOFOLLOW only checks the last component of a full path; O_NOFOLLOW_ANY
+// refuses a link anywhere in it. It needs macOS 11, so Apple Silicon only.
+#[cfg(target_arch = "aarch64")]
+pub(crate) const NOFOLLOW: i32 = libc::O_NOFOLLOW_ANY;
+#[cfg(not(target_arch = "aarch64"))]
+pub(crate) const NOFOLLOW: i32 = libc::O_NOFOLLOW;
+
+const OPEN_DIR: i32 = libc::O_RDONLY | libc::O_DIRECTORY | NOFOLLOW | libc::O_CLOEXEC;
 
 /// Directory fd shared by the tasks that still need to openat() a child.
 struct Fd(i32);
@@ -157,16 +204,20 @@ impl Drop for Fd {
 // 18% of directories are empty: those the parent's listing already says
 // so (rechecked with one lookup) are never opened.
 fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &'s Ctx) {
-    let mut l = Listing {
-        id,
-        names: Vec::new(),
-        ents: Vec::new(),
-    };
+    let mut l = Listing { id, names: Vec::new(), ents: Vec::new() };
     if fd < 0 {
         push(l, ctx);
         return;
     }
+    if ctx.disk {
+        yield_to_searches();
+    }
     list_fd(fd, &mut l);
+    descend(s, fd, path, l, ctx);
+}
+
+/// Push `l`, the listing of `fd`, and scan its folders.
+fn descend<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, mut l: Listing, ctx: &'s Ctx) {
     let me = std::sync::Arc::new(Fd(fd));
     let mut kids = Vec::new();
     let mut empty = Vec::new();
@@ -191,14 +242,7 @@ fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &
     }
     push(l, ctx);
     for id in empty {
-        push(
-            Listing {
-                id,
-                names: Vec::new(),
-                ents: Vec::new(),
-            },
-            ctx,
-        );
+        push(Listing { id, names: Vec::new(), ents: Vec::new() }, ctx);
     }
     for (name, cid, child_path) in kids {
         let parent = me.clone();
@@ -222,21 +266,14 @@ fn entry_count(dir: i32, name: &CString) -> Option<u32> {
     al.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
     al.dirattr = libc::ATTR_DIR_ENTRYCOUNT;
     let mut b = [0u32; 2];
-    let r = unsafe {
-        libc::getattrlistat(
-            dir,
-            name.as_ptr(),
-            (&raw mut al).cast(),
-            b.as_mut_ptr().cast(),
-            8,
-            libc::FSOPT_NOFOLLOW as _,
-        )
-    };
+    let r = unsafe { libc::getattrlistat(dir, name.as_ptr(), (&raw mut al).cast(), b.as_mut_ptr().cast(), 8, libc::FSOPT_NOFOLLOW as _) };
     (r == 0).then_some(b[1])
 }
 
 fn push(l: Listing, ctx: &Ctx) {
-    LISTED.fetch_add(l.ents.len(), Ordering::Relaxed);
+    if ctx.disk {
+        LISTED.fetch_add(l.ents.len(), Ordering::Relaxed);
+    }
     let slot = rayon::current_thread_index().unwrap_or(ctx.out.len() - 1);
     ctx.out[slot].lock().unwrap().push(l);
 }
@@ -251,9 +288,7 @@ fn rd64(b: &[u8], at: usize) -> u64 {
 
 /// Returns false if the directory could not be opened.
 fn list_into(path: &[u8], l: &mut Listing) -> bool {
-    let Ok(cpath) = CString::new(path) else {
-        return false;
-    };
+    let Ok(cpath) = CString::new(path) else { return false };
     let fd = unsafe { libc::open(cpath.as_ptr(), OPEN_DIR) };
     if fd < 0 {
         return false;
@@ -266,25 +301,13 @@ fn list_into(path: &[u8], l: &mut Listing) -> bool {
 fn list_fd(fd: i32, l: &mut Listing) {
     let mut al: libc::attrlist = unsafe { std::mem::zeroed() };
     al.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
-    al.commonattr = libc::ATTR_CMN_RETURNED_ATTRS
-        | libc::ATTR_CMN_NAME
-        | ATTR_CMN_ERROR
-        | libc::ATTR_CMN_OBJTYPE
-        | libc::ATTR_CMN_MODTIME
-        | libc::ATTR_CMN_FLAGS;
+    al.commonattr =
+        libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_NAME | ATTR_CMN_ERROR | libc::ATTR_CMN_OBJTYPE | libc::ATTR_CMN_MODTIME | libc::ATTR_CMN_FLAGS;
     al.dirattr = libc::ATTR_DIR_ENTRYCOUNT | libc::ATTR_DIR_MOUNTSTATUS;
     al.fileattr = libc::ATTR_FILE_DATALENGTH;
     BUF.with_borrow_mut(|buf| {
         loop {
-            let n = unsafe {
-                libc::getattrlistbulk(
-                    fd,
-                    &mut al as *mut _ as *mut libc::c_void,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                    0,
-                )
-            };
+            let n = unsafe { libc::getattrlistbulk(fd, &mut al as *mut _ as *mut libc::c_void, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
             if n <= 0 {
                 break;
             }
@@ -369,13 +392,6 @@ fn parse_entry(b: &[u8], l: &mut Listing) {
     if name.is_empty() || name.len() > u16::MAX as usize {
         return;
     }
-    l.ents.push(RawEnt {
-        name_off: l.names.len() as u32,
-        name_len: name.len() as u16,
-        kind,
-        size,
-        mtime,
-        child: NONE,
-    });
+    l.ents.push(RawEnt { name_off: l.names.len() as u32, name_len: name.len() as u16, kind, size, mtime, child: NONE });
     l.names.extend_from_slice(name);
 }

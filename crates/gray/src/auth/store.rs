@@ -47,7 +47,7 @@ impl CredentialStore {
     ///
     /// Read-modify-write must run under one lock: loading before locking let
     /// two writers overwrite each other, and the loser's credential was gone.
-    fn replace_locked(&self, next: &BTreeMap<String, AuthEntry>) -> anyhow::Result<()> {
+    pub(crate) fn replace_locked(&self, next: &BTreeMap<String, AuthEntry>) -> anyhow::Result<()> {
         let value = serde_json::to_value(next)?;
         if serde_json::to_vec(&value)?.len() > MAX_AUTH_BYTES {
             anyhow::bail!("auth store exceeds the maximum size");

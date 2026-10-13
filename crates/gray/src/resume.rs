@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::session_store::{JsonlSessionStore, SessionEnd, SessionId, SessionSummary};
+use crate::session_store::{
+    JsonlSessionStore, SessionEnd, SessionId, SessionScanEvent, SessionSummary,
+};
 
 use crate::print::now_millis;
 
@@ -179,9 +181,54 @@ impl StateFilter {
     }
 }
 
+/// Index form of [`visible_sessions`] — what the picker caches. The same
+/// filters plus a (interrupted, running, done) then newest-activity sort:
+/// identical to filtering the activity-sorted list and stable-sorting by
+/// state, computed in one pass.
+fn visible_indices(
+    summaries: &[SessionSummary],
+    query: &str,
+    cwd_filter: Option<&Path>,
+    show_system: bool,
+    filter: StateFilter,
+    running: &std::collections::HashSet<String>,
+) -> Vec<usize> {
+    let rank = |s: &SessionSummary| match session_state(s, running) {
+        SessionState::Interrupted => 0,
+        SessionState::Running => 1,
+        SessionState::Done => 2,
+    };
+    let mut out: Vec<usize> = summaries
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| session_matches_with(s, query, cwd_filter, show_system))
+        .filter(|(_, s)| {
+            let st = session_state(s, running);
+            match filter {
+                StateFilter::All => true,
+                StateFilter::Interrupted => st == SessionState::Interrupted,
+                StateFilter::Running => st == SessionState::Running,
+            }
+        })
+        .map(|(i, _)| i)
+        .collect();
+    out.sort_by(|&a, &b| {
+        rank(&summaries[a])
+            .cmp(&rank(&summaries[b]))
+            .then_with(|| {
+                summaries[b]
+                    .last_message_at
+                    .cmp(&summaries[a].last_message_at)
+            })
+            .then_with(|| summaries[b].id.as_str().cmp(summaries[a].id.as_str()))
+    });
+    out
+}
+
 /// Rows the picker shows: scope + search + status filter, with interrupted
-/// then running sessions floated above finished ones (stable, so each group
-/// keeps newest-activity order).
+/// then running sessions floated above finished ones, each group in
+/// newest-activity order. Test surface over [`visible_indices`].
+#[cfg(test)]
 fn visible_sessions<'a>(
     summaries: &'a [SessionSummary],
     query: &str,
@@ -190,24 +237,10 @@ fn visible_sessions<'a>(
     filter: StateFilter,
     running: &std::collections::HashSet<String>,
 ) -> Vec<&'a SessionSummary> {
-    let mut out: Vec<&SessionSummary> = summaries
-        .iter()
-        .filter(|s| session_matches_with(s, query, cwd_filter, show_system))
-        .filter(|s| {
-            let st = session_state(s, running);
-            match filter {
-                StateFilter::All => true,
-                StateFilter::Interrupted => st == SessionState::Interrupted,
-                StateFilter::Running => st == SessionState::Running,
-            }
-        })
-        .collect();
-    out.sort_by_key(|s| match session_state(s, running) {
-        SessionState::Interrupted => 0,
-        SessionState::Running => 1,
-        SessionState::Done => 2,
-    });
-    out
+    visible_indices(summaries, query, cwd_filter, show_system, filter, running)
+        .into_iter()
+        .map(|i| &summaries[i])
+        .collect()
 }
 
 /// Picker filter: cwd scope plus case-insensitive query over id, cwd, and user
@@ -523,12 +556,9 @@ pub(crate) async fn dismiss_interrupted(cwd: Option<&Path>) -> usize {
     };
     let store = JsonlSessionStore::new(root.clone());
     let summaries = store.list().await;
-    let mut running = std::collections::HashSet::new();
-    for s in &summaries {
-        if store.open_lock_held(&s.id).await {
-            running.insert(s.id.as_str().to_string());
-        }
-    }
+    let running = store
+        .held_open_locks(summaries.iter().map(|s| s.id.clone()).collect())
+        .await;
     interrupted_sessions(&summaries, &running, cwd)
         .into_iter()
         .filter(|s| crate::session_store::write_dismissal(&root, &s.id, s.last_message_at).is_ok())
@@ -539,12 +569,15 @@ pub(crate) async fn dismiss_interrupted(cwd: Option<&Path>) -> usize {
 pub(crate) async fn startup_interrupted_hint(cwd: &std::path::Path) -> Option<String> {
     let store = JsonlSessionStore::new(crate::session_store::default_root()?);
     let summaries = store.list_in(cwd).await;
-    let mut running = std::collections::HashSet::new();
-    for s in summaries.iter().filter(|s| s.cwd == cwd) {
-        if store.open_lock_held(&s.id).await {
-            running.insert(s.id.as_str().to_string());
-        }
-    }
+    let running = store
+        .held_open_locks(
+            summaries
+                .iter()
+                .filter(|s| s.cwd == cwd)
+                .map(|s| s.id.clone())
+                .collect(),
+        )
+        .await;
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     interrupted_hint(&summaries, &running, cwd, home.as_deref())
 }
@@ -556,29 +589,17 @@ pub async fn run_resume_picker(
     let root = crate::session_store::default_root()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve home"))?;
     let store = JsonlSessionStore::new(root);
-    // `list()` already orders by last activity; sort again so the picker's
-    // order does not depend on that internal detail.
-    let mut summaries = store.list().await;
-    summaries.retain(|s| !is_empty_session(s));
-    summaries.sort_by_key(|s| s.last_message_at);
-    summaries.reverse();
-    if summaries.is_empty() {
-        anyhow::bail!("no saved sessions");
-    }
-    // Which sessions a live process holds right now (`<id>.open` flock).
-    let mut running = std::collections::HashSet::new();
-    for s in &summaries {
-        if store.open_lock_held(&s.id).await {
-            running.insert(s.id.as_str().to_string());
-        }
-    }
-    run_picker_sync(summaries, show_all, running, &store, bg)
+    // The scan streams: `.open` lock probes and per-file summaries land on
+    // the channel while the picker is already painting, so first paint
+    // never waits on a full `store.list()` over thousands of files. Rows
+    // pop in as they parse; `Done` settles the list.
+    let scan = store.scan(None, true);
+    run_picker_sync(show_all, scan, &store, bg)
 }
 
 fn run_picker_sync(
-    mut summaries: Vec<SessionSummary>,
     mut show_all: bool,
-    running: std::collections::HashSet<String>,
+    mut scan: tokio::sync::mpsc::UnboundedReceiver<SessionScanEvent>,
     store: &JsonlSessionStore,
     bg: Option<&crate::setup::BackgroundSnapshot>,
 ) -> anyhow::Result<Option<SessionId>> {
@@ -600,6 +621,16 @@ fn run_picker_sync(
     let accent_peach = crate::theme::theme().accent;
     let text_dim = crate::theme::theme().text_dim;
 
+    // Rows stream in from the scan; `filtered` caches the visible order as
+    // indices into `summaries` and is recomputed only when `dirty` marks a
+    // real change (arrivals, the finished lock probes, a keypress) — never
+    // on a bare paint tick.
+    let mut summaries: Vec<SessionSummary> = Vec::new();
+    let mut running = std::collections::HashSet::new();
+    let mut filtered: Vec<usize> = Vec::new();
+    let mut dirty = true;
+    let mut scan_done = false;
+
     let mut query = String::new();
     let mut show_hidden = false;
     let mut state_filter = StateFilter::All;
@@ -615,21 +646,43 @@ fn run_picker_sync(
 
     let result: anyhow::Result<Option<SessionId>> = (|| {
         loop {
-            let cwd_filter: Option<&Path> = if show_all { None } else { Some(&cwd) };
-            let filtered = visible_sessions(
-                &summaries,
-                &query,
-                cwd_filter,
-                show_hidden,
-                state_filter,
-                &running,
-            );
-
-            if sel >= filtered.len() && !filtered.is_empty() {
-                sel = filtered.len() - 1;
+            // Drain whatever the scan produced since the last tick; every
+            // arrival invalidates the cached row order.
+            while let Ok(event) = scan.try_recv() {
+                match event {
+                    SessionScanEvent::Running(set) => running = set,
+                    SessionScanEvent::Summary(s) => {
+                        if !is_empty_session(&s) {
+                            summaries.push(s);
+                        }
+                    }
+                    SessionScanEvent::Done => scan_done = true,
+                }
+                dirty = true;
             }
-            if filtered.is_empty() {
-                sel = 0;
+            if scan.is_closed() {
+                scan_done = true;
+            }
+            if scan_done && summaries.is_empty() {
+                return Err(anyhow::anyhow!("no saved sessions"));
+            }
+            if dirty {
+                dirty = false;
+                let cwd_filter: Option<&Path> = if show_all { None } else { Some(&cwd) };
+                filtered = visible_indices(
+                    &summaries,
+                    &query,
+                    cwd_filter,
+                    show_hidden,
+                    state_filter,
+                    &running,
+                );
+                if sel >= filtered.len() && !filtered.is_empty() {
+                    sel = filtered.len() - 1;
+                }
+                if filtered.is_empty() {
+                    sel = 0;
+                }
             }
 
             terminal.draw(|frame| {
@@ -828,7 +881,9 @@ fn run_picker_sync(
                 let list_h = inner.height.saturating_sub(6) as usize;
 
                 if filtered.is_empty() {
-                    let msg = if summaries.is_empty() {
+                    let msg = if summaries.is_empty() && !scan_done {
+                        "Scanning sessions…"
+                    } else if summaries.is_empty() {
                         "No saved sessions yet"
                     } else if state_filter == StateFilter::Interrupted {
                         "No interrupted sessions — shift-tab to change the filter"
@@ -858,7 +913,7 @@ fn run_picker_sync(
                         if idx >= filtered.len() {
                             break;
                         }
-                        let s = filtered[idx];
+                        let s = &summaries[filtered[idx]];
                         let is_sel = idx == sel;
                         // When the latest message was sent, matching the
                         // preview beside it — not when the session opened.
@@ -916,9 +971,9 @@ fn run_picker_sync(
                     }
                 }
 
-                let sel_running = filtered
-                    .get(sel)
-                    .is_some_and(|s| session_state(s, &running) == SessionState::Running);
+                let sel_running = filtered.get(sel).is_some_and(|&i| {
+                    session_state(&summaries[i], &running) == SessionState::Running
+                });
                 let hints: &[(&str, &str)] = if takeover.is_some() {
                     &[("enter", "take over"), ("esc", "back")]
                 } else if rename.is_some() {
@@ -965,7 +1020,19 @@ fn run_picker_sync(
             if !poll(Duration::from_millis(80))? {
                 continue;
             }
-            match read()? {
+            let event = read()?;
+            // Any keypress may have changed the row set — recompute on the
+            // next pass rather than every tick.
+            if matches!(
+                event,
+                Event::Key(KeyEvent {
+                    kind: KeyEventKind::Press,
+                    ..
+                })
+            ) {
+                dirty = true;
+            }
+            match event {
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('c'),
                     modifiers,
@@ -1053,33 +1120,21 @@ fn run_picker_sync(
                     }
                     // Rename the highlighted session (prefilled with its title).
                     KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        let cwd_filter: Option<&Path> = if show_all { None } else { Some(&cwd) };
-                        rename = visible_sessions(
-                            &summaries,
-                            &query,
-                            cwd_filter,
-                            show_hidden,
-                            state_filter,
-                            &running,
-                        )
-                        .get(sel)
-                        .map(|s| (s.id.clone(), s.title.clone().unwrap_or_default()));
+                        rename = filtered.get(sel).map(|&i| {
+                            (
+                                summaries[i].id.clone(),
+                                summaries[i].title.clone().unwrap_or_default(),
+                            )
+                        });
                     }
                     // Leave an interrupted session as it is on purpose: stop
                     // flagging it (until it sees new activity).
                     KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        let cwd_filter: Option<&Path> = if show_all { None } else { Some(&cwd) };
-                        let target = visible_sessions(
-                            &summaries,
-                            &query,
-                            cwd_filter,
-                            show_hidden,
-                            state_filter,
-                            &running,
-                        )
-                        .get(sel)
-                        .filter(|s| session_state(s, &running) == SessionState::Interrupted)
-                        .map(|s| (s.id.clone(), s.last_message_at));
+                        let target = filtered
+                            .get(sel)
+                            .map(|&i| &summaries[i])
+                            .filter(|s| session_state(s, &running) == SessionState::Interrupted)
+                            .map(|s| (s.id.clone(), s.last_message_at));
                         if let (Some((id, at)), Some(root)) =
                             (target, crate::session_store::default_root())
                             && crate::session_store::write_dismissal(&root, &id, at).is_ok()
@@ -1090,32 +1145,14 @@ fn run_picker_sync(
                     }
                     KeyCode::Up => sel = sel.saturating_sub(1),
                     KeyCode::Down => {
-                        let cwd_filter: Option<&Path> = if show_all { None } else { Some(&cwd) };
-                        let count = visible_sessions(
-                            &summaries,
-                            &query,
-                            cwd_filter,
-                            show_hidden,
-                            state_filter,
-                            &running,
-                        )
-                        .len();
-                        if count > 0 {
-                            sel = (sel + 1).min(count - 1);
+                        if !filtered.is_empty() {
+                            sel = (sel + 1).min(filtered.len() - 1);
                         }
                     }
                     KeyCode::Enter => {
                         notice = None;
-                        let cwd_filter: Option<&Path> = if show_all { None } else { Some(&cwd) };
-                        let filtered = visible_sessions(
-                            &summaries,
-                            &query,
-                            cwd_filter,
-                            show_hidden,
-                            state_filter,
-                            &running,
-                        );
-                        if let Some(s) = filtered.get(sel) {
+                        if let Some(&i) = filtered.get(sel) {
+                            let s = &summaries[i];
                             let pid = store.open_holder_pid(&s.id);
                             if session_state(s, &running) == SessionState::Running
                                 && pid != Some(std::process::id())

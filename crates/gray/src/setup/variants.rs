@@ -287,6 +287,10 @@ pub(crate) struct CachedModel {
     /// "no effort knob", which a reload must restore too.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub declared: bool,
+    /// Prompt tokens above which this model bills a higher price tier, from
+    /// the provider plugin's catalog (`price_cliff_tokens`). `None` = no cliff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_cliff_tokens: Option<u32>,
 }
 
 impl CachedRow {
@@ -325,6 +329,7 @@ impl CachedRow {
             super::context::cache_model_reasoning(&m.id, !m.reasoning_efforts.is_empty());
         }
         cache_row_shape(&m.id, m.variants.clone(), m.slots.clone());
+        super::context::cache_model_price_cliff(&m.id, m.price_cliff_tokens);
     }
 }
 

@@ -13,7 +13,9 @@ use crate::agent::{
 use crate::agent_compact::{needs_pre_turn_compact, needs_soft_elide};
 use crate::agent_tools::{PendingToolCall, answer_pending_tools};
 use crate::error::CoreError;
-use crate::event::{AgentEvent, StopReason, StreamEvent, Usage, append_thinking_chunk};
+use crate::event::{
+    AgentEvent, CompactReason, StopReason, StreamEvent, Usage, append_thinking_chunk,
+};
 use crate::message::{ChatRequest, ContentBlock, Message, Role};
 
 /// Empty-turn provider retries before nudging or ending on `(empty)`.
@@ -473,6 +475,7 @@ impl Agent {
                 self.estimate_tokens(),
                 self.context_window,
                 self.compact_reserve,
+                self.compact_ceiling,
             ) {
                 // False = nothing to gain (all tail): fall through; the provider's
                 // own overflow path remains the backstop. Success strictly shrinks
@@ -482,15 +485,18 @@ impl Agent {
                     self.estimate_tokens(),
                     self.context_window,
                     self.compact_reserve,
+                    self.compact_ceiling,
                 ) {
                     let before = (self.estimate_tokens(), self.messages.len());
                     match self.try_compact_budgeted().await {
                         Ok(true) => {
+                            let reason = self.ceiling_reason(before.0);
                             emit!(AgentEvent::compacted(
                                 before.0,
                                 self.estimate_tokens(),
                                 before.1,
-                                self.messages.len()
+                                self.messages.len(),
+                                reason
                             ));
                             jobs_note_due = true;
                             continue;
@@ -832,7 +838,8 @@ impl Agent {
                                             before.0,
                                             self.estimate_tokens(),
                                             before.1,
-                                            self.messages.len()
+                                            self.messages.len(),
+                                            CompactReason::Overflow
                                         ));
                                         jobs_note_due = true;
                                         continue 'turn;

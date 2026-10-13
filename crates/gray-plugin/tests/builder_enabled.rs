@@ -2,9 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gray_plugin::Plugin;
-use gray_plugin::builder::{
-    ToolsBasicPlugin, ToolsSearchPlugin, active_plugins, take_builder_warnings,
-};
+use gray_plugin::builder::{active_plugins, take_builder_warnings};
 use gray_plugin::lock::{LockEntry, LockFile, lock_path, project_lock_path};
 
 // Build once from an absolute source path. This exercises a real native sidecar
@@ -33,12 +31,11 @@ fn echo_fixture() -> &'static std::path::Path {
         .1
 }
 
-/// Test-local copy of the two builtin plugins (no surface extras).
+/// The builtin catalog is empty: the `bash` surface is not a plugin (the
+/// builder registers it directly), so there is nothing for a `gray.yml`
+/// `builtin:` entry to name here.
 fn default_plugins() -> Vec<Arc<dyn Plugin>> {
-    vec![
-        Arc::new(ToolsBasicPlugin) as Arc<dyn Plugin>,
-        Arc::new(ToolsSearchPlugin) as Arc<dyn Plugin>,
-    ]
+    Vec::new()
 }
 
 // Serializes the process-global mutation below (GRAY_HOME + cwd) within
@@ -72,10 +69,15 @@ async fn disabled_profile_sidecars_warn_and_skip_before_spawn() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let prev_home = std::env::var("GRAY_HOME").ok();
+    let prev_user_home = std::env::var("GRAY_USER_HOME").ok();
     let prev_cwd = std::env::current_dir().unwrap();
     // SAFETY: serialized by GUARD; all other suites are separate processes.
+    // GRAY_USER_HOME pinned to the same temp home so `same_home` skips the
+    // global-lock boot path — a `global: true` entry in the machine's real
+    // lock must not leak into these assertions.
     unsafe {
         std::env::set_var("GRAY_HOME", home.path());
+        std::env::set_var("GRAY_USER_HOME", home.path());
         std::env::set_current_dir(work.path()).unwrap();
     }
 
@@ -111,18 +113,17 @@ async fn disabled_profile_sidecars_warn_and_skip_before_spawn() {
     // Both disabled: skipped before spawning. abort=true would Err on any
     // spawn attempt, so Ok proves the dead binary was never spawned.
     save(false, false);
-    let (plugins, fallback) = active_plugins(
-        default_plugins(),
-        &["tools-basic", "tools-search"],
-        profile_str.as_str(),
-        None,
-        true,
-    )
-    .await
-    .unwrap();
+    let (plugins, fallback) =
+        active_plugins(default_plugins(), &[], profile_str.as_str(), None, true)
+            .await
+            .unwrap();
     let warnings = take_builder_warnings();
+    assert!(
+        plugins.is_empty(),
+        "no plugins: the bash surface is implicit — {:?}",
+        manifest_names(&plugins)
+    );
     assert!(fallback);
-    assert!(manifest_names(&plugins).contains(&"tools-basic".to_string()));
     assert!(
         !manifest_names(&plugins).contains(&"echo".to_string()),
         "{:?}",
@@ -142,15 +143,10 @@ async fn disabled_profile_sidecars_warn_and_skip_before_spawn() {
 
     // Re-enable echo: present; dead entry still warns + skips.
     save(true, false);
-    let (plugins, fallback) = active_plugins(
-        default_plugins(),
-        &["tools-basic", "tools-search"],
-        profile_str.as_str(),
-        None,
-        true,
-    )
-    .await
-    .unwrap();
+    let (plugins, fallback) =
+        active_plugins(default_plugins(), &[], profile_str.as_str(), None, true)
+            .await
+            .unwrap();
     let warnings = take_builder_warnings();
     assert!(!fallback);
     assert!(manifest_names(&plugins).contains(&"echo".to_string()));
@@ -164,15 +160,9 @@ async fn disabled_profile_sidecars_warn_and_skip_before_spawn() {
     // Re-enable dead too (no abort): the spawn is re-armed, fails, and the
     // daemon-style path warns + skips while echo stays present.
     save(true, true);
-    let (plugins, _) = active_plugins(
-        default_plugins(),
-        &["tools-basic", "tools-search"],
-        profile_str.as_str(),
-        None,
-        false,
-    )
-    .await
-    .unwrap();
+    let (plugins, _) = active_plugins(default_plugins(), &[], profile_str.as_str(), None, false)
+        .await
+        .unwrap();
     let warnings = take_builder_warnings();
     assert!(manifest_names(&plugins).contains(&"echo".to_string()));
     assert!(
@@ -185,6 +175,10 @@ async fn disabled_profile_sidecars_warn_and_skip_before_spawn() {
         match prev_home {
             Some(v) => std::env::set_var("GRAY_HOME", v),
             None => std::env::remove_var("GRAY_HOME"),
+        }
+        match prev_user_home {
+            Some(v) => std::env::set_var("GRAY_USER_HOME", v),
+            None => std::env::remove_var("GRAY_USER_HOME"),
         }
         std::env::set_current_dir(prev_cwd).unwrap();
     }
@@ -200,10 +194,15 @@ async fn lock_install_dir_activates_and_respects_enabled_flag() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let prev_home = std::env::var("GRAY_HOME").ok();
+    let prev_user_home = std::env::var("GRAY_USER_HOME").ok();
     let prev_cwd = std::env::current_dir().unwrap();
     // SAFETY: serialized by GUARD; all other suites are separate processes.
+    // GRAY_USER_HOME pinned to the same temp home so `same_home` skips the
+    // global-lock boot path — a `global: true` entry in the machine's real
+    // lock must not leak into these assertions.
     unsafe {
         std::env::set_var("GRAY_HOME", home.path());
+        std::env::set_var("GRAY_USER_HOME", home.path());
         std::env::set_current_dir(work.path()).unwrap();
     }
 
@@ -231,7 +230,7 @@ async fn lock_install_dir_activates_and_respects_enabled_flag() {
     save_user(true);
     let (plugins, fallback) = active_plugins(
         default_plugins(),
-        &["tools-basic", "tools-search"],
+        &[],
         missing_profile.as_str(),
         None,
         false,
@@ -250,7 +249,7 @@ async fn lock_install_dir_activates_and_respects_enabled_flag() {
     save_user(false);
     let (plugins, fallback) = active_plugins(
         default_plugins(),
-        &["tools-basic", "tools-search"],
+        &[],
         missing_profile.as_str(),
         None,
         false,
@@ -269,7 +268,7 @@ async fn lock_install_dir_activates_and_respects_enabled_flag() {
     save_user(true);
     let (plugins, _) = active_plugins(
         default_plugins(),
-        &["tools-basic", "tools-search"],
+        &[],
         missing_profile.as_str(),
         None,
         false,
@@ -292,7 +291,7 @@ async fn lock_install_dir_activates_and_respects_enabled_flag() {
     .unwrap();
     let (plugins, _) = active_plugins(
         default_plugins(),
-        &["tools-basic", "tools-search"],
+        &[],
         missing_profile.as_str(),
         None,
         false,
@@ -317,15 +316,10 @@ async fn lock_install_dir_activates_and_respects_enabled_flag() {
     )
     .unwrap();
     let profile_str = profile.to_string_lossy().into_owned();
-    let (plugins, fallback) = active_plugins(
-        default_plugins(),
-        &["tools-basic", "tools-search"],
-        profile_str.as_str(),
-        None,
-        true,
-    )
-    .await
-    .unwrap();
+    let (plugins, fallback) =
+        active_plugins(default_plugins(), &[], profile_str.as_str(), None, true)
+            .await
+            .unwrap();
     assert!(fallback, "{:?}", manifest_names(&plugins));
     let warnings = take_builder_warnings();
     assert!(
@@ -344,6 +338,10 @@ async fn lock_install_dir_activates_and_respects_enabled_flag() {
         match prev_home {
             Some(v) => std::env::set_var("GRAY_HOME", v),
             None => std::env::remove_var("GRAY_HOME"),
+        }
+        match prev_user_home {
+            Some(v) => std::env::set_var("GRAY_USER_HOME", v),
+            None => std::env::remove_var("GRAY_USER_HOME"),
         }
         std::env::set_current_dir(prev_cwd).unwrap();
     }

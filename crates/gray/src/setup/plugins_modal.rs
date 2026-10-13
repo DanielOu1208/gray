@@ -1,8 +1,9 @@
 //! `/plugins` — the interactive plugin manager: every installed plugin
-//! with its load status (from the session's startup probe), a `/` filter,
-//! space enable/disable, `u`/`U` updates through `gray plugin update`,
-//! and an Enter detail pane (commands, tools, hooks, capabilities,
-//! source, last error, build log).
+//! with its load status (from the session's startup probe), a live
+//! type-to-filter query, Tab enable/disable, `ctrl+u` updates through
+//! `gray plugin update`, and an Enter detail pane (commands, tools,
+//! hooks, capabilities, source, last error, build log) where space/u/U
+//! act on the viewed plugin.
 
 use super::*;
 use std::path::{Path, PathBuf};
@@ -259,7 +260,6 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
     let mut rows = load_rows();
     let mut sel = 0usize;
     let mut query = String::new();
-    let mut filtering = false;
     let mut detail = false;
     let mut changed = false;
     let mut op_msg: Option<String> = None;
@@ -290,10 +290,10 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                         let summary = if lines.is_empty() {
                             format!("{target}: up to date")
                         } else {
+                            changed = true;
                             lines.join("  ")
                         };
                         op_msg = Some(summary);
-                        changed = true;
                     }
                     Err(e) => op_msg = Some(format!("{target}: update failed — {e}")),
                 }
@@ -375,17 +375,19 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                         );
                     }
                 } else {
-                    let query_line = if filtering {
-                        format!("/{query}█")
-                    } else if query.is_empty() {
-                        "/  filter".to_string()
+                    let query_line = if query.is_empty() {
+                        "type to filter".to_string()
                     } else {
-                        format!("/{query}")
+                        format!("{query}█")
                     };
                     frame.render_widget(
                         Paragraph::new(Line::from(Span::styled(
                             query_line,
-                            Style::default().fg(if filtering { th.text_body } else { th.text_dim }),
+                            Style::default().fg(if query.is_empty() {
+                                th.text_dim
+                            } else {
+                                th.text_body
+                            }),
                         ))),
                         at(top),
                     );
@@ -462,14 +464,13 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                     at(note_y),
                 );
                 let hint_segs: &[&str] = if detail {
-                    &["esc back"]
+                    &["space toggle", "u update", "U update all", "esc back"]
                 } else {
                     &[
                         "↑↓ move",
-                        "/ filter",
-                        "space toggle",
-                        "u update",
-                        "U update all",
+                        "type to filter",
+                        "tab toggle",
+                        "ctrl+u update",
                         "enter details",
                         "esc close",
                         "toggles apply next session or /restart",
@@ -518,8 +519,19 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                     kind: KeyEventKind::Press,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    if code == KeyCode::Char('c') {
-                        return Ok(changed);
+                    match code {
+                        KeyCode::Char('c') => return Ok(changed),
+                        // ctrl+u is the list-mode update: every printable
+                        // letter now types into the filter, so shortcuts
+                        // moved off the alphabet.
+                        KeyCode::Char('u') if updating.is_none() => {
+                            if let Some(&ri) = filtered.get(sel) {
+                                let target = rows[ri].name.clone();
+                                updating = Some(target.clone());
+                                spawn_update(upd_tx.clone(), target);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Event::Key(KeyEvent {
@@ -527,91 +539,109 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                     kind: KeyEventKind::Press,
                     modifiers,
                     ..
-                }) if filtering => match code {
-                    KeyCode::Esc => {
-                        filtering = false;
-                        query.clear();
-                        sel = 0;
-                    }
-                    KeyCode::Enter => filtering = false,
-                    KeyCode::Backspace => {
-                        query.pop();
-                        sel = 0;
-                    }
-                    KeyCode::Char(c) if !modifiers.contains(KeyModifiers::ALT) => {
-                        query.push(c);
-                        sel = 0;
-                    }
-                    _ => {}
-                },
-                Event::Key(KeyEvent {
-                    code,
-                    kind: KeyEventKind::Press,
-                    ..
-                }) => match code {
-                    KeyCode::Esc => {
-                        if detail {
-                            detail = false;
-                        } else {
-                            return Ok(changed);
-                        }
-                    }
-                    KeyCode::Enter => {
-                        if !filtered.is_empty() {
-                            detail = !detail;
-                        }
-                    }
-                    KeyCode::Char('/') if !detail => {
-                        filtering = true;
-                    }
-                    KeyCode::Up | KeyCode::Down if !detail => {
-                        let last = filtered.len().saturating_sub(1);
-                        sel = if code == KeyCode::Up {
-                            sel.saturating_sub(1)
-                        } else {
-                            (sel + 1).min(last)
-                        };
-                    }
-                    KeyCode::PageUp | KeyCode::PageDown if !detail => {
-                        let last = filtered.len().saturating_sub(1);
-                        sel = if code == KeyCode::PageUp {
-                            sel.saturating_sub(8)
-                        } else {
-                            (sel + 8).min(last)
-                        };
-                    }
-                    KeyCode::Char(' ') if !detail => {
-                        if let Some(&ri) = filtered.get(sel) {
-                            let name = rows[ri].name.clone();
-                            let now_on = !rows[ri].enabled;
-                            match crate::plugin_cli::set_managed_enabled(&name, now_on) {
-                                Ok(()) => {
-                                    changed = true;
-                                    crate::plugin_status::drop_boot();
-                                    rows[ri].enabled = now_on;
-                                    op_msg = Some(format!(
-                                        "{name} {} (applies next session or /restart)",
-                                        if now_on { "enabled" } else { "disabled" },
-                                    ));
+                }) => {
+                    if detail {
+                        // The detail pane owns the printable action keys so
+                        // the list can give every letter to the filter.
+                        match code {
+                            KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace => detail = false,
+                            KeyCode::Char(' ') => {
+                                if let Some(&ri) = filtered.get(sel) {
+                                    let name = rows[ri].name.clone();
+                                    let now_on = !rows[ri].enabled;
+                                    match crate::plugin_cli::set_managed_enabled(&name, now_on) {
+                                        Ok(()) => {
+                                            changed = true;
+                                            crate::plugin_status::drop_boot();
+                                            rows[ri].enabled = now_on;
+                                            op_msg = Some(format!(
+                                                "{name} {} (applies next session or /restart)",
+                                                if now_on { "enabled" } else { "disabled" },
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            op_msg = Some(format!("toggle {name} failed: {e}"))
+                                        }
+                                    }
                                 }
-                                Err(e) => op_msg = Some(format!("toggle {name} failed: {e}")),
+                            }
+                            KeyCode::Char('u') | KeyCode::Char('U') if updating.is_none() => {
+                                let target = if code == KeyCode::Char('U') {
+                                    "all".to_string()
+                                } else {
+                                    match filtered.get(sel) {
+                                        Some(&ri) => rows[ri].name.clone(),
+                                        None => continue,
+                                    }
+                                };
+                                updating = Some(target.clone());
+                                spawn_update(upd_tx.clone(), target);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    match code {
+                        KeyCode::Esc => {
+                            if query.is_empty() {
+                                return Ok(changed);
+                            }
+                            query.clear();
+                            sel = 0;
+                        }
+                        KeyCode::Enter => {
+                            if !filtered.is_empty() {
+                                detail = true;
                             }
                         }
-                    }
-                    KeyCode::Char('u') | KeyCode::Char('U') if !detail && updating.is_none() => {
-                        let target = if code == KeyCode::Char('U') {
-                            "all".to_string()
-                        } else {
-                            match filtered.get(sel) {
-                                Some(&ri) => rows[ri].name.clone(),
-                                None => continue,
+                        KeyCode::Backspace => {
+                            query.pop();
+                            sel = 0;
+                        }
+                        KeyCode::Tab => {
+                            if let Some(&ri) = filtered.get(sel) {
+                                let name = rows[ri].name.clone();
+                                let now_on = !rows[ri].enabled;
+                                match crate::plugin_cli::set_managed_enabled(&name, now_on) {
+                                    Ok(()) => {
+                                        changed = true;
+                                        crate::plugin_status::drop_boot();
+                                        rows[ri].enabled = now_on;
+                                        op_msg = Some(format!(
+                                            "{name} {} (applies next session or /restart)",
+                                            if now_on { "enabled" } else { "disabled" },
+                                        ));
+                                    }
+                                    Err(e) => op_msg = Some(format!("toggle {name} failed: {e}")),
+                                }
                             }
-                        };
-                        updating = Some(target.clone());
-                        spawn_update(upd_tx.clone(), target);
+                        }
+                        KeyCode::Up | KeyCode::Down => {
+                            let last = filtered.len().saturating_sub(1);
+                            sel = if code == KeyCode::Up {
+                                sel.saturating_sub(1)
+                            } else {
+                                (sel + 1).min(last)
+                            };
+                        }
+                        KeyCode::PageUp | KeyCode::PageDown => {
+                            let last = filtered.len().saturating_sub(1);
+                            sel = if code == KeyCode::PageUp {
+                                sel.saturating_sub(8)
+                            } else {
+                                (sel + 8).min(last)
+                            };
+                        }
+                        // Type-to-filter like /models: every printable key
+                        // edits the query. `/` is swallowed so the old habit
+                        // of pressing it first still works.
+                        KeyCode::Char(c) if !modifiers.contains(KeyModifiers::ALT) && c != '/' => {
+                            query.push(c);
+                            sel = 0;
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }

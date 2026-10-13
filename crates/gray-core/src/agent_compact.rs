@@ -7,7 +7,10 @@
 //! retained tail.
 
 use crate::agent::Agent;
-use crate::compact::{RETAINED_MESSAGE_TOKEN_BUDGET, SUMMARY_ENVELOPE_PREFIX, run_compaction_call};
+use crate::compact::{
+    PRICE_CLIFF_KEEP_DIVISOR, RETAINED_MESSAGE_TOKEN_BUDGET, SUMMARY_ENVELOPE_PREFIX,
+    run_compaction_call,
+};
 use crate::error::CoreError;
 use crate::message::Message;
 
@@ -33,6 +36,20 @@ impl Agent {
     /// summary would not shrink history). Callers can therefore retry on
     /// `Ok(true)` knowing each success makes progress, and must stop on
     /// `Ok(false)`.
+    /// Why a compaction at `estimate` fired: the pre-turn ceiling when it
+    /// bound (a user `--compact-at` value or the provider price cliff),
+    /// else the window+reserve bound.
+    pub(crate) fn ceiling_reason(&self, estimate: usize) -> crate::event::CompactReason {
+        use crate::event::CompactReason;
+        match self.compact_ceiling.filter(|&c| estimate >= c) {
+            Some(_) => match self.price_cliff {
+                Some(cliff) => CompactReason::PriceCliff { cliff },
+                None => CompactReason::UserCeiling,
+            },
+            None => CompactReason::Window,
+        }
+    }
+
     pub(crate) async fn try_compact_budgeted(&mut self) -> Result<bool, CoreError> {
         let before = self.estimate_tokens();
         let compacted = self.compact_v2(None, self.compact_keep).await?.is_some();
@@ -82,6 +99,13 @@ impl Agent {
             None => RETAINED_MESSAGE_TOKEN_BUDGET,
             Some(w) => RETAINED_MESSAGE_TOKEN_BUDGET.min(w.saturating_sub(COMPACT_RESERVE_TOKENS)),
         });
+        // Under a price-cliff ceiling the kept tail is capped at a quarter of
+        // it, whatever the keep-recent setting says, so the next trigger stays
+        // far away.
+        let budget = match self.compact_ceiling {
+            Some(ceiling) => budget.min(ceiling / PRICE_CLIFF_KEEP_DIVISOR),
+            None => budget,
+        };
         // Cheap no-gain bail before the summary call: the retained walk can
         // cost at most `budget`, so a transcript already within budget cannot
         // strictly shrink once the summary lands. Makes proactive
@@ -180,15 +204,20 @@ pub(crate) fn est_tokens(msgs: &[Message]) -> usize {
 pub const COMPACT_RESERVE_TOKENS: usize = 16_000;
 
 /// Pre-turn budget check: true when the estimate plus reserve reaches the
-/// window. `None` window never fires (fail-safe); `None` reserve = 16k.
+/// window, or reaches the price-cliff `ceiling` when one is declared. `None`
+/// window never fires (fail-safe); `None` reserve = 16k.
 pub(crate) fn needs_pre_turn_compact(
     estimate: usize,
     window: Option<usize>,
     reserve: Option<usize>,
+    ceiling: Option<usize>,
 ) -> bool {
     match window {
         None => false,
-        Some(w) => estimate.saturating_add(reserve.unwrap_or(COMPACT_RESERVE_TOKENS)) >= w,
+        Some(w) => {
+            estimate.saturating_add(reserve.unwrap_or(COMPACT_RESERVE_TOKENS)) >= w
+                || ceiling.is_some_and(|c| estimate >= c)
+        }
     }
 }
 

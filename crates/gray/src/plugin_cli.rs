@@ -5,6 +5,7 @@
 //! always the sidecar invocation vector.
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use anyhow::Context;
 use gray_plugin::lock::{LockEntry, LockFile};
@@ -185,7 +186,9 @@ async fn index_entry(name: &str) -> Option<gray_pkg::index::Entry> {
 ///
 /// Returns the user-facing lines; callers choose how to display them (the
 /// CLI prints, the TUI routes them through `say` — never stdout mid-frame).
-/// Never prompts: callers that can ask use [`install_spec`] instead.
+/// Never prompts: callers that can ask use [`install_spec`] instead. A
+/// native registration's capability consent defers the same way — the
+/// returned lines carry the declaration and the `grant` command.
 pub async fn install_spec_lines(
     home: &Path,
     spec: &str,
@@ -212,9 +215,7 @@ async fn install_spec_gated(
     }
     if let Some(path) = std::env::var_os("GRAY_PLUGIN_PATH") {
         anyhow::ensure!(!path.is_empty(), "GRAY_PLUGIN_PATH is set but empty");
-        return register_native(home, Some(spec), Path::new(&path), force)
-            .await
-            .map(|line| vec![line]);
+        return register_native_gated(home, Some(spec), Path::new(&path), force, gate).await;
     }
     let path = Path::new(spec);
     // A bare name only resolves as a path when it looks like one — absolute,
@@ -226,9 +227,7 @@ async fn install_spec_gated(
         || spec.contains(std::path::MAIN_SEPARATOR)
         || spec.contains('/');
     if path_like && path.exists() {
-        return register_native(home, None, path, force)
-            .await
-            .map(|line| vec![line]);
+        return register_native_gated(home, None, path, force, gate).await;
     }
     if validate_name(spec).is_ok()
         && let Some(paths) = std::env::var_os("PATH")
@@ -236,9 +235,7 @@ async fn install_spec_gated(
         for dir in std::env::split_paths(&paths) {
             let candidate = dir.join(format!("gray-{spec}{}", std::env::consts::EXE_SUFFIX));
             if candidate.is_file() {
-                return register_native(home, Some(spec), &candidate, force)
-                    .await
-                    .map(|line| vec![line]);
+                return register_native_gated(home, Some(spec), &candidate, force, gate).await;
             }
         }
     }
@@ -332,24 +329,50 @@ pub async fn install_spec(home: &Path, spec: &str, force: bool, yes: bool) -> an
 /// but a reverse shell is not a preference. `caution` needs either an
 /// interactive yes or `--force`; a session that cannot ask refuses
 /// instead of installing code nobody reviewed.
-fn scan_or_block(root: &Path, force: bool) -> anyhow::Result<()> {
+///
+/// A `TrustGate::Lines` surface cannot print mid-frame or answer a
+/// prompt either: the verdict comes back as lines for the caller's own
+/// channel (the REPL's `say`) and a caution refuses the same way.
+fn scan_or_block(root: &Path, force: bool, gate: TrustGate) -> anyhow::Result<Vec<String>> {
     use gray_plugin::scan::{Verdict, scan_tree};
     let report = scan_tree(root)?;
+    let to_lines = matches!(gate, TrustGate::Lines);
+    let mut out = Vec::new();
+    let mut note = |s: String| {
+        if to_lines {
+            out.push(s);
+        } else {
+            println!("{s}");
+        }
+    };
     match report.verdict() {
         Verdict::Safe => {
-            println!(
+            note(format!(
                 "  plugin scan: {} — {}",
                 report.summary(),
                 Verdict::Safe.label()
-            );
-            Ok(())
+            ));
         }
         Verdict::Caution => {
-            println!("  plugin scan: caution — {}", report.summary());
+            if to_lines {
+                anyhow::ensure!(
+                    force,
+                    "plugin scan reported caution ({}) and this surface cannot ask; \
+                     re-run `gray plugin install` on the command line to review the findings",
+                    report.summary()
+                );
+                note(format!("  plugin scan: caution — {}", report.summary()));
+                for line in report.render().lines() {
+                    note(line.to_string());
+                }
+                note("  continuing (--force)".to_string());
+                return Ok(out);
+            }
+            note(format!("  plugin scan: caution — {}", report.summary()));
             print!("{}", report.render());
             if force {
-                println!("  continuing (--force)");
-                return Ok(());
+                note("  continuing (--force)".to_string());
+                return Ok(out);
             }
             if !interactive() {
                 anyhow::bail!(
@@ -360,7 +383,6 @@ fn scan_or_block(root: &Path, force: bool) -> anyhow::Result<()> {
             }
             let granted = confirm("Review the findings above. Install anyway? [y/N] ")?;
             anyhow::ensure!(granted, "install cancelled after a caution scan");
-            Ok(())
         }
         Verdict::Dangerous => {
             let critical: Vec<String> = report
@@ -368,7 +390,9 @@ fn scan_or_block(root: &Path, force: bool) -> anyhow::Result<()> {
                 .iter()
                 .map(|f| format!("{} ({}:{})", f.rule, f.path, f.line))
                 .collect();
-            print!("{}", report.render());
+            if !to_lines {
+                print!("{}", report.render());
+            }
             anyhow::bail!(
                 "plugin scan blocked the install: {} critical of {} findings ({}); \
                  --force does not override a dangerous verdict",
@@ -378,6 +402,7 @@ fn scan_or_block(root: &Path, force: bool) -> anyhow::Result<()> {
             );
         }
     }
+    Ok(out)
 }
 
 /// Same rule as the typed-manifest check: a protocol-1.2 sidecar that owns
@@ -420,38 +445,60 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
     Ok(answer == "y" || answer == "yes")
 }
 
-/// Show what a plugin declares, ask for a grant, and return
-/// `(granted, consent hash)`.
+/// Show what a plugin declares, ask for a grant when the surface can,
+/// and return `(granted, consent hash, lines)`.
 ///
 /// Nothing declared → no hash and no grant (an undeclared capability is
 /// not a capability). A session that cannot prompt grants nothing but
 /// still records the hash, so the plugin runs ungranted rather than
 /// grandfathered, and `gray plugin capabilities <name> --all` grants later.
-fn consent_capabilities(name: &str, declared: &[String]) -> (Vec<String>, Option<String>) {
+///
+/// `lines` stays empty on surfaces that print as they go. Under
+/// `TrustGate::Lines` nothing prints — the declaration block and the
+/// deferral hint come back for the caller's own channel (the REPL's
+/// `say`): a mid-frame println! splatters the composer and `read_line`
+/// races its raw-mode stdin.
+fn consent_capabilities(
+    name: &str,
+    declared: &[String],
+    gate: TrustGate,
+) -> (Vec<String>, Option<String>, Vec<String>) {
     if declared.is_empty() {
-        return (Vec::new(), None);
+        return (Vec::new(), None, Vec::new());
     }
     let hash = gray_plugin::capabilities::consent_hash(declared);
-    println!("'{name}' declares {} capability(ies):", declared.len());
+    let mut lines = vec![format!(
+        "'{name}' declares {} capability(ies):",
+        declared.len()
+    )];
     for id in declared {
         let what = gray_plugin::capabilities::spec(id)
             .map(|s| s.description)
             .unwrap_or("(unknown to this build)");
-        println!("  - {id}: {what}");
+        lines.push(format!("  - {id}: {what}"));
+    }
+    if matches!(gate, TrustGate::Lines) {
+        lines.push(format!(
+            "  not granted (deferred). Grant later: gray plugin capabilities {name} --all"
+        ));
+        return (Vec::new(), Some(hash), lines);
+    }
+    for line in &lines {
+        println!("{line}");
     }
     if !interactive() {
         println!(
             "  not granted (non-interactive session). Grant later: gray plugin capabilities {name} --all"
         );
-        return (Vec::new(), Some(hash));
+        return (Vec::new(), Some(hash), Vec::new());
     }
     let granted = confirm("Grant these to this plugin? [y/N] ").unwrap_or(false);
     if granted {
         println!("  granted");
-        (declared.to_vec(), Some(hash))
+        (declared.to_vec(), Some(hash), Vec::new())
     } else {
         println!("  not granted; the plugin will run without them");
-        (Vec::new(), Some(hash))
+        (Vec::new(), Some(hash), Vec::new())
     }
 }
 
@@ -724,21 +771,40 @@ pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
     validate_name(name)?;
     migrate_commands_json(home);
     let lock = load_lock(home)?;
-    let entry = lock.plugins.get(name).with_context(|| {
-        removed_builtin(name)
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                format!("no plugin command '{name}' — install it with: gray plugin install {name}")
-            })
-    })?;
-    let argv = entry
-        .cli_argv
-        .as_ref()
-        .with_context(|| format!("'{name}' is a sidecar plugin, not a CLI command"))?;
+    // A session home that never installed the plugin still reaches a
+    // `global` entry in the user home — the same dual-home rule `cmd`
+    // command lookup applies (conversation-scoped GRAY_HOMEs).
+    let (entry, entry_home) = match lock.plugins.get(name).cloned() {
+        Some(e) => (e, home.to_path_buf()),
+        None => {
+            let fallback = gray_core::paths::gray_user_home()
+                .filter(|u| u.as_path() != home)
+                .and_then(|u| load_lock(&u).ok().map(|l| (u, l)))
+                .and_then(|(u, l)| {
+                    l.plugins
+                        .get(name)
+                        .filter(|e| e.global)
+                        .map(|e| (e.clone(), u))
+                });
+            match fallback {
+                Some((e, u)) => (e, u),
+                None => {
+                    return Err(anyhow::anyhow!(
+                        removed_builtin(name).map(str::to_string).unwrap_or_else(|| {
+                            format!("no plugin command '{name}' — install it with: gray plugin install {name}")
+                        })
+                    ));
+                }
+            }
+        }
+    };
     anyhow::ensure!(
-        enabled(home, name, entry),
+        enabled(&entry_home, name, &entry),
         "plugin command '{name}' is disabled"
     );
+    let argv = entry
+        .cli_argv
+        .with_context(|| format!("'{name}' is a sidecar plugin, not a CLI command"))?;
     let (program, args) = argv
         .split_first()
         .context("plugin command has no entry point")?;
@@ -797,6 +863,28 @@ pub async fn register_native(
     binary: &Path,
     force: bool,
 ) -> anyhow::Result<String> {
+    Ok(
+        register_native_gated(home, expected, binary, force, TrustGate::Ask)
+            .await?
+            .pop()
+            .unwrap_or_default(),
+    )
+}
+
+/// `register_native` under a trust gate. Every line the caller should
+/// surface comes back, in the order the CLI prints them: the scan verdict
+/// first, then the registration confirmation, then the deferred
+/// capability-consent block — the actionable "grant later" hint lands
+/// last. Under `TrustGate::Lines` those steps never print or prompt
+/// mid-frame; under every other gate they print and ask as before and
+/// only the confirmation returns.
+async fn register_native_gated(
+    home: &Path,
+    expected: Option<&str>,
+    binary: &Path,
+    force: bool,
+    gate: TrustGate,
+) -> anyhow::Result<Vec<String>> {
     let binary = std::fs::canonicalize(binary)?;
     let cli_probe = cli_manifest(&binary).await;
     let (manifest, wire_only) = match cli_probe {
@@ -829,9 +917,11 @@ pub async fn register_native(
     };
     // A directory plugin is source we can read; a bare binary is not, so
     // scanning (and every verdict about its code) is skipped there.
-    if binary.is_dir() {
-        scan_or_block(binary.as_ref(), force)?;
-    }
+    let mut lines = if binary.is_dir() {
+        scan_or_block(binary.as_ref(), force, gate)?
+    } else {
+        Vec::new()
+    };
     let declared = manifest["capabilities"]
         .as_array()
         .map(|a| {
@@ -840,7 +930,7 @@ pub async fn register_native(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let (granted, capabilities_hash) = consent_capabilities(&name, &declared);
+    let (granted, capabilities_hash, consent_lines) = consent_capabilities(&name, &declared, gate);
     let runtime_role = provider_only_role_json(&manifest);
     std::fs::create_dir_all(home.join("plugins"))?;
     let _guard = gray_pkg::ops::hold_registry_lock_in(&home.join("plugins"))?;
@@ -920,14 +1010,16 @@ pub async fn register_native(
         )?;
         tmp.persist(home.join("plugins/widgets.json"))?;
     }
-    Ok(if wire_only {
+    lines.push(if wire_only {
         format!("Registered '{name}' from {}", binary.display())
     } else {
         format!(
             "Registered '{name}' from {}. Run: gray {name} --help",
             binary.display()
         )
-    })
+    });
+    lines.extend(consent_lines);
+    Ok(lines)
 }
 
 /// Give an index-installed plugin a `cli_argv` when its installed
@@ -1045,20 +1137,85 @@ pub async fn capture_slash(name: &str, args: &[String]) -> anyhow::Result<Option
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
-/// Only explicitly installed command metadata participates in completion.
-pub(crate) fn completions(query: &str) -> Vec<(String, String)> {
-    let Ok(home) = home() else { return Vec::new() };
-    migrate_commands_json(&home);
-    let Ok(lock) = load_lock(&home) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for (name, entry) in lock.plugins {
-        if entry.cli_argv.is_none() || !enabled(&home, &name, &entry) {
+/// One plugin-declared slash command plus its manifest `completion` args —
+/// the unit `completions()` filters by the typed query.
+struct CompletionRow {
+    /// Declared command text, leading `/` stripped, built-ins excluded.
+    command: String,
+    /// Owning plugin name, for the "{name} plugin" description suffix.
+    plugin: String,
+    /// Manifest `completion` entries, matched as `command arg` candidates.
+    args: Vec<String>,
+}
+
+/// The completion row universe plus the `(path, mtime)` stamps that prove
+/// it fresh: user lock, project lock, and every manifest it was built from.
+/// The `/` popup asks on every keystroke; rebuilding meant ~62 lockfile
+/// parses and ~61 manifest reads per key — the stamp check costs a few
+/// stats instead.
+struct CompletionTable {
+    home: PathBuf,
+    stamps: Vec<(PathBuf, Option<std::time::SystemTime>)>,
+    rows: Vec<CompletionRow>,
+}
+
+/// The cached table plus a build count, so a test can see that a keystroke
+/// burst costs one rebuild instead of one per key.
+#[derive(Default)]
+struct CompletionCache {
+    table: Option<CompletionTable>,
+    builds: usize,
+}
+
+static COMPLETIONS: Mutex<CompletionCache> = Mutex::new(CompletionCache {
+    table: None,
+    builds: 0,
+});
+
+fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// `enabled` with the lockfiles already parsed: the project overlay wins on
+/// the flag, missing entries default to enabled — same verdict, no reloads.
+fn enabled_in(user: &LockFile, project: Option<&LockFile>, name: &str, entry: &LockEntry) -> bool {
+    entry.enabled
+        && project
+            .and_then(|lock| lock.plugins.get(name))
+            .or_else(|| user.plugins.get(name))
+            .is_none_or(|entry| entry.enabled)
+}
+
+/// Read the lockfiles and every CLI plugin's manifest once and flatten them
+/// into filterable rows. `None` when the user lock cannot be parsed, same
+/// as `completions` answering empty.
+fn build_completion_table(home: &Path) -> Option<CompletionTable> {
+    let lock = load_lock(home).ok()?;
+    let project_path = std::env::current_dir()
+        .ok()
+        .map(|cwd| gray_plugin::lock::project_lock_path(&cwd));
+    let project = project_path
+        .as_ref()
+        .and_then(|path| LockFile::load(path).ok());
+    let mut stamps = vec![
+        (
+            gray_plugin::lock::lock_path(home),
+            file_mtime(&gray_plugin::lock::lock_path(home)),
+        ),
+        (
+            project_path.clone().unwrap_or_default(),
+            project_path.as_ref().and_then(|path| file_mtime(path)),
+        ),
+    ];
+    let mut rows = Vec::new();
+    for (name, entry) in &lock.plugins {
+        if entry.cli_argv.is_none() || !enabled_in(&lock, project.as_ref(), name, entry) {
             continue;
         }
-        let Ok(raw) = std::fs::read(home.join("plugins").join(format!("{name}-manifest.json")))
-        else {
+        let manifest = home.join("plugins").join(format!("{name}-manifest.json"));
+        // Stamp before reading so a manifest appearing later invalidates.
+        stamps.push((manifest.clone(), file_mtime(&manifest)));
+        let Ok(raw) = std::fs::read(&manifest) else {
             continue;
         };
         let Ok(m) = serde_json::from_slice::<serde_json::Value>(&raw) else {
@@ -1067,21 +1224,71 @@ pub(crate) fn completions(query: &str) -> Vec<(String, String)> {
         let Some(commands) = m["commands"].as_array() else {
             continue;
         };
+        let args: Vec<String> = m["completion"]
+            .as_array()
+            .map(|args| {
+                args.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         for command in commands.iter().filter_map(|v| v.as_str()) {
             let command = command.trim_start_matches('/');
             if crate::repl::is_builtin_command(command) {
                 continue;
             }
-            if !query.contains(' ') && command.starts_with(query) {
-                out.push((command.to_string(), format!("{name} plugin")));
-            }
-            if let Some(args) = m["completion"].as_array() {
-                for arg in args.iter().filter_map(|v| v.as_str()) {
-                    let full = format!("{command} {arg}");
-                    if query.contains(' ') && full.starts_with(query) {
-                        out.push((full, format!("{name} plugin command")));
-                    }
-                }
+            rows.push(CompletionRow {
+                command: command.to_string(),
+                plugin: name.clone(),
+                args: args.clone(),
+            });
+        }
+    }
+    Some(CompletionTable {
+        home: home.to_path_buf(),
+        stamps,
+        rows,
+    })
+}
+
+/// The cached completion universe, rebuilt only when an input mtime moved.
+fn completion_table<'a>(
+    home: &Path,
+    cache: &'a mut CompletionCache,
+) -> Option<&'a CompletionTable> {
+    let fresh = cache.table.as_ref().is_some_and(|table| {
+        table.home == home
+            && table
+                .stamps
+                .iter()
+                .all(|(path, stamp)| file_mtime(path) == *stamp)
+    });
+    if !fresh {
+        cache.table = build_completion_table(home);
+        cache.builds += 1;
+    }
+    cache.table.as_ref()
+}
+
+/// Only explicitly installed command metadata participates in completion.
+pub(crate) fn completions(query: &str) -> Vec<(String, String)> {
+    let Ok(home) = home() else { return Vec::new() };
+    migrate_commands_json(&home);
+    let mut out = Vec::new();
+    let Ok(mut guard) = COMPLETIONS.lock() else {
+        return out;
+    };
+    let Some(table) = completion_table(&home, &mut guard) else {
+        return Vec::new();
+    };
+    for row in &table.rows {
+        if !query.contains(' ') && row.command.starts_with(query) {
+            out.push((row.command.clone(), format!("{} plugin", row.plugin)));
+        }
+        for arg in &row.args {
+            let full = format!("{} {arg}", row.command);
+            if query.contains(' ') && full.starts_with(query) {
+                out.push((full, format!("{} plugin command", row.plugin)));
             }
         }
     }
@@ -1542,5 +1749,91 @@ done
         assert_eq!(entry.cli_argv, None);
         assert_eq!(entry.hash, "sha256:abc");
         assert!(!home.join("plugins/demo-manifest.json").exists());
+    }
+
+    /// The TUI's `install_spec_lines` path (`TrustGate::Lines`) must never
+    /// print mid-frame or read stdin — capability consent defers: the lock
+    /// records the hash with nothing granted and the lines carry the
+    /// declaration plus the grant command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_spec_lines_defers_capability_consent() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let exe = home.join("gray-capsdemo");
+        std::fs::write(
+            &exe,
+            "#!/bin/sh\nprintf '%s\\n' '{\"name\":\"capsdemo\",\"version\":\"1.0.0\",\"capabilities\":[\"provider.credentials\"]}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = exe.to_string_lossy().into_owned();
+        let lines = install_spec_lines(home, &spec, false).await.unwrap();
+        let text = lines.join("\n");
+        assert!(
+            text.contains("Registered 'capsdemo'"),
+            "missing confirmation: {text}"
+        );
+        assert!(
+            text.contains("declares 1 capability(ies):"),
+            "missing declaration block: {text}"
+        );
+        assert!(
+            text.contains("provider.credentials"),
+            "missing capability id: {text}"
+        );
+        assert!(
+            text.contains("not granted (deferred)"),
+            "missing deferral line: {text}"
+        );
+        assert!(
+            text.contains("gray plugin capabilities capsdemo --all"),
+            "missing grant hint: {text}"
+        );
+        let entry = &load_lock(home).unwrap().plugins["capsdemo"];
+        assert!(entry.granted_capabilities.is_empty());
+        assert!(entry.capabilities_hash.is_some());
+    }
+
+    #[test]
+    fn completion_table_rebuilds_only_when_inputs_move() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let mut cli = cli_entry(&["/usr/bin/demo"]);
+        cli.cli_argv = Some(cli.argv.clone());
+        write_lock(home, &serde_json::json!({"demo": cli}));
+        let manifest = home.join("plugins/demo-manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{"name":"demo","commands":["/demo"],"completion":["run"]}"#,
+        )
+        .unwrap();
+        let mut cache = CompletionCache::default();
+        {
+            let table = completion_table(home, &mut cache).unwrap();
+            assert_eq!(table.rows.len(), 1);
+            assert_eq!(table.rows[0].command, "demo");
+            assert_eq!(table.rows[0].args, vec!["run".to_string()]);
+            // user lock + project lock + the one manifest that was read.
+            assert_eq!(table.stamps.len(), 3);
+        }
+        assert_eq!(cache.builds, 1);
+        // Every further keystroke with unchanged inputs hits the cache.
+        for _ in 0..5 {
+            assert_eq!(completion_table(home, &mut cache).unwrap().rows.len(), 1);
+        }
+        assert_eq!(cache.builds, 1);
+        // The manifest going away invalidates the table.
+        std::fs::remove_file(&manifest).unwrap();
+        assert!(completion_table(home, &mut cache).unwrap().rows.is_empty());
+        assert_eq!(cache.builds, 2);
+        // A disabled plugin drops its rows on the next rebuild.
+        let lock_path = gray_plugin::lock::lock_path(home);
+        let mut lock = gray_plugin::lock::LockFile::load(&lock_path).unwrap();
+        lock.plugins.get_mut("demo").unwrap().enabled = false;
+        lock.save(&lock_path).unwrap();
+        assert!(completion_table(home, &mut cache).unwrap().rows.is_empty());
+        assert_eq!(cache.builds, 3);
     }
 }

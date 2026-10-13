@@ -4,8 +4,7 @@
 //! a known name replaces, `when: "off"|"on"|"delete"` pauses, resumes or
 //! drops, and every call answers with the current job list (no `list`
 //! action). A tool call is the model by construction, so jobs it creates or
-//! edits wait for the user's approval in `/cron` — unless the user opted out
-//! with `GRAY_CRON_AUTO_APPROVE`.
+//! edits go live immediately.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,7 +20,7 @@ use crate::cron::{CronJob, CronStore, Deliver, Repeat, now_secs};
 
 /// Live plugin (protocol 1.3): the tool exists only while an interactive
 /// TUI is up — headless `--print` runs (bench arms, gateway turns) have
-/// nobody to approve or receive a wake.
+/// nobody to receive a wake.
 #[derive(Default)]
 pub(crate) struct CronPlugin;
 
@@ -58,8 +57,8 @@ impl Tool for ScheduleTool {
                 "job by `name`. `when` is a schedule (\"in 30m\", \"every 2h\", \"daily 9am\", ",
                 "\"weekdays 9:00\", \"every monday 6pm\", 5-field cron, RFC3339) — or ",
                 "\"off\"/\"on\" to pause/resume, \"delete\" to remove. At fire time `prompt` runs ",
-                "as a fresh turn (`reminder: true` delivers it as literal text instead). New and ",
-                "edited jobs may wait for the user's approval. Call with no args to list jobs."
+                "as a fresh turn (`reminder: true` delivers it as literal text instead). Call with no ",
+                "args to list jobs."
             )
             .to_string(),
             parameters: serde_json::json!({
@@ -141,10 +140,7 @@ fn upsert(
         None => None,
     };
     let reminder = args.get("reminder").and_then(Value::as_bool);
-    let auto = crate::cron::auto_approve();
     let verb = if store.get(name)?.is_some() {
-        // An edit is a new request: an approved job the model rewrites goes
-        // back to the user, or approval would only ever gate the first draft.
         store.update(name, |j| {
             j.schedule = schedule;
             if let Some(p) = prompt {
@@ -159,11 +155,8 @@ fn upsert(
                     completed: 0,
                 };
             }
-            (j.state, j.next_run_at) = if auto {
-                (JobState::Active, next_run(now_secs(), &j.schedule))
-            } else {
-                (JobState::AwaitingApproval, None)
-            };
+            // A paused/done job the model rewrites re-arms at once.
+            (j.state, j.next_run_at) = (JobState::Active, next_run(now_secs(), &j.schedule));
             Ok(())
         })?;
         "updated"
@@ -182,31 +175,17 @@ fn upsert(
             Deliver::Local
         };
         let reminder = reminder.unwrap_or(false);
-        let id = if auto {
-            store.add_full(
-                name,
-                when,
-                prompt,
-                deliver,
-                origin,
-                None,
-                vec![],
-                None,
-                reminder,
-            )?
-        } else {
-            store.add_awaiting_approval(
-                name,
-                when,
-                prompt,
-                deliver,
-                origin,
-                None,
-                vec![],
-                None,
-                reminder,
-            )?
-        };
+        let id = store.add_full(
+            name,
+            when,
+            prompt,
+            deliver,
+            origin,
+            None,
+            vec![],
+            None,
+            reminder,
+        )?;
         if times.is_some() {
             store.update(&id, |j| {
                 j.repeat.times = times;
@@ -215,11 +194,7 @@ fn upsert(
         }
         "created"
     };
-    Ok(if auto {
-        format!("{verb} {name}")
-    } else {
-        format!("{verb} {name} — waiting for the user to approve it in /cron")
-    })
+    Ok(format!("{verb} {name}"))
 }
 
 fn job_line(j: &CronJob) -> String {
@@ -228,7 +203,6 @@ fn job_line(j: &CronJob) -> String {
         JobState::Active => "disabled",
         JobState::Paused => "paused",
         JobState::Done => "done",
-        JobState::AwaitingApproval => "awaiting approval",
     };
     let next = j
         .next_run_at
@@ -261,26 +235,6 @@ pub(crate) fn schedule_text(s: &Schedule) -> String {
         },
         Schedule::Once { .. } => "once".to_string(),
     }
-}
-
-/// `text` with every character a reader can't see spelled out: zero-width,
-/// bidi overrides, tag characters and controls become `⟨U+XXXX⟩`, newlines
-/// `⏎`. What the user approves is then exactly what will run — showing beats
-/// guessing which characters a scanner should strip.
-pub(crate) fn visible(text: &str) -> String {
-    text.chars()
-        .map(|c| match c {
-            '\n' => "\u{23ce} ".to_string(),
-            '\u{200b}'..='\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
-            | '\u{feff}'
-            | '\u{00ad}'
-            | '\u{e0000}'..='\u{e007f}' => format!("\u{27e8}U+{:04X}\u{27e9}", c as u32),
-            c if c.is_control() => format!("\u{27e8}U+{:04X}\u{27e9}", c as u32),
-            c => c.to_string(),
-        })
-        .collect()
 }
 
 #[path = "cron_tool_tests.rs"]

@@ -378,24 +378,7 @@ async fn build_agent_with(
         )),
         // Sidecars get the host runner so plugin-initiated `host/run`
         // / `host/say` don't fall back to loud `{"error":…}`.
-        // Bash-only tools; the context-only skills + project-context
-        // plugins are always on (every profile, including the default
-        // `tools-minimal`). `--lean` skips them: their whole job is
-        // injecting prompt context. The fusion plugin is live (protocol
-        // 1.3): it injects `handoff` per turn while a local-fusion
-        // selection is active — a real tool, so `--lean` keeps it.
-        extra_plugins: {
-            let mut extra: Vec<Arc<dyn gray_plugin::Plugin>> = Vec::new();
-            if !(config.bare || config.lean || !spawn_plugins) {
-                extra.push(Arc::new(crate::skills_tool::SkillsPlugin::default()));
-                extra.push(Arc::new(crate::skills_tool::ProjectContextPlugin));
-            }
-            if !config.bare && spawn_plugins {
-                extra.push(Arc::new(crate::fusion::FusionPlugin::default()));
-                extra.push(Arc::new(crate::cron_tool::CronPlugin));
-            }
-            extra
-        },
+        extra_plugins: extra_surface_plugins(config, spawn_plugins),
         // No plugins means the builder's bare set: one in-process shell
         // tool the caller discards along with the rest of the tool surface.
         bare: config.bare || !spawn_plugins,
@@ -422,7 +405,19 @@ async fn build_agent_with(
             let _ = t.draw();
         }
     }
-    let mut agent = agent.with_compaction_budget(config.context_reserve, config.context_keep);
+    // Ceiling = explicit --compact-at/GRAY_COMPACT_AT/config choice, else the
+    // provider-declared price cliff's safe point, else none (window bound
+    // only). Computed against the same window+reserve the loop resolves.
+    let window = crate::setup::context::resolve_model_context_length(model);
+    let (ceiling, price_cliff) = crate::compact::ceiling_for(
+        config.compact_at,
+        window,
+        crate::setup::context::user_reserve_tokens_for(window),
+        crate::setup::model_price_cliff(model).map(|c| c as usize),
+    );
+    let mut agent = agent
+        .with_compaction_budget(config.context_reserve, config.context_keep)
+        .with_compact_ceiling(ceiling, price_cliff);
     // Same rule `cache_warm_policy` applies to warming: on a relay plugin a
     // prefix rewrite throws away the upstream native session, so the
     // cold-cache stale-output mask stays off there entirely.
@@ -437,6 +432,32 @@ async fn build_agent_with(
     Ok(agent
         .with_tool_timeout(crate::shell_drain::SHELL_TOOL_TIMEOUT)
         .with_cache_warm(cache_warm))
+}
+
+/// The always-on surface plugins appended after the profile/lock set in
+/// [`build_agent`] — extracted so the startup-resume replay can build the
+/// same tool surface the lazy agent will carry (its card labels/previews
+/// live on these defs before the agent exists).
+///
+/// Bash-only surface; the context-only skills + project-context plugins are
+/// always on (every profile — `bash` is implicit, not a plugin entry).
+/// `--lean` skips them: their whole job is injecting prompt context. The
+/// fusion plugin is live (protocol 1.3): it injects `handoff` per turn while
+/// a local-fusion selection is active — a real tool, so `--lean` keeps it.
+pub(crate) fn extra_surface_plugins(
+    config: &Config,
+    spawn_plugins: bool,
+) -> Vec<Arc<dyn gray_plugin::Plugin>> {
+    let mut extra: Vec<Arc<dyn gray_plugin::Plugin>> = Vec::new();
+    if !(config.bare || config.lean || !spawn_plugins) {
+        extra.push(Arc::new(crate::skills_tool::SkillsPlugin::default()));
+        extra.push(Arc::new(crate::skills_tool::ProjectContextPlugin));
+    }
+    if !config.bare && spawn_plugins {
+        extra.push(Arc::new(crate::fusion::FusionPlugin::default()));
+        extra.push(Arc::new(crate::cron_tool::CronPlugin));
+    }
+    extra
 }
 
 /// Command-line arguments for the Gray harness.
@@ -515,6 +536,12 @@ pub struct Cli {
     #[arg(long, value_name = "TOKENS", value_parser = parse_context_window_cli)]
     pub context_keep: Option<usize>,
 
+    /// Auto-compact trigger in prompt tokens (e.g. 90000, 90k, 1.5m) or
+    /// "auto" for the provider price-cliff default. Overrides a declared
+    /// price cliff; still clamped to window − reserve. Env: GRAY_COMPACT_AT.
+    #[arg(long, value_name = "auto|TOKENS", value_parser = parse_compact_at_cli)]
+    pub compact_at: Option<crate::setup::CompactAt>,
+
     /// Print the merged plugin manifest as JSON and exit
     #[arg(long = "dump-manifest")]
     pub dump_manifest: bool,
@@ -561,6 +588,12 @@ pub struct Cli {
 fn parse_context_window_cli(s: &str) -> Result<usize, String> {
     crate::setup::parse_context_window(s)
         .ok_or_else(|| format!("invalid context window '{s}' — use e.g. 128000, 128k, 1m"))
+}
+
+fn parse_compact_at_cli(s: &str) -> Result<crate::setup::CompactAt, String> {
+    crate::setup::parse_compact_at(s).ok_or_else(|| {
+        format!("invalid --compact-at '{s}' — use \"auto\" or e.g. 90000, 90k, 1.5m")
+    })
 }
 
 /// Subcommands mirroring `codex resume` / `codex fork` ergonomics.
@@ -800,12 +833,6 @@ pub enum CronCmd {
     },
     /// Resume a suspended job (id or name; recomputes next run)
     Resume {
-        /// Job id or name
-        id: String,
-    },
-    /// Start a job a model requested (id or name). Run it from your own
-    /// terminal; a gray session cannot approve its own jobs.
-    Approve {
         /// Job id or name
         id: String,
     },

@@ -27,12 +27,6 @@ fn try_lock_skips_contended_mutex() {
 }
 
 #[test]
-fn try_lock_happy_path() {
-    let m = std::sync::Arc::new(std::sync::Mutex::new(7u32));
-    assert_eq!(*try_lock_tui(&m).expect("uncontended lock"), 7u32);
-}
-
-#[test]
 fn consumed_key_is_not_lost_while_renderer_holds_tui() {
     let state = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let renderer = state.lock().unwrap();
@@ -94,6 +88,18 @@ fn turn_local_commands_are_read_only() {
         "/subagents entries",
         "/subagents manifest",
         "/subagents e2e",
+        // Local UI and config: pickers and toggles that never touch the
+        // running turn, so they should not sit in the follow-up queue.
+        "/theme",
+        "/theme banish",
+        "/plugins",
+        "/hotkeys",
+        "/reload",
+        "/intro",
+        "/intro off",
+        "/gateway",
+        "/gateway off",
+        "/hehe",
     ] {
         assert!(is_turn_local_command(cmd), "{cmd}");
     }

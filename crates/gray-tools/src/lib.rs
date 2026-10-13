@@ -13,7 +13,6 @@ pub mod grep_builtin;
 pub mod images;
 pub mod index_filter;
 pub mod ledger;
-pub mod ls;
 pub mod read;
 pub mod search_cmd;
 #[cfg(unix)]
@@ -41,7 +40,6 @@ pub use edit::EditTool;
 pub use find::FindTool;
 pub use grep::GrepTool;
 pub use ledger::{FileLedger, LedgerEntry};
-pub use ls::LsTool;
 pub use read::ReadTool;
 pub use shell::tools::bash::BashTool;
 pub use write::WriteTool;

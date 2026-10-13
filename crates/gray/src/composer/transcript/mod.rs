@@ -19,7 +19,7 @@ mod rows;
 
 pub(crate) use crate::tui::strip_ansi;
 pub(crate) use boxes::render_markdown_lines;
-pub(crate) use cards::format_tool_box_lines;
+pub(crate) use cards::{format_tool_box_lines, format_tool_box_lines_multi};
 pub(crate) use rows::{
     GUTTER, format_user_prompt_lines, left_pad, prose_width, thinking_paint_text,
     thinking_replay_lines, thinking_run_rows, thinking_style, transcript_row_is_blank,
@@ -93,6 +93,13 @@ pub(crate) fn layout_history(
                     &mut out,
                     &mut owed,
                     format_tool_box_lines(header.clone(), body, w),
+                );
+            }
+            TranscriptEntry::ToolBoxLines { header, body } => {
+                place(
+                    &mut out,
+                    &mut owed,
+                    format_tool_box_lines_multi(header, body, w),
                 );
             }
             TranscriptEntry::StyledLines { lines, .. } => place(&mut out, &mut owed, lines.clone()),
@@ -239,7 +246,7 @@ impl Tui {
 
     fn write_gap(&mut self) {
         let blank = vec![Line::default()];
-        self.insert_paragraph(&blank, None);
+        self.insert_paragraph(&blank, Some(crate::theme::theme().window_bg));
         self.record_rows(blank);
     }
 

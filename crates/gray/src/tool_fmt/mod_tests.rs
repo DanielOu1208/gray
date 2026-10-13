@@ -4,6 +4,15 @@ fn row_text(l: &Line<'_>) -> String {
     l.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
+/// The live header's headline row (no label or preview: the streamed args
+/// alone), for the partial-args assertions below.
+fn live_row(name: &str, args_so_far: &str) -> Line<'static> {
+    format_live_tool_header(name, args_so_far, None, None, None)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
 fn bash_args(cmd: &str) -> serde_json::Value {
     serde_json::json!({"command": cmd})
 }
@@ -251,7 +260,7 @@ fn render_code_block_cap_unchanged() {
 
 #[test]
 fn live_header_empty_args_shows_name_only() {
-    let text = row_text(&format_live_tool_header("bash", "", None));
+    let text = row_text(&live_row("bash", ""));
     assert!(text.contains("bash"), "got {text:?}");
 }
 
@@ -260,31 +269,27 @@ fn live_header_full_json_matches_final_header() {
     let raw = r#"{"command":"cargo test -p gray"}"#;
     let v: serde_json::Value = serde_json::from_str(raw).unwrap();
     assert_eq!(
-        row_text(&format_live_tool_header("bash", raw, None)),
+        row_text(&live_row("bash", raw)),
         row_text(&format_tool_call_header("bash", &v, None, None)),
     );
 }
 
 #[test]
 fn live_header_partial_bash_streams_command() {
-    let text = row_text(&format_live_tool_header(
-        "bash",
-        r#"{"command":"cargo test --li"#,
-        None,
-    ));
+    let text = row_text(&live_row("bash", r#"{"command":"cargo test --li"#));
     assert!(text.contains("cargo test"), "got {text:?}");
 }
 
 #[test]
 fn live_header_partial_read_streams_path() {
-    let text = row_text(&format_live_tool_header("read", r#"{"path":"src/ma"#, None));
+    let text = row_text(&live_row("read", r#"{"path":"src/ma"#));
     assert!(text.contains("src/ma"), "got {text:?}");
 }
 
 #[test]
 fn live_header_garbage_never_panics_and_names_tool() {
     for raw in ["{{{", "\"unclosed", "   ", ",,,"] {
-        let text = row_text(&format_live_tool_header("grep", raw, None));
+        let text = row_text(&live_row("grep", raw));
         assert!(text.contains("grep"), "got {text:?} for {raw:?}");
     }
 }
@@ -297,7 +302,7 @@ fn live_header_huge_raw_still_streams_prefix() {
     let full = format!(r#"{{"command":"{}"}}"#, "x".repeat(9000));
     let v: serde_json::Value = serde_json::from_str(&full).unwrap();
     assert_eq!(
-        row_text(&format_live_tool_header("bash", &big, None)),
+        row_text(&live_row("bash", &big)),
         row_text(&format_tool_call_header("bash", &v, None, None)),
     );
 }
@@ -360,7 +365,7 @@ fn live_bash_header_survives_multibyte_command() {
     let head = "Merge Risk: _";
     let pad = "y".repeat(64);
     let partial = format!("{{\"command\":\"{head}{pad}\u{1f7e0} High");
-    let line = format_live_tool_header("bash", &partial, None);
+    let line = live_row("bash", &partial);
     let text = row_text(&line);
     assert!(text.contains("Merge Risk:"), "{text}");
     assert!(crate::text_width::display_width(&text) > 0);
@@ -678,19 +683,11 @@ fn unknown_tools_humanize_and_labels_override() {
 
 #[test]
 fn live_header_streams_plugin_scalars() {
-    let text = row_text(&format_live_tool_header(
-        "web_search",
-        r#"{"query":"LibreWolf AppI"#,
-        None,
-    ));
+    let text = row_text(&live_row("web_search", r#"{"query":"LibreWolf AppI"#));
     assert!(text.contains("LibreWolf AppI"), "got {text:?}");
     // Unknown plugin tools stream a scalar too: the fallback guesses the
     // headline key from the buffer (`path` beats `pattern`/`command`).
-    let text = row_text(&format_live_tool_header(
-        "my_surface_tool",
-        r#"{"path":"/tmp/gra"#,
-        None,
-    ));
+    let text = row_text(&live_row("my_surface_tool", r#"{"path":"/tmp/gra"#));
     assert!(text.contains("/tmp/gra"), "got {text:?}");
 }
 
@@ -1010,4 +1007,251 @@ fn discord_send_preview_strips_pairs_but_keeps_singles() {
         let text = row_text(&format_tool_call_header("discord_send", &args, None, None));
         assert!(text.contains(want), "{raw:?} became {text:?}");
     }
+}
+
+// ── Template `preview` (plugin manifests) ─────────────────────────────────
+
+fn spawn_args() -> serde_json::Value {
+    serde_json::json!({
+        "name": "e2e-theme",
+        "model": "claude-haiku-5-5",
+        "effort": "max",
+        "prompt": "verify the theme fixes\nmore",
+    })
+}
+
+/// The footer's short model name, read from the real helper so these
+/// assertions follow gray's display logic instead of a copy of it.
+fn short_model_name(id: &str) -> String {
+    let friendly = crate::setup::friendly_model_name(id);
+    friendly
+        .strip_prefix("Claude ")
+        .unwrap_or(friendly.as_str())
+        .to_string()
+}
+
+#[test]
+fn template_renders_headline_suffix_and_second_line() {
+    let spec = "{name} · {model|model} · {effort}\n{prompt|firstline}";
+    let args = with_tool_label(&spawn_args(), Some("Started agent"));
+    let lines = format_tool_call_lines("rlm_spawn", &args, None, Some(spec));
+    assert_eq!(lines.len(), 2, "second line missing: {lines:?}");
+    let want = format!(
+        "\u{2b22} Started agent e2e-theme · {} · max",
+        short_model_name("claude-haiku-5-5")
+    );
+    assert_eq!(row_text(&lines[0]), want);
+    assert_eq!(row_text(&lines[1]).trim(), "verify the theme fixes");
+    let indent = " ".repeat(crate::text_width::display_width("\u{2b22} "));
+    assert!(
+        row_text(&lines[1]).starts_with(indent.as_str()),
+        "second line not under the headline text: {lines:?}"
+    );
+    // The template owns the suffix: no raw `k=v` dump after the headline.
+    assert!(
+        !row_text(&lines[0]).contains("name="),
+        "dump leaked: {lines:?}"
+    );
+    assert!(
+        !row_text(&lines[0]).contains("prompt"),
+        "dump leaked: {lines:?}"
+    );
+    // The single-line header is line one, so every surface shows one headline.
+    assert_eq!(
+        row_text(&format_tool_call_header(
+            "rlm_spawn",
+            &args,
+            None,
+            Some(spec)
+        )),
+        want
+    );
+}
+
+#[test]
+fn template_headline_falls_back_to_the_humanized_name() {
+    let lines = format_tool_call_lines("rlm_spawn", &spawn_args(), None, Some("{name}"));
+    assert_eq!(row_text(&lines[0]), "\u{2b22} Rlm Spawn e2e-theme");
+}
+
+#[test]
+fn template_drops_segments_whose_placeholders_are_all_empty() {
+    let args = serde_json::json!({"name": "e2e-theme", "model": "claude-haiku-5-5"});
+    // `{effort}` is missing: its segment goes, literal text and all.
+    assert_eq!(
+        render_template(&args, "{name} · {model|model} · effort {effort}"),
+        (
+            format!("e2e-theme · {}", short_model_name("claude-haiku-5-5")),
+            None
+        )
+    );
+    // A literal-only segment always survives; literal text beside an empty
+    // placeholder does not.
+    assert_eq!(
+        render_template(&args, "Started · run {name} · tier ({effort})"),
+        ("Started · run e2e-theme".to_string(), None)
+    );
+    // Nothing resolves: the whole template is empty.
+    assert_eq!(
+        render_template(&args, "{missing} · ({also})"),
+        (String::new(), None)
+    );
+}
+
+#[test]
+fn template_filters_model_firstline_and_unknown_filters() {
+    let args = serde_json::json!({
+        "model": "claude-haiku-5-5",
+        "prompt": "\n  \n  first real line  \nsecond line",
+        "long": "x".repeat(120),
+        "name": "e2e-theme",
+    });
+    assert_eq!(
+        render_template(&args, "{model|model}").0,
+        short_model_name("claude-haiku-5-5")
+    );
+    assert_eq!(
+        render_template(&args, "{prompt|firstline}").0,
+        "first real line"
+    );
+    // The first line is capped at the header budget (80 cells) with `…`.
+    let long = render_template(&args, "{long|firstline}").0;
+    assert_eq!(long.chars().count(), 81, "not capped: {long:?}");
+    assert!(long.ends_with('\u{2026}'), "no ellipsis: {long:?}");
+    // An unknown filter reads as no filter.
+    assert_eq!(render_template(&args, "{name|shout}").0, "e2e-theme");
+    // A plain placeholder stays on one line: the value's own breaks become spaces.
+    assert_eq!(
+        render_template(&args, "{prompt}").0,
+        "first real line second line"
+    );
+}
+
+#[test]
+fn template_arrays_join_scalars_and_objects_and_missing_are_empty() {
+    let args = serde_json::json!({
+        "tags": ["a", " b ", "", {"x": 1}, 3, null],
+        "none": [],
+        "objs": [{"x": 1}],
+        "flag": false,
+        "count": 0,
+        "meta": {"k": "v"},
+        "gone": null,
+    });
+    assert_eq!(render_template(&args, "{tags}").0, "a, b, 3");
+    assert_eq!(render_template(&args, "{flag} {count}").0, "false 0");
+    assert_eq!(render_template(&args, "{none}").0, "");
+    assert_eq!(render_template(&args, "{objs}").0, "");
+    assert_eq!(render_template(&args, "{meta} {gone} {nope.deep}").0, "");
+}
+
+#[test]
+fn template_second_line_splits_on_either_break_and_omits_empty() {
+    let args = serde_json::json!({"name": "e2e", "prompt": "do it", "p": "a\nb"});
+    let pair = ("e2e".to_string(), Some("do it".to_string()));
+    assert_eq!(render_template(&args, "{name}\n{prompt}"), pair);
+    assert_eq!(render_template(&args, "{name}\\n{prompt}"), pair);
+    assert_eq!(
+        render_template(&args, "{name}\n{missing}"),
+        ("e2e".to_string(), None)
+    );
+    // A later break reads as a space, never as a third line.
+    assert_eq!(
+        render_template(&args, "{name}\n{prompt}\\n{name}"),
+        ("e2e".to_string(), Some("do it e2e".to_string()))
+    );
+    // A break inside a value is not a break in the template.
+    assert_eq!(render_template(&args, "{p}"), ("a b".to_string(), None));
+}
+
+#[test]
+fn template_preview_flattens_for_json_and_dot_paths_stay_put() {
+    let args = spawn_args();
+    assert_eq!(
+        preview_at(&args, "{name} · {effort}\n{prompt|firstline}").as_deref(),
+        Some("e2e-theme · max · verify the theme fixes")
+    );
+    assert_eq!(preview_at(&args, "{missing}"), None);
+    let doc = serde_json::json!({"document": {"title": "  Hi  "}});
+    assert_eq!(preview_at(&doc, "document.title").as_deref(), Some("Hi"));
+}
+
+#[test]
+fn dot_path_preview_header_is_unchanged() {
+    // Byte-for-byte the pre-template header: one line, quoted value.
+    let args = serde_json::json!({"document": {"title": "## Hello"}});
+    let lines = format_tool_call_lines("some_surface_tool", &args, None, Some("document.title"));
+    assert_eq!(lines.len(), 1, "a dot path adds no second line");
+    assert_eq!(
+        row_text(&lines[0]),
+        "\u{2b22} Some Surface Tool \"## Hello\""
+    );
+}
+
+#[test]
+fn template_that_renders_empty_leaves_only_the_headline() {
+    let args = with_tool_label(
+        &serde_json::json!({"path": "/tmp/x.rs", "foo": "bar"}),
+        Some("Started agent"),
+    );
+    let lines = format_tool_call_lines(
+        "rlm_spawn",
+        &args,
+        None,
+        Some("{missing} · ({also})\n{nope}"),
+    );
+    assert_eq!(lines.len(), 1, "empty second line rendered: {lines:?}");
+    assert_eq!(row_text(&lines[0]), "\u{2b22} Started agent");
+}
+
+#[test]
+fn built_in_tools_ignore_a_template_preview() {
+    let args = serde_json::json!({"command": "ls -la"});
+    let plain = format_tool_call_lines("bash", &args, None, None);
+    let templated = format_tool_call_lines("bash", &args, None, Some("{command}\nx"));
+    assert_eq!(
+        templated.len(),
+        1,
+        "built-in arm grew a line: {templated:?}"
+    );
+    assert_eq!(row_text(&templated[0]), row_text(&plain[0]));
+}
+
+fn row_texts(lines: &[Line<'_>]) -> Vec<String> {
+    lines.iter().map(row_text).collect()
+}
+
+#[test]
+fn manifest_label_beats_a_wire_label_arg() {
+    // A wire arg named `label` must not shadow the manifest headline. The
+    // display copy is what changes; the caller's args stay as sent.
+    let args = serde_json::json!({"label": "wire-value", "name": "x"});
+    let lines = format_tool_card_lines("my_tool", &args, None, Some("Manifest Label"), None);
+    let head = row_text(&lines[0]);
+    assert!(head.contains("Manifest Label"), "{head:?}");
+    assert!(!head.contains("wire-value"), "{head:?}");
+    assert_eq!(args["label"], "wire-value");
+}
+
+#[test]
+fn live_header_with_label_and_template_matches_the_final_card() {
+    // Complete args: the live card and the final card render the same rows.
+    let raw = r#"{"name":"e2e-theme","model":"claude-haiku-5-5","effort":"max","prompt":"verify the theme fixes\nmore"}"#;
+    let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let spec = "{name} · {model|model} · {effort}\n{prompt|firstline}";
+    let live = format_live_tool_header("rlm_spawn", raw, None, Some("Started agent"), Some(spec));
+    let fin = format_tool_card_lines("rlm_spawn", &v, None, Some("Started agent"), Some(spec));
+    assert_eq!(row_texts(&live), row_texts(&fin));
+    assert_eq!(live.len(), 2, "{live:?}");
+}
+
+#[test]
+fn plain_header_keeps_the_template_second_line() {
+    let args = serde_json::json!({"name": "e2e-theme", "prompt": "verify the theme fixes\nmore"});
+    let plain =
+        format_tool_call_lines_plain("rlm_spawn", &args, None, Some("{name}\n{prompt|firstline}"));
+    let rows: Vec<&str> = plain.split('\n').collect();
+    assert_eq!(rows.len(), 2, "{plain:?}");
+    assert!(rows[0].contains("e2e-theme"), "{plain:?}");
+    assert!(rows[1].contains("verify the theme fixes"), "{plain:?}");
 }

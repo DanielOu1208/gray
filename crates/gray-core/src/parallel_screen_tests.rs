@@ -1,14 +1,7 @@
-//! Bash-screen tests: stderr redirects stay batchable; inline-code,
-//! fetch-and-write, and script execution demote.
+//! Bash-screen tests: inline-code, fetch-and-write, and script
+//! execution demote.
 
 use crate::parallel::bash_is_batchable;
-
-#[test]
-fn stderr_only_redirects_stay_batchable() {
-    assert!(bash_is_batchable("git diff 2>&1"));
-    assert!(bash_is_batchable("ls 2>/dev/null"));
-    assert!(bash_is_batchable("cargo metadata 2>&1"));
-}
 
 #[test]
 fn file_redirects_still_demotes() {

@@ -834,7 +834,7 @@ async fn the_cwd_report_does_not_mask_the_commands_exit_code() {
     let r = tool
         .execute(
             &ctx,
-            json!({"command": "grep zzz_no_such_match_xyz /dev/null"}),
+            json!({"command": "grep -q zzz_no_such_match_xyz /dev/null"}),
         )
         .await;
     assert!(!r.is_error, "{}", r.content);
@@ -901,7 +901,6 @@ async fn search_command_leaves_the_shell_its_own() {
     for cmd in [
         "gray find *.txt | wc -l",
         "gray grep --help",
-        "find . -name '*.txt'",
         "rg needle",
         "gray grep needle;touch marker",
         "gray grep needle && echo done",
@@ -971,6 +970,108 @@ async fn search_command_reads_flag_values_once() {
     // `--limit N` must not leave N behind as the pattern.
     let out = run("gray grep --limit 5 main src").await;
     assert!(out.contains("a.rs:1: fn main"), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// Bare `find` / `grep` claim the forms the lane answers exactly — the model
+// never needs to know the answer came from the index, not the binary.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bare_find_and_grep_claim_the_simple_forms() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "needle one\nNEEDLE two\n").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(dir.path().join("c.txt"), "l+teral\n").unwrap();
+    let run = |cmd: &'static str| {
+        let d = dir.path().to_path_buf();
+        async move { search_command(cmd, &d, &CancellationToken::new()).await }
+    };
+
+    // `find PATH -name GLOB`, and `find -name GLOB` with the cwd implied.
+    let out = run("find . -name '*.txt'")
+        .await
+        .expect("bare find must be claimed")
+        .content;
+    assert!(out.contains("a.txt"), "{out}");
+    assert!(!out.contains("b.rs"), "glob must hold: {out}");
+    let out = run("find -name '*.rs'")
+        .await
+        .expect("path-less find must be claimed")
+        .content;
+    assert!(out.contains("b.rs"), "{out}");
+
+    // `grep [-i] [-F] [-n] PATTERN [PATH]` — flags map onto SearchArgs.
+    let out = run("grep needle")
+        .await
+        .expect("bare grep must be claimed")
+        .content;
+    assert!(out.contains("a.txt:1: needle one"), "{out}");
+    assert!(
+        !out.contains("NEEDLE two"),
+        "case must hold without -i: {out}"
+    );
+    let out = run("grep -i needle").await.unwrap().content;
+    assert!(
+        out.contains("a.txt:2: NEEDLE two"),
+        "-i must reach the search: {out}"
+    );
+    let out = run("grep -n needle").await.unwrap().content;
+    assert!(out.contains("a.txt:1:"), "{out}");
+    let out = run("grep -F l+teral").await.unwrap().content;
+    assert!(
+        out.contains("c.txt:1: l+teral"),
+        "-F must make the pattern literal: {out}"
+    );
+    let out = run("grep l+teral").await.unwrap().content;
+    assert!(
+        !out.contains("c.txt"),
+        "without -F the regex must not match: {out}"
+    );
+    let out = run("grep -iF NEEDLE a.txt").await.unwrap().content;
+    assert!(
+        out.contains("NEEDLE two"),
+        "clustered flags + a file path: {out}"
+    );
+}
+
+#[tokio::test]
+async fn bare_find_and_grep_leave_the_shell_richer_forms() {
+    let dir = tempfile::tempdir().unwrap();
+    for cmd in [
+        // grep flags the lane cannot answer exactly.
+        "grep -r needle .",
+        "grep -v needle",
+        "grep -E 'a|b'",
+        "grep -A2 needle",
+        "grep -l needle",
+        "grep --include='*.rs' needle",
+        "grep needle a.txt b.txt", // more than one path
+        "grep needle *.txt",       // the shell would expand the glob
+        "grep needle ~/x",         // the shell would expand `~`
+        "grep needle -",           // `-` is stdin, not a path
+        "grep",                    // no pattern: the shell owns the usage error
+        "egrep needle",
+        // find shapes the lane cannot answer exactly.
+        "find .", // no expression: a real find lists everything
+        "find . -type f",
+        "find . -type d -name '*.rs'",
+        "find . -iname '*.rs'",
+        "find . -name '*.rs' -o -name '*.txt'",
+        "find / -name x -exec rm {} \\;",
+        "find src docs -name x", // more than one path
+        "find . -maxdepth 2 -name x",
+        "find . ! -name x",
+        "find . -name 'a/b'", // a basename glob can never hold a `/`
+        "find . -name",       // missing value: the shell owns the error
+    ] {
+        assert!(
+            search_command(cmd, dir.path(), &CancellationToken::new())
+                .await
+                .is_none(),
+            "must fall through to the shell: {cmd}"
+        );
+    }
 }
 
 /// Unix-only: the Windows runner resolves a temp path to a different

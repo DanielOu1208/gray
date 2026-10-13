@@ -377,12 +377,13 @@ pub struct ToolDef {
     /// serialization so persisted payloads stay byte-stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// Display-only arg preview for transcripts: dot path to the first
-    /// string worth showing (e.g. `"document.title"`), resolved against
-    /// the call args at render time. `None` = the renderer's built-in
-    /// preview. Plugin-declared, never model-visible (same projection as
-    /// `label`), and surfaces never learn the plugin's wire shape — core
-    /// walks a declared path of object keys, nothing else.
+    /// Display-only arg preview for transcripts: a dot path to the first
+    /// string worth showing (e.g. `"document.title"`), or a template
+    /// (e.g. `"{name} · {model|model}\n{prompt|firstline}"`) over several
+    /// args. The renderer resolves it against the call args at render time;
+    /// `None` = the renderer's built-in preview. Plugin-declared, never
+    /// model-visible (same projection as `label`). Wire args are never
+    /// changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
 }

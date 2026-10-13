@@ -101,10 +101,6 @@ impl ProviderRuntime {
         Ok(Self { installed, rpc })
     }
 
-    pub async fn for_agent(installed: InstalledProvider) -> anyhow::Result<Arc<Self>> {
-        Ok(Arc::new(Self::start(installed).await?))
-    }
-
     pub fn installed(&self) -> &InstalledProvider {
         &self.installed
     }

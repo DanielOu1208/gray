@@ -426,10 +426,11 @@ fn skill_singular_is_alias_for_skills_space() {
     let b = expand_skill_command(parse_command("/skills commit"), cwd, None, false);
     assert!(matches!(a, ReplCommand::Prompt(_)));
     assert_eq!(a, b);
-    // Bad args fail identically (skill takes no args): both expand to Empty.
+    // Undeclared args pass through identically: both expand to the same
+    // Prompt carrying the raw arg text.
     let a = expand_skill_command(parse_command("/skill commit bogus-arg"), cwd, None, false);
     let b = expand_skill_command(parse_command("/skills commit bogus-arg"), cwd, None, false);
-    assert_eq!(a, ReplCommand::Empty);
+    assert!(matches!(a, ReplCommand::Prompt(_)));
     assert_eq!(a, b);
     // Unknown skill fails identically.
     let a = expand_skill_command(parse_command("/skill nope"), cwd, None, false);

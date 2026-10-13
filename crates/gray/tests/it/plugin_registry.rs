@@ -1,17 +1,28 @@
 use std::sync::Arc;
 
-use gray::profile::{ToolsBasicPlugin, ToolsSearchPlugin, from_plugins};
+use gray::profile::from_plugins;
+
+struct Stub(&'static str);
+
+impl gray_plugin::Plugin for Stub {
+    fn manifest(&self) -> gray_plugin::Manifest {
+        gray_plugin::Manifest {
+            name: self.0.to_string(),
+            ..gray_plugin::Manifest::default()
+        }
+    }
+}
 
 #[test]
 fn registry_from_plugins_collects_in_order() {
     let plugins: Vec<Arc<dyn gray_plugin::Plugin>> =
-        vec![Arc::new(ToolsBasicPlugin), Arc::new(ToolsSearchPlugin)];
+        vec![Arc::new(Stub("one")), Arc::new(Stub("two"))];
     let (reg, manifests) = from_plugins(&plugins);
-    let names = reg.tool_names();
-    assert!(names.iter().any(|n| n == "read"));
-    assert!(names.iter().any(|n| n == "grep"));
-    // Manifests travel with the registry so --dump-manifest can't drift.
+    // The builtin surface is not a plugin: `bash` is registered directly by
+    // the builder, and manifests carry real installs only — `plugin list`
+    // and `--dump-manifest` never show a tools entry.
+    assert_eq!(reg.tool_names(), vec!["bash"]);
     assert_eq!(manifests.len(), 2);
-    assert_eq!(manifests[0].name, "tools-basic");
-    assert_eq!(manifests[1].name, "tools-search");
+    assert_eq!(manifests[0].name, "one");
+    assert_eq!(manifests[1].name, "two");
 }

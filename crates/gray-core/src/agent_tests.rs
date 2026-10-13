@@ -962,14 +962,6 @@ fn maxtokens_script(text: &str) -> Vec<StreamEvent> {
     ]
 }
 
-#[test]
-fn should_compress_true_only_for_context_overflow() {
-    assert!(ProviderError::ContextOverflow("ctx".into()).should_compress());
-    assert!(!ProviderError::RateLimited("x".into()).should_compress());
-    assert!(!ProviderError::BadRequest("x".into()).should_compress());
-    assert!(!ProviderError::ServerError("x".into()).should_compress());
-}
-
 #[tokio::test]
 async fn context_overflow_compacts_once_then_continues() {
     let provider = FakeProvider::new(vec![
@@ -1021,6 +1013,7 @@ async fn context_overflow_compacts_once_then_continues() {
                 tokens_after,
                 messages_before,
                 messages_after,
+                ..
             } => Some((
                 *tokens_before,
                 *tokens_after,

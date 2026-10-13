@@ -1,11 +1,18 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::detect::{McpSource, ToolDef};
+use sha2::{Digest, Sha256};
+
+use super::detect::{CredSource, McpSource, ToolDef};
+use crate::auth::store::CredentialStore;
 use crate::repl::TuiOpt;
+use crate::setup::catalog::{self, AuthEntry};
 
 struct SetupItem {
     label: String,
     desc: String,
+    /// Starts unchecked in the modal — secrets need explicit opt-in.
+    opt_in: bool,
     apply: SetupApply,
 }
 
@@ -19,9 +26,85 @@ enum SetupApply {
     Mcp {
         entries: Vec<(String, serde_json::Value)>,
     },
+    Creds {
+        entries: Vec<CredItem>,
+    },
     Plugin {
         name: &'static str,
     },
+}
+
+/// One importable credential: where it lands in `auth.json` and how to
+/// re-read the secret at apply time. Holds no secret material itself.
+struct CredItem {
+    target: String,
+    src: PathBuf,
+    extract: CredExtract,
+}
+
+/// Locator for a secret inside a source file, resolved lazily in
+/// [`CredExtract::read`] so listings never carry values.
+enum CredExtract {
+    /// Hermes `auth.json`: `credential_pool[provider][*].agent_key`,
+    /// falling back to `providers[provider].agent_key`.
+    PoolAgentKey { provider: String },
+    /// `NAME=value` line in a dotenv file.
+    DotEnv { name: String },
+    /// OpenClaw `models.json` `providers[provider].apiKey`.
+    ProviderApiKey { provider: String },
+}
+
+impl CredExtract {
+    fn read(&self, src: &Path) -> anyhow::Result<String> {
+        match self {
+            Self::PoolAgentKey { provider } => {
+                let v = read_json(src)
+                    .ok_or_else(|| anyhow::anyhow!("cannot parse {}", src.display()))?;
+                if let Some(entries) = v
+                    .get("credential_pool")
+                    .and_then(|p| p.get(provider))
+                    .and_then(|e| e.as_array())
+                {
+                    for e in entries {
+                        if let Some(k) = e
+                            .get("agent_key")
+                            .and_then(|k| k.as_str())
+                            .filter(|s| !s.is_empty())
+                        {
+                            return Ok(k.to_string());
+                        }
+                    }
+                }
+                v.get("providers")
+                    .and_then(|p| p.get(provider))
+                    .and_then(|e| e.get("agent_key"))
+                    .and_then(|k| k.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("no agent_key for {provider}"))
+            }
+            Self::ProviderApiKey { provider } => read_json(src)
+                .and_then(|v| {
+                    v.get("providers")
+                        .and_then(|p| p.get(provider))
+                        .and_then(|e| e.get("apiKey"))
+                        .and_then(|k| k.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                })
+                .ok_or_else(|| anyhow::anyhow!("no apiKey for {provider}")),
+            Self::DotEnv { name } => {
+                let body = std::fs::read_to_string(src)
+                    .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", src.display()))?;
+                dotenv_pairs(&body)
+                    .into_iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, v)| v)
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("{name} not set"))
+            }
+        }
+    }
 }
 
 fn def(id: &str) -> Option<&'static ToolDef> {
@@ -244,6 +327,264 @@ fn env_key_names(entry: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn non_empty_str(v: Option<&serde_json::Value>) -> bool {
+    v.and_then(|s| s.as_str()).is_some_and(|s| !s.is_empty())
+}
+
+/// Source-provider id → gray auth-store key. Only the mappings that
+/// differ from a lowercased id get named here.
+fn map_provider(raw: &str) -> String {
+    match raw {
+        "qwen-portal" | "qwen-oauth" => "qwen".to_string(),
+        other => other.to_lowercase().replace('_', "-"),
+    }
+}
+
+/// Allowlisted dotenv secret names → auth-store key, else `None`.
+fn env_cred_target(name: &str) -> Option<String> {
+    for suf in ["_API_KEY", "_TOKEN", "_SECRET"] {
+        if let Some(base) = name.strip_suffix(suf)
+            && !base.is_empty()
+        {
+            return Some(map_provider(base));
+        }
+    }
+    None
+}
+
+/// All `NAME=value` pairs in a dotenv body (comments and blanks skipped).
+fn dotenv_pairs(body: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let v = value.trim();
+        let v = if v.len() >= 2
+            && ((v.starts_with('"') && v.ends_with('"'))
+                || (v.starts_with('\'') && v.ends_with('\'')))
+        {
+            &v[1..v.len() - 1]
+        } else {
+            v.split(" #").next().unwrap_or(v).trim_end()
+        };
+        out.push((name.to_string(), v.to_string()));
+    }
+    out
+}
+
+fn push_cred(
+    items: &mut Vec<CredItem>,
+    seen: &mut BTreeSet<String>,
+    target: String,
+    src: &Path,
+    extract: CredExtract,
+) {
+    if seen.insert(target.clone()) {
+        items.push(CredItem {
+            target,
+            src: src.to_path_buf(),
+            extract,
+        });
+    }
+}
+
+/// What a tool's creds sources offer: `(items, skipped-notes)`. Items
+/// name provider ids only; OAuth profiles and fingerprint-only pool
+/// entries are reported as skipped rather than imported (v1: keys only).
+fn cred_candidates(d: &ToolDef, home: &Path) -> (Vec<CredItem>, Vec<String>) {
+    let mut items = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut skipped = Vec::new();
+    for src in d.creds.unwrap_or(&[]) {
+        let path = home.join(src.rel());
+        match src {
+            CredSource::HermesAuth(_) => {
+                let Some(v) = read_json(&path) else { continue };
+                if let Some(pool) = v.get("credential_pool").and_then(|p| p.as_object()) {
+                    for (prov, entries) in pool {
+                        let arr = entries.as_array();
+                        if arr.is_some_and(|a| a.iter().any(|e| non_empty_str(e.get("agent_key"))))
+                        {
+                            push_cred(
+                                &mut items,
+                                &mut seen,
+                                map_provider(prov),
+                                &path,
+                                CredExtract::PoolAgentKey {
+                                    provider: prov.clone(),
+                                },
+                            );
+                        } else if arr.is_some_and(|a| {
+                            a.iter().any(|e| {
+                                non_empty_str(e.get("access").or_else(|| e.get("access_token")))
+                            })
+                        }) {
+                            skipped.push(format!("{prov} (OAuth)"));
+                        }
+                    }
+                }
+                if let Some(providers) = v.get("providers").and_then(|p| p.as_object()) {
+                    for (prov, e) in providers {
+                        if non_empty_str(e.get("agent_key")) {
+                            push_cred(
+                                &mut items,
+                                &mut seen,
+                                map_provider(prov),
+                                &path,
+                                CredExtract::PoolAgentKey {
+                                    provider: prov.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            CredSource::DotEnv(_) => {
+                let Ok(body) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for (name, _) in dotenv_pairs(&body) {
+                    let Some(target) = env_cred_target(&name) else {
+                        continue;
+                    };
+                    push_cred(
+                        &mut items,
+                        &mut seen,
+                        target,
+                        &path,
+                        CredExtract::DotEnv { name },
+                    );
+                }
+            }
+            CredSource::OpenclawProfiles(_) => {
+                let Some(v) = read_json(&path) else { continue };
+                if let Some(profiles) = v.get("profiles").and_then(|p| p.as_object()) {
+                    for (name, e) in profiles {
+                        if non_empty_str(e.get("access").or_else(|| e.get("access_token"))) {
+                            skipped.push(format!("{name} (OAuth)"));
+                        }
+                    }
+                }
+            }
+            CredSource::OpenclawModels(_) => {
+                let Some(v) = read_json(&path) else { continue };
+                if let Some(providers) = v.get("providers").and_then(|p| p.as_object()) {
+                    for (prov, e) in providers {
+                        if non_empty_str(e.get("apiKey")) {
+                            push_cred(
+                                &mut items,
+                                &mut seen,
+                                map_provider(prov),
+                                &path,
+                                CredExtract::ProviderApiKey {
+                                    provider: prov.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    skipped.sort();
+    skipped.dedup();
+    (items, skipped)
+}
+
+/// Provider ids / env names a creds source would yield — for
+/// `scanned_report` display. Never returns values.
+pub(crate) fn cred_source_ids(src: &CredSource, path: &Path) -> Vec<String> {
+    let mut ids = match src {
+        CredSource::HermesAuth(_) => read_json(path)
+            .and_then(|v| {
+                v.get("credential_pool")
+                    .and_then(|p| p.as_object())
+                    .map(|pool| {
+                        pool.iter()
+                            .filter(|(_, e)| {
+                                e.as_array().is_some_and(|a| {
+                                    a.iter().any(|e| non_empty_str(e.get("agent_key")))
+                                })
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .unwrap_or_default(),
+        CredSource::DotEnv(_) => std::fs::read_to_string(path)
+            .map(|body| {
+                dotenv_pairs(&body)
+                    .into_iter()
+                    .filter(|(n, _)| env_cred_target(n).is_some())
+                    .map(|(n, _)| n)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        CredSource::OpenclawProfiles(_) => read_json(path)
+            .and_then(|v| {
+                v.get("profiles")
+                    .and_then(|p| p.as_object())
+                    .map(|m| m.keys().cloned().collect::<Vec<_>>())
+            })
+            .unwrap_or_default(),
+        CredSource::OpenclawModels(_) => read_json(path)
+            .and_then(|v| {
+                v.get("providers").and_then(|p| p.as_object()).map(|m| {
+                    m.iter()
+                        .filter(|(_, e)| non_empty_str(e.get("apiKey")))
+                        .map(|(k, _)| k.clone())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default(),
+    };
+    ids.sort();
+    ids
+}
+
+fn cred_store() -> anyhow::Result<CredentialStore> {
+    Ok(CredentialStore::new(catalog::auth_store_path()?))
+}
+
+fn cred_fp(secret: &str) -> String {
+    let hex = format!("{:x}", Sha256::digest(secret.as_bytes()));
+    hex[..16].to_string()
+}
+
+fn entry_fp(entry: &AuthEntry) -> Option<String> {
+    match entry {
+        AuthEntry::Key(secret) => Some(cred_fp(secret)),
+        _ => None,
+    }
+}
+
+fn age_desc(age: std::time::Duration) -> Option<String> {
+    let days = age.as_secs() / 86_400;
+    if days >= 45 {
+        Some(format!("last used ~{}mo ago", days / 30))
+    } else if days >= 10 {
+        Some(format!("last used ~{}w ago", days / 7))
+    } else {
+        None
+    }
+}
+
+fn stale_hint(d: &ToolDef, home: &Path) -> Option<String> {
+    let rel = d.stale_probe?;
+    let modified = home.join(rel).symlink_metadata().ok()?.modified().ok()?;
+    age_desc(modified.elapsed().ok()?)
+}
+
 async fn items_for(def: &ToolDef) -> Vec<SetupItem> {
     let mut items = Vec::new();
     let home = match gray_core::paths::user_home() {
@@ -267,6 +608,7 @@ async fn items_for(def: &ToolDef) -> Vec<SetupItem> {
                     format!("{lines} lines / {} B → AGENTS.md · {first}", body.len()),
                     90,
                 ),
+                opt_in: false,
                 apply: SetupApply::Rules { src },
             });
         }
@@ -296,6 +638,7 @@ async fn items_for(def: &ToolDef) -> Vec<SetupItem> {
                     ),
                     90,
                 ),
+                opt_in: false,
                 apply: SetupApply::Skills { src_dir: dir },
             });
         }
@@ -332,7 +675,39 @@ async fn items_for(def: &ToolDef) -> Vec<SetupItem> {
                 ),
                 90,
             ),
+            opt_in: false,
             apply: SetupApply::Mcp { entries: mcp },
+        });
+    }
+    let (mut cred_items, cred_skipped) = cred_candidates(def, &home);
+    match cred_store().and_then(|s| s.load()) {
+        Ok(map) => cred_items.retain(|c| !map.contains_key(&c.target)),
+        // Strict-load failure: offer nothing rather than risk clobbering.
+        Err(_) => cred_items.clear(),
+    }
+    if !cred_items.is_empty() {
+        let names: Vec<String> = cred_items
+            .iter()
+            .map(|c| format!("{} (key)", c.target))
+            .collect();
+        let mut desc = format!(
+            "→ $GRAY_HOME/auth.json · {} — values never shown",
+            names.join(", ")
+        );
+        if !cred_skipped.is_empty() {
+            desc.push_str(&format!(" · skipped: {}", cred_skipped.join(", ")));
+        }
+        items.push(SetupItem {
+            label: format!(
+                "{} credential{}",
+                cred_items.len(),
+                if cred_items.len() == 1 { "" } else { "s" }
+            ),
+            desc: clip(desc, 90),
+            opt_in: true,
+            apply: SetupApply::Creds {
+                entries: cred_items,
+            },
         });
     }
     if let Some(p) = def.plugin
@@ -342,8 +717,14 @@ async fn items_for(def: &ToolDef) -> Vec<SetupItem> {
         items.push(SetupItem {
             label: format!("{p} provider plugin"),
             desc: "gray plugin install + consent at first boot".to_string(),
+            opt_in: false,
             apply: SetupApply::Plugin { name: p },
         });
+    }
+    if let Some(hint) = stale_hint(def, &home)
+        && let Some(first) = items.first_mut()
+    {
+        first.desc = format!("{} · {hint}", first.desc);
     }
     items
 }
@@ -497,6 +878,64 @@ async fn apply_plugin(name: &str) -> anyhow::Result<String> {
     Ok(lines.join(" · "))
 }
 
+fn apply_creds(
+    d: &ToolDef,
+    entries: &[CredItem],
+    state: &mut super::QolState,
+    run: &str,
+) -> anyhow::Result<String> {
+    apply_creds_at(&cred_store()?, d, entries, state, run)
+}
+
+/// Writes go through `CredentialStore` only: lock → strict load → insert
+/// missing keys → `replace_locked`. Existing keys are never overwritten.
+fn apply_creds_at(
+    store: &CredentialStore,
+    d: &ToolDef,
+    entries: &[CredItem],
+    state: &mut super::QolState,
+    run: &str,
+) -> anyhow::Result<String> {
+    let _lock = store.lock()?;
+    let mut map = store.load()?;
+    let mut added = 0usize;
+    let mut skipped: Vec<String> = Vec::new();
+    for e in entries {
+        if map.contains_key(&e.target) {
+            skipped.push(e.target.clone());
+            continue;
+        }
+        match e.extract.read(&e.src) {
+            Ok(secret) => {
+                let fp = cred_fp(&secret);
+                map.insert(e.target.clone(), AuthEntry::Key(secret));
+                state.imports.push(super::ImportEntry {
+                    run: run.to_string(),
+                    at: now_secs(),
+                    tool: d.id.to_string(),
+                    kind: "creds".into(),
+                    target: e.target.clone(),
+                    detail: fp,
+                });
+                added += 1;
+            }
+            Err(_) => skipped.push(e.target.clone()),
+        }
+    }
+    if added > 0 {
+        store.replace_locked(&map)?;
+    }
+    Ok(format!(
+        "{added} stored → {}{}",
+        store.path().display(),
+        if skipped.is_empty() {
+            String::new()
+        } else {
+            format!(" · skipped: {}", skipped.join(", "))
+        }
+    ))
+}
+
 fn undo_entry(entry: &super::ImportEntry) -> (bool, String) {
     match entry.kind.as_str() {
         "rules" => {
@@ -567,7 +1006,39 @@ fn undo_entry(entry: &super::ImportEntry) -> (bool, String) {
             Ok(()) => (true, format!("plugin {} removed", entry.target)),
             Err(e) => (false, format!("remove failed: {e}")),
         },
+        "creds" => match catalog::auth_store_path() {
+            Ok(path) => undo_cred(&entry.target, &entry.detail, &CredentialStore::new(path)),
+            Err(_) => (true, "no auth store — skipped".into()),
+        },
         other => (true, format!("unknown kind {other} — skipped")),
+    }
+}
+
+/// Removes an imported credential only while the stored value still
+/// matches the sha256 fingerprint logged at import time; a changed or
+/// absent entry is a no-op that retires the log line either way.
+fn undo_cred(target: &str, detail: &str, store: &CredentialStore) -> (bool, String) {
+    let _lock = match store.lock() {
+        Ok(l) => l,
+        Err(e) => return (false, format!("lock failed: {e}")),
+    };
+    let mut map = match store.load() {
+        Ok(m) => m,
+        Err(e) => return (false, format!("load failed: {e}")),
+    };
+    match map.get(target) {
+        None => (true, format!("cred '{target}' not present — skipped")),
+        Some(e) if entry_fp(e).as_deref() != Some(detail) => (
+            true,
+            format!("cred '{target}' changed since import — left in place"),
+        ),
+        Some(_) => {
+            map.remove(target);
+            match store.replace_locked(&map) {
+                Ok(()) => (true, format!("cred '{target}' removed")),
+                Err(e) => (false, format!("write failed: {e}")),
+            }
+        }
     }
 }
 
@@ -682,7 +1153,7 @@ pub(crate) async fn handle(tui: &TuiOpt, arg: Option<String>) {
     if plan.is_empty() {
         say(
             tui,
-            "nothing to import — no applicable rules/skills/plugins found (or already imported)",
+            "nothing to import — no applicable rules/skills/credentials/plugins found (or already imported)",
         );
         return;
     }
@@ -709,6 +1180,7 @@ pub(crate) async fn handle(tui: &TuiOpt, arg: Option<String>) {
                 .map(|i| crate::ask::AskOption {
                     label: i.label.clone(),
                     description: i.desc.clone(),
+                    opt_in: i.opt_in,
                 })
                 .collect(),
             multi: true,
@@ -757,6 +1229,9 @@ pub(crate) async fn handle(tui: &TuiOpt, arg: Option<String>) {
                 SetupApply::Mcp { entries } => {
                     apply_mcp(d, entries, &mut state, &run).map_err(|e| format!("{e:#}"))
                 }
+                SetupApply::Creds { entries } => {
+                    apply_creds(d, entries, &mut state, &run).map_err(|e| format!("{e:#}"))
+                }
                 SetupApply::Plugin { name } => match apply_plugin(name).await {
                     Ok(r) => {
                         state.imports.push(super::ImportEntry {
@@ -782,3 +1257,7 @@ pub(crate) async fn handle(tui: &TuiOpt, arg: Option<String>) {
     out.push_str("log: $GRAY_HOME/qol/state.json · /setup undo reverses");
     say(tui, &out);
 }
+
+#[cfg(test)]
+#[path = "setup_tests.rs"]
+mod tests;
