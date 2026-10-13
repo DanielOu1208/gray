@@ -724,7 +724,7 @@ fn bare_search_args(
         return None;
     }
     let path = positional.first().copied();
-    if path.is_some_and(&rewritten) {
+    if path.is_some_and(rewritten) {
         return None;
     }
     Some(crate::search_cmd::SearchArgs {

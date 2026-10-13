@@ -1057,9 +1057,7 @@ fn user_summary_text(message: &Message) -> String {
 /// run inside a single blocking-pool task per file.
 fn summarize_session_file(root: &Path, path: &Path, cwd: Option<&Path>) -> Option<SessionFileRead> {
     let slices = read_session_ends(path, cwd)?;
-    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-        return None;
-    };
+    let stem = path.file_stem().and_then(|s| s.to_str())?;
 
     // A first line with no newline is a creator mid-write.
     let complete_first_line = slices.head.contains('\n');

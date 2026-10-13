@@ -428,7 +428,7 @@ impl Viewer {
             labels: Some(&self.tool_labels),
             previews: Some(&self.tool_previews),
         };
-        for (_id, (name, args)) in &self.tool_calls {
+        for (name, args) in self.tool_calls.values() {
             blocks.push(TranscriptEntry::Gap(1));
             blocks.push(TranscriptEntry::ToolBoxLines {
                 header: crate::tool_fmt::format_tool_card_lines(
