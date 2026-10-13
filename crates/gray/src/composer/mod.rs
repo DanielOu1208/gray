@@ -1142,7 +1142,7 @@ pub(crate) fn palette_repaint_due(
 }
 
 impl Tui {
-    pub fn new(resuming: bool) -> anyhow::Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
 
@@ -1166,9 +1166,10 @@ impl Tui {
         // Print welcome logo into scrollback once at startup
         let welcome_lines = build_welcome_lines(cols as usize);
         let welcome_h = welcome_lines.len() as u16;
-        // A resumed session skips the sweep: the replay starts painting
-        // immediately, and the intro's frames would hide it for a second.
-        let pending_input = if crate::setup::intro_enabled() && !resuming {
+        // The sweep plays on resume too: it runs before the replay can
+        // paint (replay needs the Tui this returns), so nothing is hidden —
+        // a resumed session just pays the same ~1.5s a fresh one does.
+        let pending_input = if crate::setup::intro_enabled() {
             play_logo_intro(
                 &mut terminal,
                 cols as usize,

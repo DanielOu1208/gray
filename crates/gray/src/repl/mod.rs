@@ -906,7 +906,7 @@ pub async fn run_repl_mode(
                  (could not query terminal size); pipe input or run under a TTY"
             );
         }
-        let mut t = crate::composer::Tui::new(resumed_session_info.is_some()).map_err(|e| {
+        let mut t = crate::composer::Tui::new().map_err(|e| {
             anyhow::anyhow!(
                 "not a terminal — the interactive composer needs a real terminal \
                  (cursor position could not be read: {e:#}); pipe input or run under a TTY"
