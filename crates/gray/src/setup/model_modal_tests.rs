@@ -820,7 +820,7 @@ fn composite_rows_lead_and_the_plain_rows_keep_their_order() {
     let (lead, other) = ("picker-test/lead-fusion", "picker-test/other-fusion");
     cache_row_shape(lead, Vec::new(), fusion_shape().slots);
     cache_row_shape(other, Vec::new(), fusion_shape().slots);
-    let list = vec![
+    let list = [
         ("a/1".to_string(), "A".to_string()),
         (lead.to_string(), "Fusion".to_string()),
         ("b/2".to_string(), "B".to_string()),
