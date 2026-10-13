@@ -704,18 +704,26 @@ pub(crate) fn home_column(w: usize) -> (usize, usize) {
 /// `logo-intro-pens.py` (v1 — two pens trace the rim from the top-left
 /// corner, each diagonal setting off as a pen passes) into six braille
 /// rows plus an edge plane flagging the cells at each live pen tip, at
-/// 30fps. The last frame is `logo.txt`, so the intro ends exactly on the
-/// static banner.
+/// 30fps. `intro_frames` appends a settle pass that grows the thin band
+/// raster into `logo.txt` a few dots a frame, so the intro ends exactly
+/// on the static banner.
 const INTRO_FRAME_MS: u64 = 33;
 const INTRO_TOTAL_MS: u64 = 1000;
 const INTRO_FRAMES_TXT: &str = include_str!("../../assets/logo-intro-frames.txt");
 
-/// `(mark rows, edge flags)` per frame, parsed once.
+/// `(mark rows, edge flags)` per frame: the bake parsed once, plus the
+/// settle pass appended. The pens' band raster is a strict subset of
+/// `logo.txt` — same emblem, thinner strokes — so the tail grows the
+/// missing dots in dilation order (ink-touching rings first) until the
+/// mark IS the banner. Each fresh dot's cell rides the edge plane for
+/// its one frame, the same flash the pen tips use, and the last two
+/// frames sit on the clean logo so whichever frame the sweep stops on
+/// is already the banner.
 fn intro_frames() -> &'static [(Vec<String>, Vec<String>)] {
     static FRAMES: std::sync::OnceLock<Vec<(Vec<String>, Vec<String>)>> =
         std::sync::OnceLock::new();
     FRAMES.get_or_init(|| {
-        INTRO_FRAMES_TXT
+        let mut frames: Vec<(Vec<String>, Vec<String>)> = INTRO_FRAMES_TXT
             .replace("\r\n", "\n")
             .split("\n---\n")
             .filter_map(|block| {
@@ -729,8 +737,145 @@ fn intro_frames() -> &'static [(Vec<String>, Vec<String>)] {
                     (mark.to_vec(), edge.to_vec())
                 })
             })
-            .collect()
+            .collect();
+        // The bake pins the last frame to `logo.txt`; the last frame the
+        // pens actually drew sits one earlier. Grow it into the logo.
+        if frames.len() >= 2 {
+            frames.extend(intro_settle_frames(&frames[frames.len() - 2].0));
+        }
+        frames
     })
+}
+
+/// Braille dot bits per (dx, dy) inside a cell.
+const BRAILLE_BITS: [(usize, usize, u32); 8] = [
+    (0, 0, 0x01),
+    (0, 1, 0x02),
+    (0, 2, 0x04),
+    (0, 3, 0x40),
+    (1, 0, 0x08),
+    (1, 1, 0x10),
+    (1, 2, 0x20),
+    (1, 3, 0x80),
+];
+
+/// The mark's footprint in cells (16x6 — 32x24 dots).
+const MARK_CELLS: (usize, usize) = (16, 6);
+
+/// Settle frames after the pens finish: growth frames, then two clean.
+const INTRO_SETTLE_FRAMES: usize = 12;
+
+/// Lit dots of braille `rows` as (x, y) on the 2x4-per-cell dot grid.
+fn braille_dots(rows: &[String]) -> std::collections::BTreeSet<(usize, usize)> {
+    let mut out = std::collections::BTreeSet::new();
+    for (r, line) in rows.iter().enumerate() {
+        for (c, ch) in line.chars().enumerate() {
+            if !('\u{2800}'..='\u{28ff}').contains(&ch) {
+                continue;
+            }
+            let bits = ch as u32 - 0x2800;
+            for &(dx, dy, bit) in &BRAILLE_BITS {
+                if bits & bit != 0 {
+                    out.insert((c * 2 + dx, r * 4 + dy));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Braille rows for lit `dots` — the inverse of [`braille_dots`].
+fn dots_braille(dots: &std::collections::BTreeSet<(usize, usize)>) -> Vec<String> {
+    let (cx, cy) = MARK_CELLS;
+    (0..cy)
+        .map(|r| {
+            (0..cx)
+                .map(|c| {
+                    let bits = BRAILLE_BITS.iter().fold(0, |bits, &(dx, dy, bit)| {
+                        if dots.contains(&(c * 2 + dx, r * 4 + dy)) {
+                            bits | bit
+                        } else {
+                            bits
+                        }
+                    });
+                    char::from_u32(0x2800 + bits).unwrap()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The settle pass: `from` (the pens' last drawn frame) grows into
+/// `logo.txt` over [`INTRO_SETTLE_FRAMES`] frames. It only ever adds
+/// dots — a redrawn logo that drops band dots yields no settle at all,
+/// and the bake's pinned last frame then stands alone like before.
+fn intro_settle_frames(from: &[String]) -> Vec<(Vec<String>, Vec<String>)> {
+    let (cx, cy) = MARK_CELLS;
+    let mut target: Vec<String> = crate::tui::LOGO
+        .lines()
+        .map(|l| format!("{l:\u{2800}<cx$}"))
+        .collect();
+    target.resize(cy, "\u{2800}".repeat(cx));
+    let want = braille_dots(&target);
+    let mut ink = braille_dots(from);
+    if ink.difference(&want).next().is_some() {
+        return Vec::new();
+    }
+    // Dilation order: each ring is the missing dots touching ink.
+    let mut frontier = ink.clone();
+    let mut missing: std::collections::BTreeSet<(usize, usize)> =
+        want.difference(&ink).copied().collect();
+    let mut ordered = Vec::with_capacity(missing.len());
+    while !missing.is_empty() {
+        let mut ring: Vec<(usize, usize)> = missing
+            .iter()
+            .copied()
+            .filter(|&(x, y)| {
+                (-1isize..=1).any(|ox| {
+                    (-1isize..=1).any(|oy| {
+                        x.checked_add_signed(ox)
+                            .zip(y.checked_add_signed(oy))
+                            .is_some_and(|p| frontier.contains(&p))
+                    })
+                })
+            })
+            .collect();
+        if ring.is_empty() {
+            ring = missing.iter().copied().collect();
+        }
+        ring.sort_by_key(|&(x, y)| (y, x));
+        for d in ring {
+            frontier.insert(d);
+            missing.remove(&d);
+            ordered.push(d);
+        }
+    }
+    let grow = INTRO_SETTLE_FRAMES - 2;
+    (0..INTRO_SETTLE_FRAMES)
+        .map(|i| {
+            let add: &[(usize, usize)] = if i < grow {
+                &ordered[i * ordered.len() / grow..(i + 1) * ordered.len() / grow]
+            } else {
+                &[]
+            };
+            ink.extend(add.iter().copied());
+            let fresh: std::collections::BTreeSet<(usize, usize)> =
+                add.iter().map(|&(x, y)| (x / 2, y / 4)).collect();
+            let mark = if ink == want {
+                target.clone()
+            } else {
+                dots_braille(&ink)
+            };
+            let edge = (0..cy)
+                .map(|r| {
+                    (0..cx)
+                        .map(|c| if fresh.contains(&(c, r)) { '1' } else { '0' })
+                        .collect()
+                })
+                .collect();
+            (mark, edge)
+        })
+        .collect()
 }
 
 /// The welcome body at `progress` through the baked intro — `1.0` is
