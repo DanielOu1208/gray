@@ -30,8 +30,18 @@ fn read_structured_input(path: &Path) -> Result<Vec<u8>, InputError> {
     Ok(bytes)
 }
 
+fn main() -> anyhow::Result<()> {
+    // Under the name `grep` or `rg` this binary is the search shim: decide
+    // before clap, config, or a runtime exist.
+    #[cfg(unix)]
+    if let Some(tool) = gray_tools::search_shim::invoked_as() {
+        gray_tools::search_shim::run(&tool);
+    }
+    gray_main()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn gray_main() -> anyhow::Result<()> {
     let result = run().await;
     // A session-live refusal is routine contention, not a crash: render it
     // as a `⬢`/`└` card (sibling of `Resumed session`), not an `Error:` dump.
@@ -62,6 +72,9 @@ async fn run() -> anyhow::Result<()> {
     // reason — it is the way back into a result the context had to leave out.
     if let Some(gray::Commands::Spill { cmd }) = &cli.command {
         return gray::spill::run_cli(cmd);
+    }
+    if let Some(gray::Commands::SearchServe { root, sock }) = &cli.command {
+        return Ok(gray_tools::search_serve::serve(root, sock)?);
     }
     match &cli.command {
         Some(gray::Commands::Find {
@@ -212,8 +225,9 @@ async fn run() -> anyhow::Result<()> {
             }
             gray::Commands::Find { .. }
             | gray::Commands::Grep { .. }
-            | gray::Commands::Spill { .. } => {
-                unreachable!("find/grep/spill CLI dispatch happens before configuration")
+            | gray::Commands::Spill { .. }
+            | gray::Commands::SearchServe { .. } => {
+                unreachable!("find/grep/spill/search-serve CLI dispatch happens before configuration")
             }
         }
     }

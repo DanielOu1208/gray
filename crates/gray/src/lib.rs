@@ -735,6 +735,16 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: SpillCmd,
     },
+    /// Serve grep/rg shim queries for one root on a unix socket (test entry point)
+    #[command(hide = true)]
+    SearchServe {
+        /// Directory to index and answer for
+        #[arg(long, value_name = "DIR")]
+        root: std::path::PathBuf,
+        /// Unix socket to listen on
+        #[arg(long, value_name = "PATH")]
+        sock: std::path::PathBuf,
+    },
     /// Plugin-provided commands (`gray NAME setup`, …) — forwarded to the plugin
     #[command(external_subcommand)]
     External(Vec<String>),
