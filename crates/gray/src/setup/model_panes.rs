@@ -265,6 +265,16 @@ fn is_composite(model: &str) -> bool {
     super::variants::row_shape(model).is_some_and(|s| s.is_composite())
 }
 
+/// Where the model cursor starts: the active model when it is listed, else
+/// the first row that is not a composite. Fusion leads the list, so plain
+/// `0` would start on it; the cursor starts there only when it is active.
+fn start_row(models: &[(String, String)], active: Option<&str>) -> usize {
+    active
+        .and_then(|cur| models.iter().position(|(id, _)| id == cur))
+        .or_else(|| models.iter().position(|(id, _)| !is_composite(id)))
+        .unwrap_or(0)
+}
+
 /// Models for one rail row, loaded lazily and cached for the modal's life.
 fn models_for<'a>(
     p: &PaneProvider,
@@ -845,7 +855,7 @@ pub(crate) fn run_model_panes(
                     .position(|q| q.item.id == id)
                     .unwrap_or(rail_sel)
                     .min(rail.len().saturating_sub(1));
-                model_sel = 0;
+                place_current = true;
                 model_top = 0;
                 notice = Some(format!("Removed {name}"));
                 removed = Some(name);
@@ -873,13 +883,10 @@ pub(crate) fn run_model_panes(
             };
             if place_current {
                 place_current = false;
-                if let Some(p) = provider
-                    && provider_is_active(p, config)
-                    && let Some(cur) = &config.model
-                    && let Some(idx) = models.iter().position(|(id, _)| id == cur)
-                {
-                    model_sel = idx;
-                }
+                let active = provider
+                    .filter(|p| provider_is_active(p, config))
+                    .and(config.model.as_deref());
+                model_sel = start_row(&models, active);
             }
             model_sel = clamp_sel(model_sel, models.len());
             let scoped = provider
@@ -992,7 +999,7 @@ pub(crate) fn run_model_panes(
                     } else {
                         (rail_sel + 1).min(rail.len().saturating_sub(1))
                     };
-                    model_sel = 0;
+                    place_current = true;
                     model_top = 0;
                 }
                 KeyCode::Up => model_sel = model_sel.saturating_sub(1),
@@ -1017,11 +1024,11 @@ pub(crate) fn run_model_panes(
                 }
                 KeyCode::Backspace => {
                     filter.pop();
-                    model_sel = 0;
+                    place_current = true;
                 }
                 KeyCode::Char(c) if !ctrl => {
                     filter.push(c);
-                    model_sel = 0;
+                    place_current = true;
                 }
                 _ => {}
             }

@@ -816,6 +816,9 @@ impl SavedConfig {
 
     /// Only reorder available IDs: history must not resurrect removed models
     /// or change the validation contract of the provider's live model list.
+    /// Composites (Fusion) lead the list, above the active model: a Fusion
+    /// pick is saved as the model, so it can sit in the recents head and
+    /// would otherwise rank directly under the active one.
     pub(crate) fn sort_models(&self, base_url: &str, models: &mut [(String, String)]) {
         let base = normalize_custom_base_url(base_url);
         let current = self
@@ -825,13 +828,15 @@ impl SavedConfig {
             .and(self.model.as_deref());
         let recent = self.recent_models.get(&base);
         models.sort_by_key(|(id, _)| {
-            if current == Some(id.as_str()) {
+            let composite = super::variants::row_shape(id).is_some_and(|s| s.is_composite());
+            let rank = if current == Some(id.as_str()) {
                 0
             } else {
                 recent
                     .and_then(|ids| ids.iter().position(|m| m == id))
                     .map_or(usize::MAX, |rank| rank + 1)
-            }
+            };
+            (!composite, rank)
         });
     }
 }
