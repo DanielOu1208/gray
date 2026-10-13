@@ -114,6 +114,26 @@ fn the_seam_is_the_one_gap_under_the_transcript() {
     }
 }
 
+/// The uncommitted stream tail owes the status line the same one-row margin
+/// the seam owes the band — the bug: streamed text ended flush against
+/// `Working…` because the seam only measures the committed transcript and
+/// its one gap lands *above* the tail. The margin is paid only while a
+/// status runs (idle keeps the input box's own top pad), never stacked on
+/// a tail that already ends blank, and the text + margin block is
+/// all-or-nothing under height pressure so a lone margin row can never
+/// paint a second blank under the seam.
+#[test]
+fn the_tail_margin_is_the_one_gap_above_the_status_line() {
+    assert_eq!(tail_gap_h(true, &[Line::from("streamed text")]), 1);
+    assert_eq!(tail_gap_h(false, &[Line::from("streamed text")]), 0);
+    assert_eq!(tail_gap_h(true, &[]), 0);
+    assert_eq!(tail_gap_h(true, &[Line::from("a"), Line::from("")]), 0);
+    assert_eq!(tail_block_h(3, 1), 3);
+    assert_eq!(tail_block_h(1, 1), 0);
+    assert_eq!(tail_block_h(0, 1), 0);
+    assert_eq!(tail_block_h(4, 0), 4);
+}
+
 #[test]
 fn queued_preview_renders_header_and_entries() {
     let mut q: std::collections::VecDeque<(String, Vec<std::path::PathBuf>)> =

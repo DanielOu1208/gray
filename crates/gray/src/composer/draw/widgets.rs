@@ -386,6 +386,26 @@ pub(crate) fn needs_seam(transcript: &[Line<'static>]) -> bool {
     !transcript.is_empty() && !transcript_ends_blank(transcript)
 }
 
+/// Rows of margin the uncommitted stream tail owes the status line: one
+/// blank while a status runs under a non-empty, non-blank-ended tail — the
+/// tail-side analogue of [`needs_seam`], which only sees the committed
+/// transcript and so places the one gap *above* the tail. Idle frames owe
+/// no row (the input box's own top pad is the margin then), and a tail
+/// that already ends blank carries its own. Pure for testability
+/// (`Tui::new` needs a TTY).
+pub(crate) fn tail_gap_h(has_status: bool, tail: &[Line<'static>]) -> u16 {
+    u16::from(has_status && !tail.is_empty() && !transcript_ends_blank(tail))
+}
+
+/// The painted height of a tail block (text rows + its [`tail_gap_h`]
+/// margin) once the band allowance has kept `kept` rows for it:
+/// all-or-nothing — an allowance covering only the margin would paint a
+/// lone blank row under the seam, so the tail yields entirely instead.
+/// Pure for testability.
+pub(crate) fn tail_block_h(kept: u16, gap: u16) -> u16 {
+    if kept > gap { kept } else { 0 }
+}
+
 /// Queued follow-up inputs held while a turn is in flight (codex
 /// `PendingInputPreview` parity, minimal): header + `↳` dim-italic rows,
 /// then one blank row so the queue never glues onto the live tool card.
