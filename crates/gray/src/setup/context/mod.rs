@@ -2,9 +2,8 @@ mod providers;
 
 pub(crate) use providers::{
     EndpointProbe, LocalEndpointSuggestion, cache_model_efforts, cache_model_price_cliff,
-    ensure_disk_loaded,
-    fetch_plugin_provider_models, load_provider_model_list, ollama_running, probe_custom_endpoint,
-    probe_local_endpoints, provider_model_lists, save_provider_model_list,
+    ensure_disk_loaded, fetch_plugin_provider_models, load_provider_model_list, ollama_running,
+    probe_custom_endpoint, probe_local_endpoints, provider_model_lists, save_provider_model_list,
     warm_rates_from_disk_cache,
 };
 pub use providers::{
@@ -14,10 +13,9 @@ pub use providers::{
     fetch_live_provider_models, fetch_models_dev_context, fetch_openrouter_rates,
     fetch_recommended_models, format_cost, friendly_model_name, get_cached_model_context,
     get_cached_model_price_cliff, get_model_rate, load_models_cache_to_memory, model_meta,
-    model_supports_reasoning,
-    parse_litellm_context_json, parse_models_dev_json, parse_openrouter_models_json,
-    save_models_cache_to_disk, set_active_model_provider, supported_efforts,
-    supported_thinking_levels, turn_cost, uncached_cost, verify_api_key,
+    model_supports_reasoning, parse_litellm_context_json, parse_models_dev_json,
+    parse_openrouter_models_json, save_models_cache_to_disk, set_active_model_provider,
+    supported_efforts, supported_thinking_levels, turn_cost, uncached_cost, verify_api_key,
 };
 
 static USER_CONTEXT_WINDOW: std::sync::OnceLock<std::sync::RwLock<Option<usize>>> =
@@ -153,8 +151,7 @@ impl<'de> serde::Deserialize<'de> for CompactAt {
                     .map_err(|_| E::custom("compact_at must be positive"))
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<CompactAt, E> {
-                parse_compact_at(s)
-                    .ok_or_else(|| E::custom("expected \"auto\" or a token count"))
+                parse_compact_at(s).ok_or_else(|| E::custom("expected \"auto\" or a token count"))
             }
         }
         d.deserialize_any(V)

@@ -12,11 +12,39 @@ pub(crate) struct ToolDef {
     pub skills: Option<&'static str>,
     pub plugin: Option<&'static str>,
     pub mcp: Option<McpSource>,
+    pub creds: Option<&'static [CredSource]>,
+    /// Config file whose mtime stands in for "last used" in item descs.
+    pub stale_probe: Option<&'static str>,
 }
 
 pub(crate) enum McpSource {
     ClaudeJson(&'static str),
     Opencode(&'static str),
+}
+
+/// A file holding credentials importable into gray's auth store. The
+/// variant names the on-disk shape; listing reads provider ids and env
+/// names only — secret values are read once, at apply time.
+pub(crate) enum CredSource {
+    /// Hermes `auth.json` (`credential_pool` + `providers` maps).
+    HermesAuth(&'static str),
+    /// `KEY=VALUE` dotenv file; allowlisted secret names only.
+    DotEnv(&'static str),
+    /// OpenClaw `auth-profiles.json` `profiles` map (OAuth — reported, not imported).
+    OpenclawProfiles(&'static str),
+    /// OpenClaw `models.json` `providers` map (`apiKey` fields).
+    OpenclawModels(&'static str),
+}
+
+impl CredSource {
+    pub(crate) fn rel(&self) -> &'static str {
+        match self {
+            CredSource::HermesAuth(p)
+            | CredSource::DotEnv(p)
+            | CredSource::OpenclawProfiles(p)
+            | CredSource::OpenclawModels(p) => p,
+        }
+    }
 }
 
 pub(crate) const TOOLS: &[ToolDef] = &[
@@ -30,6 +58,8 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         skills: Some(".claude/skills"),
         plugin: Some("claude-sub"),
         mcp: Some(McpSource::ClaudeJson(".claude.json")),
+        creds: None,
+        stale_probe: None,
     },
     ToolDef {
         id: "codex",
@@ -41,6 +71,8 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         skills: Some(".codex/skills"),
         plugin: Some("codex-sub"),
         mcp: None,
+        creds: None,
+        stale_probe: None,
     },
     ToolDef {
         id: "opencode",
@@ -52,6 +84,8 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         skills: Some(".config/opencode/skills"),
         plugin: Some("opencode-sub"),
         mcp: Some(McpSource::Opencode(".config/opencode/opencode.json")),
+        creds: None,
+        stale_probe: None,
     },
     ToolDef {
         id: "devin",
@@ -63,6 +97,8 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         skills: Some(".config/devin/skills"),
         plugin: Some("devin-sub"),
         mcp: None,
+        creds: None,
+        stale_probe: None,
     },
     ToolDef {
         id: "cursor",
@@ -74,6 +110,8 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         skills: Some(".cursor/skills"),
         plugin: None,
         mcp: None,
+        creds: None,
+        stale_probe: None,
     },
     ToolDef {
         id: "windsurf",
@@ -85,6 +123,8 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         skills: None,
         plugin: None,
         mcp: None,
+        creds: None,
+        stale_probe: None,
     },
     ToolDef {
         id: "aider",
@@ -96,6 +136,40 @@ pub(crate) const TOOLS: &[ToolDef] = &[
         skills: None,
         plugin: None,
         mcp: None,
+        creds: None,
+        stale_probe: None,
+    },
+    ToolDef {
+        id: "openclaw",
+        name: "OpenClaw",
+        dirs: &[".openclaw"],
+        files: &[],
+        bins: &["openclaw"],
+        rules: Some(".openclaw/workspace/AGENTS.md"),
+        skills: Some(".openclaw/skills"),
+        plugin: None,
+        mcp: None,
+        creds: Some(&[
+            CredSource::OpenclawProfiles(".openclaw/agents/main/agent/auth-profiles.json"),
+            CredSource::OpenclawModels(".openclaw/agents/main/agent/models.json"),
+        ]),
+        stale_probe: Some(".openclaw/openclaw.json"),
+    },
+    ToolDef {
+        id: "hermes",
+        name: "Hermes",
+        dirs: &[".hermes"],
+        files: &[],
+        bins: &["hermes"],
+        rules: Some(".hermes/SOUL.md"),
+        skills: Some(".hermes/skills"),
+        plugin: None,
+        mcp: None,
+        creds: Some(&[
+            CredSource::HermesAuth(".hermes/auth.json"),
+            CredSource::DotEnv(".hermes/.env"),
+        ]),
+        stale_probe: None,
     },
 ];
 
@@ -275,6 +349,27 @@ pub(crate) fn scanned_report() -> String {
                 "    {} {} on PATH\n",
                 if on_path(b) { "+" } else { "-" },
                 b
+            ));
+        }
+        for src in def.creds.unwrap_or(&[]) {
+            let rel = src.rel();
+            let p = home.join(rel);
+            let found = p.symlink_metadata().is_ok();
+            let suffix = if found {
+                let ids = super::setup::cred_source_ids(src, &p);
+                if ids.is_empty() {
+                    String::new()
+                } else {
+                    format!("  (creds: {})", ids.join(", "))
+                }
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "    {} {}{}\n",
+                if found { "+" } else { "-" },
+                rel,
+                suffix
             ));
         }
     }

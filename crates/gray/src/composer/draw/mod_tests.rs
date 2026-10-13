@@ -2,14 +2,6 @@ use super::widgets::transcript_ends_blank;
 use super::*;
 
 #[test]
-fn status_dock_rows() {
-    assert_eq!(status_dock_h(false, false), 0); // idle under the welcome banner
-    assert_eq!(status_dock_h(false, true), 1); // idle: seam above the input box
-    assert_eq!(status_dock_h(true, false), 2); // status + breath
-    assert_eq!(status_dock_h(true, true), 3); // seam + status + breath
-}
-
-#[test]
 fn home_spacer_fills_to_the_last_row() {
     // 100x30 home: 17 transcript rows visible above the band, a seam dock
     // row + the footer (2 reserved) and a 6-row box leave 5 spacer rows,

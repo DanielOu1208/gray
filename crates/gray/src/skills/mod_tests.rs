@@ -13,19 +13,20 @@ fn test_skill(name: &str, args: &[&str]) -> Skill {
 }
 
 #[test]
-fn no_args_skill_rejects_any_arg() {
-    let s = test_skill("deploy", &[]);
+fn undeclared_args_pass_raw_text_through() {
+    let s = test_skill("ponytail", &[]);
     assert!(validate_skill_args(&s, None).is_ok());
     assert!(validate_skill_args(&s, Some("")).is_ok());
     assert!(validate_skill_args(&s, Some("   ")).is_ok());
-    let err = validate_skill_args(&s, Some("bogus-args")).unwrap_err();
-    assert!(err.contains("deploy"), "names skill: {err}");
-    assert!(err.contains("(none)"), "names valid args: {err}");
+    assert!(validate_skill_args(&s, Some("ultra")).is_ok());
+    assert!(validate_skill_args(&s, Some("ultra --fast x=1")).is_ok());
 }
 
 #[test]
 fn declared_args_reject_unknown_naming_valid() {
     let s = test_skill("deploy", &["env", "force"]);
+    assert!(validate_skill_args(&s, None).is_ok());
+    assert!(validate_skill_args(&s, Some("")).is_ok());
     assert!(validate_skill_args(&s, Some("env")).is_ok());
     assert!(validate_skill_args(&s, Some("env force")).is_ok());
     assert!(validate_skill_args(&s, Some("--env --force")).is_ok());

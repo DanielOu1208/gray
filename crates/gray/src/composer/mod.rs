@@ -272,20 +272,25 @@ pub(crate) fn live_tool_rows(
                     draw::shimmer_spans(live.unwrap_or("Running "), elapsed),
                 );
             }
-            headers.into_iter().chain(t.tail.rows().into_iter().map(|text| {
-                let chars: Vec<char> = text.chars().collect();
-                let text = if crate::text_width::fit_char_count(&chars, text_budget) < chars.len() {
-                    let fit =
-                        crate::text_width::fit_char_count(&chars, text_budget.saturating_sub(1));
-                    format!("{}…", chars[..fit].iter().collect::<String>())
-                } else {
-                    text
-                };
-                Line::from(Span::styled(
-                    format!("    {text}"),
-                    Style::default().fg(crate::theme::theme().tool_dim),
-                ))
-            }))
+            headers
+                .into_iter()
+                .chain(t.tail.rows().into_iter().map(|text| {
+                    let chars: Vec<char> = text.chars().collect();
+                    let text =
+                        if crate::text_width::fit_char_count(&chars, text_budget) < chars.len() {
+                            let fit = crate::text_width::fit_char_count(
+                                &chars,
+                                text_budget.saturating_sub(1),
+                            );
+                            format!("{}…", chars[..fit].iter().collect::<String>())
+                        } else {
+                            text
+                        };
+                    Line::from(Span::styled(
+                        format!("    {text}"),
+                        Style::default().fg(crate::theme::theme().tool_dim),
+                    ))
+                }))
         })
         .collect()
 }
@@ -1324,9 +1329,8 @@ impl Tui {
                     self.emit_rows(lines, Some(crate::theme::theme().surface_bg));
                 }
                 TranscriptEntry::ToolBoxLines { header, body } => {
-                    let lines = crate::composer::transcript::format_tool_box_lines_multi(
-                        header, body, w,
-                    );
+                    let lines =
+                        crate::composer::transcript::format_tool_box_lines_multi(header, body, w);
                     self.emit_rows(lines, Some(crate::theme::theme().surface_bg));
                 }
                 TranscriptEntry::StyledLines { lines, hyperlinks } => {
@@ -1740,10 +1744,7 @@ impl Tui {
     }
 
     /// opencode `prompt.paste` (ctrl+v): image attach first, then OS
-    /// clipboard text. Backend only; drawing is untouched.
-    pub fn paste_from_clipboard(&mut self) -> bool {
-        input::paste_from_system_clipboard(self)
-    }
+
 
     pub fn begin_turn(&mut self, label: &str) {
         // The first real turn ends the home screen — slash commands and

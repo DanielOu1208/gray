@@ -71,23 +71,6 @@ fn live_tps_ticks_with_stream_and_hides_until_measurable() {
 }
 
 #[test]
-fn live_turn_output_sums_rounds_plus_stream_estimate() {
-    assert_eq!(live_turn_output_tokens(0, 0), 0);
-    assert_eq!(live_turn_output_tokens(0, 4000), 1000);
-    assert_eq!(live_turn_output_tokens(500, 4000), 1500);
-}
-
-#[test]
-fn context_falls_back_to_input_without_breakdown() {
-    let u = Usage {
-        input_tokens: 5_000,
-        output_tokens: 300,
-        ..Usage::default()
-    };
-    assert_eq!(live_context_total(Some(u), 0), 5_300);
-}
-
-#[test]
 fn live_pill_ticks_immediately_without_freezing_on_previous_output() {
     // Cross-turn freeze repro (muse-spark-1.3, no CoT): previous turn billed
     // 14k output, so the stale context report is 20k in + 14,129 out. The

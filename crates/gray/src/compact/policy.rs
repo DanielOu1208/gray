@@ -54,12 +54,12 @@ pub fn should_compact(tokens: usize, window: usize, s: &CompactionSettings) -> b
 /// Why a firing at `tokens` was the ceiling rather than the window bound —
 /// `None` means the window bound (or nothing) fired.
 pub fn binding_reason(tokens: usize, s: &CompactionSettings) -> Option<CompactReason> {
-    s.ceiling_tokens.filter(|&c| tokens >= c).map(|_| {
-        match s.price_cliff_tokens {
+    s.ceiling_tokens
+        .filter(|&c| tokens >= c)
+        .map(|_| match s.price_cliff_tokens {
             Some(cliff) => CompactReason::PriceCliff { cliff },
             None => CompactReason::UserCeiling,
-        }
-    })
+        })
 }
 
 /// Display suffix for a compaction trigger: the empty string for the plain
@@ -70,7 +70,10 @@ pub fn compact_reason_note(reason: CompactReason) -> String {
         CompactReason::Overflow => " · overflow".to_string(),
         CompactReason::UserCeiling => " · --compact-at".to_string(),
         CompactReason::PriceCliff { cliff } => {
-            format!(" · price cliff {}", crate::setup::format_context_length(cliff))
+            format!(
+                " · price cliff {}",
+                crate::setup::format_context_length(cliff)
+            )
         }
     }
 }

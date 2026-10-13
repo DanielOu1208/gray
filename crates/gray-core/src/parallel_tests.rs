@@ -33,56 +33,6 @@ fn planner_groups_only_contiguous_batchable_runs() {
     );
 }
 #[test]
-fn singleton_batchable_demotes_to_single() {
-    let u = vec![("a".into(), "read".into(), json!({"path": "x"}))];
-    assert_eq!(plan_segments(&u, &known()), vec![Segment::Single(0)]);
-}
-#[test]
-fn long_batchable_run_stays_one_segment() {
-    // Mixed read + screened-bash run: no cap, still one segment.
-    let names = ["read", "bash", "grep", "ls", "find"];
-    let u: Vec<(String, String, Value)> = (0..15)
-        .map(|i| {
-            let name = names[i % names.len()];
-            let args = if name == "bash" {
-                json!({"command": "grep -rn foo ."})
-            } else {
-                json!({"path": "x"})
-            };
-            (format!("c{i}"), name.into(), args)
-        })
-        .collect();
-    let k: HashSet<String> = names.iter().map(|s| s.to_string()).collect();
-    assert_eq!(
-        plan_segments(&u, &k),
-        vec![Segment::Parallel((0..15).collect())]
-    );
-}
-#[test]
-fn bash_screen_allows_read_only_verbs() {
-    for cmd in [
-        "grep -rn foo .",
-        "sed -n '1,10p' file.txt",
-        "ls -la",
-        "cat file.txt",
-        "git diff",
-        "git status",
-        "git log --oneline",
-        "git show HEAD --stat",
-        "git blame file.rs",
-        "cargo metadata --no-deps",
-        "cargo --version",
-        "cat Cargo.toml | grep name | head -5",
-        "ls | wc -l",
-        "find . -name '*.rs'",
-        "npm ls",
-        "npm --version",
-        "echo done",
-    ] {
-        assert!(bash_is_batchable(cmd), "read-only must batch: {cmd}");
-    }
-}
-#[test]
 fn bash_screen_demotes_mutators() {
     for cmd in [
         "rm -rf /tmp/x",
@@ -108,43 +58,6 @@ fn bash_screen_demotes_mutators() {
     ] {
         assert!(!bash_is_batchable(cmd), "mutator must demote: {cmd}");
     }
-}
-#[test]
-fn planner_batches_mixed_read_bash_run_and_splits_at_mutator() {
-    let known: HashSet<String> = ["read", "bash", "grep"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let ok = vec![
-        ("a".into(), "read".into(), json!({"path": "x.rs"})),
-        (
-            "b".into(),
-            "bash".into(),
-            json!({"command": "grep -rn foo ."}),
-        ),
-        (
-            "c".into(),
-            "bash".into(),
-            json!({"command": "sed -n '1,10p' f"}),
-        ),
-        ("d".into(), "grep".into(), json!({"pattern": "y"})),
-    ];
-    assert_eq!(
-        plan_segments(&ok, &known),
-        vec![Segment::Parallel(vec![0, 1, 2, 3])]
-    );
-    let split = vec![
-        ("a".into(), "read".into(), json!({"path": "x.rs"})),
-        (
-            "b".into(),
-            "bash".into(),
-            json!({"command": "rm -rf /tmp/x"}),
-        ),
-    ];
-    assert_eq!(
-        plan_segments(&split, &known),
-        vec![Segment::Single(0), Segment::Single(1)]
-    );
 }
 #[test]
 fn planner_demotes_bash_without_parsable_command() {

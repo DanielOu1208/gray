@@ -591,8 +591,9 @@ fn parse_context_window_cli(s: &str) -> Result<usize, String> {
 }
 
 fn parse_compact_at_cli(s: &str) -> Result<crate::setup::CompactAt, String> {
-    crate::setup::parse_compact_at(s)
-        .ok_or_else(|| format!("invalid --compact-at '{s}' — use \"auto\" or e.g. 90000, 90k, 1.5m"))
+    crate::setup::parse_compact_at(s).ok_or_else(|| {
+        format!("invalid --compact-at '{s}' — use \"auto\" or e.g. 90000, 90k, 1.5m")
+    })
 }
 
 /// Subcommands mirroring `codex resume` / `codex fork` ergonomics.

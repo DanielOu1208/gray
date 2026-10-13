@@ -420,6 +420,7 @@ pub(crate) async fn handle(tui: &TuiOpt) {
             options: vec![crate::ask::AskOption {
                 label: RESUME_OPTION.into(),
                 description: "restart re-enters this conversation".into(),
+                opt_in: false,
             }],
             multi: true,
             default_all: true,

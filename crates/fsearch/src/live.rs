@@ -603,20 +603,9 @@ mod tests {
     use super::*;
 
     fn listing(id: u32, ents: &[(&[u8], u8, u32)]) -> Listing {
-        let mut l = Listing {
-            id,
-            names: Vec::new(),
-            ents: Vec::new(),
-        };
+        let mut l = Listing { id, names: Vec::new(), ents: Vec::new() };
         for &(name, kind, child) in ents {
-            l.ents.push(RawEnt {
-                name_off: l.names.len() as u32,
-                name_len: name.len() as u16,
-                kind,
-                size: 0,
-                mtime: 0,
-                child,
-            });
+            l.ents.push(RawEnt { name_off: l.names.len() as u32, name_len: name.len() as u16, kind, size: 0, mtime: 0, child });
             l.names.extend_from_slice(name);
         }
         l
@@ -638,14 +627,7 @@ mod tests {
     }
 
     fn listing_of(path: &[u8], ents: &[(&[u8], u8, u32)]) -> Fetched {
-        Fetched {
-            path: path.to_vec(),
-            recursive: false,
-            blocked: false,
-            attrs: None,
-            listing: Some(listing(0, ents)),
-            scans: HashMap::new(),
-        }
+        Fetched { path: path.to_vec(), recursive: false, blocked: false, attrs: None, listing: Some(listing(0, ents)), scans: HashMap::new() }
     }
 
     #[test]
@@ -673,22 +655,12 @@ mod tests {
         let root_b = root.as_os_str().as_encoded_bytes().to_vec();
         // One listing per ancestor, down to the root holding file "f"
         // (what `scan_rooted` grafts for a rooted build).
-        let comps: Vec<&[u8]> = root_b
-            .split(|&b| b == b'/')
-            .filter(|c| !c.is_empty())
-            .collect();
-        let mut ls: Vec<Listing> = comps
-            .iter()
-            .enumerate()
-            .map(|(i, c)| listing(i as u32, &[(*c, KIND_DIR, i as u32 + 1)]))
-            .collect();
+        let comps: Vec<&[u8]> = root_b.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
+        let mut ls: Vec<Listing> = comps.iter().enumerate().map(|(i, c)| listing(i as u32, &[(*c, KIND_DIR, i as u32 + 1)])).collect();
         ls.push(listing(comps.len() as u32, &[(b"f", walk::KIND_FILE, NONE)]));
         let mut live = Live::new(Index::build(ls, 0, 1, b"/")).rooted(&root_b);
         let fpath = join(&root_b, b"f");
-        let present = |live: &Live| {
-            live.over.contains_key(fpath.as_slice())
-                || live.base.lookup(&fpath).is_some_and(|e| !live.is_dead(e))
-        };
+        let present = |live: &Live| live.over.contains_key(fpath.as_slice()) || live.base.lookup(&fpath).is_some_and(|e| !live.is_dead(e));
         assert!(matches!(live.apply_dir(&root_b, false), Applied::Done) && present(&live));
 
         // Unmounted: offline — the tree stays, events under it are dropped.

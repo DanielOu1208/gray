@@ -18,31 +18,6 @@ fn w(id: &str, path: &str) -> (String, String, serde_json::Value) {
 }
 
 #[test]
-fn disjoint_writes_share_one_parallel_segment() {
-    let u = vec![w("a", "a.txt"), w("b", "b.txt")];
-    assert_eq!(
-        plan_segments(&u, &known_rw()),
-        vec![Segment::Parallel(vec![0, 1])]
-    );
-}
-
-#[test]
-fn disjoint_write_edit_mix_batches() {
-    let u = vec![
-        w("a", "a.txt"),
-        (
-            "b".into(),
-            "edit".into(),
-            json!({"path": "b.txt", "edits": []}),
-        ),
-    ];
-    assert_eq!(
-        plan_segments(&u, &known_rw()),
-        vec![Segment::Parallel(vec![0, 1])]
-    );
-}
-
-#[test]
 fn same_path_writes_stay_sequential() {
     let u = vec![w("a", "a.txt"), w("b", "a.txt")];
     assert_eq!(

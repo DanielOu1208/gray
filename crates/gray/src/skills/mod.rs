@@ -30,7 +30,7 @@ pub struct Skill {
     /// synthetic source label: "user" | "project" | "path"
     pub source: String,
     /// declared invocation args from frontmatter `args:`/`arguments:`;
-    /// empty = the skill takes no arguments.
+    /// empty = no declared allowlist, so invocation args pass through.
     pub args: Vec<String>,
 }
 
@@ -347,26 +347,25 @@ pub fn format_skills_for_prompt(
 // ---------------------------------------------------------------------------
 // Invocation-arg validation (Bug1: `/skills <name> <bogus-args>` silently
 // ignored args while `/skills bogus-name` errored). Skills declare args via
-// frontmatter `args:`/`arguments:` (see `load::parse_declared_args`); empty
-// means the skill takes no arguments, so any passed arg is an error naming
-// the valid args. Callers (REPL skill expansion) must
-// surface the Err string locally instead of invoking the model.
+// frontmatter `args:`/`arguments:` (see `load::parse_declared_args`); a
+// declared list is a strict allowlist and unknown tokens error naming the
+// valid args. No declared list means no allowlist — upstream skills don't
+// have to declare args, so the raw text passes through to the prompt (it
+// already reaches it via `format_skill_paste`). Callers (REPL skill
+// expansion) must surface the Err string locally instead of invoking the
+// model.
 // ---------------------------------------------------------------------------
 
 /// Validate free-form invocation args against a skill's declared `args`.
 /// `args` is the raw text after the skill name (`None`/blank = no args).
-/// Returns `Ok` when no args were passed or every token matches; otherwise
-/// `Err` naming the valid args for local display.
+/// Returns `Ok` when no args were passed, when the skill declares no
+/// allowlist (the raw text passes through to the prompt), or when every
+/// token matches a declared arg; otherwise `Err` naming the valid args for
+/// local display.
 pub fn validate_skill_args(skill: &Skill, args: Option<&str>) -> Result<(), String> {
     let raw = args.unwrap_or("").trim();
-    if raw.is_empty() {
+    if raw.is_empty() || skill.args.is_empty() {
         return Ok(());
-    }
-    if skill.args.is_empty() {
-        return Err(format!(
-            "skill '{}' takes no arguments (valid args: (none)) — got '{}'",
-            skill.name, raw
-        ));
     }
     let mut unknown: Vec<String> = Vec::new();
     for tok in raw.split_whitespace() {

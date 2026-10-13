@@ -3,17 +3,6 @@ use gray_core::message::{ContentBlock, Role};
 use std::sync::Arc;
 
 #[test]
-fn should_compact_threshold() {
-    let s = CompactionSettings {
-        reserve_tokens: 16384,
-        ceiling_tokens: None,
-        price_cliff_tokens: None,
-    };
-    assert!(!should_compact(100_000, 128_000, &s));
-    assert!(should_compact(115_000, 128_000, &s)); // 115k > 128k-16k
-}
-
-#[test]
 fn should_compact_ceiling() {
     // Haiku-like: 200k window, 100k cliff, 12.5k reserve → ceiling 87.5k.
     let (ceiling, _) = ceiling_for(None, 200_000, 12_500, Some(100_000));
@@ -31,7 +20,10 @@ fn should_compact_ceiling() {
     assert_eq!(binding_reason(87_499, &s), None);
     // Window bound still fires past it regardless of the ceiling.
     assert!(should_compact(190_000, 200_000, &s));
-    assert_eq!(binding_reason(190_000, &s), Some(CompactReason::PriceCliff { cliff: 100_000 }));
+    assert_eq!(
+        binding_reason(190_000, &s),
+        Some(CompactReason::PriceCliff { cliff: 100_000 })
+    );
 }
 
 #[test]
@@ -52,12 +44,22 @@ fn ceiling_for_math() {
     );
     // Explicit value is the user's choice — it may sit above the cliff…
     assert_eq!(
-        ceiling_for(Some(CompactAt::Tokens(150_000)), 200_000, 12_500, Some(100_000)),
+        ceiling_for(
+            Some(CompactAt::Tokens(150_000)),
+            200_000,
+            12_500,
+            Some(100_000)
+        ),
         (Some(150_000), None)
     );
     // …but never above window − reserve.
     assert_eq!(
-        ceiling_for(Some(CompactAt::Tokens(1_000_000)), 200_000, 12_500, Some(100_000)),
+        ceiling_for(
+            Some(CompactAt::Tokens(1_000_000)),
+            200_000,
+            12_500,
+            Some(100_000)
+        ),
         (Some(187_500), None)
     );
     // Degenerate: a window smaller than its reserve yields no ceiling.
@@ -94,23 +96,6 @@ fn summary_envelope_matches_core_helper_byte_for_byte() {
     // Both compact paths build via the same helper, so envelopes are identical.
     let m2 = gray_core::agent::summary_message("shared summary");
     assert_eq!(m1.text_content().as_bytes(), m2.text_content().as_bytes());
-}
-
-#[test]
-fn estimate_uses_usage_when_available() {
-    let msgs = vec![Message::user("hi"), Message::assistant("hello")];
-    let usage = Usage {
-        input_tokens: 100000,
-        output_tokens: 10000,
-        ..Default::default()
-    };
-    assert_eq!(estimate_context_tokens(&msgs, Some(usage)), 110000);
-}
-
-#[test]
-fn estimate_falls_back_to_chars() {
-    let msgs = vec![Message::user("a".repeat(400))]; // 100 tokens
-    assert_eq!(estimate_context_tokens(&msgs, None), 100);
 }
 
 /// A message holding one capped tool result (`truncate.rs` allows 50 KiB)

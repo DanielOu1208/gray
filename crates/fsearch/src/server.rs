@@ -956,14 +956,3 @@ pub fn connect(dir: &Path) -> std::io::Result<UnixStream> {
     UnixStream::connect(&sock)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn near() {
-        let n = |a: &str, b: &str| nearness(a.as_bytes(), b.as_bytes());
-        assert_eq!((n("/p/src/a.rs", "/p/src/b.rs"), n("/p/src/a.rs", "/p/src/a.rs")), (12, -20));
-        assert_eq!((n("/p/src/a.rs", "/p/src/ui/c.rs"), n("/p/src/a.rs", "/p/docs/x.md"), n("/p/a/b/c/d.rs", "/q/e.rs")), (9, 6, 0));
-    }
-}

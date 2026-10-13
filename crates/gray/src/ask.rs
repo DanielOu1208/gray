@@ -34,6 +34,10 @@ use serde::{Deserialize, Serialize};
 pub struct AskOption {
     pub label: String,
     pub description: String,
+    /// Multi-select only: starts unchecked even under `default_all`
+    /// (secrets and other explicit opt-ins).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub opt_in: bool,
 }
 
 /// One question (mirrors the `gray-questions` contract).
@@ -457,7 +461,11 @@ fn ask_stdin_multi(stdin: &std::io::Stdin, q: &AskQuestion) -> AskAnswer {
     use std::io::{BufRead, Write};
     println!("Question: {}", q.question);
     for (i, opt) in q.options.iter().enumerate() {
-        let mark = if q.default_all { "x" } else { " " };
+        let mark = if q.default_all && !opt.opt_in {
+            "x"
+        } else {
+            " "
+        };
         println!("  [{mark}] {}. {} — {}", i + 1, opt.label, opt.description);
     }
     print!("  pick (numbers, e.g. 1,3; blank = as shown; 0 = none): ");
@@ -467,7 +475,11 @@ fn ask_stdin_multi(stdin: &std::io::Stdin, q: &AskQuestion) -> AskAnswer {
     let t = line.trim();
     let answers: Vec<String> = if read == 0 || t.is_empty() {
         if q.default_all {
-            q.options.iter().map(|o| o.label.clone()).collect()
+            q.options
+                .iter()
+                .filter(|o| !o.opt_in)
+                .map(|o| o.label.clone())
+                .collect()
         } else {
             Vec::new()
         }
@@ -603,7 +615,12 @@ impl AskModalState {
         self.checked = self
             .questions
             .iter()
-            .map(|q| vec![q.is_multi() && q.default_all; q.options.len()])
+            .map(|q| {
+                q.options
+                    .iter()
+                    .map(|o| q.is_multi() && q.default_all && !o.opt_in)
+                    .collect()
+            })
             .collect();
     }
 

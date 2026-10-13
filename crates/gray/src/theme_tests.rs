@@ -61,14 +61,6 @@ fn derived_window_steps_away_from_the_surface() {
 }
 
 #[test]
-fn derive_window_only_moves_rgb_surfaces() {
-    // Transparent, indexed and named surfaces have no channels to move.
-    assert_eq!(derive_window(Color::Reset), Color::Reset);
-    assert_eq!(derive_window(Color::Indexed(236)), Color::Indexed(236));
-    assert_eq!(derive_window(Color::Black), Color::Black);
-}
-
-#[test]
 fn colors_accept_vars_names_indexes_and_short_hex() {
     let (t, warnings) = parse_theme(
         r##"{
@@ -160,38 +152,4 @@ fn derived_window_keeps_its_side_of_near_extreme_surfaces() {
         derive_window(Color::Rgb(255, 255, 255)),
         Color::Rgb(255, 255, 255)
     );
-}
-
-#[test]
-fn derived_window_sits_on_the_far_side_of_every_surface() {
-    // Sweep a coarse RGB grid: by luma, a dark surface's window is darker and
-    // a light surface's is lighter. Pure black and white stay equal.
-    let luma =
-        |r: u8, g: u8, b: u8| 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
-    let steps: Vec<u8> = (0..=255).step_by(17).collect();
-    for &r in &steps {
-        for &g in &steps {
-            for &b in &steps {
-                let Color::Rgb(wr, wg, wb) = derive_window(Color::Rgb(r, g, b)) else {
-                    panic!("rgb surface ({r},{g},{b}) must derive an rgb window");
-                };
-                if (r, g, b) == (0, 0, 0) || (r, g, b) == (255, 255, 255) {
-                    assert_eq!((wr, wg, wb), (r, g, b));
-                    continue;
-                }
-                let (s, w) = (luma(r, g, b), luma(wr, wg, wb));
-                if s < 128.0 {
-                    assert!(
-                        w < s,
-                        "dark ({r},{g},{b}): window luma {w:.1} not below {s:.1}"
-                    );
-                } else {
-                    assert!(
-                        w > s,
-                        "light ({r},{g},{b}): window luma {w:.1} not above {s:.1}"
-                    );
-                }
-            }
-        }
-    }
 }

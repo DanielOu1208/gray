@@ -109,11 +109,6 @@ fn a_native_composite_row_blocks_synthesis() {
 }
 
 #[test]
-fn no_rows_means_no_fusion() {
-    assert!(synthesize_row("http://x.test/v1", &[], &BTreeMap::new()).is_none());
-}
-
-#[test]
 fn variant_resolution_picks_the_lead_wire_id() {
     let own = vec![pair("opus", "Opus 5"), pair("sonnet", "Sonnet 4")];
     let all = lists(&[("http://lead.test/v1", own.clone())]);

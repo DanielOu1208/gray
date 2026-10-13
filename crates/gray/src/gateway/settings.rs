@@ -85,15 +85,6 @@ fn minutes(raw: &str) -> Option<u32> {
     (h <= 24 && m < 60 && h * 60 + m <= 1440).then_some((h * 60 + m) % 1440)
 }
 
-/// Local minute of the day for a unix timestamp.
-pub fn local_minute(at: i64) -> u32 {
-    use chrono::Timelike as _;
-    let t = chrono::DateTime::from_timestamp(at, 0)
-        .unwrap_or_default()
-        .with_timezone(&chrono::Local);
-    t.hour() * 60 + t.minute()
-}
-
 #[path = "settings_tests.rs"]
 #[cfg(test)]
 mod tests;

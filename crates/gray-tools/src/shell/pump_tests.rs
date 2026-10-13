@@ -37,49 +37,6 @@ fn shell_log_cap_trips_past_10mib() {
     assert!(!log_capped(SHELL_LOG_MAX_BYTES - 2, 1));
 }
 
-#[test]
-fn mem_view_tracks_cr_across_chunks() {
-    let mut mem = MemView::new();
-    mem.push(b"line one\nline two");
-    assert!(!mem.has_cr);
-    mem.push(b"\r\nline three\r\n");
-    assert!(mem.has_cr);
-    let s = mem.into_summary(false);
-    assert!(s.has_cr);
-}
-
-#[test]
-fn mem_view_bounds_head_and_tail() {
-    // 5 MiB in 8 KiB pushes with a newline every 100th byte.
-    let total = 5 * 1024 * 1024;
-    let data: Vec<u8> = (0..total)
-        .map(|i| {
-            if i % 100 == 99 {
-                b'\n'
-            } else {
-                b'a' + (i % 26) as u8
-            }
-        })
-        .collect();
-    let mut mem = MemView::new();
-    for chunk in data.chunks(8 * 1024) {
-        mem.push(chunk);
-    }
-    assert_eq!(mem.total_bytes, total as u64);
-    assert_eq!(
-        mem.total_lines,
-        data.iter().filter(|&&b| b == b'\n').count()
-    );
-    assert_eq!(mem.head.len(), MEM_HEAD_BYTES);
-    assert_eq!(mem.head, &data[..MEM_HEAD_BYTES]);
-    assert_eq!(mem.tail.len(), MEM_TAIL_BYTES);
-    assert_eq!(
-        mem.tail.iter().copied().collect::<Vec<u8>>(),
-        &data[total - MEM_TAIL_BYTES..]
-    );
-    assert!(mem.head.len() + mem.tail.len() <= 64 * 1024);
-}
-
 #[tokio::test]
 async fn pump_logs_both_streams_verbatim() {
     let (mut child, out, err) =

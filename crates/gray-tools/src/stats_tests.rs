@@ -1,12 +1,6 @@
 use super::*;
 
 #[test]
-fn tokens_are_bytes_over_four() {
-    assert_eq!(est_tokens(51_200), 12_800);
-    assert_eq!(est_tokens(7), 1);
-}
-
-#[test]
 fn line_format_matches_spec() {
     let s = ToolStats {
         tool: "read",

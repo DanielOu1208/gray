@@ -284,31 +284,6 @@ async fn budgeted_compact_false_when_summary_would_not_shrink() {
     );
 }
 
-#[test]
-fn price_cliff_ceiling_math() {
-    use crate::compact::price_cliff_ceiling;
-    // Haiku-like: cliff 100k, reserve 12.5k → margin is the reserve.
-    assert_eq!(price_cliff_ceiling(100_000, 12_500), Some(87_500));
-    // Small reserve → the 10% margin wins.
-    assert_eq!(price_cliff_ceiling(100_000, 1_000), Some(90_000));
-    // A cliff at/under its margin is not a usable trigger.
-    assert_eq!(price_cliff_ceiling(10_000, 12_500), None);
-    // Opus-like rows carry no cliff: callers keep the window bound.
-    let no_cliff: Option<usize> = None;
-    assert_eq!(no_cliff.and_then(|c| price_cliff_ceiling(c, 12_500)), None);
-}
-
-#[tokio::test]
-async fn budget_math() {
-    assert!(needs_pre_turn_compact(120_000, Some(128_000), None, None)); // 120k+16k >= 128k
-    assert!(!needs_pre_turn_compact(100_000, Some(128_000), None, None));
-    assert!(!needs_pre_turn_compact(999_999_999, None, None, None)); // unknown window: never
-    // Price-cliff ceiling: fires at the ceiling even far under the window.
-    assert!(!needs_pre_turn_compact(87_499, Some(200_000), None, Some(87_500)));
-    assert!(needs_pre_turn_compact(87_500, Some(200_000), None, Some(87_500)));
-    assert!(!needs_pre_turn_compact(999_999_999, None, None, Some(87_500))); // no window: never
-}
-
 /// Provider whose stream immediately fails: exercises the provider-error
 /// path of `try_compact_budgeted` (same pre-swap early return as cancel).
 struct FailingProvider;

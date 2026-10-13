@@ -798,12 +798,6 @@ impl Agent {
         self
     }
 
-    /// Replaces the advertised tools in place (post-construction form of
-    /// [`Agent::with_tools`]).
-    pub fn set_tools(&mut self, tools: Vec<ToolDef>) {
-        self.tools = tools;
-    }
-
     /// Re-reads the tool set from the executor when it is live
     /// ([`ToolExecutor::live_defs`]); a static executor leaves the
     /// current defs untouched. Called at the start of every run.
@@ -834,11 +828,6 @@ impl Agent {
         self
     }
 
-    /// Display headline for a wire name, if one was registered.
-    pub fn tool_label(&self, name: &str) -> Option<&str> {
-        self.tool_labels.get(name).map(|s| s.as_str())
-    }
-
     /// Display-only arg preview paths per tool name (plugin `preview`
     /// support). Same merge/render contract as [`Self::with_tool_labels`].
     pub fn with_tool_previews(
@@ -850,11 +839,6 @@ impl Agent {
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
         self
-    }
-
-    /// Display arg preview path for a wire name, if one was registered.
-    pub fn tool_preview(&self, name: &str) -> Option<&str> {
-        self.tool_previews.get(name).map(|s| s.as_str())
     }
 
     /// Attaches plugin hooks (protocol v1). Empty by default: no hooks
@@ -971,19 +955,6 @@ impl Agent {
         if tokens > 0 {
             self.context_usage = Some((tokens, self.messages.len()));
         }
-    }
-
-    /// Idle-host view of background jobs (the REPL between turns): `Some`
-    /// wake future while this session still has unfinished jobs — it resolves
-    /// `Some(())` once one settles — so the host can start a turn on its own.
-    pub fn background_wake(
-        &self,
-        ctx: &ToolContext,
-        timeout: Duration,
-    ) -> Option<BoxFuture<'static, Option<()>>> {
-        self.executor
-            .has_pending_background(ctx)
-            .then(|| self.executor.wait_for_notification(ctx, timeout))
     }
 
     /// A shared handle on the tool executor, for a host task that watches

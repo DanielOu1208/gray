@@ -683,12 +683,19 @@ pub async fn run_repl_mode(
     crate::setup::set_user_reserve_tokens(config.context_reserve);
     crate::setup::set_user_keep_recent_tokens(config.context_keep);
     crate::setup::set_active_model_provider(&config.base_url);
-    // Discovery also feeds completion, even with a cached/overridden context window.
-    let base = config.base_url.clone();
-    let key = config.api_key.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::setup::fetch_live_provider_models(&base, key.as_deref());
-    });
+    // Discovery also feeds completion, even with a cached/overridden
+    // context window. Skip the live fetch where it cannot work or is not
+    // wanted: a plugin-credentialed provider's base_url is a relay
+    // placeholder no HTTP fetch can satisfy (the plugin RPC path is
+    // `fetch_plugin_provider_models`), and bare/lean runs stick to the 24h
+    // disk cache the pickers read anyway.
+    if !config.uses_plugin_credentials() && !config.bare && !config.lean {
+        let base = config.base_url.clone();
+        let key = config.api_key.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::setup::fetch_live_provider_models(&base, key.as_deref());
+        });
+    }
     tokio::spawn(crate::setup::fetch_models_dev_context());
     tokio::spawn(crate::setup::fetch_recommended_models());
     if crate::setup::get_user_context_window().is_none() {
@@ -729,7 +736,7 @@ pub async fn run_repl_mode(
         crate::setup::set_user_context_window(config.context_window);
         crate::setup::set_user_reserve_tokens(config.context_reserve);
         crate::setup::set_user_keep_recent_tokens(config.context_keep);
-        // reasoning efforts already fetched unconditionally at boot (see above).
+        // reasoning efforts came in at boot via the live or plugin catalog (see above).
         if crate::setup::get_user_context_window().is_none() {
             tokio::spawn(crate::setup::fetch_litellm_context_windows());
             if let Some(m) = config.model.clone()

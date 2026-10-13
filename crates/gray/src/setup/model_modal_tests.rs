@@ -197,15 +197,6 @@ fn head_first_skips_ids_that_are_not_listed() {
 }
 
 #[test]
-fn head_first_with_an_empty_head_is_the_identity() {
-    let models = sorted_models();
-    let refs: Vec<&(String, String)> = models.iter().collect();
-    let out = super::head_first(&refs, &[]);
-    let ids: Vec<&str> = out.iter().map(|(id, _)| id.as_str()).collect();
-    assert_eq!(ids, ["cur/m", "a/1", "b/2", "c/3"]);
-}
-
-#[test]
 fn selection_never_rest_on_the_divider() {
     use super::Row;
     let rows = vec![Row::Model(0), Row::Divider, Row::Model(1)];

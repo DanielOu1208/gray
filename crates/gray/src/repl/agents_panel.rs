@@ -1185,8 +1185,12 @@ fn run_agents_panel(
                     }
                     // Arrows keep scrolling while the box is focused — it's
                     // an input row, not a mode that swallows the viewport.
-                    KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
-                    | KeyCode::Home | KeyCode::End => {
+                    KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Home
+                    | KeyCode::End => {
                         if let Some(vw) = viewer.as_mut() {
                             let d = match code {
                                 KeyCode::Up => -1,

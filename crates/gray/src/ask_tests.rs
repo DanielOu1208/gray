@@ -9,6 +9,7 @@ fn q(id: &str, options: usize) -> AskQuestion {
             .map(|i| AskOption {
                 label: format!("o{i}"),
                 description: "d".into(),
+                opt_in: false,
             })
             .collect(),
         multi: false,
@@ -138,6 +139,7 @@ fn json_wire_asks_with_a_row_and_reads_answers_by_id() {
         options: vec![AskOption {
             label: "main".into(),
             description: "production".into(),
+            opt_in: false,
         }],
         multi: false,
         default_all: false,
@@ -169,4 +171,15 @@ fn json_wire_asks_with_a_row_and_reads_answers_by_id() {
         }]
     );
     assert!(parse_json_answer("not json", 7, &questions).is_none());
+}
+
+#[test]
+fn opt_in_option_starts_unchecked_under_default_all() {
+    let mut q = q("x", 3);
+    q.multi = true;
+    q.default_all = true;
+    q.options[2].opt_in = true;
+    let mut state = AskModalState::new(1);
+    state.load(vec![q]);
+    assert_eq!(state.checked[0], vec![true, true, false]);
 }

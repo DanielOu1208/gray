@@ -1557,3 +1557,61 @@ async fn open_lock_probe_does_not_create_files() {
         "the advisory probe must not mint lock files"
     );
 }
+
+#[tokio::test]
+async fn scan_streams_the_same_sessions_list_returns() {
+    let dir = tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path());
+    for id in ["scan-a", "scan-b"] {
+        let id = SessionId::new(id);
+        store
+            .create(SessionMeta::new(id.clone(), 1, "/tmp", "t"))
+            .await
+            .unwrap();
+        store.append(&id, &Message::user("hi")).await.unwrap();
+    }
+    let mut rx = store.scan(None, true);
+    let mut got = Vec::new();
+    let mut running = None;
+    let mut done = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            SessionScanEvent::Running(set) => running = Some(set),
+            SessionScanEvent::Summary(s) => got.push(s.id),
+            SessionScanEvent::Done => done = true,
+        }
+    }
+    assert!(done, "scan never sent Done");
+    assert_eq!(got.len(), store.list().await.len());
+    assert!(running.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn scan_reports_held_open_locks_as_running() {
+    let dir = tempdir().unwrap();
+    let store = JsonlSessionStore::new(dir.path());
+    let held = SessionId::new("scan-held");
+    let free = SessionId::new("scan-free");
+    for id in [held.clone(), free] {
+        store
+            .create(SessionMeta::new(id.clone(), 1, "/tmp", "t"))
+            .await
+            .unwrap();
+        store.append(&id, &Message::user("hi")).await.unwrap();
+    }
+    let _guard = store.acquire_open(&held).await.unwrap();
+    let mut rx = store.scan(None, true);
+    let mut running = None;
+    let mut done = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            SessionScanEvent::Running(set) => running = Some(set),
+            SessionScanEvent::Done => done = true,
+            _ => {}
+        }
+    }
+    assert!(done, "scan never sent Done");
+    let running = running.unwrap();
+    assert!(running.contains(held.as_str()));
+    assert!(!running.contains("scan-free"));
+}
