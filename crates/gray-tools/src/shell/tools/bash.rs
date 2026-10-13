@@ -1036,15 +1036,16 @@ fn literal_word(w: &str) -> bool {
     !w.contains(['*', '?', '[', ']', '{', '}']) && !w.starts_with('~')
 }
 
-/// Whether an `echo`/`printf` prints its arguments unchanged. `printf`
-/// expands backslash escapes and `%` conversions; `echo` reads leading `-`
-/// words as flags (`-n`, `-e`). Either one transforms the output.
+/// Whether an `echo`/`printf` prints its arguments unchanged. Backslash
+/// escapes are expanded by `printf` and by dash's `echo` (`/bin/sh`);
+/// `printf` also expands `%` conversions, and `echo` reads leading `-`
+/// words as flags (`-n`, `-e`). Any of these transforms the output.
 fn verbatim_print(cmd: &str, args: &[String]) -> bool {
-    if cmd == "printf" {
-        !args.iter().any(|w| w.contains(['\\', '%']))
-    } else {
-        !args.iter().any(|w| w.starts_with('-'))
-    }
+    !args.iter().any(|w| {
+        w.contains('\\')
+            || (cmd == "printf" && w.contains('%'))
+            || (cmd == "echo" && w.starts_with('-'))
+    })
 }
 
 /// `sleep`-shaped durations: `5`, `0.5`, `30s`, `2m`, `1h`, `1d`.

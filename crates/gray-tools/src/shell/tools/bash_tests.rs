@@ -1630,6 +1630,8 @@ async fn bare_noop_commands_are_steered_not_spawned() {
         "echo x | wc -c",
         "echo $((40 + 2))",
         "printf 'done\\n'",
+        "printf \"a\\nb\\nc\\n\"",
+        "echo \"a\\nb\"",
     ] {
         let out = BashTool::default()
             .execute(&ctx, json!({"command": cmd}))
