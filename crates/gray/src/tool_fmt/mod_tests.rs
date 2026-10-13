@@ -1239,8 +1239,20 @@ fn live_header_with_label_and_template_matches_the_final_card() {
     let raw = r#"{"name":"e2e-theme","model":"claude-haiku-5-5","effort":"max","prompt":"verify the theme fixes\nmore"}"#;
     let v: serde_json::Value = serde_json::from_str(raw).unwrap();
     let spec = "{name} · {model|model} · {effort}\n{prompt|firstline}";
-    let live = format_live_tool_header("subagent_spawn", raw, None, Some("Started agent"), Some(spec));
-    let fin = format_tool_card_lines("subagent_spawn", &v, None, Some("Started agent"), Some(spec));
+    let live = format_live_tool_header(
+        "subagent_spawn",
+        raw,
+        None,
+        Some("Started agent"),
+        Some(spec),
+    );
+    let fin = format_tool_card_lines(
+        "subagent_spawn",
+        &v,
+        None,
+        Some("Started agent"),
+        Some(spec),
+    );
     assert_eq!(row_texts(&live), row_texts(&fin));
     assert_eq!(live.len(), 2, "{live:?}");
 }
@@ -1248,8 +1260,12 @@ fn live_header_with_label_and_template_matches_the_final_card() {
 #[test]
 fn plain_header_keeps_the_template_second_line() {
     let args = serde_json::json!({"name": "e2e-theme", "prompt": "verify the theme fixes\nmore"});
-    let plain =
-        format_tool_call_lines_plain("subagent_spawn", &args, None, Some("{name}\n{prompt|firstline}"));
+    let plain = format_tool_call_lines_plain(
+        "subagent_spawn",
+        &args,
+        None,
+        Some("{name}\n{prompt|firstline}"),
+    );
     let rows: Vec<&str> = plain.split('\n').collect();
     assert_eq!(rows.len(), 2, "{plain:?}");
     assert!(rows[0].contains("e2e-theme"), "{plain:?}");

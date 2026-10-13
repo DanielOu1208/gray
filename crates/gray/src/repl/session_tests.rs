@@ -194,8 +194,10 @@ fn stream_clock_bills_batch_delivery_its_generation_window() {
 // tool with a label and a two-line template preview: both rows reach the card.
 #[test]
 fn repl_tool_header_renders_label_and_template_second_line() {
-    let labels =
-        std::collections::HashMap::from([("subagent_spawn".to_string(), "Started agent".to_string())]);
+    let labels = std::collections::HashMap::from([(
+        "subagent_spawn".to_string(),
+        "Started agent".to_string(),
+    )]);
     let previews = std::collections::HashMap::from([(
         "subagent_spawn".to_string(),
         "{name} · {model|model} · {effort}\n{prompt|firstline}".to_string(),

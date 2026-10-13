@@ -190,7 +190,9 @@ fn tool_card_commit_keeps_emission_order_with_stream_text() {
 
     let card = |tag: &str| vec![Line::from(vec![Span::raw(format!("bash {tag} card"))])];
     let row_idx = |tui: &Tui, needle: &str| {
-        tui.transcript.iter().position(|l| row_text(l).contains(needle))
+        tui.transcript
+            .iter()
+            .position(|l| row_text(l).contains(needle))
     };
     let entry_idx = |tui: &Tui, needle: &str| {
         tui.history_entries.iter().position(|e| match e {
@@ -234,9 +236,7 @@ fn tool_card_commit_keeps_emission_order_with_stream_text() {
         .collect();
     let entries: Vec<usize> = needles
         .iter()
-        .map(|n| {
-            entry_idx(&tui, n).unwrap_or_else(|| panic!("history entry missing: {n}"))
-        })
+        .map(|n| entry_idx(&tui, n).unwrap_or_else(|| panic!("history entry missing: {n}")))
         .collect();
     assert!(
         rows.windows(2).all(|w| w[0] < w[1]),
