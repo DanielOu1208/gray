@@ -952,8 +952,13 @@ fn noop_segment(seg: &str, live_jobs: bool) -> Option<NoopFamily> {
         "jobs" | "wait" | "fg" | "bg" | "disown" => Some(NoopFamily::JobControl),
         // A lone `cat` copies nothing it wasn't fed.
         "cat" if rest.is_empty() => Some(NoopFamily::Plain),
-        // A literal print returns exactly what the model wrote.
-        "echo" | "printf" if rest.iter().all(|w| literal_word(w)) => Some(NoopFamily::Plain),
+        // A literal print returns exactly what the model wrote, unless it
+        // transforms the text (escapes, `%`, echo flags): then it does work.
+        "echo" | "printf"
+            if rest.iter().all(|w| literal_word(w)) && verbatim_print(head, rest) =>
+        {
+            Some(NoopFamily::Plain)
+        }
         // A timed stall only matters when a job exists to await; with none,
         // a bare `sleep` can be a deliberate pause (service startup, …).
         "sleep" if live_jobs && rest.iter().all(|w| is_duration(w)) => Some(NoopFamily::Plain),
@@ -1029,6 +1034,17 @@ fn is_fn_def(seg: &str) -> bool {
 /// `$`/backquote never reach this — the word splitter bails on them first.
 fn literal_word(w: &str) -> bool {
     !w.contains(['*', '?', '[', ']', '{', '}']) && !w.starts_with('~')
+}
+
+/// Whether an `echo`/`printf` prints its arguments unchanged. `printf`
+/// expands backslash escapes and `%` conversions; `echo` reads leading `-`
+/// words as flags (`-n`, `-e`). Either one transforms the output.
+fn verbatim_print(cmd: &str, args: &[String]) -> bool {
+    if cmd == "printf" {
+        !args.iter().any(|w| w.contains(['\\', '%']))
+    } else {
+        !args.iter().any(|w| w.starts_with('-'))
+    }
 }
 
 /// `sleep`-shaped durations: `5`, `0.5`, `30s`, `2m`, `1h`, `1d`.

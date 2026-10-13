@@ -1606,7 +1606,6 @@ async fn bare_noop_commands_are_steered_not_spawned() {
         // (echo "switching tools") and the real calls never arrive.
         "echo hi",
         "echo \"switching to harness tools\"",
-        "printf 'done\\n'",
         // Compounds of literal prints and wrapper-peeled echoes are the same
         // stall in another shape: nothing runs that the model didn't write.
         "true && echo ran",
@@ -1630,6 +1629,7 @@ async fn bare_noop_commands_are_steered_not_spawned() {
         "echo ran > gray-noop-test-out",
         "echo x | wc -c",
         "echo $((40 + 2))",
+        "printf 'done\\n'",
     ] {
         let out = BashTool::default()
             .execute(&ctx, json!({"command": cmd}))
