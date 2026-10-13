@@ -212,8 +212,10 @@ async fn run() -> anyhow::Result<()> {
         .as_ref()
         .and_then(|r| r.as_deref())
         .or(cli.session.as_deref());
+    // Print modes leave through `exit_after_print`, never by returning: the
+    // runtime drop would wait on the stdin steer reader (see there).
     if let Some(prompt) = cli.print.as_deref() {
-        if cli.json {
+        let result = if cli.json {
             gray::print::run_print_mode_json(
                 &config,
                 prompt,
@@ -223,12 +225,13 @@ async fn run() -> anyhow::Result<()> {
                 cli.input_price,
                 cli.output_price,
             )
-            .await?;
+            .await
         } else {
-            run_print_mode_with_session(&config, prompt, session_arg, cli.continue_last).await?;
-        }
+            run_print_mode_with_session(&config, prompt, session_arg, cli.continue_last).await
+        };
+        exit_after_print(result);
     } else if let Some(input) = structured_input.as_ref() {
-        gray::print::run_print_mode_json_input(
+        let result = gray::print::run_print_mode_json_input(
             &config,
             input,
             session_arg,
@@ -237,7 +240,8 @@ async fn run() -> anyhow::Result<()> {
             cli.input_price,
             cli.output_price,
         )
-        .await?;
+        .await;
+        exit_after_print(result);
     } else {
         if !config.bare {
             gray::update::startup_check().await;
@@ -250,7 +254,34 @@ async fn run() -> anyhow::Result<()> {
         log::logger().flush();
         std::process::exit(0);
     }
-    Ok(())
+}
+
+/// Ends a finished print turn (`-p`, `-p --json`, `--input-json`) by exiting
+/// the process rather than returning through `#[tokio::main]`. With
+/// `GRAY_STDIN_STEER` the json wire parks a `spawn_blocking` reader in
+/// `read_line` on stdin, and the runtime drop waits for every blocking task:
+/// a caller that keeps its pipe open would hang the turn after its `result`
+/// row. The turn's work is done by now (session persisted, rows written), so
+/// flush and exit with the code `main` would return: 0, or 1 with the failure
+/// rendered as it is for any other run error.
+fn exit_after_print(result: anyhow::Result<()>) -> ! {
+    let code = match result {
+        Ok(()) => 0,
+        Err(error) => {
+            if let Some(gray::session_store::SessionError::Locked { id, pid }) =
+                error.downcast_ref::<gray::session_store::SessionError>()
+            {
+                eprintln!("{}", gray::resume::locked_session_card(id, *pid));
+            } else {
+                eprintln!("Error: {error:?}");
+            }
+            1
+        }
+    };
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    log::logger().flush();
+    std::process::exit(code);
 }
 
 async fn run_resume_subcommand(

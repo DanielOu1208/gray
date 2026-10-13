@@ -12,6 +12,7 @@ mod memory_cli;
 mod native_plugin;
 mod plugin_first_command;
 mod plugin_registry;
+mod print_stdin_exit;
 mod provider_effort;
 mod windows_limits;
 mod working_directory;
