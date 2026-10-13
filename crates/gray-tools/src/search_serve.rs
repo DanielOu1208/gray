@@ -22,7 +22,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -36,6 +36,11 @@ struct Server {
     root: PathBuf,
     engine: fsearch::Engine,
     watch: Arc<Watch>,
+    /// Directory listings behind walk-order keys, kept across requests and
+    /// dropped when the watch reports a change.
+    order: Mutex<HashMap<PathBuf, Option<HashMap<OsString, usize>>>>,
+    /// Unheld paths under the root, cached until the watch reports a change.
+    unheld: Mutex<Option<Arc<BTreeSet<Vec<u8>>>>>,
     _index_dir: tempfile::TempDir,
 }
 
@@ -57,7 +62,14 @@ pub fn serve(root: &Path, sock: &Path) -> std::io::Result<()> {
         skip: Some(Vec::new()),
     })
     .map_err(std::io::Error::other)?;
-    let server = Arc::new(Server { root, engine, watch, _index_dir: index_dir });
+    let server = Arc::new(Server {
+        root,
+        engine,
+        watch,
+        order: Mutex::new(HashMap::new()),
+        unheld: Mutex::new(None),
+        _index_dir: index_dir,
+    });
     let _ = std::fs::remove_file(sock);
     let listener = UnixListener::bind(sock)?;
     for conn in listener.incoming() {
@@ -120,13 +132,34 @@ fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static
     let (scope, prefix) = operand(&server.root, cwd, &plan)?;
     let scope_bytes = scope.as_os_str().as_bytes();
     let changed = server.watch.changed(scope_bytes).ok_or("watch broken")?;
-    let unheld = server.engine.unheld_files(scope_bytes).ok_or("content index not holding scope")?;
+    if !changed.is_empty() {
+        server.order.lock().unwrap().clear();
+        *server.unheld.lock().unwrap() = None;
+    }
+    let unheld = {
+        let mut cache = server.unheld.lock().unwrap();
+        if cache.is_none() {
+            let root_bytes = server.root.as_os_str().as_bytes();
+            let all: BTreeSet<Vec<u8>> = server
+                .engine
+                .unheld_files(root_bytes)
+                .ok_or("content index not holding scope")?
+                .into_iter()
+                .collect();
+            *cache = Some(Arc::new(all));
+        }
+        cache.as_ref().unwrap().clone()
+    };
+    let unheld = unheld.iter().filter(|p| {
+        p.starts_with(scope_bytes)
+            && (p.len() == scope_bytes.len() || p.get(scope_bytes.len()) == Some(&b'/'))
+    }).cloned();
     let matched = server
         .engine
         .held_matches(scope_bytes, &plan.needles, plan.ignore_case)
         .ok_or("match answer partial")?;
-    let all: BTreeSet<Vec<u8>> = unheld.into_iter().chain(matched).chain(changed).collect();
-    let mut order = HashMap::new();
+    let all: BTreeSet<Vec<u8>> = unheld.chain(matched).chain(changed).collect();
+    let mut order = server.order.lock().unwrap();
     let mut found = Vec::new();
     for p in all {
         let path = Path::new(OsStr::from_bytes(&p));

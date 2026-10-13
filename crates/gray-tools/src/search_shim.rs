@@ -21,8 +21,10 @@ pub const SOCK_ENV: &str = "GRAY_SEARCH_SOCK";
 pub const INDEX_ENV: &str = "GRAY_SEARCH_INDEX";
 pub const TRACE_ENV: &str = "GRAY_SHIM_TRACE";
 /// The whole round trip, connect included, before the shim gives up and
-/// runs the real tool on the original argv.
-pub const BUDGET: Duration = Duration::from_millis(50);
+/// runs the real tool on the original argv. Sized well under what the real
+/// recursive walk costs on a big tree; a wedged server costs this once per
+/// call instead of a scan.
+pub const BUDGET: Duration = Duration::from_secs(4);
 /// Argument bytes per real-tool run. Past this the file list is split and
 /// the runs' exit codes merged.
 const BATCH_BYTES: usize = 96 * 1024;
