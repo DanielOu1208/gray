@@ -771,21 +771,40 @@ pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
     validate_name(name)?;
     migrate_commands_json(home);
     let lock = load_lock(home)?;
-    let entry = lock.plugins.get(name).with_context(|| {
-        removed_builtin(name)
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                format!("no plugin command '{name}' — install it with: gray plugin install {name}")
-            })
-    })?;
-    let argv = entry
-        .cli_argv
-        .as_ref()
-        .with_context(|| format!("'{name}' is a sidecar plugin, not a CLI command"))?;
+    // A session home that never installed the plugin still reaches a
+    // `global` entry in the user home — the same dual-home rule `cmd`
+    // command lookup applies (conversation-scoped GRAY_HOMEs).
+    let (entry, entry_home) = match lock.plugins.get(name).cloned() {
+        Some(e) => (e, home.to_path_buf()),
+        None => {
+            let fallback = gray_core::paths::gray_user_home()
+                .filter(|u| u.as_path() != home)
+                .and_then(|u| load_lock(&u).ok().map(|l| (u, l)))
+                .and_then(|(u, l)| {
+                    l.plugins
+                        .get(name)
+                        .filter(|e| e.global)
+                        .map(|e| (e.clone(), u))
+                });
+            match fallback {
+                Some((e, u)) => (e, u),
+                None => {
+                    return Err(anyhow::anyhow!(
+                        removed_builtin(name).map(str::to_string).unwrap_or_else(|| {
+                            format!("no plugin command '{name}' — install it with: gray plugin install {name}")
+                        })
+                    ));
+                }
+            }
+        }
+    };
     anyhow::ensure!(
-        enabled(home, name, entry),
+        enabled(&entry_home, name, &entry),
         "plugin command '{name}' is disabled"
     );
+    let argv = entry
+        .cli_argv
+        .with_context(|| format!("'{name}' is a sidecar plugin, not a CLI command"))?;
     let (program, args) = argv
         .split_first()
         .context("plugin command has no entry point")?;
