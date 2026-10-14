@@ -289,6 +289,7 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
             notice: bg.home_notice.as_deref(),
             stats: bg.plugin_stats.as_deref(),
             model: Some(model_display.as_str()),
+            model_tail: None,
             above: bg.home_update.as_deref(),
             session: bg.home_session.as_deref(),
             qol: bg.home_qol.as_deref(),

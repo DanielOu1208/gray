@@ -175,25 +175,31 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         }
         _ => model_display.clone(),
     };
-    let home_model_text = tui
+    let (home_model_name, home_model_tail) = tui
         .model_label_parts
         .as_ref()
-        .map(|parts| parts.iter().map(|(t, _)| t.as_str()).collect::<String>())
+        .map(|parts| {
+            (
+                parts.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+                String::new(),
+            )
+        })
         .unwrap_or_else(|| {
             if effort_display.is_empty()
                 || model_display
                     .to_lowercase()
                     .contains(&tui.thinking_effort.to_lowercase())
             {
-                model_display.clone()
+                (model_display.clone(), String::new())
             } else {
-                format!("{model_display} {effort_display}")
+                (model_display.clone(), format!(" {effort_display}"))
             }
         });
     let home = tui.is_home().then_some(HomeRows {
         notice: tui.home_notice.as_deref(),
         stats: tui.plugin_stats.as_deref(),
-        model: Some(home_model_text.as_str()),
+        model: Some(home_model_name.as_str()),
+        model_tail: (!home_model_tail.is_empty()).then_some(home_model_tail.as_str()),
         above: tui.home_update.as_deref(),
         qol: tui.home_qol.as_deref(),
         session: tui.home_session.as_deref(),
@@ -213,10 +219,10 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     } else {
         1 + n.min(3) as u16 + u16::from(n > 3) + 1
     };
-    let panel_est: u16 = if home.is_some() {
+    let panel_est: u16 = if tui.matches.is_empty() {
         0
     } else {
-        tui.matches.len().min(PANEL_ROWS) as u16
+        tui.matches.len().min(PANEL_ROWS) as u16 + 1
     };
 
     let ask_est: u16 = tui
@@ -253,7 +259,8 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let mut widget_rows = tui.plugin_widget.rows(widget_budget as usize, w);
     let max_viewport_h = viewport_cap(rows);
 
-    let mut band_allowance = band_budget(max_viewport_h, status_h + box_h + attach_h + 1);
+    let mut band_allowance =
+        band_budget(max_viewport_h, status_h + box_h + attach_h + panel_est + 1);
 
     let reserve_overflow_row = tui.live_tool_overflow() > 0 && band_allowance > 0;
     if reserve_overflow_row {
@@ -438,26 +445,20 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let ask_h = rows_h[0];
         let widget_h = rows_h[2];
 
-        let avail = area.height.saturating_sub(
-            status_h + queued_h + tail_h + live_h + widget_h + box_h + attach_h + 1,
-        );
-        let need = PANEL_ROWS as u16;
-        let panel_cap = need.min(avail).max((PANEL_ROWS as u16).min(avail));
-        let visible_count = if tui.matches.is_empty() {
-            0
-        } else if home_mode {
-            tui.matches.len().min(PANEL_ROWS)
+        let visible_count = tui.matches.len().min(PANEL_ROWS);
+        let panel_gap: u16 = if visible_count > 0 {
+            visible_count as u16 + 1
         } else {
-            tui.matches.len().min(panel_cap as usize)
+            0
         };
-        let panel_h = visible_count as u16;
+        let panel_h: u16 = 0;
         let box_rows = box_h;
         let tail_y = status_y + seam_h;
         let queued_y = status_y + status_h + tail_h;
         let live_y = queued_y + queued_h;
         let ask_y = live_y + live_h;
         let widget_y = ask_y + ask_h;
-        let box_y = widget_y + widget_h;
+        let box_y = widget_y + widget_h + panel_gap;
         let panel_y = if home_mode {
             (area.y + area.height.saturating_sub(1)).saturating_sub(panel_h)
         } else {
@@ -582,6 +583,36 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
             let end = (start + visible_count).min(total);
             let hidden_above = start;
             let hidden_below = total.saturating_sub(end);
+
+            let pad_x: u16 = 2;
+            let mut item_w = 24usize;
+            for (name, desc) in tui.matches.iter().skip(start).take(visible_count) {
+                let sw = theme_row_swatch(name).map_or(0, |sw| {
+                    sw.iter()
+                        .map(|sp| display_width(sp.content.as_ref()))
+                        .sum::<usize>()
+                });
+                item_w = item_w.max(
+                    display_width(&format!(" /{name} "))
+                        + display_width(&format!(" {desc} "))
+                        + sw
+                        + 1,
+                );
+            }
+            let pop_w = (item_w as u16 + pad_x * 2)
+                .min(area.width.saturating_sub(4))
+                .max(30);
+            let inner_w = (pop_w - pad_x * 2) as usize;
+            let pop_h = visible_count as u16;
+            let pop_x = (area.x + ibox.x as u16).min(area.right().saturating_sub(pop_w));
+            let pop_y = box_y.saturating_sub(pop_h).max(area.y);
+            let rect = Rect::new(pop_x, pop_y, pop_w, pop_h);
+            frame.render_widget(ratatui::widgets::Clear, rect);
+            frame.render_widget(
+                Block::default().style(Style::default().bg(crate::theme::theme().surface_bg)),
+                rect,
+            );
+
             for (i, (name, desc)) in tui
                 .matches
                 .iter()
@@ -589,11 +620,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 .skip(start)
                 .take(visible_count)
             {
-                let y = (i - start) as u16;
-                let item_y = panel_y + y;
-                if item_y < area.y || item_y >= area.y + area.height {
-                    continue;
-                }
+                let item_y = pop_y + (i - start) as u16;
                 let is_sel = i == tui.sel;
                 let cmd_str = format!(" /{name} ");
                 let desc_str = format!(" {desc} ");
@@ -615,7 +642,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                     (false, true) => "↓",
                     (false, false) => "",
                 };
-                let pad_len = w.saturating_sub(used_len + display_width(marker));
+                let pad_len = inner_w.saturating_sub(used_len + display_width(marker));
                 let line_bg = if is_sel {
                     crate::theme::theme().accent
                 } else {
@@ -680,7 +707,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 frame.render_widget(
                     Paragraph::new(line)
                         .block(Block::default().style(Style::default().bg(line_bg))),
-                    Rect::new(area.x, item_y, area.width, 1),
+                    Rect::new(pop_x + pad_x, item_y, inner_w as u16, 1),
                 );
             }
         }

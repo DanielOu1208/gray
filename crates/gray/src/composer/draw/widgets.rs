@@ -276,6 +276,7 @@ pub(crate) struct HomeRows<'a> {
 
     pub(crate) stats: Option<&'a str>,
     pub(crate) model: Option<&'a str>,
+    pub(crate) model_tail: Option<&'a str>,
     pub(crate) qol: Option<&'a str>,
 
     pub(crate) above: Option<&'a str>,
@@ -323,15 +324,19 @@ fn left_right_rows(
 fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
     let mut rows: Vec<Line<'static>> = Vec::new();
     let t = crate::theme::theme();
-    let model: Vec<Span<'static>> = home
-        .model
-        .map(|m| {
-            vec![Span::styled(
-                m.to_string(),
-                Style::default().fg(t.text_muted),
-            )]
-        })
-        .unwrap_or_default();
+    let mut model: Vec<Span<'static>> = Vec::new();
+    if let Some(m) = home.model {
+        model.push(Span::styled(
+            m.to_string(),
+            Style::default().fg(t.text_bright),
+        ));
+    }
+    if let Some(tail) = home.model_tail {
+        model.push(Span::styled(
+            tail.to_string(),
+            Style::default().fg(t.text_muted),
+        ));
+    }
     let stats = home
         .stats
         .map(crate::composer::stats_spans)

@@ -1461,10 +1461,12 @@ impl Tui {
                 area,
             );
             let row = ratatui::layout::Rect::new(0, area.height.saturating_sub(1), area.width, 1);
-            frame.render_widget(Paragraph::new(Line::styled("enter to skip", dim)), row);
             frame.render_widget(
-                Paragraph::new(Line::styled("/intro disable to disable", dim))
-                    .alignment(ratatui::layout::Alignment::Right),
+                Paragraph::new(Line::styled(
+                    "enter to skip · /intro disable to disable",
+                    dim,
+                ))
+                .alignment(ratatui::layout::Alignment::Center),
                 row,
             );
         });
