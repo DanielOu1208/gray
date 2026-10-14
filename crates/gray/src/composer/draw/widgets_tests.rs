@@ -149,6 +149,13 @@ fn cells_text(cells: &[InputCell]) -> String {
 }
 
 #[test]
+fn an_inline_attachment_marker_renders_as_a_chip_not_literal_text() {
+    let text = "see [image: pic.png] here";
+    let ibox = build_input_box(text, text.len(), 100, None, None, &[]);
+    assert_eq!(row_texts(&ibox)[1], " ❯ see  IMAGE  pic.png  here");
+}
+
+#[test]
 fn chip_cells_are_pill_then_label_with_a_gap_between_chips() {
     let cells = two_chips();
     assert_eq!(

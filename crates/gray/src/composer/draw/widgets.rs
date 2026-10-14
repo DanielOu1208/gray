@@ -127,9 +127,9 @@ fn styled_runs(cells: &[InputCell]) -> Vec<Span<'static>> {
 }
 
 fn restyle_attachment_markers(cells: &mut [InputCell]) {
-    let st = Style::default()
-        .fg(crate::theme::theme().text_muted)
-        .bg(crate::theme::theme().surface_bg);
+    let t = crate::theme::theme();
+    let pill = Style::default().fg(t.text_bright).bg(t.input_bg);
+    let label = Style::default().fg(t.text_muted).bg(t.surface_bg);
     let n = cells.len();
     let mut i = 0;
     while i < n {
@@ -137,26 +137,33 @@ fn restyle_attachment_markers(cells: &mut [InputCell]) {
             i += 1;
             continue;
         }
-        let name_start = crate::repl::attachments::MARKER_PREFIXES
-            .iter()
-            .find_map(|p| {
-                let fits = p
-                    .chars()
-                    .enumerate()
-                    .all(|(k, c)| cells.get(i + 1 + k).is_some_and(|cell| cell.0 == c));
-                fits.then_some(i + 1 + p.len())
-            });
-        let Some(name_start) = name_start else {
+        let matched = crate::repl::attachments::MARKER_PREFIXES.iter().find(|p| {
+            p.chars()
+                .enumerate()
+                .all(|(k, c)| cells.get(i + 1 + k).is_some_and(|cell| cell.0 == c))
+        });
+        let Some(prefix) = matched else {
             i += 1;
             continue;
         };
+        let klen = prefix.len() - 2;
+        let name_start = i + 1 + prefix.len();
         let mut j = name_start;
         while j < n && cells[j].0 != ']' && cells[j].0 != '\n' {
             j += 1;
         }
         if j < n && cells[j].0 == ']' && j > name_start {
-            for cell in &mut cells[i..=j] {
-                cell.1 = st;
+            cells[i].0 = ' ';
+            for (k, c) in prefix[..klen].to_uppercase().chars().enumerate() {
+                cells[i + 1 + k].0 = c;
+            }
+            cells[i + klen + 1].0 = ' ';
+            cells[j].0 = ' ';
+            for cell in &mut cells[i..i + klen + 2] {
+                cell.1 = pill;
+            }
+            for cell in &mut cells[i + klen + 2..=j] {
+                cell.1 = label;
             }
             i = j + 1;
         } else {

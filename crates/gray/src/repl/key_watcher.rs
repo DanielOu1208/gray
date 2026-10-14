@@ -415,6 +415,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                                 );
                                 continue;
                             }
+                            crate::composer::input::sync_attachment_markers(&mut t);
                             let attached: Vec<std::path::PathBuf> =
                                 std::mem::take(&mut t.attachments);
 

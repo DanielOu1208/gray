@@ -10,7 +10,9 @@ pub(crate) mod keys;
 
 use keys::KeyOutcome;
 
-pub(crate) use attach::{try_attach_clipboard_image, try_attach_image_paste};
+pub(crate) use attach::{
+    sync_attachment_markers, try_attach_clipboard_image, try_attach_image_paste,
+};
 pub(crate) use clipboard::paste_from_system_clipboard;
 
 #[cfg(unix)]
@@ -274,8 +276,9 @@ pub(crate) fn read_line(
                     }
                     tui.history_idx = None;
                     tui.draft.clear();
-                    tui.textarea.set_text("");
+                    attach::sync_attachment_markers(tui);
                     let attached: Vec<PathBuf> = std::mem::take(&mut tui.attachments);
+                    tui.textarea.set_text("");
                     if tui.is_task_running {
                         tui.queued_inputs
                             .push_back((trimmed.clone(), attached.clone()));

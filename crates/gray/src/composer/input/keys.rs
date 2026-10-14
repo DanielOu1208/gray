@@ -206,6 +206,7 @@ fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
 
 fn edit(tui: &mut Tui, f: impl FnOnce(&mut Tui)) -> Option<KeyOutcome> {
     f(tui);
+    super::attach::sync_attachment_markers(tui);
     tui.sel = 0;
     Some(KeyOutcome::Edited)
 }
