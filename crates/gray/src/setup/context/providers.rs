@@ -2050,26 +2050,29 @@ pub(crate) fn warm_rates_from_disk_cache() {
     if cfg!(test) {
         return;
     }
-    let Some(dir) = crate::setup::catalog::gray_home()
-        .ok()
-        .map(|h| h.join("cache"))
-    else {
-        return;
-    };
-    for (name, apply) in [
-        (
-            "models.dev.json",
-            parse_models_dev_json as fn(&serde_json::Value) -> usize,
-        ),
-        ("litellm.json", parse_litellm_context_json as _),
-        ("openrouter.json", parse_openrouter_models_json as _),
-    ] {
-        if let Ok(s) = std::fs::read(dir.join(name))
-            && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&s)
-        {
-            apply(&v);
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Some(dir) = crate::setup::catalog::gray_home()
+            .ok()
+            .map(|h| h.join("cache"))
+        else {
+            return;
+        };
+        for (name, apply) in [
+            (
+                "models.dev.json",
+                parse_models_dev_json as fn(&serde_json::Value) -> usize,
+            ),
+            ("litellm.json", parse_litellm_context_json as _),
+            ("openrouter.json", parse_openrouter_models_json as _),
+        ] {
+            if let Ok(s) = std::fs::read(dir.join(name))
+                && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&s)
+            {
+                apply(&v);
+            }
         }
-    }
+    });
 }
 
 #[path = "providers_tests.rs"]

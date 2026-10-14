@@ -279,6 +279,35 @@ impl Message {
         }
         out
     }
+
+    pub fn context_text_len(&self) -> usize {
+        let mut total = 0usize;
+        let mut pieces = 0usize;
+        for block in &self.content {
+            let n = match block {
+                ContentBlock::Text { text } => text.len(),
+                ContentBlock::StructuredInput { .. } => block
+                    .provider_text()
+                    .map(|t| t.len())
+                    .unwrap_or_else(|| "<gray_structured_input unavailable>".len()),
+                ContentBlock::ToolResult { content, .. } => content.len(),
+                ContentBlock::ToolUse { name, args, .. } => {
+                    name.len() + serde_json::to_string(args).map(|s| s.len()).unwrap_or(0)
+                }
+                ContentBlock::Thinking {
+                    text,
+                    encrypted_content,
+                    ..
+                } => text.len() + encrypted_content.as_deref().map_or(0, str::len),
+                ContentBlock::Image { data, .. } | ContentBlock::Media { data, .. } => data.len(),
+            };
+            if n > 0 {
+                total += n + usize::from(pieces > 0);
+                pieces += 1;
+            }
+        }
+        total
+    }
 }
 
 pub const MAX_NATIVE_MEDIA_BYTES: usize = 8 * 1024 * 1024;

@@ -932,6 +932,9 @@ async fn run_print_inner(
         None
     };
     let cwd = std::env::current_dir()?;
+    if !config.bare {
+        let _ = crate::plugin_status::ensure_boot(None);
+    }
     let store = JsonlSessionStore::default();
     let prompt_text = crate::failed_turn::prompt_text(prompt, &user_message);
     let prompt_hash = crate::failed_turn::prompt_hash(&prompt_text);

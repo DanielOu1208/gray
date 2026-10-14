@@ -235,8 +235,7 @@ pub(crate) async fn handle_resume(
     };
     match store.load(&sid).await {
         Ok((meta, entries)) => {
-            let history: Vec<Message> = entries.iter().map(|e| e.message.clone()).collect();
-            let n = history.len();
+            let n = entries.len();
 
             crate::setup::canonicalize_adopted_model(config);
             let eff_model = crate::resume::effective_session_model(
@@ -271,7 +270,14 @@ pub(crate) async fn handle_resume(
             }
             match build_agent(&build_config, cwd, Some(sid.as_str())).await {
                 Ok(built) => {
-                    *agent = Some(built.with_messages(history));
+                    *totals = SessionTotals::from_entries(&entries, model);
+                    let shared_history = std::sync::Arc::new(
+                        entries
+                            .into_iter()
+                            .map(|e| e.message)
+                            .collect::<Vec<Message>>(),
+                    );
+                    *agent = Some(built.with_messages((*shared_history).clone()));
 
                     if let Some(ledger) = gray_plugin::builder::current_file_ledger() {
                         ledger.clear();
@@ -283,19 +289,22 @@ pub(crate) async fn handle_resume(
                         _open_guard: Some(open_guard),
                     });
                     export_session_env(sid.as_str());
-                    *totals = SessionTotals::from_entries(&entries, model);
                     if let Some(shared) = &tui {
                         let mut t = shared.lock().expect("tui lock");
                         let (tool_labels, tool_previews) = tool_display_maps(
                             agent.as_ref().map(|a| a.tool_defs()).unwrap_or_default(),
                         );
                         t.replay_session_history_with_tools(
-                            &entries,
+                            shared_history,
                             cwd,
                             crate::tool_fmt::ToolDisplay {
                                 labels: Some(&tool_labels),
                                 previews: Some(&tool_previews),
                             },
+                            vec![format!(
+                                "\u{2b22} Resumed session {} ({n} messages)",
+                                sid.as_str()
+                            )],
                         );
                         t.ensure_gap();
 
@@ -311,10 +320,6 @@ pub(crate) async fn handle_resume(
                             t.set_thinking_effort(crate::setup::effort_chip(eff, &build_config));
                             t.set_hide_thinking(build_config.reasoning_hidden());
                         }
-                        t.push_dim(format!(
-                            "\u{2b22} Resumed session {} ({n} messages)",
-                            sid.as_str()
-                        ));
                         t.ensure_gap();
                         let _ = t.draw();
                     } else {

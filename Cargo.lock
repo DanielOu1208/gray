@@ -882,6 +882,7 @@ dependencies = [
  "libc",
  "log",
  "ratatui",
+ "rayon",
  "regex",
  "reqwest",
  "serde",

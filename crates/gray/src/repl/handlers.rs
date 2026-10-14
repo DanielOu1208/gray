@@ -442,7 +442,7 @@ pub(crate) async fn handle_undo(
     retry: bool,
     agent: &mut Option<Agent>,
     session_state: &mut Option<SessionState>,
-    pending_history: &mut Vec<Message>,
+    pending_history: &mut std::sync::Arc<Vec<Message>>,
     tui: Option<&crate::composer::SharedTui>,
 ) -> Option<String> {
     let Some(ag) = agent.as_mut() else {
@@ -468,7 +468,7 @@ pub(crate) async fn handle_undo(
         return None;
     }
     ag.set_messages(kept.clone());
-    pending_history.truncate(kept.len());
+    std::sync::Arc::make_mut(pending_history).truncate(kept.len());
     let dropped = messages.len() - kept.len();
     say(
         tui,

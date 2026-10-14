@@ -111,7 +111,7 @@ pub fn estimate_message_tokens(m: &Message) -> usize {
     }) {
         m.content.iter().map(crate::compact::block_tokens).sum()
     } else {
-        m.context_text().len() / 4
+        m.context_text_len() / 4
     }
 }
 

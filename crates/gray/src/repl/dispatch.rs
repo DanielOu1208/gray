@@ -16,7 +16,7 @@ pub(crate) async fn dispatch_command(
     session_state: &mut Option<SessionState>,
     session_totals: &mut SessionTotals,
     pending_command: &mut Option<ReplCommand>,
-    pending_history: &mut Vec<Message>,
+    pending_history: &mut std::sync::Arc<Vec<Message>>,
     unconfigured: &mut bool,
     hide_thinking: &mut bool,
 ) -> anyhow::Result<Flow> {
@@ -172,7 +172,7 @@ pub(crate) async fn dispatch_command(
         }
         ReplCommand::New(initial_prompt) => {
             shutdown_hooks(agent.as_ref()).await;
-            pending_history.clear();
+            *pending_history = std::sync::Arc::new(Vec::new());
             *session_totals = SessionTotals::default();
             *session_state = None;
             let mut short_id = String::new();
@@ -537,7 +537,8 @@ pub(crate) async fn dispatch_command(
                 let sid = session_state.as_ref().map(|s| s.session_id.as_str());
                 match build_agent(config, cwd, sid).await {
                     Ok(built) => {
-                        *agent = Some(built.with_messages(std::mem::take(pending_history)));
+                        *agent =
+                            Some(built.with_messages(super::take_pending_history(pending_history)));
                     }
                     Err(e) => {
                         say(tui.as_ref().map(|(s, _)| s), &format!("{e:#}"));

@@ -346,7 +346,7 @@ fn context_build_text_scrub_fits_frame_and_restores() {
         Message::user("small"),
     ];
     let session = serde_json::json!({"id": "s", "cwd": "/tmp"});
-    let pulled = scrub_text_for_frame(&mut wire, &session);
+    let (pulled, _frame_len) = scrub_text_for_frame(&mut wire, &session);
     let frame_len = serialized_len(&serde_json::json!({"messages": &wire, "session": &session}));
     assert!(
         frame_len + 128 <= MAX_FRAME,
@@ -393,7 +393,7 @@ fn context_build_text_scrub_fits_frame_and_restores() {
 fn context_build_text_scrub_leaves_small_payloads_alone() {
     let mut wire = vec![Message::user("hi")];
     let session = serde_json::json!({"id": "s", "cwd": "/tmp"});
-    let pulled = scrub_text_for_frame(&mut wire, &session);
+    let (pulled, _frame_len) = scrub_text_for_frame(&mut wire, &session);
     assert!(pulled.iter().all(|v| v.is_empty()));
     assert_eq!(
         wire[0].content[0],

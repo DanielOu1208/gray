@@ -48,6 +48,7 @@ libc = { workspace = true }
 unicode-width = { workspace = true }
 ignore = { workspace = true }
 regex = { workspace = true }
+rayon = "1.12"
 
 
 [target.'cfg(windows)'.dependencies]

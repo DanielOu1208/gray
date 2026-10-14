@@ -50,7 +50,7 @@ pub(crate) async fn run_prompt_turn(
     session_state: &mut Option<SessionState>,
     session_totals: &mut SessionTotals,
     pending_command: &mut Option<ReplCommand>,
-    pending_history: &mut Vec<Message>,
+    pending_history: &mut std::sync::Arc<Vec<Message>>,
     unconfigured: &mut bool,
     resumable: &mut bool,
 ) -> anyhow::Result<()> {
@@ -117,7 +117,8 @@ pub(crate) async fn run_prompt_turn(
         match built {
             Ok(built) => {
                 if !pending_history.is_empty() {
-                    *agent = Some(built.with_messages(std::mem::take(&mut *pending_history)));
+                    *agent =
+                        Some(built.with_messages(super::take_pending_history(pending_history)));
                 } else {
                     *agent = Some(built);
                 }
