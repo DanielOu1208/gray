@@ -2,13 +2,6 @@ use crate::agent::Agent;
 use crate::error::CoreError;
 use crate::message::{ContentBlock, Message, Role};
 
-/// One message's token estimate: image-aware budgeting over the shared
-/// `agent_compact::est_tokens` owner (bytes/4 over billable text). Messages
-/// without images delegate verbatim so text/tool/thinking estimates can never
-/// drift; messages with images price each `Image` block via
-/// [`image_block_tokens`] (base64 at bytes/4 would overcharge ~5× — the
-/// payload is base64, not raw bytes). Block separators (`\n` in
-/// `context_text`) are sub-token and ignored on the image path.
 fn message_tokens(m: &Message) -> usize {
     if m.content
         .iter()
@@ -20,15 +13,11 @@ fn message_tokens(m: &Message) -> usize {
     }
 }
 
-/// One block's token estimate on the image path: billable bytes/4 exactly
-/// like `context_text`, except `Image` which uses [`image_block_tokens`].
 pub(crate) fn block_tokens(b: &ContentBlock) -> usize {
     match b {
         ContentBlock::Text { text } => text.len() / 4,
         ContentBlock::Image { media_type, data } => image_block_tokens(media_type, data.len()),
-        // Media is priced like the image path (bytes/4): providers that take
-        // it bill the bytes, and the fallback would have been cheaper, but a
-        // cleared block is dropped, not silently replaced with its fallback.
+
         ContentBlock::Media {
             media_type, data, ..
         } => image_block_tokens(media_type, data.len()),
@@ -51,37 +40,15 @@ pub(crate) fn block_tokens(b: &ContentBlock) -> usize {
     }
 }
 
-/// Token price of one `Image` block from its base64 length.
-///
-/// Bounded heuristic for attached images (original bytes; Anthropic's wire caps are enforced at serialization).
-/// Encoded file length is not a vision token count: cap at 4096 to avoid
-/// treating a several-MB screenshot as hundreds of thousands of text tokens.
-/// Provider-reported usage remains authoritative after the request.
 pub(crate) fn image_block_tokens(_media_type: &str, base64_len: usize) -> usize {
     (base64_len.saturating_mul(3) / 4 / 4).clamp(1_000, 4_096)
 }
 
-/// In-band compaction trigger: chat-shaped equivalent of codex v2's
-/// `ResponseItem::CompactionTrigger` + summary instruction, appended to the
-/// retained history for the summarization call only.
-//
-// Task-neutral wording, no domain (coding or otherwise) assumed.
-/// Opening words of the [`summary_message`] envelope. A transcript whose
-/// second message carries this prefix was compacted before and its first
-/// message is the pinned intent anchor (see [`anchor_message`]).
 pub(crate) const SUMMARY_ENVELOPE_PREFIX: &str =
     "The conversation history before this point was compacted into the following summary:";
 
 pub(crate) const COMPACTION_TRIGGER: &str = "Summarize this conversation so far for continuing it: outcomes, decisions, open questions. No tool calls.";
 
-/// One in-band summarization call over `history`: same system prompt + same
-/// tools as live turns, plus [`COMPACTION_TRIGGER`]. Identical request prefix
-/// → server prefix-cache hit on providers that support it. Custom
-/// `instructions` (manual `/compact <text>`) ride the trigger with high
-/// priority. Takes `&[Message]` and builds the input locally — the caller's
-/// history is never mutated — and the trigger is popped from retained history
-/// after (mirroring v2's `prompt_input.pop()`), so it never pollutes the
-/// transcript.
 pub(crate) async fn run_compaction_call(
     agent: &Agent,
     history: &[Message],
@@ -95,8 +62,7 @@ pub(crate) async fn run_compaction_call(
         ));
     }
     messages.push(Message::user_injected(trigger));
-    // Reuse the captured live prefix, including hook context, without re-fetching it.
-    // Before the first turn, system_text() falls back to the configured base prompt.
+
     let system = agent.system_text();
     agent
         .complete_with_history(
@@ -107,30 +73,14 @@ pub(crate) async fn run_compaction_call(
         .await
 }
 
-/// Retained-history token budget, mirroring codex v2's
-/// `RETAINED_MESSAGE_TOKEN_BUDGET` verbatim.
 pub(crate) const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
-/// Per-group cap for retained assistant-only groups, mirroring codex v2's
-/// `MAX_RETAINED_AGENT_MESSAGE_TOKENS`. `i64` kept verbatim — converted at use.
-/// Single assistant messages over this are progress/completion chatter.
+
 pub(crate) const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
-/// Boundary-truncation marker, inlined between the kept head+tail halves. Gray
-/// has no message marker convention; documented here. Marker bytes come out of
-/// the token budget so truncated output still estimates within budget.
+
 const TRUNCATION_MARKER: &str = "[…truncated…]";
 
-/// A `ToolResult` body at or over this size elides to a citation stub during
-/// compaction (arXiv:2607.25066, ARC: addressable recall). Below it, keeping
-/// the output is cheaper than the recall round-trip.
 pub(crate) const ARC_STUB_MIN_BYTES: usize = 8_192;
 
-/// The citation left in place of an elided tool output. Self-describing on
-/// purpose: neither compaction nor the age mask touches the append-only
-/// session JSONL on disk, so the full output stays recoverable with one grep —
-/// the tool-call id is the address, no retrieval model involved. (The
-/// `~/.gray/sessions` default is a hint; the id alone is enough to `grep -rl`
-/// the sessions dir when GRAY_HOME differs.) Shared by compaction and the
-/// stale-output mask so both cite the same way.
 pub(crate) fn tool_result_stub(id: &str, bytes: usize, session_id: Option<&str>) -> String {
     let file = match session_id {
         Some(sid) => format!("~/.gray/sessions/{sid}.jsonl"),
@@ -141,8 +91,6 @@ pub(crate) fn tool_result_stub(id: &str, bytes: usize, session_id: Option<&str>)
     )
 }
 
-/// True when the group holds at least one `ToolResult` body at/over the
-/// stub threshold.
 fn has_stubbable_result(group: &[Message]) -> bool {
     group
         .iter()
@@ -150,9 +98,6 @@ fn has_stubbable_result(group: &[Message]) -> bool {
         .any(|b| matches!(b, ContentBlock::ToolResult { content, .. } if content.len() >= ARC_STUB_MIN_BYTES))
 }
 
-/// Replace every at-threshold `ToolResult` body with its citation stub. The
-/// block itself (id, `is_error`) and the paired `ToolUse` stay, so
-/// call/result pairing survives compaction.
 fn stub_large_tool_results(group: &mut [Message], session_id: Option<&str>) {
     for m in group.iter_mut() {
         for b in m.content.iter_mut() {
@@ -165,15 +110,10 @@ fn stub_large_tool_results(group: &mut [Message], session_id: Option<&str>) {
     }
 }
 
-/// Kept groups counted from the newest that still carry real image bytes;
-/// media in anything older is replaced with a citation stub.
 const RECENT_IMAGE_GROUPS: usize = 2;
-/// Media under this base64 size is cheap enough to keep wherever it lands.
+
 const IMAGE_STUB_MIN_BYTES: usize = 8 * 1024;
 
-/// Replace `Image`/`Media` blocks at/over [`IMAGE_STUB_MIN_BYTES`] with a
-/// text citation stub. The block's position and the surrounding text stay,
-/// so the model still knows an image was there and can re-view the file.
 fn stub_large_media(group: &mut [Message]) {
     for m in group.iter_mut() {
         for b in m.content.iter_mut() {
@@ -198,23 +138,11 @@ fn stub_large_media(group: &mut [Message]) {
     }
 }
 
-/// Build the retained history: group atomically → retention filter →
-/// newest-first budget walk → chronological order. Mirrors codex v2's
-/// `build_v2_compacted_history` minus the summary append (Task 5); images are
-/// charged atomically newest-first via [`image_block_tokens`]. Deviation from
-/// v2: tool-only rounds holding an at-threshold `ToolResult` survive the
-/// retention filter as citation stubs (ARC, arXiv:2607.25066) instead of
-/// dropping without a trace.
-/// Two-arg delegate of [`build_retained_with_session`] without a session id;
-/// test-only — production goes through `compact_v2`, which has the session.
 #[cfg(test)]
 pub(crate) fn build_retained(messages: &[Message], budget: usize) -> Vec<Message> {
     build_retained_with_session(messages, budget, None)
 }
 
-/// [`build_retained`] with the session id woven into citation stubs (see
-/// [`tool_result_stub`]); the plain two-arg delegate serves tests and
-/// callers without a session on disk.
 pub(crate) fn build_retained_with_session(
     messages: &[Message],
     budget: usize,
@@ -226,11 +154,7 @@ pub(crate) fn build_retained_with_session(
         if remaining == 0 {
             continue;
         }
-        // ARC citation retention (arXiv:2607.25066): a tool-only round the
-        // retention filter would drop whole instead survives as citations
-        // when its output is large enough to be worth a recall — the
-        // append-only session log is the addressable store, the tool-call
-        // id the address.
+
         let mut stubbed_group: Vec<Message>;
         let group: &[Message] = if group_is_retained(group) {
             group
@@ -249,72 +173,42 @@ pub(crate) fn build_retained_with_session(
             kept_reversed.push(truncated);
             remaining = 0;
         }
-        // Untruncatable boundary group (no retainable text/image): dropped,
-        // walk continues with `remaining` untouched.
     }
-    // Images stop earning their pixel price a few groups back: the newest
-    // `RECENT_IMAGE_GROUPS` kept groups keep them, everything older gets a
-    // citation stub (the transcript on disk still holds the bytes).
+
     for group in kept_reversed.iter_mut().skip(RECENT_IMAGE_GROUPS) {
         stub_large_media(group);
     }
     kept_reversed.into_iter().rev().flatten().collect()
 }
 
-/// Soft-threshold elision (arXiv:2609.20804, tier T4 stage M1): the share
-/// of the context window at which stale tool observations are stubbed with
-/// no provider call, well before the summary pass at the hard threshold.
-/// The paper's staged policy (0.6 soft / 0.85 hard) had the lowest cost in
-/// seven of eight model-benchmark panels at unchanged success, because cheap
-/// early elision handles most of the pressure before an LLM summary is
-/// ever needed.
 pub(crate) const SOFT_ELIDE_RATIO: f64 = 0.6;
-/// Verbatim recent window the soft pass never touches, as a share of the
-/// window (paper: 0.3), floored at [`SOFT_ELIDE_MIN_RECENT_GROUPS`].
+
 pub(crate) const SOFT_ELIDE_KEEP_RATIO: f64 = 0.3;
-/// Newest atomic groups kept verbatim whatever their size (paper: two turns).
+
 pub(crate) const SOFT_ELIDE_MIN_RECENT_GROUPS: usize = 2;
-/// Growth of the estimate, as a share of the window, before the soft stage
-/// re-runs after a pass that changed history (prompt-cache hysteresis).
+
 pub(crate) const SOFT_ELIDE_REARM_RATIO: f64 = 0.1;
 
-/// Estimated-token level at which the soft pass runs for `window`.
 pub(crate) fn soft_elide_threshold(window: usize) -> usize {
     (window as f64 * SOFT_ELIDE_RATIO) as usize
 }
 
-/// Estimate growth after which a disarmed soft stage re-arms for `window`.
 pub(crate) fn soft_elide_rearm_step(window: usize) -> usize {
     (window as f64 * SOFT_ELIDE_REARM_RATIO) as usize
 }
 
-/// Default verbatim-window budget of the soft pass for `window`.
 pub(crate) fn soft_elide_keep_budget(window: usize) -> usize {
     (window as f64 * SOFT_ELIDE_KEEP_RATIO) as usize
 }
 
-/// Price-cliff ceiling: the prompt-token count at which auto-compaction fires
-/// for a model that bills a higher tier above `cliff` tokens. The margin below
-/// the cliff is 10% of it or `reserve`, whichever is larger, so the compaction
-/// call and the request after it stay under the cliff. `None` when the margin
-/// leaves no room (a cliff at or under its margin is not a usable trigger).
 pub fn price_cliff_ceiling(cliff: usize, reserve: usize) -> Option<usize> {
     cliff
         .checked_sub((cliff / 10).max(reserve))
         .filter(|ceiling| *ceiling > 0)
 }
 
-/// Divisor of the price-cliff retained-tail cap: under a ceiling the kept tail
-/// is at most a quarter of it, so summary + tail lands well below the trigger.
 pub(crate) const PRICE_CLIFF_KEEP_DIVISOR: usize = 4;
 
-/// In-place rule-based elision of the middle region: every at-threshold
-/// `ToolResult` body older than the verbatim recent window becomes the same
-/// citation stub compaction uses ([`tool_result_stub`]); the newest groups
-/// within `keep_budget` tokens (at least [`SOFT_ELIDE_MIN_RECENT_GROUPS`])
-/// stay verbatim. Call/result pairing is untouched (only bodies change), no
-/// message is dropped or reordered, and a stub is under the threshold, so
-/// the pass is idempotent. Returns the number of results elided.
 pub(crate) fn elide_stale_tool_results(
     messages: &mut [Message],
     keep_budget: usize,
@@ -348,12 +242,6 @@ pub(crate) fn elide_stale_tool_results(
     elided
 }
 
-/// Split chronological `messages` into atomic retain/drop groups: an assistant
-/// message's `ToolUse` ids fuse with ALL immediately-following user messages
-/// that share tool ids (the full batch — gray's loop pushes one `ToolResult`
-/// user message per call, so a 3-call batch is 1 assistant + 3 user
-/// messages); unmatched strays are singleton groups. Batches therefore
-/// retain/drop atomically — never an orphaned call or result.
 pub(crate) fn atomic_groups(messages: &[Message]) -> Vec<&[Message]> {
     let mut groups = Vec::new();
     let mut i = 0;
@@ -401,8 +289,6 @@ fn has_text(m: &Message) -> bool {
     })
 }
 
-/// Assistant message with ≥1 `ToolUse` and zero text: v2's
-/// descendant-progress/completion chatter equivalent.
 fn is_tool_use_only(m: &Message) -> bool {
     m.role == Role::Assistant && tool_use_ids(m).next().is_some() && !has_text(m)
 }
@@ -411,11 +297,6 @@ fn group_tokens(group: &[Message]) -> usize {
     group.iter().map(message_tokens).sum()
 }
 
-/// Retention filter per group, mirroring v2's
-/// `is_retained_for_remote_compaction_v2`: `ToolUse`-only chatter drops
-/// together with its paired results; user/system groups are always retained
-/// (the budget walk sizes them); text-carrying assistant-only groups survive
-/// iff within the per-group cap.
 fn group_is_retained(group: &[Message]) -> bool {
     if group.iter().any(is_tool_use_only) {
         return false;
@@ -429,10 +310,6 @@ fn group_is_retained(group: &[Message]) -> bool {
     i64::try_from(group_tokens(group)).unwrap_or(i64::MAX) <= MAX_RETAINED_AGENT_MESSAGE_TOKENS
 }
 
-/// Boundary truncation with the ARC fallback: a group that does not fit with
-/// its large tool outputs priced whole first retries with those outputs
-/// elided to citation stubs before dropping whole. Groups without a
-/// stubbable result behave exactly as before.
 fn truncate_group_to_budget(
     group: &[Message],
     budget: usize,
@@ -449,21 +326,6 @@ fn truncate_group_to_budget(
     None
 }
 
-/// Middle-truncate a group's `Text` blocks to `budget` tokens while charging
-/// `Image` blocks atomically, newest-first like codex v2's
-/// `truncate_message_to_token_budget` (fits → keep; first overflow → head+tail
-/// truncate; later text dropped). An image that fits is kept whole and charged;
-/// one that doesn't is dropped whole — base64 is never split (mirrors codex's
-/// "images are handled atomically"). Fixed-cost blocks (`Thinking`,
-/// `ToolUse` args, `ToolResult` bodies) are billed by the group pricer but
-/// are not truncatable here, so they are charged first; a group whose fixed
-/// costs alone exceed `budget` is dropped whole (caller preserves `remaining`
-/// for older groups). The 16k `COMPACT_RESERVE_TOKENS` held back in
-/// `try_compact_budgeted` covers the summary/system/tools overhead outside
-/// this walk. Returns `None` when nothing retainable survives (no text or image
-/// kept — e.g. an image-only group priced out of budget); the caller then
-/// drops the whole group with `remaining` untouched. `None` also when the
-/// group holds no text or image at all.
 fn fit_group_to_budget(group: &[Message], budget: usize) -> Option<Vec<Message>> {
     let fixed: usize = group
         .iter()
@@ -493,7 +355,7 @@ fn fit_group_to_budget(group: &[Message], budget: usize) -> Option<Vec<Message>>
                         remaining -= price;
                         retained_billable = true;
                     } else {
-                        data.clear(); // atomic drop; `retain` below removes it
+                        data.clear();
                     }
                 }
                 ContentBlock::Text { text } => {
@@ -523,9 +385,6 @@ fn fit_group_to_budget(group: &[Message], budget: usize) -> Option<Vec<Message>>
     retained_billable.then_some(out)
 }
 
-/// Middle-truncate `text` to `max_tokens`: keep head+tail halves with
-/// [`TRUNCATION_MARKER`] inline. Already-small text returns untouched (no
-/// marker). Splits on char boundaries.
 fn truncate_text_to_budget(text: &str, max_tokens: usize) -> String {
     if text.len() / 4 <= max_tokens {
         return text.to_string();
@@ -549,28 +408,12 @@ fn split_head_tail(s: &str, usable: usize) -> (&str, &str) {
 #[cfg(test)]
 mod tests;
 
-/// The stable anchor for compaction: the session's original user intent.
-///
-/// arXiv:2512.22087 ("Context as a Tool") splits a long-horizon agent's
-/// context into a fixed segment — system prompt plus key user intent — and
-/// evolving memory. Gray's compaction-v2 pipeline kept only the summary and
-/// a newest-first tail, so the original request could fall out of context
-/// entirely and the agent drifted from what it was asked to do. This
-/// recovers the intent from the transcript: the first message when it is a
-/// plain user turn, or the already-pinned first message when the transcript
-/// was compacted before (recognized by the summary envelope at index 1).
-/// Returns `None` for transcripts that do not start on a user turn.
 pub(crate) fn anchor_message(messages: &[Message]) -> Option<Message> {
     let first = messages.first()?;
     if first.role != Role::User {
         return None;
     }
-    // Index 0 is the intent in both transcript shapes. In a compacted
-    // transcript it is the anchor pinned by the previous compaction (the
-    // envelope at index 1 is the tell), so re-pinning reuses the ORIGINAL
-    // intent rather than promoting the old summary to the fixed segment.
-    // Media is scrubbed either way: the pinned message rides every later
-    // request, and a several-hundred-KB image is an intent stub, not pixels.
+
     let mut anchor = first.clone();
     stub_large_media(std::slice::from_mut(&mut anchor));
     Some(anchor)

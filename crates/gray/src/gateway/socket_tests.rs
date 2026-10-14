@@ -152,8 +152,6 @@ fn unknown_verbs_still_list_every_verb() {
 
 #[test]
 fn logs_tail_reports_the_real_total_after_the_byte_cap() {
-    // Audit #21: a log far bigger than the 64KiB read cap must still report
-    // the file's total line count, not the retained tail's.
     let dir = tempfile::tempdir().unwrap();
     let logs = dir.path().join("logs");
     std::fs::create_dir_all(&logs).unwrap();
@@ -200,7 +198,6 @@ fn pull_then_ack_drains_a_platform() {
 
 #[test]
 fn identify_and_status_never_carry_the_process_argv() {
-    // argv holds the turn's `-p <prompt>` text; it must not leave the process.
     let home = tempfile::tempdir().unwrap();
     for req in [
         br#"{"id":1,"verb":"identify","protocol":1}"#.as_slice(),

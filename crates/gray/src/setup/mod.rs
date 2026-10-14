@@ -1,10 +1,3 @@
-/// Owns the terminal modes an alternate-screen modal acquires. Create it
-/// after raw mode is enabled and before the first fallible terminal write:
-/// a `?` during setup then can never strand the user's terminal. Restoration
-/// is best-effort by design — `Drop` cannot report errors, and the callers'
-/// primary result must win (audit 24.03). `LeaveAlternateScreen` alone
-/// restores the main buffer: never emit `ClearType::All`/blank-line floods
-/// on the way out, they race the compositor's synchronized flush (ghost text).
 pub(crate) struct TuiSession {
     was_raw: bool,
 }
@@ -19,14 +12,6 @@ impl TuiSession {
     }
 }
 
-/// Opens the alternate screen every modal shares: raw mode, alternate
-/// buffer, hidden cursor, and a terminal ready to `draw` on. Each modal
-/// keeps its own layout and event loop; only the 10-line terminal setup
-/// they all repeated lives here.
-///
-/// The guard is returned FIRST on purpose: drop order is reverse of
-/// declaration, so the terminal is torn down before `TuiSession` restores
-/// the main screen and the cursor.
 pub(crate) fn open_modal() -> std::io::Result<(
     TuiSession,
     ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
@@ -44,15 +29,10 @@ pub(crate) fn open_modal() -> std::io::Result<(
     Ok((session, terminal))
 }
 
-/// Anything already sitting in the input queue was typed before the modal
-/// painted — it belongs to the composer, not the modal. Left queued, a
-/// fast second Enter or a stray character lands on the modal's first
-/// `read()` and acts instantly (a picker flashing closed on a double-Enter,
-/// or a typed name applied as filter + confirm without a pause).
 fn drain_queued_events() {
     use crossterm::event::{poll, read};
     use std::time::Duration;
-    // Bounded so a terminal spewing events can't wedge the modal forever.
+
     for _ in 0..256 {
         match poll(Duration::ZERO) {
             Ok(true) => {
@@ -94,8 +74,6 @@ pub use catalog::{
     save_saved_config_at, saved_config_path, skills_auto_enabled, skills_auto_enabled_at,
 };
 
-/// The OS user's home, where app configs live (`~/.config/<app>/…`) —
-/// distinct from gray's own home, which holds gray's registries.
 pub fn user_home() -> anyhow::Result<std::path::PathBuf> {
     gray_core::paths::user_home()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve the user home; set HOME"))
@@ -161,7 +139,6 @@ pub(crate) use theme_modal::run_theme_picker;
 
 use crate::{config::Config, tui::print_wrapped};
 
-/// Thinking levels and descriptions matching Pi / Prime-Agent.
 pub const THINKING_LEVELS: &[(&str, &str)] = &[
     ("off", "No reasoning"),
     ("minimal", "Very brief reasoning"),
@@ -184,7 +161,7 @@ pub async fn run_onboarding(config: &mut Config) -> anyhow::Result<bool> {
     let _ = crossterm::terminal::disable_raw_mode();
     crate::tui::clear_screen();
     print!("\r\n");
-    // Same art as the TUI welcome (the gray ASCII logo; graychan is /hehe).
+
     crate::tui::print_logo();
     print!("\r\n");
     print_wrapped("\x1b[2mWelcome to gray by alignment\x1b[0m", 2);
@@ -221,8 +198,7 @@ pub async fn run_onboarding(config: &mut Config) -> anyhow::Result<bool> {
             crate::qol::detect::set_pending_setup(true);
         }
     }
-    // Returning users with a saved model + key skip the picker entirely:
-    // the modal only earns its interruption on first run.
+
     let model_ok = config
         .model
         .as_deref()
@@ -237,8 +213,7 @@ pub async fn run_onboarding(config: &mut Config) -> anyhow::Result<bool> {
         print!("\r\n");
         return Ok(true);
     }
-    // Onboarding only cares "is a provider ready": a removal leaves the
-    // user exactly as unconfigured as a dismissal.
+
     match run_connect_modal(config, None)? {
         ConnectOutcome::Connected => Ok(true),
         ConnectOutcome::Removed(_) | ConnectOutcome::Dismissed => Ok(false),

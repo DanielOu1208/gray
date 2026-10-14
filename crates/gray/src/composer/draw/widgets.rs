@@ -1,5 +1,3 @@
-//! Viewport widgets: input box, shimmer, status dock (split from `draw`).
-
 use super::*;
 
 pub(crate) fn shimmer_spans(text: &str, elapsed: Duration) -> Vec<Span<'static>> {
@@ -12,9 +10,7 @@ pub(crate) fn shimmer_spans(text: &str, elapsed: Duration) -> Vec<Span<'static>>
     let sweep_seconds = 2.0f32;
     let pos = ((elapsed.as_secs_f32() % sweep_seconds) / sweep_seconds * (period as f32)) as usize;
     let band_half_width = 5.0f32;
-    // Theme-driven sweep: base role → bright role. Non-Rgb theme colors
-    // (e.g. the `terminal` theme's Reset passthrough) fall back to the
-    // generic blender, which holds the base color steady.
+
     let base = crate::theme::theme().shimmer_base;
     let hilite = crate::theme::theme().text_bright;
     chars
@@ -40,32 +36,21 @@ pub(crate) fn shimmer_spans(text: &str, elapsed: Duration) -> Vec<Span<'static>>
         .collect()
 }
 
-/// Input box render state: styled lines (own internal top/bottom margin
-/// rows, `❯` prompt) plus the cursor position within them. `cur_row` is an
-/// index into `lines`, so it carries the top pad's offset.
 pub(crate) struct InputBox {
     pub(crate) lines: Vec<Line<'static>>,
-    /// Leading rows that are the box itself (painted on `surface_bg`);
-    /// any rows after them are the home rows under it.
+
     pub(crate) band_h: usize,
-    /// Rows before the box rows that are home chrome on the screen bg
-    /// (the update notice above the box), so `lines` keeps one vector.
+
     pub(crate) lead_h: usize,
-    /// The box's column: `x` cells in from the left, `width` wide. Full
-    /// width in chat; on the home screen the welcome's centered column.
+
     pub(crate) x: usize,
     pub(crate) width: usize,
     pub(crate) cur_row: usize,
     pub(crate) cur_col: usize,
 }
 
-/// One styled char of an input row: a chip's pill or label cell, or a draft
-/// char. The layout runs on these, so chips wrap and take the cursor with the
-/// draft text they sit in front of.
 pub(crate) type InputCell = (char, Style);
 
-/// Cells for the attachment chips, in order: a ` {kind} ` pill, a ` {name} `
-/// label, and one gap cell between chips. Pure; the caller brings the styles.
 pub(crate) fn chip_cells(
     chips: &[(&str, &str)],
     pill: Style,
@@ -83,21 +68,9 @@ pub(crate) fn chip_cells(
     cells
 }
 
-/// `wrap_line`'s return: each visual row's `start..end` char range plus
-/// the cursor's `(row, col)` when a cursor position was given.
 type WrapResult = (Vec<(usize, usize)>, Option<(usize, usize)>);
 
-/// Splits one logical input line into visual rows no wider than `content_w`,
-/// word-aware (break after the last space in the window, hard-cut only a word
-/// too long for a row). Returns each row as a `start..end` char range, and the
-/// `(row, col)` of `cursor` (a char index) when one is given. A cursor on a
-/// wrap point stays at the end of the row before it. An empty line is one
-/// empty row, so there is always a row to draw. Pure.
-pub(crate) fn wrap_line(
-    chars: &[char],
-    content_w: usize,
-    cursor: Option<usize>,
-) -> WrapResult {
+pub(crate) fn wrap_line(chars: &[char], content_w: usize, cursor: Option<usize>) -> WrapResult {
     let mut rows: Vec<(usize, usize)> = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {
@@ -119,8 +92,6 @@ pub(crate) fn wrap_line(
     (rows, at)
 }
 
-/// The draft's logical line and char index under `cursor` (a byte offset): the
-/// first line whose end reaches it, else the last.
 fn draft_cursor(text: &str, cursor: usize) -> (usize, usize) {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut line_start = 0usize;
@@ -136,7 +107,6 @@ fn draft_cursor(text: &str, cursor: usize) -> (usize, usize) {
     (0, 0)
 }
 
-/// Groups cells into spans, one per run of equal style.
 fn styled_runs(cells: &[InputCell]) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut run = String::new();
@@ -167,13 +137,15 @@ fn restyle_attachment_markers(cells: &mut [InputCell]) {
             i += 1;
             continue;
         }
-        let name_start = ["image: ", "file: "].iter().find_map(|p| {
-            let fits = p
-                .chars()
-                .enumerate()
-                .all(|(k, c)| cells.get(i + 1 + k).is_some_and(|cell| cell.0 == c));
-            fits.then_some(i + 1 + p.len())
-        });
+        let name_start = crate::repl::attachments::MARKER_PREFIXES
+            .iter()
+            .find_map(|p| {
+                let fits = p
+                    .chars()
+                    .enumerate()
+                    .all(|(k, c)| cells.get(i + 1 + k).is_some_and(|cell| cell.0 == c));
+                fits.then_some(i + 1 + p.len())
+            });
         let Some(name_start) = name_start else {
             i += 1;
             continue;
@@ -193,10 +165,6 @@ fn restyle_attachment_markers(cells: &mut [InputCell]) {
     }
 }
 
-/// Builds the prompt box lines from textarea state. Hoisted out of the draw
-/// closure so the dock height (and thus the viewport) can be sized before
-/// `terminal.draw` runs. `chips` open the first logical line, right after the
-/// `❯`, and wrap with the draft; an empty draft shows the ghost hint after them.
 pub(crate) fn build_input_box(
     text: &str,
     cursor: usize,
@@ -208,18 +176,14 @@ pub(crate) fn build_input_box(
     let (x, w) = home.map_or((0, w), |_| crate::composer::home_column(w));
     let content_w = w.saturating_sub(4).max(1);
 
-    // Neutral Gray palette (no blue, transparent bg — text only)
     let prompt_color = crate::theme::theme().text_soft;
     let text_primary = crate::theme::theme().text_body;
     let text_dim = crate::theme::theme().text_dim;
 
     let mut box_lines: Vec<Line<'static>> = Vec::new();
 
-    // Top padding inside the box: the blank row the box owns above its
-    // `❯` row, so the prompt never sits flush against the row above it.
     box_lines.push(Line::from(""));
 
-    // Prompt input rows. Continuation rows indent under the glyph.
     let arrow_span = Span::styled(
         " ❯ ",
         Style::default()
@@ -240,8 +204,6 @@ pub(crate) fn build_input_box(
         }
         let lead = cells.len();
         if i == 0 && text.is_empty() {
-            // Ghost hint (display-only, never submitted): e.g. "Please continue…"
-            // while a resume is pending.
             if let Some(hint) = ghost {
                 cells.extend(hint.chars().map(|c| (c, ghost_style)));
             }
@@ -250,8 +212,6 @@ pub(crate) fn build_input_box(
             restyle_attachment_markers(&mut cells[lead..]);
         }
 
-        // Word-aware wrap (question-panel `wrap_plain` parity): words never
-        // split across rows. The chips count against the first row's room.
         let chars: Vec<char> = cells.iter().map(|c| c.0).collect();
         let at_here = (i == cur_line).then_some(lead + cur_char);
         let (rows, at) = wrap_line(&chars, content_w, at_here);
@@ -272,12 +232,8 @@ pub(crate) fn build_input_box(
         }
     }
 
-    // Bottom padding inside the box
     box_lines.push(Line::from(""));
 
-    // Lead rows above the box — the transient update notice first, then
-    // the session line — flush with the box's left edge and no bottom
-    // margin, so the last one sticks right against the box's top row.
     let mut lead: Vec<Line<'static>> = Vec::new();
     if let Some(home) = home {
         for text in [home.above, home.session].into_iter().flatten() {
@@ -301,26 +257,21 @@ pub(crate) fn build_input_box(
         lead_h,
         x,
         width: w,
-        // Rows were counted from the top of the box; the lead shifts them down.
+
         cur_row: cur_row + lead_h,
         cur_col,
     }
 }
 
-/// What devin's home screen shows under the box.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct HomeRows<'a> {
     pub(crate) notice: Option<&'a str>,
-    /// The plugin counts line from the startup probe (`N plugins · M
-    /// loaded · …`); its slot stays empty until it lands.
+
     pub(crate) stats: Option<&'a str>,
     pub(crate) qol: Option<&'a str>,
-    /// A dim row directly above the box (the update notice), flush with
-    /// the box's left edge.
+
     pub(crate) above: Option<&'a str>,
-    /// The current-session line in the same lead slot, under `above` so it
-    /// stays adjacent to the box: one live band row, never a transcript
-    /// copy that could stack.
+
     pub(crate) session: Option<&'a str>,
 }
 
@@ -341,9 +292,6 @@ fn right_aligned_line(w: usize, spans: Vec<Span<'static>>) -> Line<'static> {
     Line::from(out)
 }
 
-/// One row with `left` at the box edge and `right` flush to `w`, or —
-/// when they can't share it with two cells of gap — the left row, then
-/// the right item right-aligned on its own row under it.
 fn left_right_rows(
     w: usize,
     left: Vec<Span<'static>>,
@@ -364,12 +312,6 @@ fn left_right_rows(
     }
 }
 
-/// devin's home rows under the box, on the screen bg and inside the
-/// box's column: row 1 pairs the tip (left edge) with the hints (right
-/// edge); row 2 pairs the startup notice's headline with the plugin
-/// stats, the notice's command rows continuing under it — or the stats
-/// alone on the left when there is no notice. Pairs that can't share a
-/// row stack, the right item on its own row under.
 fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
     let mut rows: Vec<Line<'static>> = Vec::new();
     let tip = crate::composer::tip_spans();
@@ -423,8 +365,6 @@ fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
     rows
 }
 
-/// The home band's height before its spacer: the empty box, the home
-/// rows and the status bar.
 pub(crate) fn home_band_h(w: usize) -> usize {
     build_input_box("", 0, w, None, Some(HomeRows::default()), &[])
         .lines
@@ -432,9 +372,6 @@ pub(crate) fn home_band_h(w: usize) -> usize {
         + 1
 }
 
-/// True when the last scrollback row is a bare blank (no bg, no glyphs):
-/// the transcript already left breathing room above the viewport (a
-/// paragraph separator, `ensure_gap`, …). Same predicate `ensure_gap` uses.
 pub(crate) fn transcript_ends_blank(transcript: &[Line<'static>]) -> bool {
     transcript.last().is_some_and(|l| {
         l.style.bg.is_none()
@@ -444,53 +381,29 @@ pub(crate) fn transcript_ends_blank(transcript: &[Line<'static>]) -> bool {
     })
 }
 
-/// Height the band reserves above its queued, live and input rows:
-///   seam    1 row, when the transcript ends in content (see [`needs_seam`])
-///   status  1 row, the shimmer text, while a turn runs
-///   breath  1 row below the status, so it never melts into the input box
 pub(crate) fn status_dock_h(has_status: bool, needs_seam: bool) -> u16 {
     u16::from(needs_seam) + if has_status { 2 } else { 0 }
 }
 
-/// Whether the band opens with the seam row: the one gap between the
-/// transcript and whatever the band shows first, the status mid-turn or the
-/// input box when idle. Gaps are paid as the prefix of the next block, never
-/// left as a trailing blank (`transcript::margins`), so the transcript ends
-/// in content and the seam is that gap; the only blank tail is the welcome
-/// banner's own trailing row. Pure for testability (`Tui::new` needs a TTY).
 pub(crate) fn needs_seam(transcript: &[Line<'static>]) -> bool {
     !transcript.is_empty() && !transcript_ends_blank(transcript)
 }
 
-/// Rows of margin the uncommitted stream tail owes the status line: one
-/// blank while a status runs under a non-empty, non-blank-ended tail — the
-/// tail-side analogue of [`needs_seam`], which only sees the committed
-/// transcript and so places the one gap *above* the tail. Idle frames owe
-/// no row (the input box's own top pad is the margin then), and a tail
-/// that already ends blank carries its own. Pure for testability
-/// (`Tui::new` needs a TTY).
 pub(crate) fn tail_gap_h(has_status: bool, tail: &[Line<'static>]) -> u16 {
     u16::from(has_status && !tail.is_empty() && !transcript_ends_blank(tail))
 }
 
-/// The painted height of a tail block (text rows + its [`tail_gap_h`]
-/// margin) once the band allowance has kept `kept` rows for it:
-/// all-or-nothing — an allowance covering only the margin would paint a
-/// lone blank row under the seam, so the tail yields entirely instead.
-/// Pure for testability.
 pub(crate) fn tail_block_h(kept: u16, gap: u16) -> u16 {
     if kept > gap { kept } else { 0 }
 }
 
-/// Queued follow-up inputs held while a turn is in flight (codex
-/// `PendingInputPreview` parity, minimal): header + `↳` dim-italic rows,
-/// then one blank row so the queue never glues onto the live tool card.
-/// One row per queued message, first line only, truncated to `w`.
 pub(crate) fn queued_preview_lines(
     queued: &std::collections::VecDeque<(String, Vec<std::path::PathBuf>)>,
+    sends: &[(String, Vec<std::path::PathBuf>)],
     w: usize,
 ) -> Vec<Line<'static>> {
-    if queued.is_empty() {
+    let total = queued.len() + sends.len();
+    if total == 0 {
         return Vec::new();
     }
     let dim = Style::default().fg(crate::theme::theme().text_muted);
@@ -500,11 +413,11 @@ pub(crate) fn queued_preview_lines(
         .add_modifier(Modifier::ITALIC);
     let mut lines = vec![Line::from(vec![
         Span::styled("• ", dim),
-        Span::styled(format!("Queued follow-up inputs ({})", queued.len()), dim),
+        Span::styled(format!("Queued follow-up inputs ({total})"), dim),
     ])];
-    // Viewport is only 10 rows — cap preview so input + footer stay visible.
+
     let max_show = 3usize;
-    for (text, attached) in queued.iter().take(max_show) {
+    for (text, attached) in queued.iter().chain(sends.iter()).take(max_show) {
         let first = text.lines().next().unwrap_or("").trim();
         let mut preview: String = first.chars().take(w.saturating_sub(6).max(8)).collect();
         if first.chars().count() > preview.chars().count() {
@@ -525,8 +438,7 @@ pub(crate) fn queued_preview_lines(
             dim_italic,
         )]));
     }
-    // The separator belongs to the queued block's measured height: a command
-    // preview stays visually distinct from the running tool below it.
+
     lines.push(Line::default());
     lines
 }

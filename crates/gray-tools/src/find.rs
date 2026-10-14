@@ -1,5 +1,3 @@
-//! The `find` tool: glob filename search. Respects .gitignore.
-
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -35,12 +33,6 @@ fn relativize(result_path: &str, search_path: &Path) -> String {
     }
 }
 
-/// Filename glob search. Respects .gitignore via `fd` when available,
-/// otherwise falls back to a manual walk.
-///
-/// The resident index answers first when it can reproduce `fd`'s contract
-/// exactly (basename globs, ignore-filtered relpaths, provably untruncated);
-/// anything else declines to the fd lane below.
 pub struct FindTool;
 
 #[async_trait]
@@ -69,11 +61,6 @@ impl Tool for FindTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: Value) -> ToolOutput {
-        // A token that is already cancelled answers before anything is
-        // spawned. Without this the cancel branch races the child's first
-        // line in the drain `select!`, so a pre-cancelled call could come
-        // back *finished* instead of cancelled — the same query, two
-        // answers, decided by scheduling.
         if ctx.cancel.is_cancelled() {
             return finish("cancelled by user".to_string());
         }
@@ -99,18 +86,14 @@ impl Tool for FindTool {
             Err(e) => return fail(format!("Path not found: {}: {e}", search_path.display())),
         }
 
-        // The resident index answers `fd`'s contract without a spawn or a
-        // walk; anything it cannot answer exactly declines to fd below.
         if let Some(out) = indexed_find(&pattern, &search_path, effective_limit).await {
             return out;
         }
 
-        // Try fd first (preferred, respects .gitignore correctly).
         if let Some(output) = try_fd(&pattern, &search_path, effective_limit, &ctx.cancel).await {
             return output;
         }
 
-        // Fallback: manual recursive walk with simple glob matching.
         fallback_walk(&pattern, &search_path, effective_limit).await
     }
 }
@@ -121,14 +104,12 @@ async fn try_fd(
     effective_limit: usize,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Option<ToolOutput> {
-    // Probe fd availability quickly.
     let mut args: Vec<String> = vec![
         "--glob".to_string(),
         "--color=never".to_string(),
         "--hidden".to_string(),
     ];
 
-    // Detect git repo to decide --no-require-git
     let mut inside_git = false;
     let mut cur = search_path.to_path_buf();
     loop {
@@ -210,9 +191,9 @@ async fn try_fd(
             }
         }
     }
-    // Always reap: normal EOF and cancel kill both land here.
+
     let status = child.wait().await.ok()?;
-    // Cancel must not hang on a grandchild-held stderr pipe.
+
     let stderr_str = if cancelled {
         stderr_handle.abort();
         String::new()
@@ -223,7 +204,6 @@ async fn try_fd(
         return Some(finish("cancelled by user".to_string()));
     }
 
-    // If fd exited with error and produced no output, treat as failure and fall back.
     if lines.is_empty()
         && let Some(code) = status.code()
         && code != 0
@@ -252,17 +232,20 @@ async fn try_fd(
     Some(finish_find(relativized, effective_limit))
 }
 
-/// The index lane: `fd`'s contract off the resident engine, behind the same
-/// `GRAY_SEARCH_INDEX` switch `gray find` honors. `None` = fd answers.
 #[cfg(unix)]
-async fn indexed_find(pattern: &str, search_path: &Path, effective_limit: usize) -> Option<ToolOutput> {
+async fn indexed_find(
+    pattern: &str,
+    search_path: &Path,
+    effective_limit: usize,
+) -> Option<ToolOutput> {
     let crate::search_cmd::IndexBackend::Fs(pool) = crate::search_cmd::global_index() else {
         return None;
     };
     let (dir, pat) = (search_path.to_path_buf(), pattern.to_string());
-    let hits = crate::search_cmd::spawn_index(move || pool.indexed_glob(&dir, &pat, effective_limit))
-        .await?;
-    // fd prints directory hits bare; the index marks them with a slash.
+    let hits =
+        crate::search_cmd::spawn_index(move || pool.indexed_glob(&dir, &pat, effective_limit))
+            .await?;
+
     Some(finish_find(
         hits.iter()
             .map(|h| h.strip_suffix('/').unwrap_or(h).to_string())
@@ -272,12 +255,14 @@ async fn indexed_find(pattern: &str, search_path: &Path, effective_limit: usize)
 }
 
 #[cfg(not(unix))]
-async fn indexed_find(_pattern: &str, _search_path: &Path, _effective_limit: usize) -> Option<ToolOutput> {
+async fn indexed_find(
+    _pattern: &str,
+    _search_path: &Path,
+    _effective_limit: usize,
+) -> Option<ToolOutput> {
     None
 }
 
-/// Shared rendering for both lanes: relpaths, newline-joined, with the
-/// limit and truncation notices `fd`'s output would carry.
 fn finish_find(rel_paths: Vec<String>, effective_limit: usize) -> ToolOutput {
     if rel_paths.is_empty() {
         return finish("No files found matching pattern".to_string());
@@ -308,11 +293,7 @@ fn finish_find(rel_paths: Vec<String>, effective_limit: usize) -> ToolOutput {
     finish(output)
 }
 
-/// Fallback when `fd` is missing: recursive walk via the `ignore` crate
-/// (real .gitignore handling) + `globset` matching with fd `--glob`
-/// semantics (no `/` in pattern = basename match, else rel-path match).
 async fn fallback_walk(pattern: &str, search_path: &Path, effective_limit: usize) -> ToolOutput {
-    // Mirror the `--full-path` anchoring `try_fd` applies.
     let full_pattern = if pattern.contains('/')
         && !pattern.starts_with('/')
         && !pattern.starts_with("**/")
@@ -333,10 +314,9 @@ async fn fallback_walk(pattern: &str, search_path: &Path, effective_limit: usize
 
     let mut results: Vec<String> = Vec::new();
     let walker = ignore::WalkBuilder::new(search_path)
-        .hidden(false) // fd --hidden parity: include dotfiles
-        .require_git(false) // honor .gitignore outside repos, like before
+        .hidden(false)
+        .require_git(false)
         .filter_entry(|e| {
-            // Always prune these, even when not ignored.
             !(e.file_type().is_some_and(|t| t.is_dir())
                 && (e.file_name() == ".git" || e.file_name() == "node_modules"))
         })
@@ -350,7 +330,7 @@ async fn fallback_walk(pattern: &str, search_path: &Path, effective_limit: usize
             continue;
         };
         if rel.as_os_str().is_empty() {
-            continue; // the root itself
+            continue;
         }
         let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
         let rel_str = rel.to_string_lossy().replace('\\', "/");
@@ -360,7 +340,6 @@ async fn fallback_walk(pattern: &str, search_path: &Path, effective_limit: usize
             matcher.is_match(&rel_str)
         };
         if hit {
-            // Directories keep a trailing slash, as before.
             if is_dir && !rel_str.ends_with('/') {
                 results.push(format!("{rel_str}/"));
             } else {

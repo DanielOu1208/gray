@@ -1,5 +1,3 @@
-// temporary: appended to lib.rs tests then removed
-
 use super::*;
 use gray_core::message::ContentBlock;
 use tempfile::tempdir;
@@ -62,8 +60,7 @@ async fn append_heals_damaged_tail() {
     let mut raw = tokio::fs::read_to_string(&path).await.unwrap();
     raw.push_str("{torn");
     tokio::fs::write(&path, raw).await.unwrap();
-    // The torn final line is truncated under the lock and the append
-    // lands as if the crash never happened.
+
     store.append(&id, &Message::user("two")).await.unwrap();
     let raw = tokio::fs::read_to_string(&path).await.unwrap();
     assert!(!raw.contains("{torn"));
@@ -90,7 +87,7 @@ async fn traversal_ids_rejected_at_storage_boundary() {
         assert!(store.load(&id).await.is_err(), "load accepted: {bad:?}");
         assert!(store.delete(&id).await.is_err(), "delete accepted: {bad:?}");
     }
-    // UUIDs and safe legacy IDs still work.
+
     let id = SessionId::generate();
     store
         .create(SessionMeta::new(id.clone(), 1, "/tmp", "t"))
@@ -217,7 +214,7 @@ async fn legacy_entry_without_duration_loads_as_none() {
         .unwrap();
     let path = store.session_path(&id).unwrap();
     let mut raw = tokio::fs::read_to_string(&path).await.unwrap();
-    // Legacy entry shape: no duration_ms field.
+
     raw.push_str(r#"{"entry_id":0,"parent_id":null,"timestamp":1,"message":{"role":"user","content":[{"type":"text","text":"hi"}]},"usage":null}"#);
     raw.push('\n');
     tokio::fs::write(&path, raw).await.unwrap();
@@ -226,10 +223,6 @@ async fn legacy_entry_without_duration_loads_as_none() {
     assert_eq!(entries[0].duration_ms, None);
 }
 
-/// Compact -> reload roundtrip: the store must reproduce the ACTIVE
-/// transcript (no duplication, compaction not undone), stay appendable
-/// after the boundary, and let a second compaction supersede the first.
-/// Old marker-less files load whole (covered by the pre-existing tests).
 #[tokio::test]
 async fn compaction_replacement_reloads_as_active_transcript() {
     let dir = tempdir().unwrap();
@@ -253,16 +246,16 @@ async fn compaction_replacement_reloads_as_active_transcript() {
         vec!["summary".to_string(), "ack".to_string()],
         "reload must replay the active transcript only, got {texts:?}"
     );
-    // Listing describes the post-compact session, not the buried opener.
+
     let summaries = store.list().await;
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].first_user_text.as_deref(), Some("summary"));
-    // Post-compaction turns append after the boundary and still reload.
+
     store.append(&id, &Message::user("after")).await.unwrap();
     let (_, entries) = store.load(&id).await.unwrap();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[2].message.text_content(), "after");
-    // A second compaction supersedes the first.
+
     store
         .append_compaction_replacement(&id, &[Message::user("s2")])
         .await
@@ -321,7 +314,7 @@ async fn list_reports_latest_message_after_compaction() {
         .unwrap();
     let s = &store.list().await[0];
     assert_eq!(s.last_user_text.as_deref(), Some("summary"));
-    // Post-compact turns keep it current.
+
     store.append(&id, &Message::user("after")).await.unwrap();
     let s = &store.list().await[0];
     assert_eq!(s.last_user_text.as_deref(), Some("after"));
@@ -450,7 +443,7 @@ async fn load_rejects_duplicate_entry_ids() {
     store.append(&id, &Message::user("b")).await.unwrap();
     let path = store.session_path(&id).unwrap();
     let raw = tokio::fs::read_to_string(&path).await.unwrap();
-    // Duplicate the last entry line verbatim (same entry_id).
+
     let last = raw.lines().last().unwrap().to_string();
     let mut dup = raw.clone();
     dup.push_str(&last);
@@ -499,7 +492,7 @@ async fn load_rejects_parent_cycle() {
     let path = store.session_path(&id).unwrap();
     let raw = tokio::fs::read_to_string(&path).await.unwrap();
     let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
-    // Entry 0 (lines[1]) parent -> entry 1's id, entry 1 (lines[2]) parent -> entry 0's id.
+
     let mut e0: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();
     let mut e1: serde_json::Value = serde_json::from_str(&lines[2]).unwrap();
     let id0 = e0["entry_id"].as_u64().unwrap();
@@ -541,8 +534,7 @@ async fn concurrent_appends_from_two_handles_keep_unique_ids() {
         .create(SessionMeta::new(SessionId::new("conc1"), 1, "/tmp", "m"))
         .await
         .unwrap();
-    // Two handles = two per-instance mutexes: only a cross-process file
-    // lock serializes them. 20 concurrent appends must yield 20 unique IDs.
+
     let sa = std::sync::Arc::new(JsonlSessionStore::new(dir.path()));
     let sb = std::sync::Arc::new(JsonlSessionStore::new(dir.path()));
     let mut js = Vec::new();
@@ -576,7 +568,7 @@ async fn remember_recall_roundtrip() {
         .create(SessionMeta::new(id.clone(), 1, cwd.clone(), "m"))
         .await
         .unwrap();
-    // create() remembers; explicit remember is idempotent.
+
     store.remember(&id, &cwd).await;
     assert_eq!(store.recall(&cwd).await, Some(id.clone()));
     assert_eq!(store.recall_validated(&cwd).await, Some(id.clone()));
@@ -595,9 +587,9 @@ async fn recall_returns_none_for_other_cwd_and_garbage() {
         .create(SessionMeta::new(id.clone(), 1, a.clone(), "m"))
         .await
         .unwrap();
-    // Different cwd hashes to a different pointer file.
+
     assert_eq!(store.recall(&b).await, None);
-    // Garbage in the pointer file never surfaces.
+
     std::fs::write(store.remember_path_for_cwd(&a), "not\na session\n").unwrap();
     assert_eq!(store.recall(&a).await, None);
     assert_eq!(store.recall_validated(&a).await, None);
@@ -617,7 +609,7 @@ async fn recall_validated_none_after_delete() {
     assert!(store.recall_validated(&cwd).await.is_some());
     store.delete(&id).await.unwrap();
     assert_eq!(store.recall_validated(&cwd).await, None);
-    // Stale pointer degrades to the list fallback, never an error.
+
     assert!(store.list().await.is_empty());
 }
 
@@ -680,7 +672,7 @@ async fn origin_tagged_session_never_owns_the_recall_pointer() {
         .create(SessionMeta::new(user.clone(), 1, cwd.clone(), "m"))
         .await
         .unwrap();
-    // A subagent child minted later must not steal `-c`.
+
     store
         .create(
             SessionMeta::new(child.clone(), 2, cwd.clone(), "m")
@@ -689,10 +681,10 @@ async fn origin_tagged_session_never_owns_the_recall_pointer() {
         .await
         .unwrap();
     assert_eq!(store.recall_validated(&cwd).await, Some(user.clone()));
-    // …and loading it (steer's `--session` path) must not steal it either.
+
     store.load(&child).await.unwrap();
     assert_eq!(store.recall_validated(&cwd).await, Some(user));
-    // The child stays loadable — steering works — it just never surfaces.
+
     let (meta, _) = store.load(&child).await.unwrap();
     assert_eq!(meta.origin.as_deref(), Some("subagent"));
 }
@@ -741,7 +733,7 @@ async fn cross_handle_append_continues_ids_via_rescan() {
             .await
             .unwrap();
     }
-    // Fresh handle, empty cache: ids continue from the file, not 0.
+
     let fresh = JsonlSessionStore::new(dir.path());
     let got = fresh.append(&id, &Message::user("next")).await.unwrap();
     assert_eq!(got, 3);
@@ -779,8 +771,7 @@ async fn store_dir_and_files_are_owner_only() {
 async fn a_torn_header_is_left_for_its_writer() {
     let dir = tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path());
-    // A creator between `create_new` and the end of its header write: the
-    // first line exists but is not terminated yet.
+
     let id = SessionId::new("torn");
     let path = store.session_path(&id).unwrap();
     std::fs::write(&path, "{\"kind\":\"head").unwrap();
@@ -794,7 +785,7 @@ async fn a_torn_header_is_left_for_its_writer() {
         .filter(|n| n.contains("corrupt"))
         .collect();
     assert!(quarantined.is_empty(), "{quarantined:?}");
-    // A complete, unparseable header is still real corruption: it goes.
+
     std::fs::write(&path, "not json\n").unwrap();
     assert_eq!(store.list().await.len(), 0);
     let quarantined: Vec<String> = std::fs::read_dir(dir.path())
@@ -806,13 +797,6 @@ async fn a_torn_header_is_left_for_its_writer() {
     assert_eq!(quarantined.len(), 1, "{quarantined:?}");
 }
 
-// ── listing reads the two ends, not the whole file ──
-
-/// Write a session file directly: big enough that the head and tail
-/// cannot both fit in one `SUMMARY_END_BYTES` slice, with a user turn at
-/// each end and a wall of assistant text between. Built as bytes rather
-/// than 4,000 locked appends — the reader is what is under test, not the
-/// writer.
 fn write_big_session(dir: &std::path::Path, id: &str, tail_turn: &str) {
     let header = serde_json::json!({
         "version": 1, "id": id, "timestamp": 1_000u64, "cwd": "/tmp", "model": "test",
@@ -883,8 +867,7 @@ async fn list_summarizes_a_large_session_from_its_two_ends() {
 async fn listing_order_is_newest_activity_first() {
     let dir = tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path());
-    // Started oldest-first, but the middle session is touched last: the
-    // row's age column must come out monotonic.
+
     for (id, started) in [("old", 100_u64), ("mid", 200), ("new", 300)] {
         let sid = SessionId::new(id);
         store
@@ -926,8 +909,7 @@ async fn a_small_session_is_still_summarized_exactly() {
 async fn a_compaction_boundary_in_the_tail_resets_the_preview() {
     let dir = tempdir().unwrap();
     write_big_session(dir.path(), "compacted", "after compaction");
-    // A boundary just before the last turn: what the head remembered
-    // before it is superseded.
+
     let path = dir.path().join("compacted.jsonl");
     let mut text = std::fs::read_to_string(&path).unwrap();
     let boundary = serde_json::json!({
@@ -952,9 +934,6 @@ async fn a_compaction_boundary_in_the_tail_resets_the_preview() {
     );
 }
 
-/// `/undo` drops the tail of the conversation and hands it back, so the REPL
-/// can re-send it. The kept entries must still form a valid chain afterwards,
-/// which is what the renumbering buys.
 #[tokio::test]
 async fn rewind_drops_the_tail_and_renumbers_the_chain() {
     let dir = tempdir().unwrap();
@@ -982,17 +961,13 @@ async fn rewind_drops_the_tail_and_renumbers_the_chain() {
     let (_, entries) = store.load(&id).await.unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].message.text_content(), "answer");
-    // Ids stay verbatim: a tail truncation never invalidates the chain, which
-    // only ever points backwards.
+
     assert_eq!(entries[0].entry_id, 0);
     assert_eq!(entries[0].parent_id, None);
     assert_eq!(entries[1].entry_id, 1);
     assert_eq!(entries[1].parent_id, Some(0));
 }
 
-/// After a compaction the file holds the superseded prefix, a boundary marker
-/// and the active transcript. Rewinding the active tail must not delete the
-/// marker: that is what stops the pre-compaction history from coming back.
 #[tokio::test]
 async fn rewind_keeps_the_compaction_marker_and_its_superseded_prefix() {
     let dir = tempdir().unwrap();
@@ -1036,8 +1011,6 @@ async fn rewind_keeps_the_compaction_marker_and_its_superseded_prefix() {
     assert!(!after.iter().any(|e| e.message.text_content() == "ancient"));
 }
 
-/// A rewind is destructive by design, so the complete original must survive in
-/// `archive/` — that file is the only way back.
 #[tokio::test]
 async fn rewind_archives_the_original_file() {
     let dir = tempdir().unwrap();
@@ -1075,8 +1048,6 @@ async fn rewind_archives_the_original_file() {
     );
 }
 
-/// Nothing to drop is not an error: `/undo` twice in a row says so rather than
-/// failing, and `keep >= len` must leave the file untouched (no archive).
 #[tokio::test]
 async fn rewind_past_the_start_drops_nothing() {
     let dir = tempdir().unwrap();
@@ -1096,9 +1067,6 @@ async fn rewind_past_the_start_drops_nothing() {
     );
 }
 
-/// Deterministic xorshift64: the property sweep below must be reproducible in
-/// CI (a failing seed has to reproduce), and the crate takes no rng dependency
-/// for a test.
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -1114,9 +1082,6 @@ impl Rng {
     }
 }
 
-/// One varied turn: the block kinds that actually reach a session file, with
-/// the awkward payloads (quotes, newlines, unicode, JSON metacharacters, empty
-/// tool args) that a JSONL round-trip has to survive verbatim.
 fn random_message(rng: &mut Rng, i: usize) -> Message {
     let role = if rng.below(2) == 0 {
         Role::User
@@ -1155,11 +1120,6 @@ fn random_message(rng: &mut Rng, i: usize) -> Message {
     Message::new(role, content)
 }
 
-/// The invariant that makes a resumable session actually resumable: whatever was
-/// appended must come back out of `load` unchanged, once, in order — and a
-/// compaction must leave exactly the post-boundary transcript replayed, nothing
-/// more, nothing less. Every existing test here covers one hand-picked shape;
-/// this sweeps hundreds of random ones.
 #[tokio::test]
 async fn random_session_log_replays_exactly_what_was_appended() {
     for seed in 1..=120u64 {
@@ -1176,14 +1136,13 @@ async fn random_session_log_replays_exactly_what_was_appended() {
             .await
             .unwrap();
 
-        // Append a random transcript, remembering it independently.
         let mut appended: Vec<Message> = Vec::new();
         for i in 0..rng.below(12) {
             let msg = random_message(&mut rng, i as usize);
             store.append(&id, &msg).await.unwrap();
             appended.push(msg);
         }
-        // Zero or more compactions, each superseding everything before it.
+
         let compactions = rng.below(3);
         let mut active: Vec<Message> = appended;
         for c in 0..compactions {
@@ -1196,7 +1155,7 @@ async fn random_session_log_replays_exactly_what_was_appended() {
                 .await
                 .unwrap();
             active = replacement;
-            // Turns appended after a boundary are ordinary history again.
+
             if rng.below(2) == 0 {
                 let msg = random_message(&mut rng, 200 + c as usize);
                 store.append(&id, &msg).await.unwrap();
@@ -1212,8 +1171,6 @@ async fn random_session_log_replays_exactly_what_was_appended() {
             "seed {seed}: replay diverged (compactions={compactions})"
         );
 
-        // Sequence ids strictly increase across the active window, and the
-        // graph survives a second read with no drift from tail repair.
         for pair in entries.windows(2) {
             assert!(
                 pair[1].entry_id > pair[0].entry_id,
@@ -1225,21 +1182,6 @@ async fn random_session_log_replays_exactly_what_was_appended() {
     }
 }
 
-/// A crash-interrupted final write must cost exactly that one entry, and the
-/// file must stay appendable afterwards. Cut at every byte offset of the final
-/// record rather than one hand-picked spot: a tear can land anywhere, and the
-/// repair must drop the torn entry without disturbing the ones before it.
-///
-/// Two cut classes are covered deliberately. A cut on a character boundary
-/// leaves valid UTF-8; a cut *inside* a multi-byte character leaves invalid
-/// UTF-8 in the tail and must be treated the same way, because a crash does not
-/// know where the character boundaries are. Invalid bytes that precede a
-/// complete line are real mid-file corruption and still error (covered by
-/// `invalid_utf8_before_the_final_record_is_still_corruption`).
-///
-/// The last position (`cut == record length`) is distinct from the rest: the
-/// record is complete but its newline is missing, which exercises the
-/// missing-trailing-newline repair and must keep both entries.
 #[tokio::test]
 async fn torn_final_line_at_every_offset_costs_only_that_entry() {
     let dir = tempfile::tempdir().unwrap();
@@ -1249,9 +1191,7 @@ async fn torn_final_line_at_every_offset_costs_only_that_entry() {
         .await
         .unwrap();
     store.append(&id, &Message::user("first")).await.unwrap();
-    // A real second entry, written through the store, is the record under test.
-    // It must carry multi-byte characters, or the mid-UTF-8 cut class is empty
-    // and the sweep below silently loses half its meaning.
+
     store
         .append(&id, &Message::user("second \u{00e9}\u{4e2d}\u{1F600} tail"))
         .await
@@ -1273,7 +1213,6 @@ async fn torn_final_line_at_every_offset_costs_only_that_entry() {
     let mut boundary_cuts = 0;
     let mut mid_utf8_cuts = 0;
     for cut in 1..record.len() {
-        // Everything before the final record, plus `cut` bytes of it.
         let damaged = &bytes[..record_start + cut];
         tokio::fs::write(&path, damaged).await.unwrap();
         let mid_utf8 = std::str::from_utf8(damaged).is_err();
@@ -1288,7 +1227,7 @@ async fn torn_final_line_at_every_offset_costs_only_that_entry() {
             "cut {cut} (mid-utf8={mid_utf8}): a torn final record must cost only itself"
         );
         assert_eq!(entries[0].message.text_content(), "first");
-        // The whole point of the repair: the session is still appendable.
+
         store
             .append(&id, &Message::user("after"))
             .await
@@ -1304,9 +1243,7 @@ async fn torn_final_line_at_every_offset_costs_only_that_entry() {
             boundary_cuts += 1;
         }
     }
-    // The sweep is only meaningful if it actually exercises both classes, so a
-    // record with no multi-byte character (which would make the mid-UTF8 class
-    // empty) is a broken fixture, not a lucky pass.
+
     assert!(
         boundary_cuts > 0,
         "no character-boundary cuts were exercised"
@@ -1316,8 +1253,6 @@ async fn torn_final_line_at_every_offset_costs_only_that_entry() {
         "no mid-UTF-8 cuts were exercised; the torn record must contain a multi-byte character"
     );
 
-    // Complete record, missing its newline: a different repair branch, and it
-    // must keep both entries.
     let damaged = &bytes[..record_start + record.len()];
     tokio::fs::write(&path, damaged).await.unwrap();
     let (_, entries) = store.load(&id).await.unwrap();
@@ -1334,9 +1269,6 @@ async fn torn_final_line_at_every_offset_costs_only_that_entry() {
     );
 }
 
-/// The tail-tear rule must not swallow real corruption: invalid UTF-8 that sits
-/// *before* a complete record means the file was not simply truncated mid-write,
-/// so loading it stays an error rather than a silent repair.
 #[tokio::test]
 async fn invalid_utf8_before_the_final_record_is_still_corruption() {
     let dir = tempfile::tempdir().unwrap();
@@ -1365,7 +1297,7 @@ async fn invalid_utf8_before_the_final_record_is_still_corruption() {
         first_line_end < last_start,
         "need a record before the last one"
     );
-    // Invalid bytes inside the first record, with a complete record after it.
+
     let mut damaged = Vec::new();
     damaged.extend_from_slice(&bytes[..first_line_end]);
     damaged.extend_from_slice(&[0xFF, 0xFE]);
@@ -1389,7 +1321,7 @@ fn generate_makes_three_word_names_from_the_lists() {
         assert!(PHENOMENON_WORDS.contains(&parts[2]), "{s}");
         assert!(valid_session_id(s), "{s}");
     }
-    // No duplicates inside a list: a word maps to exactly one slot.
+
     for list in [QUALIFIER_WORDS, MIDDLE_WORDS, PHENOMENON_WORDS] {
         let mut sorted = list.to_vec();
         sorted.sort_unstable();
@@ -1421,7 +1353,6 @@ async fn fresh_id_skips_taken_names_and_salts_when_exhausted() {
     assert_eq!(id.as_str(), "free-two");
     assert_eq!(calls, 2);
 
-    // Every candidate taken: after FRESH_ID_ATTEMPTS the id is hex-salted.
     store
         .create(SessionMeta::new(
             SessionId::new("taken-always"),
@@ -1441,15 +1372,10 @@ async fn fresh_id_skips_taken_names_and_salts_when_exhausted() {
     assert!(valid_session_id(salted.as_str()));
 }
 
-// UNRUN (cargo test banned under X): run in TTY/CI.
-// Open-locks: `<id>.open` marks the process that owns a live session.
-
 #[tokio::test]
 async fn open_lock_blocks_second_owner_and_names_holder_pid() {
     let dir = tempdir().unwrap();
-    // Two store handles = two "processes" as far as the flock is
-    // concerned (the lock lives on the open file description, not the
-    // store instance).
+
     let sa = JsonlSessionStore::new(dir.path());
     let sb = JsonlSessionStore::new(dir.path());
     let id = SessionId::new("open1");
@@ -1461,17 +1387,13 @@ async fn open_lock_blocks_second_owner_and_names_holder_pid() {
     assert!(sa.open_lock_held(&id).await);
     assert!(sb.open_lock_held(&id).await);
 
-    // The in-process registry would merge sb's acquire into sa's lock
-    // (by design — same process, same owner). Stash it so sb exercises
-    // the OS flock path a genuine second process always hits, then
-    // restore — sa's re-acquire below must merge again.
     let stashed = std::mem::take(&mut *OPEN_LOCKS.lock().expect("open-lock registry poisoned"));
     let err = sb.acquire_open(&id).await.unwrap_err();
     *OPEN_LOCKS.lock().expect("open-lock registry poisoned") = stashed;
     match err {
         SessionError::Locked { id: locked_id, pid } => {
             assert_eq!(locked_id, id);
-            // The holder stamped its own pid for the error to name.
+
             assert_eq!(pid, Some(std::process::id()));
         }
         other => panic!("expected Locked, got {other:?}"),
@@ -1487,8 +1409,6 @@ async fn open_lock_blocks_second_owner_and_names_holder_pid() {
          Close the other instance before opening it here."
     );
 
-    // Same-process re-acquire shares the held lock (registry), never
-    // reports Locked on ourselves.
     let again = sa.acquire_open(&id).await.unwrap();
     drop(guard);
     assert!(sb.open_lock_held(&id).await, "shared guard keeps the claim");
@@ -1513,7 +1433,7 @@ async fn open_lock_reacquire_after_release_overwrites_stale_pid() {
         let _g = store.acquire_open(&id).await.unwrap();
     }
     assert!(!store.open_lock_held(&id).await);
-    // The released file's stale PID is never mistaken for a live holder.
+
     let _g = store.acquire_open(&id).await.unwrap();
     assert!(store.open_lock_held(&id).await);
 }
@@ -1536,7 +1456,7 @@ async fn delete_and_prune_leave_open_sessions_alone() {
         store.delete(&open).await,
         Err(SessionError::Locked { .. })
     ));
-    // Prune removes the old unlocked session, skips the live one.
+
     let removed = store.prune_before(u64::MAX).await.unwrap();
     assert_eq!(removed, vec![old]);
     assert!(dir.path().join("open3.jsonl").exists());

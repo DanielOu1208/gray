@@ -40,8 +40,7 @@ fn auth() -> BTreeMap<String, catalog::AuthEntry> {
 fn connected_then_popular_then_custom_then_stable_remainder() {
     let mut items = build_connect_items(&load_catalog().unwrap(), &[], &[]);
     let len = items.len();
-    // Nothing connected or detected: the popular block leads the list —
-    // the cursor's row 0 is OpenAI — Custom tails it, then the catalog.
+
     catalog::sort_connect_items(&mut items, &config(), &BTreeMap::new(), &BTreeMap::new());
     let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
     assert_eq!(&ids[..4], ["openai", "anthropic", "google", "openrouter"]);
@@ -137,10 +136,9 @@ fn provider_selection_stays_visible_through_separator_scroll_and_filter() {
                     .map(|cell| cell.symbol())
                     .collect();
                 if height < 10 {
-                    continue; // Existing compact layout has no provider rows; draw must not panic.
+                    continue;
                 }
                 if let Some(item) = filtered.get(sel) {
-                    // Narrow screens must show the beginning of the selected name.
                     let expected: String = item.name.chars().take(5).collect();
                     assert!(
                         highlighted.contains(&expected),
@@ -167,8 +165,7 @@ fn separator_is_after_custom_not_after_first_connected_provider() {
         text_dim: Color::DarkGray,
     };
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-    // The list window is shorter than the row above Custom: only a
-    // selection past Custom scrolls the separator into view.
+
     let sel = items.iter().position(|i| i.id == "custom").unwrap() + 1;
     terminal
         .draw(|frame| {
@@ -190,16 +187,13 @@ fn separator_is_after_custom_not_after_first_connected_provider() {
         .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect())
         .collect();
     let custom = rows.iter().position(|r| r.contains("Custom")).unwrap();
-    // The popular block ends with xAI and Mistral; Custom tails it and the
-    // separator keeps sitting directly under Custom.
+
     assert!(rows[custom - 2].contains("xAI"));
     assert!(rows[custom - 1].contains("Mistral"));
     assert!(rows[custom + 1].contains("────"));
     assert!(!rows[custom + 2].contains("OpenAI"));
 }
 
-/// The key screen fits its longest lines: at 80 columns the full key URL,
-/// the full rejection status, and the env-var provenance are all readable.
 #[test]
 fn key_screen_shows_full_url_and_rejection_at_eighty_columns() {
     let item = ConnectItem {
@@ -253,7 +247,7 @@ fn key_screen_shows_full_url_and_rejection_at_eighty_columns() {
             text.contains("(from $ANTHROPIC_API_KEY)"),
             "{width}: {text}"
         );
-        // Status, provenance and the URL are three distinct rows.
+
         let row_of = |needle: &str| {
             rows.iter()
                 .position(|r| r.contains(needle))
@@ -265,7 +259,7 @@ fn key_screen_shows_full_url_and_rejection_at_eighty_columns() {
             row_of("Get a key:"),
         );
         assert!(status < env && env < url, "{width}: {status} {env} {url}");
-        // The footer sits below every hint row — no overlap.
+
         assert!(row_of("update") > url, "{width}: {text}");
     }
 }
@@ -303,7 +297,7 @@ fn plugin_login_status_does_not_overwrite_title() {
         .position(|r| r.contains("Checking your terminal login"))
         .unwrap();
     assert!(status > title);
-    // The dialog hugs its content: header + status + esc-cancel, no dead space.
+
     let box_rows = (0..24)
         .filter(|&y| (0..80).any(|x| buf[(x, y)].bg == Color::Black))
         .count();

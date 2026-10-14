@@ -1,8 +1,5 @@
 use super::*;
 
-// These tests used to mutate HOME while unrelated tests read it. A mutex
-// local to this file cannot protect those readers. Reuse the subprocess pattern
-// from home_paths: set environment before startup, run one exact test per child.
 fn isolated_home(test: &str) -> bool {
     if std::env::var("GRAY_SKILLS_TEST_CHILD").as_deref() == Ok(test) {
         return false;
@@ -98,23 +95,21 @@ async fn skills_context_matches_fresh_discovery_and_rescans_on_change() {
     };
 
     let plugin = SkillsPlugin::default();
-    // Fingerprint is stable with no changes…
+
     let fp1 = crate::skills::discovery_fingerprint(work.path());
     assert_eq!(fp1, crate::skills::discovery_fingerprint(work.path()));
 
     write_skill("demo-a", "first demo skill");
-    // …moves when a skill appears…
+
     let fp2 = crate::skills::discovery_fingerprint(work.path());
     assert_ne!(fp1, fp2, "fingerprint must move on new skill");
-    // …and the served block matches a fresh discovery exactly (no
-    // behavior change vs per-turn rediscovery)…
+
     let a = plugin.prompt_context(&cwd).await;
     assert_eq!(a, fresh_block());
     assert!(a.unwrap().contains("first demo skill"));
-    // …is stable across turns…
+
     assert_eq!(plugin.prompt_context(&cwd).await, fresh_block());
 
-    // …moves on in-place edits (dir mtime alone would miss these)…
     write_skill("demo-a", "edited demo description");
     let fp3 = crate::skills::discovery_fingerprint(work.path());
     assert_ne!(fp2, fp3, "fingerprint must move on content edit");
@@ -122,7 +117,6 @@ async fn skills_context_matches_fresh_discovery_and_rescans_on_change() {
     assert_eq!(b, fresh_block());
     assert!(b.unwrap().contains("edited demo description"));
 
-    // …and on removal.
     std::fs::remove_dir_all(work.path().join(".gray/skills/demo-a")).unwrap();
     let fp4 = crate::skills::discovery_fingerprint(work.path());
     assert_ne!(fp3, fp4, "fingerprint must move on removal");
@@ -137,7 +131,7 @@ async fn skills_plugin_is_context_only_and_serves_block() {
     }
     use gray_plugin::Plugin;
     let plugin = SkillsPlugin::default();
-    // Bash-only: no tools ride this plugin.
+
     assert!(
         plugin.tools().is_empty(),
         "skills plugin must carry no tools"
@@ -192,8 +186,7 @@ fn project_context_block_serves_nearest_ancestor() {
         block.trim_end().ends_with("</project_context>"),
         "unclosed: {block}"
     );
-    // Self-describing: a stored prompt that never mentions the block still
-    // learns what it is and how to weigh it.
+
     assert!(
         block.contains("outrank general defaults"),
         "no semantics line: {block}"
@@ -234,7 +227,7 @@ fn project_context_block_strips_rationale_comments_for_the_executor() {
 fn strip_rationale_comments_is_identity_without_comments() {
     let body = "# Title\n\n- Rule one.\n- Rule two.\n";
     assert_eq!(strip_rationale_comments(body), body);
-    // A heading is not a comment, and neither is prose.
+
     assert_eq!(
         strip_rationale_comments("# Requirements:\n- Rule."),
         "# Requirements:\n- Rule."
@@ -248,7 +241,7 @@ fn strip_rationale_comments_is_identity_without_comments() {
 #[test]
 fn project_context_block_none_when_only_blank_lines_survive_the_strip() {
     let tmp = tempfile::tempdir().unwrap();
-    // Comments separated by blank lines: the strip leaves only the blanks.
+
     std::fs::write(
         tmp.path().join("AGENTS.md"),
         "# r1: only a rationale\n\n# r2: and another\n\n",
@@ -327,10 +320,7 @@ fn project_context_block_skips_gray_home_level() {
     if isolated_home("project_context_block_skips_gray_home_level") {
         return;
     }
-    // isolated_home points GRAY_HOME at a scratch dir: its AGENTS.md is the
-    // stored system prompt, and serving it would duplicate the whole prompt
-    // every turn. The level is skipped, but a rule file ABOVE gray home
-    // still counts — the walk continues upward.
+
     let gray_home = crate::setup::gray_home().unwrap();
     std::fs::create_dir_all(&gray_home).unwrap();
     std::fs::write(gray_home.join("AGENTS.md"), "the system prompt itself").unwrap();

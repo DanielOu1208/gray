@@ -1,6 +1,5 @@
 use super::*;
 
-/// Anthropic-ish per-token pricing (USD per token) with cache prices.
 fn priced() -> ModelRate {
     ModelRate {
         tiers: Vec::new(),
@@ -12,7 +11,6 @@ fn priced() -> ModelRate {
     }
 }
 
-/// Usage with an explicit cache breakdown (input is the inclusive total).
 fn usage(input: usize, output: usize, read: usize, write: usize) -> Usage {
     Usage {
         input_tokens: input,
@@ -24,14 +22,10 @@ fn usage(input: usize, output: usize, read: usize, write: usize) -> Usage {
     }
 }
 
-/// A provider that only fills the inclusive total (no cache detail).
 fn opaque(input: usize, output: usize) -> Usage {
     Usage::new(input, output)
 }
 
-/// Deterministic clock for a test: offsets from one base instant, so
-/// idle arithmetic is exact (a live `Instant::now()` per call drifts by
-/// microseconds and breaks equality asserts).
 fn t(base: Instant, offset_secs: u64) -> Instant {
     base + Duration::from_secs(offset_secs)
 }
@@ -58,13 +52,12 @@ fn first_request_is_never_a_miss_and_warms_the_cache() {
 fn cold_is_the_ttl_crossed_on_a_reported_cache_only() {
     let base = Instant::now();
     let mut tr = CacheTracker::default();
-    // No request seen yet: nothing was cached, so nothing is known to be lost.
+
     assert!(!tr.is_cold(t(base, cache_ttl().as_secs() * 10)));
     tr.note(&usage(100_000, 500, 90_000, 10_000), "m", None, t(base, 0));
     assert!(!tr.is_cold(t(base, cache_ttl().as_secs() - 1)));
     assert!(tr.is_cold(t(base, cache_ttl().as_secs())));
-    // A provider that never reports caching: `remaining` is `None` too, but
-    // no warm cache is known to have expired — do not claim a free rewrite.
+
     let mut opaque_tr = CacheTracker::default();
     opaque_tr.note(&opaque(100_000, 500), "m", None, t(base, 0));
     assert_eq!(opaque_tr.remaining(t(base, 1)), None);
@@ -76,13 +69,11 @@ fn a_paused_turn_answers_cold_on_the_idle_gap_it_started_after() {
     let base = Instant::now();
     let mut tr = CacheTracker::default();
     tr.note(&usage(100_000, 500, 90_000, 10_000), "m", None, t(base, 0));
-    // The turn began long after the TTL: the pause freezes the clock there,
-    // so the answer must be cold even though wall time keeps running.
+
     tr.pause(t(base, cache_ttl().as_secs() + 30));
     assert!(tr.is_cold(t(base, cache_ttl().as_secs() + 30)));
     assert!(tr.is_cold(t(base, cache_ttl().as_secs() + 3_600)));
-    // A turn that began while the cache was still warm is not cold, however
-    // long it runs — the in-turn requests keep refreshing the prefix.
+
     tr.rearm(t(base, 30));
     tr.pause(t(base, 60));
     assert!(!tr.is_cold(t(base, 60)));
@@ -106,7 +97,7 @@ fn active_turn_freezes_then_rearms_the_countdown() {
     tr.note(&usage(100_000, 500, 90_000, 10_000), "m", None, t(base, 0));
 
     tr.pause(t(base, 60));
-    // Setup and the normal request path can both reassert `begin_turn`.
+
     tr.pause(t(base, 120));
     assert_eq!(
         tr.remaining(t(base, 360)),
@@ -213,7 +204,7 @@ fn provider_without_cache_reporting_never_warns_or_times() {
         None
     );
     assert_eq!(tr.remaining(t(base, 10)), None);
-    // Second opaque request: zero cache everywhere, never reported before.
+
     assert_eq!(
         tr.note(&opaque(52_000, 100), "m", Some(priced()), t(base, 30)),
         None
@@ -230,8 +221,7 @@ fn growing_prompt_fully_cached_is_not_a_miss() {
         Some(priced()),
         t(base, 0),
     );
-    // +10k of new user/tool content, all of it correctly billed fresh;
-    // the 50k the previous request carried was all served from cache.
+
     assert_eq!(
         tr.note(
             &usage(60_000, 100, 50_000, 10_000),
@@ -253,7 +243,7 @@ fn miss_below_the_noise_floor_is_ignored() {
         Some(priced()),
         t(base, 0),
     );
-    // 500 re-billed tokens: breakpoint granularity, not a miss.
+
     assert_eq!(
         tr.note(
             &usage(50_000, 100, 49_500, 500),
@@ -275,8 +265,7 @@ fn idle_past_the_ttl_is_a_total_miss_with_the_idle_label() {
         Some(priced()),
         t(base, 0),
     );
-    // Six minutes later the cache is cold: the whole prompt re-billed and
-    // re-written. 100k * ($3.75 - $0.30)/M = $0.345 over a full hit.
+
     let miss = tr
         .note(
             &usage(100_000, 100, 0, 100_000),
@@ -326,8 +315,6 @@ fn model_switch_relabels_the_miss() {
 
 #[test]
 fn read_only_provider_total_miss_counts() {
-    // OpenAI-style: reads reported, writes never are. A zero-read request
-    // after a cached one is a total miss, not "no cache support".
     let base = Instant::now();
     let mut tr = CacheTracker::default();
     tr.note(&usage(50_000, 100, 40_000, 0), "gpt", None, t(base, 0));
@@ -352,7 +339,7 @@ fn small_miss_stays_below_the_warning_bar() {
         Some(priced()),
         t(base, 0),
     );
-    // 5k re-billed, ~$0.017 over a hit: real, but the footer timer covers it.
+
     let miss = tr
         .note(
             &usage(60_000, 100, 55_000, 5_000),
@@ -376,9 +363,7 @@ fn expensive_small_miss_still_warns() {
         Some(priced()),
         t(base, 0),
     );
-    // Only 12k tokens (under the token bar), but 10k of them landed in
-    // the fresh-input bucket at a premium rate: blended paid rate
-    // (10k*$15 + 2k*$3.75)/M over the $1.50/M read rate = $0.1395.
+
     let premium = ModelRate {
         input: 15.0e-6,
         cache_read: 1.5e-6,
@@ -411,11 +396,9 @@ fn reemitted_report_is_not_a_second_request() {
     let mut tr = CacheTracker::default();
     let first = usage(100_000, 100, 40_000, 60_000);
     tr.note(&first, "m", Some(priced()), t(base, 0));
-    // The loop re-emits the last round's usage when a later round reports
-    // none; that must not read as a fresh (fully re-billed) request.
+
     assert_eq!(tr.note(&first, "m", Some(priced()), t(base, 1)), None);
-    // The original request is still the baseline afterwards: 40k of its
-    // prompt re-billed, not the 100k a fresh baseline would have claimed.
+
     let miss = tr
         .note(
             &usage(100_000, 100, 40_000, 55_000),
@@ -439,7 +422,7 @@ fn compaction_resets_the_baseline() {
     );
     tr.reset();
     assert_eq!(tr.remaining(t(base, 1)), None);
-    // Post-compaction prompt is mostly new content: no miss is invented.
+
     assert_eq!(
         tr.note(
             &usage(60_000, 100, 10_000, 50_000),
@@ -449,7 +432,7 @@ fn compaction_resets_the_baseline() {
         ),
         None
     );
-    // ... and the compacted request re-arms the warmth timer.
+
     assert!(tr.remaining(t(base, 11)).is_some());
 }
 

@@ -1,33 +1,3 @@
-//! `gray find` / `gray grep` — the search index as a *command*, not a
-//! tool.
-//!
-//! The index used to sit behind the `find`/`grep` tools, which quietly
-//! changed what two tools return depending on the directory, the pattern and
-//! a decade of glob semantics. That is the wrong shape for a harness whose
-//! whole claim is that the model drives one `bash`: searching is already a
-//! shell thing (`fd`, `rg`, `grep`), so the index belongs beside them as a
-//! command the model reaches for on purpose.
-//!
-//! The contract is therefore the simplest one that can exist: **whatever
-//! `fd`/`rg` would have answered, this answers.** The index is a fast path in
-//! front of the existing lanes, never a different answer — when it is not
-//! usable (no index in this process yet, a non-git root, `ignoreCase`, a
-//! depth-anchored glob, an invalid pattern, a file target) the call falls
-//! through to the very same `FindTool`/`GrepTool` the model could have run
-//! itself, so the bytes are identical either way.
-//!
-//! "Not usable yet" is the load-bearing part, and it is about *cost*, not
-//! capability. The index lives in process memory, so a fresh process holding
-//! none would pay a full scan to answer a question `fd` answers in ~20ms —
-//! measured at 1.4s against 20ms on a 20k-file repo. So the first search in a
-//! process goes to `fd`/`rg` and starts the index in the background; every
-//! search after that is served warm. The index therefore has to *earn* each
-//! call, which is the only arrangement where it is ever the right answer.
-//!
-//! Both entry points share this module: the `gray find`/`gray grep` CLI verbs
-//! and the bash claim that answers them without depending on `gray` being on
-//! the child's PATH.
-
 use std::path::{Path, PathBuf};
 
 use gray_core::agent::{Tool, ToolContext};
@@ -35,15 +5,13 @@ use serde_json::{Value, json};
 #[cfg(unix)]
 use tokio_util::sync::CancellationToken;
 
-/// What one search call needs. Mirrors the `find`/`grep` tool arguments so a
-/// model that learned the flags from either side is not wrong.
 #[derive(Debug, Default, Clone)]
 pub struct SearchArgs {
     pub pattern: String,
-    /// Search root. Defaults to the cwd, like the tools.
+
     pub path: Option<PathBuf>,
     pub limit: Option<usize>,
-    /// `grep` only: basename glob filter, passed through untouched.
+
     pub glob: Option<String>,
     pub ignore_case: bool,
     pub literal: bool,
@@ -56,13 +24,10 @@ impl SearchArgs {
     }
 }
 
-/// `gray find PATTERN [PATH]` — file names matching a glob, off the
-/// process-wide pool.
 pub async fn find(args: &SearchArgs, ctx: &ToolContext) -> String {
     find_on(args, ctx, &global_index()).await
 }
 
-/// `find` on a chosen backend — tests drive every lane through this.
 pub(crate) async fn find_on(args: &SearchArgs, ctx: &ToolContext, b: &IndexBackend) -> String {
     match b {
         #[cfg(unix)]
@@ -71,7 +36,6 @@ pub(crate) async fn find_on(args: &SearchArgs, ctx: &ToolContext, b: &IndexBacke
     }
 }
 
-/// The fallback `gray find` tool call — what `Off` and cold pools run.
 async fn find_call(args: &SearchArgs, ctx: &ToolContext) -> String {
     tool_text(
         &crate::FindTool,
@@ -85,9 +49,6 @@ async fn find_call(args: &SearchArgs, ctx: &ToolContext) -> String {
     .await
 }
 
-/// Which resident index serves `find`/`grep`: `GRAY_SEARCH_INDEX=off`/`none`
-/// disables it, anything else is the default — the fallback lanes always
-/// answer. fsearch is unix-only; elsewhere there is no index at all.
 pub enum IndexBackend {
     #[cfg(unix)]
     Fs(std::sync::Arc<crate::search_index_fs::FsearchPool>),
@@ -109,9 +70,6 @@ pub(crate) fn global_index() -> IndexBackend {
         .clone()
 }
 
-/// Which resident index `GRAY_SEARCH_INDEX` selects. Anything unrecognized
-/// is the default — fsearch — so a typo never silently disables indexing.
-/// fsearch is a unix daemon crate; elsewhere the default is no index.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum BackendKind {
@@ -140,7 +98,6 @@ impl Clone for IndexBackend {
     }
 }
 
-/// [`find`] against the fsearch whole-disk index — the only index lane.
 #[cfg(unix)]
 pub async fn find_with_fsearch(
     args: &SearchArgs,
@@ -175,13 +132,10 @@ pub async fn find_with_fsearch(
     .await
 }
 
-/// `gray grep PATTERN [PATH]` — file contents matching a pattern, off the
-/// process-wide pool.
 pub async fn grep(args: &SearchArgs, ctx: &ToolContext) -> String {
     grep_on(args, ctx, &global_index()).await
 }
 
-/// `grep` on a chosen backend — tests drive every lane through this.
 pub(crate) async fn grep_on(args: &SearchArgs, ctx: &ToolContext, b: &IndexBackend) -> String {
     match b {
         #[cfg(unix)]
@@ -190,7 +144,6 @@ pub(crate) async fn grep_on(args: &SearchArgs, ctx: &ToolContext, b: &IndexBacke
     }
 }
 
-/// [`grep`] against the fsearch whole-disk index.
 #[cfg(unix)]
 pub async fn grep_with_fsearch(
     args: &SearchArgs,
@@ -221,8 +174,6 @@ pub async fn grep_with_fsearch(
     grep_call(args, ctx).await
 }
 
-/// The fallback `gray grep` tool call, factored out of `grep_with_pool` so
-/// every backend shares it.
 async fn grep_call(args: &SearchArgs, ctx: &ToolContext) -> String {
     let root = args.root(&ctx.cwd);
     let limit = args.limit.unwrap_or(100);
@@ -247,9 +198,6 @@ async fn grep_call(args: &SearchArgs, ctx: &ToolContext) -> String {
     tool_text(&crate::GrepTool, ctx, call).await
 }
 
-/// The index is synchronous CPU work, so it belongs off the async runtime.
-/// The spawned task keeps indexing in the background after a cancel, which is
-/// exactly what the next call wants.
 #[cfg(unix)]
 pub(crate) async fn spawn_index<F, T>(f: F) -> Option<T>
 where
@@ -259,8 +207,6 @@ where
     tokio::task::spawn_blocking(f).await.ok().flatten()
 }
 
-/// Index hits as the `find` tool would print them: newline-joined relative
-/// paths plus the same notices, so the two lanes are indistinguishable.
 #[cfg(unix)]
 fn render_find(hits: &[String], limit: usize) -> String {
     use crate::MAX_BYTES;
@@ -288,7 +234,6 @@ fn render_find(hits: &[String], limit: usize) -> String {
     }
 }
 
-/// The fallback lane: the real tool, so the answer is the tool's answer.
 async fn tool_text(tool: &dyn Tool, ctx: &ToolContext, args: Value) -> String {
     tool.execute(ctx, args).await.content
 }

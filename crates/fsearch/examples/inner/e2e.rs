@@ -1,26 +1,3 @@
-//! End-to-end latency rig: the daemon as its clients use it, from outside.
-//! (examples/rig.rs times searches in-process; this adds everything between
-//! a keystroke or a command and its answer.)
-//!
-//!   e2e <transport> <corpus.json> <out.json> <plan...>    one daemon
-//!   e2e dual <transport A> <transport B> <corpus.json> <out.json> <plan...>
-//!       two daemons side by side, every request asked of both in turn
-//!   e2e cli <bin A> <bin B> <HOME A> <HOME B> <corpus.json> <out.json> <rounds> [cats]
-//!       `fsearch <query>` as a shell runs it, A and B in turn
-//!   e2e launch <rounds> <command>...    process launch to exit, in turn
-//!
-//! transport: `stdio:<bin>[@<HOME>][#arg#arg]` spawns `<bin> stdio [args]`
-//! like an app; `sock:<path>` talks to the daemon's socket directly.
-//! plan (in order): `name:R` every name query, R rounds back to back;
-//! `typing:R:GAP` every typing run, one request per keystroke GAP ms apart;
-//! `grep:R`; `ping:N`; `connping:N` (a fresh connection each, sock only);
-//! `idle:GAPS:N` N exact-name queries after each of the comma-separated
-//! pauses (s). dual takes name, grep, ping and typing (back to back).
-//!
-//! Per request it records the wall time, the daemon's own search time
-//! (took_us), and a digest of the answer without its timing fields, so
-//! two builds can be checked for identical answers.
-
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -34,7 +11,6 @@ enum Conn {
 impl Conn {
     fn open(t: &str) -> Conn {
         if let Some(spec) = t.strip_prefix("stdio:") {
-            // stdio:<bin>[@<HOME>][#extra#args]
             let mut parts = spec.split('#');
             let bin = parts.next().unwrap();
             let (bin, home) = bin.split_once('@').map_or((bin, None), |(b, h)| (b, Some(h)));
@@ -55,7 +31,6 @@ impl Conn {
         }
     }
 
-    /// One request, one response line. Returns (wall, line).
     fn ask(&mut self, req: &str, line: &mut String) -> Duration {
         line.clear();
         let t = Instant::now();
@@ -89,7 +64,6 @@ fn fnv(h: &mut u64, b: &[u8]) {
     }
 }
 
-/// took_us, and a digest of the line with timing/progress fields removed.
 fn digest(line: &str) -> (Option<u64>, u64) {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut took = None;
@@ -106,7 +80,7 @@ fn digest(line: &str) -> (Option<u64>, u64) {
         }
     }
     fnv(&mut h, rest.as_bytes());
-    // Another tool's daemon may report it as "ms":1.234 instead.
+
     if took.is_none()
         && let Some(p) = line.find("\"ms\":")
     {
@@ -146,8 +120,6 @@ fn req(q: &str) -> String {
     s
 }
 
-/// Two daemons side by side, every request asked of both (alternating who
-/// goes first), so drift on the machine hits both alike.
 fn dual(a: &[String]) {
     let corpus: Value = serde_json::from_str(&std::fs::read_to_string(&a[2]).unwrap()).unwrap();
     let list = |k: &str| -> Vec<(String, String)> {
@@ -177,7 +149,6 @@ fn dual(a: &[String]) {
             "grep" => ("grep", greps.clone()),
             "ping" => ("ping", vec![("ping".into(), String::new())]),
             "typing" => {
-                // Back to back keystrokes, the run taking turns on A and B.
                 for _ in 0..n {
                     for run in corpus["typing"].as_array().unwrap() {
                         let keys: Vec<&str> = run.as_array().unwrap().iter().map(|k| k.as_str().unwrap()).collect();
@@ -213,8 +184,6 @@ fn dual(a: &[String]) {
     compare(&recs[0].res, &recs[1].res);
 }
 
-/// The CLI as a shell runs it: spawn, read all its output, wait. A and B
-/// alternate per query.
 fn cli(a: &[String]) {
     let (bins, homes) = ([&a[0], &a[1]], [&a[2], &a[3]]);
     let corpus: Value = serde_json::from_str(&std::fs::read_to_string(&a[4]).unwrap()).unwrap();
@@ -288,8 +257,6 @@ fn compare(ra: &serde_json::Map<String, Value>, rb: &serde_json::Map<String, Val
     }
 }
 
-/// Process launch to exit, commands taking turns (rotating who goes first).
-///   e2e launch <rounds> <cmd> <cmd>...   (each cmd: words split on spaces)
 fn launch(a: &[String]) {
     let rounds: usize = a[0].parse().unwrap();
     let cmds: Vec<Vec<&str>> = a[1..].iter().map(|c| c.split(' ').collect()).collect();
@@ -348,7 +315,7 @@ pub fn main() {
     let mut conn = Conn::open(transport);
     let mut rec = Rec::default();
     let mut line = String::new();
-    // Connected and answering (also faults in whatever the first query needs).
+
     for _ in 0..3 {
         conn.ask("{\"op\":\"ping\"}\n", &mut line);
     }
@@ -372,7 +339,6 @@ pub fn main() {
                 let gap = Duration::from_millis(num(2, 0));
                 for _ in 0..num(1, 3) {
                     for run in &typing {
-                        // Something else first, so the name cache can't answer the first key.
                         conn.ask(&req("zzzz qqqq"), &mut line);
                         let mut total = Duration::ZERO;
                         let mut first = Duration::ZERO;

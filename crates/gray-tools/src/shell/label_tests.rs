@@ -37,23 +37,22 @@ fn export_set_env_timeout_and_friends_peel() {
 
 #[test]
 fn anything_that_could_do_work_stops_the_peel() {
-    // A segment that is not pure setup keeps the whole chain visible.
     let risky = "rm -rf build && cargo check";
     assert_eq!(core_command(risky).command, risky);
-    // Expansion in the cd target could run something: not peeled.
+
     let sub = "cd $(mktemp -d) && cargo check";
     assert_eq!(core_command(sub).command, sub);
-    // A quoted assignment stops at the assignment.
+
     assert_eq!(
         core_command("FOO='a b' cargo check").command,
         "FOO='a b' cargo check"
     );
-    // `flock -c` runs a string; keep it whole.
+
     assert_eq!(
         core_command("flock -c 'make' /tmp/l").command,
         "flock -c 'make' /tmp/l"
     );
-    // A wrapper with nothing after it is the command.
+
     assert_eq!(core_command("nice").command, "nice");
 }
 
@@ -124,7 +123,6 @@ fn bare_cat_of_media_is_a_view() {
 
 #[test]
 fn media_cat_that_the_tool_does_not_attach_is_a_plain_read() {
-    // Only the whole-command shape attaches; these dump bytes instead.
     assert_eq!(look("cd ~/x && cat a.png").map(|l| l.0), Some(Look::Read));
     assert_eq!(
         look("cat a.png | head -c 10").map(|l| l.0),

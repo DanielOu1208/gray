@@ -14,9 +14,6 @@ fn write(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
     path
 }
 
-/// Unix-only: see the note on the bash dedup tests — the Windows
-/// resolver spelling of the temp path differs from what plain_read
-/// keys on.
 #[cfg(unix)]
 #[test]
 fn only_a_bare_single_file_read_is_a_plain_read() {
@@ -32,7 +29,7 @@ fn only_a_bare_single_file_read_is_a_plain_read() {
     assert_eq!(whole("sed -n '1,40p' a.rs"), Some(((1, Some(40)), false)));
     assert_eq!(whole("sed -n '5,$p' a.rs"), None);
     assert_eq!(whole("sed -n '1,$p' a.rs"), Some(((1, None), true)));
-    // Everything that is not one file's bytes is a normal run.
+
     for c in [
         "cat a.rs | head",
         "cat a.rs b.rs",
@@ -53,19 +50,15 @@ fn only_a_bare_single_file_read_is_a_plain_read() {
     ] {
         assert_eq!(whole(c), None, "{c:?} must not be a plain read");
     }
-    // An absolute path resolves like any other operand.
-    // Forward slashes: a bare Windows backslash path is mangled before it lands.
+
     let arg = path.display().to_string().replace('\\', "/");
     let abs = plain_read(&format!("cat {arg}"), cwd).expect("abs");
-    // macOS /tmp is a symlink: compare resolved paths, not spellings.
+
     assert_eq!(
         std::fs::canonicalize(&abs.path).expect("abs resolves"),
         std::fs::canonicalize(&path).expect("path resolves")
     );
 
-    // A path the shell would rewrite is declined even when the rewritten
-    // target exists: the ledger resolves literally, so `~` and `$VAR` would
-    // key the entry to a different file than the one the command read.
     std::fs::create_dir(cwd.join("~")).expect("mkdir");
     write(&dir, "~/a.rs", "tilde\n");
     assert!(plain_read("cat ~/a.rs", cwd).is_none());
@@ -86,16 +79,14 @@ fn a_repeat_of_an_unchanged_file_is_stubbed_once() {
     let read = plain_read("cat a.rs", dir.path()).expect("plain read");
     let size = std::fs::metadata(&path).unwrap().len();
 
-    // Nothing recorded yet: the first read runs.
     assert!(check(&ledger, &read, true).is_none());
     record(&ledger, &read, size);
 
-    // Second identical read: stubbed, and the stub names the way back.
     let hit = check(&ledger, &read, true).expect("stubbed");
     assert!(hit.content.contains("unchanged since your previous read"));
     assert!(hit.content.contains("cat a.rs"));
     assert!(!hit.content.contains("three"));
-    // Consume-on-hit: the third read runs again.
+
     assert!(check(&ledger, &read, true).is_none());
     record(&ledger, &read, size);
     assert!(check(&ledger, &read, true).is_some());
@@ -108,9 +99,7 @@ fn a_changed_file_never_stubs() {
     let read = plain_read("cat a.rs", dir.path()).expect("plain read");
     let size = std::fs::metadata(&path).unwrap().len();
     record(&ledger, &read, size);
-    // Same size, different content: mtime is the other half of the key. Move
-    // it explicitly — a back-to-back rewrite can land inside the
-    // filesystem's timestamp granularity (it does on the Windows runner).
+
     std::fs::write(&path, "two\n").expect("rewrite");
     let later =
         std::fs::metadata(&path).unwrap().modified().unwrap() + std::time::Duration::from_secs(2);
@@ -122,8 +111,7 @@ fn a_changed_file_never_stubs() {
     let changed = plain_read("cat a.rs", dir.path()).expect("plain read");
     assert!(check(&ledger, &changed, true).is_none());
     record(&ledger, &changed, size);
-    // Same size AND same mtime (a rewrite that lands inside the filesystem's
-    // timestamp granularity) is the documented ceiling of an mtime+size key.
+
     assert!(check(&ledger, &changed, true).is_some());
 }
 
@@ -143,10 +131,6 @@ fn a_different_window_is_a_different_read() {
     assert!(check(&ledger, &tail, true).is_none());
     assert!(check(&ledger, &whole, true).is_some());
 
-    // One entry per file, like the read tool's ledger: reading a window of a
-    // file replaces what the ledger remembers about it, so the repeat that
-    // stubs is the repeat of the read that came last. A different window then
-    // runs again — a miss costs tokens, never output.
     record(&ledger, &head, 8);
     assert!(check(&ledger, &head, true).is_some());
     assert!(check(&ledger, &whole, true).is_none());
@@ -158,8 +142,7 @@ fn an_elided_run_is_never_recorded() {
     let path = write(&dir, "big.txt", &"x".repeat(INLINE_BUDGET_BYTES + 100));
     let size = std::fs::metadata(&path).unwrap().len();
     let read = plain_read("cat big.txt", dir.path()).expect("plain read");
-    // The log held more than the inline budget, so the body the model saw was
-    // head+tail: that run cannot be cited as "unchanged since you read it".
+
     record(&ledger, &read, size);
     assert!(check(&ledger, &read, true).is_none());
 }
@@ -169,8 +152,7 @@ fn a_whole_file_read_needs_a_whole_view_to_stub() {
     let (dir, ledger) = fixture();
     write(&dir, "a.rs", "one\ntwo\n");
     let read = plain_read("cat a.rs", dir.path()).expect("plain read");
-    // A record of a *window* on the same file (a head) must not make a later
-    // whole-file `cat` stub: the model has not seen the rest.
+
     let head = plain_read("head -n 1 a.rs", dir.path()).expect("plain read");
     record(&ledger, &head, 4);
     assert!(check(&ledger, &read, true).is_none());
@@ -185,12 +167,10 @@ fn the_kill_switch_and_a_lifecycle_reset_both_land() {
     record(&ledger, &read, size);
     assert!(check(&ledger, &read, false).is_none(), "GRAY_READ_DEDUP=0");
     assert!(check(&ledger, &read, true).is_some());
-    // `/new` clears the shared ledger: a new session has seen nothing, so no
-    // stub may point at a result that is not in its transcript.
+
     ledger.clear();
     assert!(check(&ledger, &read, true).is_none());
-    // Compaction keeps the entries (the write guard needs them) but disarms
-    // every stub, because the result it cited is compacted away.
+
     record(&ledger, &read, size);
     ledger.disarm_all_dedup();
     assert!(check(&ledger, &read, true).is_none());

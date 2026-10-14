@@ -1,7 +1,5 @@
 #!/bin/sh
-# gray installer — https://gray.alignment.id
-# stable:  curl -fsSL https://gray.alignment.id/install.sh | sh
-# beta:    curl -fsSL https://gray.alignment.id/install.sh | sh -s -- beta
+
 set -eu
 
 CHANNEL="stable"
@@ -63,7 +61,6 @@ fi || { echo "checksum mismatch for ${TARBALL} — refusing to install"; exit 1;
 
 tar xzf "${TMP}/${TARBALL}" -C "$TMP"
 
-# install dir: ~/.local/bin by default; --system or GRAY_INSTALL_DIR for system-wide
 if [ -n "${GRAY_INSTALL_DIR:-}" ]; then
     DEST="${GRAY_INSTALL_DIR}"
 elif [ "$SYSTEM" = "1" ] || [ "$(id -u)" = "0" ]; then
@@ -76,8 +73,6 @@ fi
 mv "${TMP}/gray" "${DEST}/gray"
 chmod +x "${DEST}/gray"
 
-# One gray only: a `cargo install` stray at ~/.cargo/bin/gray shadows the
-# install dir whenever it sits earlier on PATH.
 shadow="$HOME/.cargo/bin/gray"
 if [ -e "$shadow" ]; then
     rm -f "$shadow"

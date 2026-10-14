@@ -1,15 +1,7 @@
-//! `gray spill` — the way back into a result the context had to leave out.
-//!
-//! The contract these check is the one the footer promises: numbered lines
-//! against the original, a stated ceiling instead of a silent cut, and an
-//! unknown handle as an error rather than an empty success.
-
 use super::*;
 
 const H: &str = "0123456789abcdef";
 
-/// `$GRAY_HOME` is process-global: these two tests write through it, so they
-/// take a lock rather than repointing each other's home mid-run.
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn numbered(out: &str) -> Vec<(usize, &str)> {
@@ -131,8 +123,7 @@ fn a_bad_pattern_is_an_error_not_a_panic() {
 fn stats_reports_nothing_honestly_on_a_fresh_machine() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::TempDir::new().expect("tempdir");
-    // SAFETY: the lock makes this the only thread touching the var while it is
-    // set, and the body reads back only its own directory.
+
     unsafe { std::env::set_var("GRAY_HOME", dir.path()) };
     let out = stats();
     unsafe { std::env::remove_var("GRAY_HOME") };
@@ -143,7 +134,7 @@ fn stats_reports_nothing_honestly_on_a_fresh_machine() {
 fn stats_names_the_rules_that_earned_their_keep() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::TempDir::new().expect("tempdir");
-    // SAFETY: as above — the lock covers the whole body.
+
     unsafe { std::env::set_var("GRAY_HOME", dir.path()) };
     for (rule, raw, sent) in [("cargo", 30_000u64, 900u64), ("npm", 10_000, 2_000)] {
         gray_core::spill::record(gray_core::spill::MeterEvent {
@@ -158,7 +149,7 @@ fn stats_names_the_rules_that_earned_their_keep() {
     assert!(out.contains("2 result(s) metered"), "got: {out}");
     assert!(out.contains("by rule:"), "got: {out}");
     assert!(out.contains("cargo"), "got: {out}");
-    // Biggest saving first.
+
     let cargo = out.find("cargo").expect("cargo row");
     let npm = out.find("npm").expect("npm row");
     assert!(cargo < npm, "cargo saved more, so it comes first: {out}");

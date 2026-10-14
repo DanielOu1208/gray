@@ -1,69 +1,3 @@
-//! T2.1 — streaming, memory-capped line reader for the `read` tool.
-//!
-//! Replaces `tokio::fs::read` (whole file into RAM) with a 64 KiB
-//! `BufReader` pull stream: lines before `offset` are counted, never decoded
-//! or stored, and no single line ever occupies more than ~8 KiB — longer
-//! lines are cut at [`LINE_BYTE_CAP`] and the rest discarded to the next
-//! `\n` (counted as `overflow_chars`). Worst-case resident buffers per
-//! stream: ~8 KiB line scratch + 64 KiB reader = ~72 KiB, regardless of file
-//! size (a 200 MiB single line streams, it never materializes).
-//!
-//! Hygiene runs on the stream via the `hygiene` helpers: BOM stripped
-//! from the first line only, one trailing `\r` stripped per line (CRLF).
-//! Known gap: a lone interior `\r` (old-Mac endings) is kept,
-//! not treated as a line break — no zoo fixture covers it, and splitting
-//! mid-line would break `line_no` accounting. Integrator: revisit if a
-//! lone-CR fixture lands.
-//!
-//! Sniff (T1.4) runs on the first chunk inside [`LineStream::open`] — a
-//! `fill_buf` peek, so no byte is consumed — before any decoding (decoding
-//! itself is lazy per line via [`RawLine::text`]). A binary hit sets
-//! [`LineStream::binary_note`]; the driver returns it as-is
-//! (`is_error=false`).
-//!
-//! [`LineStream::next_line`] is the whole API (pull, not `futures::Stream`:
-//! same semantics, no `Pin`/boxing machinery; a `Stream` adapter is five
-//! lines if anyone needs combinators).
-//!
-//! Line-boundary invariant: between `next_line` calls the reader always sits
-//! on a line boundary — overflow is drained to the terminating `\n` before
-//! yielding. The only exits that abandon position are cancel and the binary
-//! hit, which both mark the stream done, clear the scratch, and leave the
-//! reader to drop with the stream (never a half-read buffer handed on).
-//!
-//! Total counting: after the window is filled the driver calls
-//! [`LineStream::count_rest_lines_capped`] (exact remaining lines: newlines
-//! plus one for a trailing unterminated line while under the cap;
-//! `fill_buf`/`consume` pass, no per-line buffering). Files over
-//! [`COUNT_SKIP_LIMIT_BYTES`] skip the count: report
-//! `notices::count_skipped_total` and still provide `next_offset`.
-//!
-//! T2.2 deferred cut: the driver reads one line past a filled window before
-//! claiming more remains (empty → complete; non-empty → the cut names that
-//! line), and one line past the pre-offset skip before claiming past-EOF.
-//! So a cut/resume offset always names an observed line.
-//!
-//! Raw-byte hashing: every byte flows through the inner [`HashRead`] exactly
-//! once, so [`LineStream::content_hash`] is byte-identical to
-//! `FileLedger::hash_bytes` over `fs::read` output once fully drained
-//! (`None` past [`crate::ledger::MAX_HASH_BYTES`]).
-//!
-//! Cancellation: `cancel` is checked at open, on every `next_line` entry,
-//! on every backlog chunk, and inside the drain. A hit marks the stream
-//! done and yields `None`; the driver renders `notices::cancelled_note`.
-//!
-//! Driver contract (`read/mod.rs::execute_streamed`, which replaced the
-//! pre-T2.2 whole-file read chain):
-//!
-//! 1. `LineStream::open` (open error → the `read failed …` path).
-//! 2. `binary_note()` → return as-is; `file_size() == 0` → the empty note.
-//! 3. Skip to `offset` with `next_line` (count, don't store), plus the
-//!    deferred skip peek; tail mode rings with `tail::drain_tail`.
-//! 4. Collect the window, plus the deferred window peek; total via
-//!    `count_rest_lines_capped` (exact) or the skipped fragment for huge files.
-//! 5. `window::window` renders; a loop ending with `cancelled()` renders
-//!    `cancelled_note(line_no())`.
-
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
@@ -77,40 +11,22 @@ use tokio_util::sync::CancellationToken;
 
 use super::hygiene;
 
-/// Reader chunk size: one `fill_buf` window.
 pub const READ_CHUNK_BYTES: usize = 64 * 1024;
 
-/// Spec-fixed line ceiling in chars (canonical home is `window.rs`).
 pub const LINE_BYTE_CAP: usize = super::window::MAX_LINE_CHARS * 4;
 
-/// Files at or under this size get an exact total via
-/// [`LineStream::count_rest_lines_capped`]; larger files skip the count
-/// (`notices::count_skipped_total`) but keep `next_offset`.
 pub const COUNT_SKIP_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Cap for exact line totals: past this many remaining lines the read tool
-/// reports the count-skipped lower bound instead of scanning the file.
-/// 100k lines ≈ tens of MB of the slowest per-byte work; files under the
-/// ledger hash limit with fewer lines are unaffected (exact + hashed).
 pub const MAX_COUNT_LINES: u64 = 100_000;
 
-/// True when the file is small enough for an exact total count.
 pub fn should_count_exact(file_size: u64) -> bool {
     file_size <= COUNT_SKIP_LIMIT_BYTES
 }
 
-/// Codepoints in `bytes` via the leading-byte count — exact for valid UTF-8
-/// (every codepoint has exactly one byte with the top bits != `10`). Used
-/// only for the clamp marker on over-long lines, where the full text never
-/// materializes; splitting the count across chunks stays exact because a
-/// split codepoint's leading byte is counted exactly once.
 fn count_chars(bytes: &[u8]) -> u64 {
     bytes.iter().filter(|&&b| b & 0xC0 != 0x80).count() as u64
 }
 
-/// `AsyncRead` wrapper that feeds every raw byte through a hasher exactly
-/// once (reads happen once per byte no matter how `fill_buf`/`consume`
-/// slice the buffer). `hash == None` past [`crate::ledger::MAX_HASH_BYTES`].
 struct HashRead<R> {
     inner: R,
     hash: Option<DefaultHasher>,
@@ -135,31 +51,20 @@ impl<R: AsyncRead + Unpin> AsyncRead for HashRead<R> {
     }
 }
 
-/// One hygiene-cleaned line. `bytes` never holds more than
-/// [`LINE_BYTE_CAP`] + 1 (cap plus the kept `\n` before stripping… in
-/// practice ≤ cap after terminator/CRLF/BOM strips); the remainder of an
-/// over-long line is counted in `overflow_chars`, never stored.
 pub struct RawLine {
-    /// Absolute 1-based file line number.
     pub line_no: usize,
-    /// Line content: terminator, trailing `\r`, and (first line) BOM removed.
-    /// Lossy-decoded on demand via [`RawLine::text`].
+
     pub bytes: Vec<u8>,
-    /// Codepoints in the discarded bytes ([`count_chars`]).
-    /// `text().chars().count() + overflow_chars` is the line's full char
-    /// count (exact for valid UTF-8), so the clamp marker stays exact.
+
     pub overflow_chars: u64,
 }
 
 impl RawLine {
-    /// Lossy-decode this line (lossy UTF-8, like the whole-file path).
-    /// Lines skipped before `offset` never call this: counted, not decoded.
     pub fn text(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(&self.bytes)
     }
 }
 
-/// Bounded-memory forward line reader over a regular file.
 pub struct LineStream {
     reader: BufReader<HashRead<File>>,
     cancel: CancellationToken,
@@ -172,17 +77,11 @@ pub struct LineStream {
 }
 
 impl LineStream {
-    /// Open + peek the first chunk for the T1.4 sniff before any decoding.
-    /// The peek is `fill_buf` (buffered, unconsumed): no byte is lost.
-    /// Open errors are plain `io::Error` for today's `read failed …` path.
     pub async fn open(
         path: &Path,
         display: &str,
         cancel: CancellationToken,
     ) -> std::io::Result<Self> {
-        // O_NONBLOCK open so a regular→FIFO swap between the guard
-        // and here fails fast instead of hanging the task; re-check type
-        // post-open (TOCTOU) and refuse non-regular files.
         #[cfg(unix)]
         let file = {
             use std::os::unix::fs::OpenOptionsExt;
@@ -202,7 +101,7 @@ impl LineStream {
             ));
         }
         let file_size = meta.len();
-        // Hash gate mirrors FileLedger::hash_bytes (whole file or None).
+
         let hash = (file_size <= crate::ledger::MAX_HASH_BYTES).then(DefaultHasher::new);
         let mut reader = BufReader::with_capacity(READ_CHUNK_BYTES, HashRead { inner: file, hash });
         let binary_note = {
@@ -223,9 +122,6 @@ impl LineStream {
         })
     }
 
-    /// Next line, or `None` at EOF / after cancel / on a binary hit.
-    /// Check [`LineStream::cancelled`] and [`LineStream::binary_note`] when
-    /// the stream ends early to tell the three apart.
     pub async fn next_line(&mut self) -> std::io::Result<Option<RawLine>> {
         if self.done {
             return Ok(None);
@@ -245,11 +141,10 @@ impl LineStream {
             }
             let chunk = self.reader.fill_buf().await?;
             if chunk.is_empty() {
-                break; // EOF
+                break;
             }
             let room = (LINE_BYTE_CAP + 1).saturating_sub(self.scratch.len());
             if room == 0 {
-                // Past the cap: buffer nothing, scan for the terminator.
                 match chunk.iter().position(|&b| b == b'\n') {
                     Some(p) => {
                         overflow_bytes += p as u64;
@@ -282,22 +177,19 @@ impl LineStream {
             }
         }
         if self.scratch.is_empty() && overflow_bytes == 0 && !had_newline {
-            // EOF exactly on a line boundary: nothing left.
             self.done = true;
             return Ok(None);
         }
-        // Drop a kept terminator (overflow lines never hold one in-scratch,
-        // so gate on the byte itself, not had_newline — and never pop content).
+
         if self.scratch.ends_with(b"\n") {
             let len = self.scratch.len();
             self.scratch.truncate(len - 1);
         }
         if self.scratch.ends_with(b"\r") {
             let len = self.scratch.len();
-            self.scratch.truncate(len - 1); // CRLF: one trailing \r per line
+            self.scratch.truncate(len - 1);
         }
         if self.line_no == 0 {
-            // BOM: first line only (mirrors hygiene::strip_bom).
             let bom = self.scratch.len() - hygiene::strip_bom(&self.scratch).len();
             if bom > 0 {
                 self.scratch.drain(..bom);
@@ -312,9 +204,6 @@ impl LineStream {
         }))
     }
 
-    /// Drain the rest of the file (no per-line buffering): newline count,
-    /// whether any byte was seen, and whether the tail ends with `\n`.
-    /// Bytes flow through the hasher, so the full-file hash stays complete.
     async fn drain_rest_capped(
         &mut self,
         cap: Option<u64>,
@@ -337,9 +226,6 @@ impl LineStream {
             if let Some(max) = cap
                 && newlines + chunk_newlines >= max
             {
-                // Stop at exactly the max-th newline: consume through it and
-                // leave the rest buffered (the capped caller discards the
-                // hash, so the partial drain never poisons the ledger).
                 let mut need = max - newlines;
                 let mut pos = chunk.len();
                 if need == 0 {
@@ -366,12 +252,6 @@ impl LineStream {
         Ok((newlines, saw_any, ended_newline, false))
     }
 
-    /// Exact remaining line count after the last yielded line: newlines plus
-    /// one for a trailing unterminated line, stopping after `max_lines`
-    /// newlines. Returns `(count, capped)`. When capped, the caller must take
-    /// the count-skipped path AND [`discard_hash`](Self::discard_hash):
-    /// partial bytes must never masquerade as a full-file ledger hash.
-    /// Call at a line boundary; the total is then `line_no() + count`.
     pub async fn count_rest_lines_capped(
         &mut self,
         max_lines: u64,
@@ -384,44 +264,32 @@ impl LineStream {
         Ok((newlines + u64::from(saw_any && !ended_newline), false))
     }
 
-    /// Drop the incremental hash (capped-count path only).
     pub fn discard_hash(&mut self) {
         self.reader.get_mut().hash = None;
     }
 
-    /// Incremental raw-byte hash for the T3.2 write guard (rule 5): `Some`
-    /// only when the driver consumed the whole file (EOF / `count_rest*`
-    /// drained) and the file fit [`crate::ledger::MAX_HASH_BYTES`].
-    /// Byte-identical to `FileLedger::hash_bytes` over `fs::read` output.
     pub fn content_hash(&mut self) -> Option<u64> {
         self.reader.get_mut().hash.take().map(|h| h.finish())
     }
 
-    /// Mark done and drop any half-read state (cancel path): the reader is
-    /// abandoned at whatever position, never handed on mid-line.
     fn abandon(&mut self) {
         self.cancelled = true;
         self.done = true;
         self.scratch.clear();
     }
 
-    /// Lines yielded so far (== last yielded `line_no`; 0 before the first).
     pub fn line_no(&self) -> usize {
         self.line_no
     }
 
-    /// `stat` size captured at open (drives [`should_count_exact`]).
     pub fn file_size(&self) -> u64 {
         self.file_size
     }
 
-    /// `Some(note)` when the first-chunk sniff said binary — return as-is,
-    /// `is_error=false`. Set at open; `next_line` then yields `None`.
     pub fn binary_note(&self) -> Option<&str> {
         self.binary_note.as_deref()
     }
 
-    /// True once a cancel check has fired (stream is done).
     pub fn cancelled(&self) -> bool {
         self.cancelled
     }

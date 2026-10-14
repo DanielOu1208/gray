@@ -1,11 +1,9 @@
-"""Real print-mode NDJSON contract, loopback provider, no user credentials."""
 import asyncio
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
-
 
 @unittest.skipUnless(os.environ.get('GRAY_TEST_BIN'), 'Set GRAY_TEST_BIN')
 class JsonPrintTests(unittest.IsolatedAsyncioTestCase):

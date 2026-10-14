@@ -1,7 +1,3 @@
-//! `grep_answer` — the in-process answer path the bash tool's bare-`grep`
-//! claim uses — against GNU grep byte for byte. Every case must come back
-//! byte-identical stdout/stderr/exit-code, or `None` (declined).
-
 #![cfg(unix)]
 
 use std::path::Path;
@@ -70,14 +66,18 @@ fn grep_answer_matches_gnu() {
         argv(&["-rEn", "nee[a-z]le", "."]),
         argv(&["-rFn", "needle", "."]),
         argv(&["-rn", "needle", "src", "deep"]),
-        argv(&["-rn", "needle", "src/a.py"]), // file operand: must decline
+        argv(&["-rn", "needle", "src/a.py"]),
         argv(&["-q", "-r", "needle", "."]),
         argv(&["-rI", "-n", "needle", "."]),
     ];
     let mut served = 0;
     for args in &cases {
         match grep_answer(&engine, args, work.path()) {
-            Some(Answer::Print { stdout, stderr, code }) => {
+            Some(Answer::Print {
+                stdout,
+                stderr,
+                code,
+            }) => {
                 served += 1;
                 let (rout, rerr, rcode) = real_grep(args, work.path());
                 assert_eq!(
@@ -92,13 +92,10 @@ fn grep_answer_matches_gnu() {
             }
             Some(Answer::Exec { .. }) => panic!("grep_answer returned Exec for {args:?}"),
             None => {
-                // Legit declines: a file operand, and a *matching* binary
-                // under `-o`/context — shapes the renderer cannot reproduce
-                // exactly, so the real tool answers.
                 let ok = args.last().map(String::as_str) == Some("src/a.py")
-                    || args.iter().any(|a| {
-                        a.starts_with('-') && a[1..].chars().any(|c| "oCc".contains(c))
-                    });
+                    || args
+                        .iter()
+                        .any(|a| a.starts_with('-') && a[1..].chars().any(|c| "oCc".contains(c)));
                 assert!(ok, "declined {args:?}");
             }
         }
@@ -116,10 +113,13 @@ fn write_rg_tree(root: &Path) {
     .unwrap();
     std::fs::write(src.join("b.py"), "# needle again\nno match here\n").unwrap();
     std::fs::write(src.join("caps.txt"), "NEEDLE\nkelvin\n").unwrap();
-    std::fs::write(src.join("words.txt"), "needlework nope\nneedle exact\nexactly needle here\n").unwrap();
+    std::fs::write(
+        src.join("words.txt"),
+        "needlework nope\nneedle exact\nexactly needle here\n",
+    )
+    .unwrap();
     std::fs::write(src.join("exact.txt"), "needle\nneedlex\nxneedle\n").unwrap();
-    // Binary without the needle: exercises the NUL-skip path without
-    // forcing a decline (a *matching* binary always declines).
+
     std::fs::write(src.join("bin.dat"), b"ab\x00nomatch\x00cd").unwrap();
     std::fs::create_dir_all(root.join("ignored")).unwrap();
     std::fs::write(root.join("ignored/secret.txt"), "needle in ignored\n").unwrap();
@@ -130,14 +130,12 @@ fn write_rg_tree(root: &Path) {
     std::fs::write(root.join(".git/hooks/x.sample"), "needle in git\n").unwrap();
     std::fs::create_dir_all(root.join("deep/d1/d2")).unwrap();
     std::fs::write(root.join("deep/d1/d2/c.txt"), "deep needle\n").unwrap();
-    // `.ignore` applies outside a repo; `.gitignore` needs `.git` (present).
+
     std::fs::write(root.join(".ignore"), "ignored/\n").unwrap();
     std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
 }
 
 fn real_rg(argv: &[String], cwd: &Path) -> (Vec<u8>, Vec<u8>, i32) {
-    // `-j1`: the serial walk order the answer path reproduces. Parallel
-    // rg promises no order, so it cannot be a byte-level oracle.
     let out = Command::new("rg")
         .arg("-j1")
         .args(argv)
@@ -209,13 +207,17 @@ fn rg_answer_matches_real() {
         argv(&["--no-ignore", "-n", "needle", "."]),
         argv(&["--no-ignore-vcs", "-n", "needle", "."]),
         argv(&["-I", "-n", "needle", "."]),
-        argv(&["needle", "src/a.py"]), // file operand: must decline
-        argv(&["needle", "missing"]),  // missing operand: must decline
+        argv(&["needle", "src/a.py"]),
+        argv(&["needle", "missing"]),
     ];
     let mut served = 0;
     for args in &cases {
         match super::rg_answer(&engine, args, work.path()) {
-            Some(super::Answer::Print { stdout, stderr, code }) => {
+            Some(super::Answer::Print {
+                stdout,
+                stderr,
+                code,
+            }) => {
                 served += 1;
                 let (rout, rerr, rcode) = real_rg(args, work.path());
                 assert_eq!(
@@ -230,7 +232,6 @@ fn rg_answer_matches_real() {
             }
             Some(super::Answer::Exec { .. }) => panic!("rg_answer returned Exec for {args:?}"),
             None => {
-                // Legit declines: file and missing operands.
                 let last = args.last().map(String::as_str);
                 assert!(
                     last == Some("src/a.py") || last == Some("missing"),

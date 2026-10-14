@@ -1,11 +1,3 @@
-//! `gray plugin check <dir>` — sidecar conformance runner.
-//!
-//! Boots the plugin exactly like `gray.yml` would and drives the
-//! failure modes the `gray-plugin` fixtures pin down:
-//! empty-name manifests bail at spawn, hung calls time out instead of
-//! hanging the host, concurrent calls route by id, and shutdown is
-//! graceful for v1.1 sidecars. One line per check; nonzero exit on failure.
-
 use std::path::Path;
 use std::time::Duration;
 
@@ -42,12 +34,10 @@ impl Report {
     }
 }
 
-/// Run every check; `Err` (with per-check lines already printed) when any fail.
 pub async fn check_plugin_dir(dir: &str) -> anyhow::Result<()> {
     let mut argv = resolve_argv(Path::new(dir))?;
     let argv0 = argv.first().cloned().unwrap_or_default();
-    // argv `manifest` probe — the install/check convention: prints the same
-    // manifest the wire answers with.
+
     let probe = tokio::time::timeout(
         Duration::from_secs(10),
         tokio::process::Command::new(&argv0)
@@ -143,7 +133,6 @@ pub async fn check_plugin_dir(dir: &str) -> anyhow::Result<()> {
         },
     });
 
-    // tool/call round-trip on the first tool (skipped when there are none).
     if let Some(tool) = plugin.tools().first().cloned() {
         let name = tool.def().name.clone();
         let out = tokio::time::timeout(
@@ -167,7 +156,7 @@ pub async fn check_plugin_dir(dir: &str) -> anyhow::Result<()> {
                 detail: format!("{name} hung past 10s (hang-fixture behavior)"),
             },
         });
-        // Concurrent calls must both resolve (reorder-fixture behavior).
+
         let t2 = plugin.tools()[0].clone();
         let ctx = ToolContext::default();
         let both = tokio::time::timeout(Duration::from_secs(15), async {
@@ -188,9 +177,6 @@ pub async fn check_plugin_dir(dir: &str) -> anyhow::Result<()> {
         });
     }
 
-    // tool/before gate (skipped when unclaimed): allow resolves fast;
-    // ask-shaped hooks without a host handler deny fast (fail closed, never
-    // hang to the ask TTL — the transport has no handler in check mode).
     if m.hooks.iter().any(|h| h == "tool/before") {
         let t = std::time::Instant::now();
         let verdict = tokio::time::timeout(
@@ -222,7 +208,6 @@ pub async fn check_plugin_dir(dir: &str) -> anyhow::Result<()> {
         });
     }
 
-    // command/run on every claimed command (skipped when there are none).
     for cmd in m.commands.iter() {
         let t = std::time::Instant::now();
         let outcome =
@@ -247,8 +232,6 @@ pub async fn check_plugin_dir(dir: &str) -> anyhow::Result<()> {
         });
     }
 
-    // event/notify is fire-and-forget: must return fast even for plugins
-    // that never reply (hang fixture).
     let t = std::time::Instant::now();
     plugin
         .on_event(CoreEvent::TurnEnd {
@@ -262,7 +245,6 @@ pub async fn check_plugin_dir(dir: &str) -> anyhow::Result<()> {
         detail: format!("turn_end notify returned in {dt:?}"),
     });
 
-    // Graceful teardown (v1.1: plugin/shutdown; pre-v1: SIGKILL path).
     let t = std::time::Instant::now();
     plugin.shutdown(Duration::from_secs(5)).await;
     let dt = t.elapsed();

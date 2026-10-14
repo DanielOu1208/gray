@@ -1,14 +1,3 @@
-//! Name-search quality rig: how high fsearch ranks the file a query means.
-//!
-//!   quality snap <snap dir> <home>                    crawl the disk into <snap>/index.bin
-//!   quality run <snap dir> <root> <queries.json> <out.json>
-//!   quality ask <snap dir> <query>                    print the hits' paths
-//!
-//! `snap` skips the folders macOS guards with a consent prompt (for the real
-//! home too: no Full Disk Access here). `run` asks each query scoped to
-//! `<root>` and records where the wanted paths (relative to it) rank; the
-//! queries and fff's answers come from examples/quality.py.
-
 use fsearch::index::Index;
 use fsearch::live::Live;
 use fsearch::query::{Query, Searcher};

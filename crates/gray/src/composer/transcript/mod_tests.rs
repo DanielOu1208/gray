@@ -24,8 +24,6 @@ fn word_flush_cut_exact_fit_pushes_whole() {
     assert_eq!(word_flush_cut(&chars, 6), 6);
 }
 
-/// The reported seam: a window ending exactly on a space keeps the space
-/// on its own row, so the next row starts at the word, not at " changed".
 #[test]
 fn word_flush_cut_boundary_space_rides_with_the_row() {
     let chars: Vec<char> = "hi you  there".chars().collect();
@@ -41,14 +39,12 @@ fn thinking_paint_text_trims_only_word_cut_continuations() {
         Some("changed and")
     );
     assert_eq!(thinking_paint_text("  - nested", false), Some("  - nested"));
-    // The cut line's own terminator is not a paragraph break.
+
     assert_eq!(thinking_paint_text(" ", true), None);
     assert_eq!(thinking_paint_text("", true), None);
     assert_eq!(thinking_paint_text("", false), Some(""));
 }
 
-/// Mirrors `stream_thinking` token by token: no painted row may open with
-/// a space, whatever the chunking, and the stored run reproduces the text.
 #[test]
 fn live_thinking_rows_never_open_with_a_space() {
     let text = "Given the ambiguity, the most useful interpretation: they want to know what \
@@ -65,7 +61,7 @@ fn live_thinking_rows_never_open_with_a_space() {
                 painted.push(t.to_string());
             }
         };
-        // Word-sized chunks with their leading space, like provider deltas.
+
         for tok in text.split_inclusive(' ') {
             let tok = match tok.strip_suffix(' ') {
                 Some(t) => format!(" {t}"),
@@ -102,7 +98,7 @@ fn live_thinking_rows_never_open_with_a_space() {
 #[test]
 fn word_flush_cut_budgets_cells_not_chars() {
     let chars: Vec<char> = "界界界界".chars().collect();
-    // 2×2 cells fit; a third wide char would overflow the 5-cell budget.
+
     assert_eq!(word_flush_cut(&chars, 5), 2);
 }
 
@@ -170,24 +166,18 @@ fn streaming_punctuation_guard_only_matches_a_standalone_continuation() {
     assert!(!is_orphan_stream_punctuation(""));
 }
 
-/// A punctuation-only delta with no round boundary armed (mid-round split,
-/// post-interrupt tail) must be held back, not fed to the streaming
-/// renderer — checkpoints only advance on complete blocks, so the chunk
-/// would freeze as its own lone `.` transcript row.
 #[test]
 fn unboundaryed_punctuation_only_chunks_are_held_not_rendered() {
-    // The repro: a trailing `.` arrives as its own chunk.
     assert!(should_hold_stream_chunk(0, "."));
     assert!(should_hold_stream_chunk(0, "…"));
-    // Once a burst is held, keep holding punctuation and the whitespace
-    // separators between bursts until a meaningful delta releases them.
+
     assert!(should_hold_stream_chunk(1, "."));
     assert!(should_hold_stream_chunk(3, " "));
     assert!(should_hold_stream_chunk(3, "\n"));
-    // Meaningful deltas and the empty chunk render normally.
+
     assert!(!should_hold_stream_chunk(0, "I'll build it"));
     assert!(!should_hold_stream_chunk(0, ""));
-    // The boundary-armed path stays `should_drop`'s job.
+
     assert!(!should_hold_stream_chunk(0, "x"));
 }
 
@@ -195,7 +185,7 @@ fn unboundaryed_punctuation_only_chunks_are_held_not_rendered() {
 fn user_prompt_wraps_at_word_boundaries() {
     let text = "write a very long poem about the restless sea";
     let lines = format_user_prompt_lines(text, &[], 24);
-    // content rows (skip blank margins) preserve the text exactly
+
     let bodies: Vec<String> = lines
         .iter()
         .filter_map(|l| l.spans.get(1))
@@ -203,7 +193,7 @@ fn user_prompt_wraps_at_word_boundaries() {
         .collect();
     assert!(bodies.len() > 1);
     assert_eq!(bodies.concat(), text);
-    // every row except the last ends at a space or is a full hard cut
+
     let max_w = 24usize - 4;
     for b in &bodies[..bodies.len() - 1] {
         assert!(
@@ -216,7 +206,7 @@ fn user_prompt_wraps_at_word_boundaries() {
 #[test]
 fn user_prompt_wraps_wide_chars_by_cells() {
     let text = "界界界界界";
-    let lines = format_user_prompt_lines(text, &[], 6); // 2-cell budget
+    let lines = format_user_prompt_lines(text, &[], 6);
     let bodies: Vec<Span<'static>> = lines
         .iter()
         .filter_map(|l| l.spans.get(1).cloned())
@@ -252,38 +242,33 @@ fn diff_rows_pad_edge_to_edge() {
     ];
     let lines = format_tool_box_lines(header, &body, 80);
     let row_w = |l: &Line<'static>| l.spans.iter().map(|s| s.width()).sum::<usize>();
-    // margin, header, breathing row, the three body rows, margin
+
     assert_eq!(lines.len(), 7, "{lines:?}");
-    // tinted rows span the full width (no dark strip on the right)
+
     assert_eq!(row_w(&lines[3]), 80);
     assert_eq!(row_w(&lines[4]), 80);
-    // untinted rows are untouched (card block bg shows through, same color)
+
     assert!(row_w(&lines[5]) < 80);
 }
 
-/// tool_fmt pre-wraps numbered rows to `width - 2` cells (2-col lead +
-/// gutter + content). The card must not re-wrap them narrower: a 2-col
-/// mismatch orphaned each full row's last word onto its own row.
 #[test]
 fn full_width_numbered_row_is_not_rewrapped() {
     let width = 80;
-    let content = "word ".repeat(14); // 70 cells
-    let row = format!("    1 | {content}"); // 2 lead + "  1 | " + 70 = 78
+    let content = "word ".repeat(14);
+    let row = format!("    1 | {content}");
     assert_eq!(row.len(), width - 2);
     let lines = format_tool_box_lines(Line::from("Ran x"), &[Line::from(row)], width);
-    // margin, header, ONE body row, margin (no breathing row for a 1-line body)
+
     assert_eq!(lines.len(), 4, "{lines:?}");
 }
 
 #[test]
 fn wrap_ranges_round_trip_and_identity() {
-    // identity: short line maps to the whole source
     let short = Line::from(vec![Span::raw("hello world")]);
     let out = wrap_styled_line_with_ranges(short, 20);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].1.end, usize::MAX);
 
-    // long line: rows fit max_w and each row's text equals the source slice
     let text =
         "the quick brown fox jumps over the lazy dog again and again until it wraps somewhere";
     let long = Line::from(vec![Span::raw(text.to_string())]);
@@ -303,11 +288,6 @@ fn wrap_ranges_round_trip_and_identity() {
     }
 }
 
-/// Resize regression: the live thinking cut (`word_flush_cut` at the old
-/// width) stores raw run text, and reflow re-wraps whole logical lines at
-/// the new width (`thinking_run_rows`). Narrowing must never lose words
-/// (no hard-clipped "shortened" rows); widening must re-join the live
-/// fragments into full-width rows instead of leaving narrow shards.
 #[test]
 fn thinking_survives_resize_round_trip() {
     let text = "The second command was blocked by a guard because of `curl ... | python3`? \
@@ -323,9 +303,7 @@ fn thinking_survives_resize_round_trip() {
             })
             .collect::<Vec<_>>()
     };
-    // Live accumulation at the old width, mirroring `stream_thinking`:
-    // `\n`-drains store terminated, word-cuts concatenate bare (which for
-    // `\n`-free text reproduces the source exactly).
+
     let accumulate = |w_live: usize| {
         let max_live = prose_width(w_live);
         let mut run = String::new();
@@ -347,10 +325,7 @@ fn thinking_survives_resize_round_trip() {
         let run = accumulate(w_live);
         let rows = thinking_run_rows(&run, prose_width(w_new), false);
         assert!(!rows.is_empty(), "run must paint at {w_new}");
-        // Render budget is `prose_width` with the gutter on top: padded
-        // rows stop short of the right margin, never the full width
-        // (Paragraph would hard-clip anything wider — the "shortened"
-        // symptom).
+
         for r in &rows {
             let rw: usize = r.spans.iter().map(|s| s.width()).sum();
             assert!(rw <= w_new - RIGHT_MARGIN, "row overflows {w_new}: {r:?}");
@@ -362,8 +337,7 @@ fn thinking_survives_resize_round_trip() {
             .join(" ");
         assert_eq!(got, norm, "text lost resizing {w_live} -> {w_new}");
     }
-    // The reported bug: streamed narrow (40), widened to 100 — rows must
-    // expand past the narrow cut budget instead of lingering as shards.
+
     let narrow_rows = thinking_run_rows(&accumulate(40), prose_width(40), false);
     let wide_rows = thinking_run_rows(&accumulate(40), prose_width(100), false);
     let max_cells = |rows: &[Line<'static>]| {
@@ -386,15 +360,12 @@ fn thinking_survives_resize_round_trip() {
 
 #[test]
 fn thinking_run_rows_collapse_stacked_blanks() {
-    // Live parity: blank-on-blank never paints, at run start (blank tail
-    // from the opening gap) or mid-run (provider `\n\n` breaks).
     let rows = thinking_run_rows("\nfoo\n\n\nbar\n", 40, true);
     let texts: Vec<String> = rows
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    // Live blank rows carry the gutter pad; the blank predicate treats
-    // them as blank, so no stacked gaps ever paint.
+
     let pad = " ".repeat(GUTTER);
     assert_eq!(
         texts,
@@ -402,10 +373,6 @@ fn thinking_run_rows_collapse_stacked_blanks() {
     );
 }
 
-/// Paragraph has no `.wrap()`: any row wider than the viewport is
-/// hard-clipped at the right edge (the "shortened" symptom). The wrapper
-/// must therefore never emit an over-budget row, including overlong
-/// words (URLs) that force hard cuts.
 #[test]
 fn wrapped_rows_never_exceed_budget() {
     let text = format!(
@@ -420,8 +387,6 @@ fn wrapped_rows_never_exceed_budget() {
     }
 }
 
-// Over-cap push evicts oldest-first, mirroring the transcript
-// >1000/drain-100 guard.
 #[test]
 fn history_entries_cap_evicts_oldest_first_unrun() {
     let mut entries: Vec<crate::composer::TranscriptEntry> = (0..1001)
@@ -435,7 +400,6 @@ fn history_entries_cap_evicts_oldest_first_unrun() {
     }
 }
 
-// At-cap is a no-op.
 #[test]
 fn history_entries_cap_keeps_at_most_1000_unrun() {
     let mut entries: Vec<crate::composer::TranscriptEntry> = (0..1000)
@@ -447,19 +411,10 @@ fn history_entries_cap_keeps_at_most_1000_unrun() {
 
 #[test]
 fn thinking_blank_never_stacks_on_blank() {
-    // Sibling `stream()` parity: a drained blank must not stack on a
-    // trailing blank, or provider `\n\n` paragraph breaks paint the
-    // double gap from the report (`[gap][gap AGAIN]`).
-    // Pure drain simulation: `stream_thinking` pushes every drained line
-    // via `push_line_styled` (needs a TTY `Tui`), so mirror its exact
-    // guard here — `trimmed` blank + blank tail means skip.
     let tail_blank = Line::from("");
     let tail_text = Line::from(vec![Span::styled("hello".to_string(), thinking_style())]);
     let drained = "\n\nhello\n\n";
-    // blank tail: leading `\n\n` skipped, `hello` + one trailing blank
-    // land (2 rows). text tail: the two leading blanks and `hello` land,
-    // the single trailing blank lands too — but the second trailing blank
-    // would stack on it, so it skips (3 rows, never a stacked pair).
+
     for (tail, want_rows) in [(&tail_blank, 2usize), (&tail_text, 3usize)] {
         let mut transcript = vec![tail.clone()];
         let mut pending = drained.to_string();
@@ -487,14 +442,11 @@ fn thinking_blank_never_stacks_on_blank() {
 
 #[test]
 fn transcript_row_is_blank_matches_gap_predicates() {
-    // The shared predicate must agree with `ensure_gap` /
-    // `transcript_ends_blank`, or the live drain and the gap logic drift.
     assert!(transcript_row_is_blank(&Line::from("")));
     assert!(transcript_row_is_blank(&Line::from(" ")));
     assert!(transcript_row_is_blank(&Line::from(vec![Span::raw(" ")])));
     assert!(!transcript_row_is_blank(&Line::from("text")));
-    // A card's padding row is painted with the card background: it is part
-    // of the card, not the gap between blocks (codex keeps the two apart).
+
     let bg = Style::default().bg(crate::theme::theme().surface_bg);
     assert!(!transcript_row_is_blank(&Line::from("").style(bg)));
     assert!(!transcript_row_is_blank(&Line::from(vec![Span::styled(
@@ -505,9 +457,6 @@ fn transcript_row_is_blank_matches_gap_predicates() {
 
 #[test]
 fn tool_box_has_exactly_one_painted_margin_row_top_and_bottom() {
-    // A card owns exactly one margin row per side. "Painted" is the part that
-    // matters: an unpainted blank row is invisible against the composer
-    // surface, so the margin existed in the transcript but not on screen.
     let bg = crate::theme::theme().surface_bg;
     let row_w = |l: &Line<'static>| l.spans.iter().map(|s| s.width()).sum::<usize>();
     let painted = |l: &Line<'static>| {
@@ -523,7 +472,7 @@ fn tool_box_has_exactly_one_painted_margin_row_top_and_bottom() {
         assert_eq!(row_w(first), 80, "top margin spans the card");
         assert_eq!(row_w(last), 80, "bottom margin spans the card");
         assert!(painted(first) && painted(last), "{first:?} {last:?}");
-        // and exactly one of each: the rows next to them hold content
+
         assert!(lines[1].spans.iter().any(|s| !s.content.trim().is_empty()));
         assert!(
             lines[lines.len() - 2]
@@ -536,9 +485,6 @@ fn tool_box_has_exactly_one_painted_margin_row_top_and_bottom() {
 
 #[test]
 fn prose_and_card_glyphs_share_the_gutter_column() {
-    // Prose text, the tool card's header and the prompt card's `❯` all start
-    // in the same column, `GUTTER`, so nothing in the transcript is flush to
-    // the terminal edge or misaligned against its neighbour.
     let first_glyph = |l: &Line<'static>| {
         let flat: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
         flat.chars().take_while(|c| *c == ' ').count()
@@ -549,7 +495,7 @@ fn prose_and_card_glyphs_share_the_gutter_column() {
     assert_eq!(first_glyph(&card[1]), GUTTER);
     let prompt = format_user_prompt_lines("rebuilt?", &[], 80);
     assert_eq!(first_glyph(&prompt[1]), GUTTER);
-    // wrapped prompt rows hang under the text, not under the glyph
+
     let long = format_user_prompt_lines(&"word ".repeat(40), &[], 40);
     assert_eq!(first_glyph(&long[2]), GUTTER + 2);
     for row in &long {
@@ -558,9 +504,6 @@ fn prose_and_card_glyphs_share_the_gutter_column() {
     }
 }
 
-/// The setup screen's backdrop lays history out through the same funnel as
-/// the live transcript: repeated marks, edge blanks in stored blocks and
-/// cards all come out one unpainted row apart, and nothing trails.
 #[test]
 fn the_backdrop_keeps_the_live_margins() {
     let styled = |rows: &[&str]| TranscriptEntry::StyledLines {

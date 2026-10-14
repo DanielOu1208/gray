@@ -1,5 +1,3 @@
-//! The `write` tool: creates or overwrites a text file.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,27 +10,15 @@ use crate::ledger::{FileLedger, LedgerEntry};
 use crate::read::notices;
 use crate::{Tool, fail, finish, get_opt_bool, get_str, resolve_path};
 
-/// Writes `content` to `path`, creating parent directories as needed.
-///
-/// Shares a [`FileLedger`] with the read/edit tools for the read-before-write
-/// guard (T3.2).
 pub struct WriteTool {
     ledger: Arc<FileLedger>,
 }
 
 impl WriteTool {
-    /// Share `ledger` (the registry/plugin wiring); [`Default`] keeps a
-    /// private ledger so existing tests compile.
     pub fn new(ledger: Arc<FileLedger>) -> Self {
         Self { ledger }
     }
 
-    /// T3.2 decision table (pure; `None` = allow), in order: (1) new file →
-    /// allow; (2) unread → refuse unless `force`; (3) changed on disk
-    /// (mtime/size, or content hash when both sides hashed) → refuse;
-    /// (4) full view (delivered coverage) → allow; (5) partial → refuse
-    /// with the resume offset. `force` bypasses (2) and (5) only, never (3).
-    /// Disk hash gates freshness only, never overwrite authorization.
     pub(crate) fn decide(
         entry: Option<&LedgerEntry>,
         meta: Option<&std::fs::Metadata>,
@@ -50,15 +36,14 @@ impl WriteTool {
         if meta.modified().is_ok_and(|t| t != entry.mtime) || meta.len() != entry.size {
             return Some(notices::write_changed(display));
         }
-        // Freshness via bytes when already read: same mtime/size but different
-        // bytes still counts as changed.
+
         if let (Some(expected), Some(actual)) =
             (entry.content_hash, FileLedger::hash_bytes(old_bytes))
             && expected != actual
         {
             return Some(notices::write_changed(display));
         }
-        // `force` bypasses (2) and (5) — but never (3) above.
+
         if force {
             return None;
         }
@@ -83,12 +68,6 @@ impl Default for WriteTool {
     }
 }
 
-/// Verify-at-apply (audit #8): the staleness check and the atomic replace
-/// are separate syscalls, so a file that changed *between* them would be
-/// clobbered by a guard that already passed. Re-prove freshness immediately
-/// before the replace: the metadata the check saw must still describe the
-/// file, and when the ledger knows the old bytes' hash the current bytes
-/// must still hash to it (mtime granularity can lie; the bytes cannot).
 pub(crate) fn still_fresh(
     path: &std::path::Path,
     expected_meta: Option<&std::fs::Metadata>,
@@ -96,14 +75,14 @@ pub(crate) fn still_fresh(
 ) -> bool {
     let current = std::fs::metadata(path).ok();
     match (expected_meta, current) {
-        (None, None) => {} // still absent: the replace creates it
+        (None, None) => {}
         (Some(want), Some(got)) => {
             let same_meta = got.len() == want.len() && got.modified().ok() == want.modified().ok();
             if !same_meta {
                 return false;
             }
         }
-        _ => return false, // appeared or vanished under us
+        _ => return false,
     }
     match expected_hash {
         Some(want) => match std::fs::read(path) {
@@ -114,14 +93,6 @@ pub(crate) fn still_fresh(
     }
 }
 
-/// Atomic file replace via temp + rename with mode preservation.
-///
-/// Symlink/hardlink semantics: rename replaces the directory entry itself, so
-/// a symlink at `path` is replaced (not followed — the link is gone, the old
-/// target keeps its bytes) and a hardlink is broken (new inode; other names
-/// keep the old content). Crash safety (no half-written target) wins over
-/// link-following here; callers that must follow a symlink should resolve it
-/// first.
 pub(crate) async fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -192,15 +163,11 @@ impl Tool for WriteTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: Value) -> ToolOutput {
-        // Legacy names (file_path/contents/…) are renamed by the ALIASES table
-        // in `crate` (coerce_args) before lookup — no per-tool chain here.
         let path = match get_str(&args, "path") {
             Ok(p) => p,
             Err(e) => return e,
         };
 
-        // Content must be an explicit string: missing or wrong-typed content
-        // must never become an empty-string truncation. Explicit "" stays valid.
         let content = match args.get("content") {
             None => {
                 return fail(
@@ -224,23 +191,19 @@ impl Tool for WriteTool {
             Ok(v) => v.unwrap_or(false),
             Err(e) => return e,
         };
-        // Distinguish NotFound (new file) from other metadata errors: only
-        // NotFound means "does not exist yet"; anything else fails closed.
+
         let disk_meta = match tokio::fs::metadata(&full).await {
             Ok(m) => Some(m),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return fail(format!("write failed for {}: {e}", full.display())),
         };
-        // Validate regular files: refuse directories/special files before any
-        // read or write (metadata follows symlinks; see atomic_write for link
-        // semantics).
+
         if let Some(meta) = disk_meta.as_ref()
             && !meta.file_type().is_file()
         {
             return fail(format!("write refused: {display} is not a regular file"));
         }
-        // No read-errors-become-empty: NotFound after an existing metadata is
-        // a race (treat as changed); other read errors fail closed.
+
         let old_bytes: Vec<u8> = if disk_meta.is_some() {
             match tokio::fs::read(&full).await {
                 Ok(b) => b,
@@ -253,8 +216,7 @@ impl Tool for WriteTool {
             Vec::new()
         };
         let old = String::from_utf8_lossy(&old_bytes).into_owned();
-        // T3.2 ledger guard: refuse blind/partial/stale overwrites (pure table
-        // above). Runs before any directory creation or write.
+
         if let Some(msg) = Self::decide(
             self.ledger.get(&full).as_ref(),
             disk_meta.as_ref(),
@@ -265,19 +227,17 @@ impl Tool for WriteTool {
             return fail(msg);
         }
         let existed = disk_meta.is_some();
-        // Audit #8: re-prove freshness at the rename, not just at the check.
+
         let recheck_hash = self.ledger.get(&full).and_then(|e| e.content_hash);
         if !still_fresh(&full, disk_meta.as_ref(), recheck_hash) {
             return fail(notices::write_changed(&display));
         }
         match atomic_write(&full, content.as_bytes()).await {
             Ok(()) => {
-                // T3.2 ledger: the whole new content is known — the next write
-                // is allowed without a re-read, and the next read is full.
                 self.ledger.mark_written(&full, content.as_bytes());
                 if existed && !old.is_empty() {
                     let patch = crate::edit_diff::generate_unified_patch(&path, &old, &content, 3);
-                    // Same verbatim-bytes concern as edit: redact the diff.
+
                     let patch = gray_core::redaction::redact_for_disclosure(&patch).into_text();
                     if patch.is_empty() {
                         finish(format!(

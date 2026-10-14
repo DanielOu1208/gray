@@ -99,9 +99,6 @@ fn provider_only_runtime_role_survives_lock_round_trip() {
 
 #[test]
 fn provider_cache_accepts_a_manifest_named_differently_from_the_lock_key() {
-    // Index installs adopt the CLI manifest of a plugin published under a
-    // different registry key (the `-sub` plugins); the `<key>-manifest.json`
-    // filename is what binds the manifest to the lock entry.
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join("plugins")).unwrap();
     write_lock(home.path(), lock_entry(vec!["demo-exe".to_string()])).unwrap();

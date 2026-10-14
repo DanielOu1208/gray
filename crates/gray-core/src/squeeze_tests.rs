@@ -1,10 +1,5 @@
-//! The compression rules, checked against the output shapes they claim to know
-//! and against the shapes they must not touch.
-
 use crate::squeeze::*;
 
-/// A `cargo build` over a 300-crate tree: the bulk is progress, the payload is
-/// one error line and the summary.
 fn cargo_build() -> String {
     let mut out = String::new();
     for i in 0..300 {
@@ -22,11 +17,11 @@ fn cargo_collapses_progress_and_keeps_the_error() {
     let s = squeeze(&cargo_build(), "cargo build --release");
     assert_eq!(s.rule, "cargo");
     assert!(s.squeezed());
-    // The progress run is one counted line, not 302 of them.
+
     assert!(s.text.contains("progress ×30"), "got: {}", s.text);
     assert!(s.text.contains("error[E0308]"), "got: {}", s.text);
     assert!(s.text.contains("Finished dev"), "got: {}", s.text);
-    // Fewer than a tenth of the original: this is the whole point.
+
     assert!(
         s.sent_bytes * 10 < s.raw_bytes,
         "{} -> {}",
@@ -51,14 +46,13 @@ fn two_progress_lines_are_a_list_not_a_count() {
 
 #[test]
 fn a_mixed_pipeline_gets_only_the_generic_rule() {
-    // grep's output is not cargo's output; a family rule here would be wrong.
     let mut text = String::new();
     for _ in 0..200 {
         text.push_str("src/a.rs:12:   Compiling thing v0.1.0\n");
     }
     let s = squeeze(&text, "cargo build 2>&1 | grep Compiling");
     assert_eq!(s.rule, "runs");
-    // The generic rule fires: identical consecutive lines, counted.
+
     assert!(s.text.contains("×200"), "got: {}", s.text);
 }
 
@@ -128,8 +122,6 @@ fn small_output_is_never_touched() {
 
 #[test]
 fn a_compressor_never_returns_more_than_it_was_given() {
-    // Nothing to collapse: the output must pass through untouched, not grow a
-    // note for a rule that did nothing.
     let text = format!(
         "{}\n{}",
         "unique line of its own here", "another distinct one"
@@ -143,7 +135,7 @@ fn a_compressor_never_returns_more_than_it_was_given() {
 #[test]
 fn the_escape_hatch_is_an_environment_variable() {
     let text = cargo_build();
-    // SAFETY: single-threaded test body; the var is read once, right here.
+
     unsafe { std::env::set_var("GRAY_NO_SQUEEZE", "1") };
     let s = squeeze(&text, "cargo build");
     unsafe { std::env::remove_var("GRAY_NO_SQUEEZE") };
@@ -176,7 +168,6 @@ fn a_trailing_newline_is_preserved() {
 
 #[test]
 fn blank_floods_collapse_to_a_count() {
-    // Over the 2 KiB gate, so the rule is allowed to cost a line.
     let mut text = String::new();
     for _ in 0..3000 {
         text.push('\n');

@@ -73,7 +73,7 @@ async fn waiting_events_for_one_key_batch_and_the_cap_holds() {
         std::thread::sleep(Duration::from_millis(2));
     }
     brain.step(1_000);
-    // Cap 2: main (both messages, one turn) + the next oldest key.
+
     assert_eq!(brain.busy_keys(), 2);
     assert_eq!(event::pending(&brain.dir).len(), 1);
     drain(&mut brain, &mut rx).await;
@@ -152,6 +152,7 @@ fn recovery_readmits_then_gives_up_and_says_so() {
         key: MAIN.into(),
         events: vec![fresh.clone(), tired],
         started_at: 1,
+        child: None,
     };
     crate::cron::store::atomic_write_json(&brain.dir.join("running/t1.json"), &record).unwrap();
     brain.recover();
@@ -211,4 +212,110 @@ async fn autonomous_turns_neither_resume_nor_replace_the_session() {
     }
     let user = Some(format!("sid-{}", Kind::User.as_str()));
     assert_eq!(*seen.lock().unwrap(), vec![None, None, user]);
+}
+
+#[cfg(unix)]
+fn group_leader(script: &str) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg(script)
+        .stdout(std::process::Stdio::piped());
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    cmd.spawn().unwrap()
+}
+
+#[cfg(unix)]
+fn recover_record(brain: &mut Brain, child: ChildProc, events: Vec<Event>) {
+    let record = Running {
+        turn: "t1".into(),
+        key: MAIN.into(),
+        events,
+        started_at: 1,
+        child: Some(child),
+    };
+    crate::cron::store::atomic_write_json(&brain.dir.join("running/t1.json"), &record).unwrap();
+    brain.recover();
+}
+
+#[cfg(unix)]
+fn orphan_rows(brain: &Brain) -> Vec<serde_json::Value> {
+    crate::gateway::activity::tail(&brain.dir, 50)
+        .into_iter()
+        .filter(|r| r["what"] == "orphan_killed")
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_requeues_when_the_recorded_child_is_dead() {
+    let home = tempfile::tempdir().unwrap();
+    let mut brain = Brain::new(home.path(), stub("x"));
+    let mut child = group_leader("exec sleep 30");
+    let stamp = ChildProc::leader(child.id());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(!stamp.alive());
+    let first = Event::new(Kind::User, MAIN, "one", None);
+    let mut second = Event::new(Kind::User, MAIN, "two", None);
+    second.attempt = 1;
+    recover_record(&mut brain, stamp, vec![first.clone(), second.clone()]);
+    assert!(event::spool_files(&brain.dir.join("running")).is_empty());
+    let attempts: Vec<(String, u32)> = event::pending(&brain.dir)
+        .into_iter()
+        .map(|(_, e)| (e.id, e.attempt))
+        .collect();
+    assert_eq!(attempts, vec![(first.id, 1), (second.id, 2)]);
+    assert!(orphan_rows(&brain).is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn recovery_kills_a_live_orphan_group_before_requeueing() {
+    use std::io::BufRead as _;
+    use std::os::unix::process::ExitStatusExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let mut brain = Brain::new(home.path(), stub("x"));
+    let mut child = group_leader("sleep 30 & echo $!; exec sleep 30");
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let grandchild = ChildProc {
+        pid: line.trim().parse().unwrap(),
+        pgid: None,
+        start_time: crate::gateway::pid::proc_start_time(line.trim().parse().unwrap()),
+    };
+    let stamp = ChildProc::leader(child.id());
+    assert!(stamp.alive() && grandchild.alive());
+    let mut ev = Event::new(Kind::User, MAIN, "deploy", None);
+    ev.attempt = 1;
+    recover_record(&mut brain, stamp.clone(), vec![ev.clone()]);
+    assert!(!stamp.alive(), "orphan dead once recover returns");
+    assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while grandchild.alive() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!grandchild.alive(), "the whole group went");
+    let pending = event::pending(&brain.dir);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].1.id, ev.id);
+    assert_eq!(pending[0].1.attempt, 2);
+    let rows = orphan_rows(&brain);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["pid"], stamp.pid);
+    assert_eq!(rows[0]["killed"], true);
+}
+
+#[test]
+fn records_from_older_builds_still_load() {
+    let old = r#"{"turn":"t","key":"main","events":[],"started_at":1}"#;
+    let rec: Running = serde_json::from_str(old).unwrap();
+    assert!(rec.child.is_none());
 }

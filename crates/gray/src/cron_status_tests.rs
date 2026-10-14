@@ -1,4 +1,3 @@
-// UNRUN (cargo test banned under X): run in TTY/CI.
 use super::*;
 use crate::cron::OverdueJob;
 
@@ -83,8 +82,6 @@ fn add_warning_only_when_nothing_is_ticking() {
 
 #[test]
 fn add_warning_never_sends_a_chat_bound_job_to_start_a_driver() {
-    // The fresh-conversation race: the host only ticks homes that already
-    // have `cron/`, so the first add there never sees a tick stamp.
     let hint = add_warning(None, 10_000, true).expect("chat-bound hint");
     assert!(hint.contains("host's next tick"), "{hint}");
     assert!(!hint.contains("cron serve"), "{hint}");

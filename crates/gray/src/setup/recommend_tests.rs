@@ -1,7 +1,5 @@
 use super::*;
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
-
 fn models(ids: &[&str]) -> Vec<(String, String)> {
     ids.iter()
         .map(|id| (id.to_string(), id.to_string()))
@@ -22,7 +20,6 @@ fn meta(
     }
 }
 
-/// Meta lookup over `(id, meta)` pairs, mirroring the real cache's signature.
 fn lookup<'a>(table: &'a [(&'a str, ModelMeta)]) -> impl Fn(&str) -> Option<ModelMeta> + 'a {
     move |id| table.iter().find(|(k, _)| *k == id).map(|(_, m)| m.clone())
 }
@@ -72,7 +69,7 @@ fn non_tool_or_unknown_meta_models_are_not_recommended() {
         ),
         ("a/good", meta(true, true, Some("2025-01-01"), Some("a"))),
     ];
-    // `a/unknown` has no meta entry at all.
+
     let got = recommended_ids(&m, None, lookup(&table), 5);
     assert_eq!(got, ["a/good"]);
 }

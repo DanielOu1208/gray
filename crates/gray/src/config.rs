@@ -1,13 +1,9 @@
-//! Configuration resolution for the Gray agent harness.
-
 use std::path::PathBuf;
 
 use crate::Cli;
 
-/// Default API base URL pointing to OpenRouter.
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-/// The level `effort_memory` holds for this connection+model, if any.
 fn remembered_effort(
     memory: &std::collections::BTreeMap<String, String>,
     provider_id: &str,
@@ -30,11 +26,6 @@ fn nonempty(s: Option<&str>) -> Option<String> {
         .map(ToString::to_string)
 }
 
-/// API-key precedence: `--api-key` > `GRAY_API_KEY` > the stored key >
-/// `OPENAI_API_KEY`. `OPENAI_API_KEY` is only a legacy fallback for the
-/// OpenAI endpoint: an OpenAI Bearer against the default OpenRouter base
-/// is just a bad key, so the env var is ignored there — letting the
-/// connect flow's `(found OPENAI_API_KEY)` row offer it properly.
 fn resolve_api_key(
     cli: &Cli,
     base_url: &str,
@@ -55,7 +46,6 @@ fn resolve_api_key(
         })
 }
 
-/// scheme://host/path without userinfo, query, or fragment (for logs).
 fn scrub_url(url: &str) -> String {
     let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let auth_end = after_scheme
@@ -70,12 +60,7 @@ fn scrub_url(url: &str) -> String {
     }
 }
 
-/// The desktop's session bus, when ours is missing or dead. A user service
-/// started at login before the desktop (turnstile/runit) gets no live bus, so
-/// keyring-backed tools (`gh`, secret-tool) fail in its turns. dbus-launch
-/// records the desktop bus under `~/.dbus/session-bus/`; take the newest.
 fn desktop_bus(current: Option<&str>, home: &std::path::Path) -> Option<String> {
-    // Only `unix:path=` can be checked; any other address is trusted.
     let live = |addr: &str| {
         addr.strip_prefix("unix:path=")
             .is_none_or(|p| std::path::Path::new(p.split(',').next().unwrap_or(p)).exists())
@@ -95,70 +80,50 @@ fn desktop_bus(current: Option<&str>, home: &std::path::Path) -> Option<String> 
         .filter(|a| a != current.unwrap_or_default() && live(a))
 }
 
-/// Resolved application configuration.
-///
-/// `Debug` is redacted by hand: the config carries the plaintext API key.
-// `Eq` is deliberately absent: the sampling passthroughs are `f32`.
 #[derive(Clone, PartialEq)]
 pub struct Config {
-    /// Target model identifier (e.g. "anthropic/claude-sonnet-4"). None until set.
     pub model: Option<String>,
-    /// API endpoint base URL.
+
     pub base_url: String,
-    /// API key for authentication. None until set.
+
     pub api_key: Option<String>,
-    /// Resolved provider id. Empty for the built-in API-key flow.
+
     pub provider_id: String,
-    /// Credential mode for the active model/provider ("plugin" for dynamic).
+
     pub credential_source: String,
-    /// Namespaced namespaced plugin credential reference.
+
     pub auth_ref: String,
-    /// Thinking / reasoning effort level ("off", "minimal", "low", "medium", "high", "xhigh", "max").
+
     pub thinking_effort: Option<String>,
-    /// Show reasoning text in the transcript. None (default) = shown.
-    /// `GRAY_SHOW_REASONING=0/false/no/off` hides. Effort "off" always hides.
+
     pub show_reasoning: Option<bool>,
-    /// Prefer the provider's fast-serving variant of the current model
-    /// (`-fast`/`-priority` catalog rows). None/false = standard serving.
-    /// `GRAY_FAST=0/false/no/off` disables; any other value enables.
+
     pub fast_mode: Option<bool>,
-    /// Composite-row selection (`{"lead": …, "sidekick": …}`) for the
-    /// current model — one option id per declared slot. Empty for every
-    /// non-composite row.
+
     pub model_parts: std::collections::BTreeMap<String, String>,
-    /// Sampling temperature sent with every chat request (`GRAY_TEMPERATURE`
-    /// or saved config). None = provider default; out-of-range ignored.
+
     pub temperature: Option<f32>,
-    /// Nucleus sampling cutoff sent with every chat request (`GRAY_TOP_P` or
-    /// saved config). None = provider default; out-of-range ignored.
+
     pub top_p: Option<f32>,
-    /// User override for context window in tokens. Highest priority (over auto-fetched).
+
     pub context_window: Option<usize>,
-    /// Reserve tokens before auto-compact fires.
+
     pub context_reserve: Option<usize>,
-    /// Tail budget kept alongside the summary after compaction.
+
     pub context_keep: Option<usize>,
-    /// Explicit auto-compact trigger (`--compact-at` / `GRAY_COMPACT_AT` /
-    /// `"compact_at_tokens"` in config.json). `Auto`/unset = the provider
-    /// price-cliff default; a count still clamps to `window − reserve`.
+
     pub compact_at: Option<crate::setup::CompactAt>,
-    /// Program that runs the model's shell commands somewhere else, e.g.
-    /// `docker exec -i dev sh -s` or `ssh box sh -s`. `GRAY_EXEC_PREFIX` or
-    /// the saved `exec_prefix`; None = commands run in this process's shell.
+
     pub exec_prefix: Option<String>,
-    /// Turn cap for this process (CLI `--max-turns` / `GRAY_MAX_TURNS`).
+
     pub max_turns: Option<u32>,
-    /// Spend cap in micro-dollars for this process (exact `u64`: Eq-safe,
-    /// unlike `f64`). Set via `--max-cost-usd` / `GRAY_MAX_COST_USD`.
+
     pub max_cost_micros: Option<u64>,
-    /// Wall-clock cap in seconds from process start (`--max-wall-secs`).
+
     pub max_wall_secs: Option<u64>,
-    /// `--bare` / `GRAY_BARE=1`: stock prompt + bash only (see `Cli::bare`).
+
     pub bare: bool,
-    /// On by default; `--lean` / `GRAY_LEAN=1` force on, `GRAY_LEAN=0` or
-    /// persisted `lean: false` opt out: no per-turn injected
-    /// context (skills list, project rules, plugin docs). Tools, plugins
-    /// and compaction stay on.
+
     pub lean: bool,
 }
 
@@ -173,7 +138,6 @@ impl std::fmt::Debug for Config {
 }
 
 impl Config {
-    /// Resolves configuration from CLI arguments and environment variables.
     pub fn resolve(cli: &Cli) -> anyhow::Result<Self> {
         let config = Self::resolve_with(cli, |k| std::env::var(k).ok())?;
         if let Some(prefix) = config
@@ -181,16 +145,9 @@ impl Config {
             .as_deref()
             .filter(|p| !p.trim().is_empty())
         {
-            // gray-tools reads the prefix from the environment, next to the
-            // other GRAY_* shell knobs. Set once here, before any tool can
-            // spawn; a bad prefix is reported by the command it breaks, not
-            // at boot, so an unused typo never blocks a session.
             unsafe { std::env::set_var(gray_tools::shell::spawn::EXEC_PREFIX_ENV, prefix) };
         }
         if config.bare {
-            // Bare = mini-swe-agent shape: plain blocking bash (no job
-            // control in its schema) and no automatic compaction. Same
-            // set-once-before-any-tool rule as the exec prefix above.
             unsafe {
                 std::env::set_var("GRAY_NO_JOBS", "1");
                 std::env::set_var("GRAY_NO_AUTO_COMPACT", "1");
@@ -202,19 +159,15 @@ impl Config {
                 std::path::Path::new(&home),
             )
         {
-            // Same set-once rule: tools spawned later inherit the bus.
             unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", bus) };
         }
         Ok(config)
     }
 
-    /// Resolves configuration with a custom environment lookup function (useful for testing).
     pub fn resolve_with<F>(cli: &Cli, mut env: F) -> anyhow::Result<Self>
     where
         F: FnMut(&str) -> Option<String>,
     {
-        // Saved file (~/.gray/config.json) fills anything the user didn't
-        // provide via flag or environment. Flags > env > saved file.
         let saved = crate::setup::load_saved_config_at(
             &crate::setup::saved_config_path().unwrap_or_else(|_| PathBuf::from("/dev/null")),
         );
@@ -222,17 +175,13 @@ impl Config {
         let saved_model = saved.model.clone();
         let model = nonempty(cli.model.as_deref())
             .or_else(|| nonempty(env("GRAY_MODEL").as_deref()))
-            .or(saved.model); // optional: REPL starts without a model; validated on first use
+            .or(saved.model);
 
         let base_url = nonempty(cli.base_url.as_deref())
             .or_else(|| nonempty(env("GRAY_BASE_URL").as_deref()))
             .or(saved.base_url)
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
-        // Provider identity envs let one process run a connection the
-        // saved file doesn't name — an empty value clears the field. The
-        // fusion sidekick's `gray -p` child targets its own provider
-        // through exactly this.
         let provider_id = env("GRAY_PROVIDER_ID")
             .map(|v| v.trim().to_string())
             .unwrap_or_else(|| nonempty(Some(saved.provider_id.as_str())).unwrap_or_default());
@@ -243,15 +192,8 @@ impl Config {
             model.as_deref(),
         );
 
-        let api_key = resolve_api_key(cli, &base_url, &mut env, saved.api_key); // optional: validated on first use
+        let api_key = resolve_api_key(cli, &base_url, &mut env, saved.api_key);
 
-        // Effort belongs to a connection+model (`effort_memory`), not to
-        // gray: the flat `thinking_effort` is only what the last session to
-        // save wrote. The resolved target restores its own remembered level
-        // first, so two sessions on different models never hand each other
-        // their tier — on a plugin relay that bakes the tier into the native
-        // model id (devin-sub `swe-2-high` vs `swe-2-max`) a flip re-bills
-        // the whole transcript.
         let thinking_effort = nonempty(env("GRAY_THINKING_EFFORT").as_deref())
             .or(target_effort)
             .or(saved.thinking_effort);
@@ -274,8 +216,6 @@ impl Config {
             })
             .or(saved.fast_mode);
 
-        // Sampling params pass through to providers that accept them.
-        // Out-of-range values are ignored, never clamped or sent.
         let temperature = env("GRAY_TEMPERATURE")
             .and_then(|s| s.trim().parse::<f32>().ok())
             .filter(|t| (0.0..=2.0).contains(t))
@@ -310,12 +250,8 @@ impl Config {
             })
             .or(saved.context_keep);
 
-        // Where the model's shell commands run. The saved value is the
-        // durable one (it names a box); the env var is the override.
         let exec_prefix = nonempty(env("GRAY_EXEC_PREFIX").as_deref()).or(saved.exec_prefix);
 
-        // Caps are CLI/env-only (never persisted): they bound one run, not
-        // the identity. Non-positive values are ignored, never clamped.
         let max_turns = cli.max_turns.filter(|&n| n > 0).or_else(|| {
             env("GRAY_MAX_TURNS").and_then(|s| s.trim().parse::<u32>().ok().filter(|&n| n > 0))
         });
@@ -337,8 +273,7 @@ impl Config {
         });
 
         let bare = cli.bare || env("GRAY_BARE").is_some_and(|v| v.trim() == "1");
-        // Lean is the default: the stored prompt stays the whole system
-        // prefix unless hooks are wanted back (`lean: false`, GRAY_LEAN=0).
+
         let lean_env = env("GRAY_LEAN").map(|v| v.trim().to_string());
         let lean = if cli.lean || lean_env.as_deref() == Some("1") {
             true
@@ -399,13 +334,10 @@ impl Config {
         Ok(config)
     }
 
-    /// Whether reasoning text stays hidden: effort "off" always hides,
-    /// otherwise the show_reasoning setting decides (default shown).
     pub fn reasoning_hidden(&self) -> bool {
         self.thinking_effort.as_deref() == Some("off") || !self.show_reasoning.unwrap_or(true)
     }
 
-    /// True only for a fully identified plugin-backed provider connection.
     pub fn uses_plugin_credentials(&self) -> bool {
         self.credential_source == "plugin"
             && !self.provider_id.is_empty()

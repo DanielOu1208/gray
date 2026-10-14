@@ -1,16 +1,13 @@
-/// Single slash-command registry driving `/help`, completion, and parsing.
 pub(crate) struct CmdDef {
     pub(crate) name: &'static str,
     pub(crate) desc: &'static str,
     pub(crate) aliases: &'static [&'static str],
-    /// Which `GRAY_HOME` `gray cmd` runs against (see GRAY-CMD-CONTRACT.md).
+
     pub(crate) scope: CmdScope,
-    /// What a headless adapter can render for this command.
+
     pub(crate) surface: CmdSurface,
 }
 
-/// `gray cmd` scope: the per-conversation home channel adapters derive
-/// (`conversations/<sha256(conv-key)>`) or the user's main home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CmdScope {
@@ -18,9 +15,6 @@ pub(crate) enum CmdScope {
     Global,
 }
 
-/// `gray cmd` surface: `interactive` may answer `kind:"ui"` (pickers,
-/// panels), `text` always answers `kind:"text"`, `local` is TUI-only and
-/// `run` answers `local_only`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CmdSurface {
@@ -200,11 +194,6 @@ pub(crate) const REGISTRY: &[CmdDef] = &[
     },
 ];
 
-/// Help line with aliases inline (Bug2: `/exit` worked but was unlisted;
-/// welcome hinted `/provider` while `/help` showed only `/connect`).
-/// Single alias → `/quit (alias: /exit)`; several → `/connect (aliases: …)`;
-/// no aliases keeps the legacy `  /name desc` shape. Reads the existing
-/// `aliases` arrays so `/help` can never drift from `resolve`.
 pub(crate) fn format_help_line(d: &CmdDef) -> String {
     if d.aliases.is_empty() {
         format!("  /{:<10} {}", d.name, d.desc)
@@ -221,12 +210,8 @@ pub(crate) fn format_help_line(d: &CmdDef) -> String {
     }
 }
 
-/// Spellings that resolve to a canonical command but never appear as a
-/// row of their own — not in the popup, `/help`, or `gray cmd list`.
 const HIDDEN_ALIASES: &[(&str, &str)] = &[("plugin", "plugins")];
 
-/// TUI-only commands: they resolve, complete and list in `/help` like any
-/// builtin but stay out of the gateway registry, which iterates REGISTRY.
 pub(crate) const TUI_COMMANDS: &[CmdDef] = &[
     CmdDef {
         name: "intro",
@@ -244,8 +229,6 @@ pub(crate) const TUI_COMMANDS: &[CmdDef] = &[
     },
 ];
 
-/// Canonical lookup: strip one leading `/`, lowercase, exact wins then
-/// hidden aliases, then listed aliases.
 pub(crate) fn resolve(name: &str) -> Option<&'static CmdDef> {
     let n = name.strip_prefix('/').unwrap_or(name).to_lowercase();
     if let Some(d) = REGISTRY.iter().chain(TUI_COMMANDS).find(|d| d.name == n) {
@@ -260,15 +243,10 @@ pub(crate) fn resolve(name: &str) -> Option<&'static CmdDef> {
         .find(|d| d.aliases.iter().any(|a| *a == n))
 }
 
-/// True when `name` (with or without `/`) is a built-in command or alias.
 pub(crate) fn is_builtin_command(name: &str) -> bool {
     resolve(name).is_some()
 }
 
-/// `/claude`, `/devin`, ...: one `(command, provider id, provider name)` per
-/// slash command a provider plugin declares in its manifest, opening its
-/// login directly. The plugin owns the name — core invents nothing and has
-/// no naming convention. Built-in names and aliases always win.
 pub(crate) fn provider_shortcuts() -> Vec<(String, String, String)> {
     let Ok(home) = crate::setup::gray_home() else {
         return Vec::new();
@@ -289,7 +267,6 @@ pub(crate) fn provider_shortcuts() -> Vec<(String, String, String)> {
     out
 }
 
-/// Commands matching `filter` (the text after '/'), auto-sorted by relevance.
 pub(crate) fn completion_matches(filter: &str) -> Vec<(&'static str, &'static str)> {
     let f = filter.to_lowercase();
     let mut matches: Vec<(u8, &'static str, &'static str)> = Vec::new();
@@ -322,9 +299,6 @@ pub(crate) fn completion_matches(filter: &str) -> Vec<(&'static str, &'static st
         .collect()
 }
 
-/// Completion for the composer prompt: static commands, skill names after
-/// `/skills ` (alias `/skill `), or per-command suffixes after `/cmd `
-/// (Minecraft-style). Owned here so every read_loop call site stays in sync.
 pub(crate) fn completion_matches_dyn(
     cur_text: &str,
     cwd: &std::path::Path,
@@ -335,10 +309,9 @@ pub(crate) fn completion_matches_dyn(
             if cmd.is_empty() || cmd.contains(':') {
                 return Vec::new();
             }
-            // Everything after `<cmd>`, leading spaces trimmed, trailing kept
-            // for level detection (`/context reserve ` vs `/context reserve`).
+
             let after = inner[cmd.len()..].trim_start_matches(char::is_whitespace);
-            // Reconstruct trailing-space info from the raw line.
+
             let trailing = cur_text.ends_with(char::is_whitespace);
             let full_after = if trailing && !after.ends_with(char::is_whitespace) {
                 format!("{after} ")
@@ -354,7 +327,7 @@ pub(crate) fn completion_matches_dyn(
             .map(|(a, b)| (a.to_string(), b.to_string()))
             .collect();
         let f = inner.to_lowercase();
-        // Prompt templates: listed after built-ins, name-prefix first.
+
         let templates = crate::prompt_templates::discover(cwd);
         let mut tpl_rows: Vec<(u8, String, String)> = templates
             .iter()
@@ -383,8 +356,7 @@ pub(crate) fn completion_matches_dyn(
                 .filter(|(short, _, _)| short.starts_with(&f))
                 .map(|(short, _, name)| (short.clone(), format!("log in to {name}"))),
         );
-        // A provider plugin's declared command is listed once, as its
-        // shortcut — not again as a bare `{name} plugin` row.
+
         matches.extend(
             crate::plugin_cli::completions(inner)
                 .into_iter()
@@ -395,10 +367,6 @@ pub(crate) fn completion_matches_dyn(
     Vec::new()
 }
 
-/// Fill text for an accepted popup row. Built-ins and `cmd args` rows
-/// fill `/{name} ` as before; a bare skill name fills `/skills {name} ` so
-/// the existing skill dispatch runs it — skills never become real
-/// top-level commands.
 pub(crate) fn completion_fill(name: &str) -> String {
     if name.contains(' ')
         || resolve(name).is_some()
@@ -413,17 +381,6 @@ pub(crate) fn completion_fill(name: &str) -> String {
     format!("/skills {name} ")
 }
 
-/// Universal per-command suffix completion hook.
-///
-/// `cmd` is lowercased without the leading `/`; `arg_text` is everything
-/// after it with leading spaces trimmed (trailing space preserved to detect
-/// `/cmd sub ` vs `/cmd sub`). Returns full `cmd + args` names (no slash)
-/// so the existing `/{name} ` fill just works. Add new commands here.
-///
-/// First page (`/cmd ` with an empty arg box) leads with the bare command
-/// itself, so Enter runs it instead of forcing a suffix. Filtered and L2
-/// pages list suffixes only — a bare row there would wipe the typed args
-/// on fill.
 pub(crate) fn complete_command_args(
     cmd: &str,
     arg_text: &str,
@@ -473,8 +430,6 @@ pub(crate) fn complete_command_args(
     out
 }
 
-/// Filter a static `(name, description)` table by the lowercased typed args;
-/// empty filter lists every row. Rows fill as `{cmd} {name}`.
 fn complete_from_table(cmd: &str, arg_text: &str, table: &[(&str, &str)]) -> Vec<(String, String)> {
     let f = arg_text.to_lowercase();
     table
@@ -484,7 +439,6 @@ fn complete_from_table(cmd: &str, arg_text: &str, table: &[(&str, &str)]) -> Vec
         .collect()
 }
 
-/// Suffixes for `/sessions` (alias `/resume`): session picker flags.
 fn complete_resume_args(cmd: &str, arg_text: &str) -> Vec<(String, String)> {
     const FLAGS: &[(&str, &str)] = &[
         ("--last", "resume most recent session"),
@@ -495,8 +449,6 @@ fn complete_resume_args(cmd: &str, arg_text: &str) -> Vec<(String, String)> {
     complete_from_table(cmd, arg_text, FLAGS)
 }
 
-/// Suffixes for `/skills` (alias `/skill`): discovered skill names;
-/// rows fill `/skills <name> ` (or `/skill <name> `).
 fn complete_skill_args(cmd: &str, arg_text: &str, cwd: &std::path::Path) -> Vec<(String, String)> {
     let f = arg_text.trim().to_lowercase();
     crate::skills::discover_skills(cwd)
@@ -507,8 +459,6 @@ fn complete_skill_args(cmd: &str, arg_text: &str, cwd: &std::path::Path) -> Vec<
         .collect()
 }
 
-/// Suffixes for `/theme`: the built-in name, user theme files, and the
-/// `new` / `reload` actions.
 fn complete_theme_args(cmd: &str, arg_text: &str) -> Vec<(String, String)> {
     let mut rows: Vec<(String, String)> =
         vec![(crate::theme::BUILTIN_THEME_NAME.to_string(), String::new())];
@@ -531,14 +481,11 @@ fn complete_theme_args(cmd: &str, arg_text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Suffixes for `/agentsmd` (alias `/sys`).
 fn complete_agentsmd_args(cmd: &str, arg_text: &str) -> Vec<(String, String)> {
     const SUBS: &[(&str, &str)] = &[("show", "print prompt file"), ("reset", "restore default")];
     complete_from_table(cmd, arg_text, SUBS)
 }
 
-/// Suffixes for `/model`: ids from the in-memory model cache (empty until
-/// models are fetched; the picker covers discovery).
 fn complete_model_args(cmd: &str, arg_text: &str) -> Vec<(String, String)> {
     let f = arg_text.to_lowercase();
     crate::setup::cached_model_ids()
@@ -548,7 +495,6 @@ fn complete_model_args(cmd: &str, arg_text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Suffixes for `/plugin` (alias `/plugins`): plugin manager subcommands.
 fn complete_plugin_args(
     cmd: &str,
     arg_text: &str,
@@ -566,8 +512,6 @@ fn complete_plugin_args(
     complete_from_table(cmd, arg_text, SUBS)
 }
 
-/// Suffixes for `/context`: L1 (`[number]|auto|status|reserve|keep`) and L2
-/// (`reserve <16k|auto>`, `keep <20k|auto|off>`).
 fn complete_context_args(arg_text: &str) -> Vec<(String, String)> {
     const L1: &[(&str, &str)] = &[
         ("[number]", "set window"),
@@ -585,7 +529,7 @@ fn complete_context_args(arg_text: &str) -> Vec<(String, String)> {
     ];
     let trailing = arg_text.ends_with(char::is_whitespace);
     let parts: Vec<&str> = arg_text.split_whitespace().collect();
-    // `/context ` → all L1
+
     if parts.is_empty() {
         return L1
             .iter()
@@ -594,7 +538,6 @@ fn complete_context_args(arg_text: &str) -> Vec<(String, String)> {
     }
     let head = parts[0].to_lowercase();
     if head == "reserve" || head == "keep" {
-        // `/context reserve` (no space) → still L1 filtering, so Tab picks `reserve ` first
         if parts.len() == 1 && !trailing {
             let f = parts[0].to_lowercase();
             return L1
@@ -619,7 +562,7 @@ fn complete_context_args(arg_text: &str) -> Vec<(String, String)> {
             .map(|(s, d)| (format!("context {head} {s}"), d.to_string()))
             .collect();
     }
-    // L1 leaf with trailing space takes nothing further.
+
     if parts.len() > 1 || trailing {
         return Vec::new();
     }
@@ -630,100 +573,80 @@ fn complete_context_args(arg_text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Parsed command or input from the REPL prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplCommand {
-    /// Exit the REPL cleanly (`/quit` or `/exit`).
     Quit,
-    /// Open the system-prompt file in `$EDITOR` (`/agentsmd`), print it (`/agentsmd show`),
-    /// or restore the default (`/agentsmd reset`). `/sys` is an alias.
+
     Sys(SysAction),
-    /// Log in to one plugin provider directly (`/claude`, `/devin`, ...);
-    /// holds its `plugin:provider` id. See [`provider_shortcuts`].
+
     ProviderLogin(String),
-    /// A command a provider plugin declares (`/devin`, `/fusion`): its
-    /// sidecar's `command/run` answers first; no answer = login shortcut.
-    /// `argv` is the words after the command name (`/devin tools all`).
+
     ProviderCommand {
         cmd: String,
         argv: Vec<String>,
         provider_id: String,
     },
-    /// Start a fresh conversation (`/new` or `/clear [prompt]`).
+
     New(Option<String>),
-    /// Resume a previous session (`/sessions [id|--last|--all]`, alias `/resume`).
+
     Resume(ResumeArgs),
-    /// Compress conversation context window (`/compact` or `/compress [instructions]`).
+
     Compact(Option<String>),
-    /// Drop the last exchange from the conversation (`/undo`).
+
     Undo,
-    /// Drop the last exchange and send it again (`/retry`).
+
     Retry,
-    /// Print the command list (`/help`).
+
     Help,
-    /// Open the model picker (`/model`) or set directly (`/model provider/id`).
+
     Model(Option<String>),
-    /// Open the two-pane provider×model picker (bare `/model`).
+
     ModelPanes,
-    /// Open the model picker focused on a row — never typed; a plugin's
-    /// `model_picker` command outcome (`/fusion`) queues it.
+
     ModelFocus(String),
-    /// Set context window (`/context [128k|auto|reserve 16k|keep 20k|status]`).
+
     ContextWindow(Option<String>),
-    /// Session token + cost totals (`/usage` or `/cost`).
-    /// Check the channel and install a newer build when there is one.
+
     Update(Option<String>),
-    /// Put the running gray on the binary that is on disk: restart the
-    /// gateway, then re-exec this session into the new build.
+
     Restart,
     Usage,
-    /// List cron jobs (read-only; manage via `gray cron` CLI).
+
     CronJobs(Option<String>),
-    /// This session's running background jobs and scheduled wakes (`/jobs`).
+
     Jobs,
-    /// Connections panel (`/gateway` or `/gw`): installed apps plus pointers
-    /// at daemon/cron/memory. A switch word (`on`/`off`) flips the persisted
-    /// gateway master switch, same as `gray gateway on|off`.
+
     Gateway(Option<String>),
-    /// Copy the last assistant response to the clipboard (`/copy`).
+
     Copy,
-    /// Send feedback (`/feedback <what happened>`): saves locally, opens a prefilled issue.
+
     Feedback(Option<String>),
-    /// Toggle the graychan mascot (`/hehe`): the anime art painted into the
-    /// transcript at full terminal width, and pressing it again drops it so
-    /// the default gray ASCII banner is back. Easter egg, no persisted state.
+
     Hehe,
-    /// Color theme: bare lists, `<name>` applies and saves, `new <name>`
-    /// writes the current palette as an editable file, `reload` re-reads.
+
     Theme(Option<String>),
-    /// The startup logo intro (`/intro [on|off]`): bare reports the state,
-    /// a switch word persists the toggle. TUI-only.
+
     Intro(Option<String>),
     Setup(Option<String>),
-    /// Keybindings: bare lists, `reload` re-reads `keybindings.json`.
+
     Keys(Option<String>),
-    /// Re-read file customizations (theme, keybindings, templates).
+
     Reload,
-    /// Unknown slash command (`/word`).
+
     Unknown(String),
-    /// Plugin manager: /plugin <list|install|remove|update|enable|disable|check>.
+
     Plugin(String),
-    /// Interactive plugin manager (`/plugins`): the modal; headless runs
-    /// answer the same list as text.
+
     Plugins,
-    /// Skills: bare /skills lists discovered; /skills <name> [args] (alias /skill <name>) runs one
+
     Skill(Option<String>),
-    /// Regular user prompt to feed to the agent.
+
     Prompt(String),
-    /// Blank line, should be ignored.
+
     Empty,
 }
 
 impl ReplCommand {
-    /// True when dispatch never hands text to the model: the submit echo
-    /// (`› /cmd`) is retracted so only the command's own feedback stays.
-    /// Unknown/provider commands keep their echo — `command/run` can
-    /// still escalate into a `Prompt`, and a silent model turn is worse.
     pub(crate) fn runs_local(&self) -> bool {
         match self {
             ReplCommand::Prompt(_)
@@ -732,8 +655,7 @@ impl ReplCommand {
             | ReplCommand::Retry
             | ReplCommand::Unknown(_)
             | ReplCommand::ProviderCommand { .. } => false,
-            // `/skills <name>` expands into a prompt; bare `/skills` only
-            // opens the manager.
+
             ReplCommand::Skill(payload) => payload.is_none(),
             _ => true,
         }
@@ -745,19 +667,16 @@ pub struct ResumeArgs {
     pub target: Option<String>,
     pub last: bool,
     pub all: bool,
-    /// `/sessions dismiss`: stop flagging this directory's interrupted
-    /// sessions (every directory with `all`) instead of opening one.
+
     pub dismiss: bool,
 }
 
-/// What to do when the user types `/agentsmd`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SysAction {
-    /// Edit `~/.gray/AGENTS.md` in `$EDITOR`.
     Edit,
-    /// Print the current prompt file contents and path.
+
     Show,
-    /// Overwrite the file with the shipped default.
+
     Reset,
 }
 
@@ -788,8 +707,6 @@ pub(crate) fn parse_resume_args(rest: &str) -> ResumeArgs {
     }
 }
 
-/// Parses a line of input into a [`ReplCommand`]: resolve the first token
-/// to its canonical registry name, then match on canonical only.
 pub fn parse_command(line: &str) -> ReplCommand {
     let t = line.trim();
     if t.is_empty() {
@@ -853,9 +770,7 @@ pub fn parse_command(line: &str) -> ReplCommand {
             Some(id) => ReplCommand::Model(Some(id)),
             None => ReplCommand::ModelPanes,
         },
-        // `/plugins` bare is the manager modal; with args (or spelled
-        // `/plugin`, its hidden alias) it stays the `/plugin <sub>` text
-        // command it aliased before.
+
         Some("plugins") => match opt(rest) {
             None => ReplCommand::Plugins,
             Some(_) => ReplCommand::Plugin(t.to_string()),
@@ -864,15 +779,10 @@ pub fn parse_command(line: &str) -> ReplCommand {
             if rest.is_empty() {
                 ReplCommand::Skill(None)
             } else {
-                // `/skills <name> [args]` (or the `/skill` alias): identical
-                // payload shape so expansion/validation match exactly.
                 ReplCommand::Skill(Some(rest.to_string()))
             }
         }
         _ => {
-            // Codex port: a slash-name containing '/' is plain text, not an
-            // unknown command — e.g. `///` doc comments, `//` comments,
-            // `/tmp/foo` paths. Bare `/` (empty name) is text too.
             let name = t[1..].split_whitespace().next().unwrap_or("");
             if name.is_empty() || name.contains('/') {
                 ReplCommand::Prompt(t.to_string())
@@ -880,10 +790,6 @@ pub fn parse_command(line: &str) -> ReplCommand {
                 .into_iter()
                 .find(|(short, _, _)| short.eq_ignore_ascii_case(name))
             {
-                // The plugin answers its own commands first (`/fusion` opens
-                // the model picker); unanswered ones are its login shortcut.
-                // Args ride along so `/devin tools all` reaches command/run;
-                // unparseable quoting degrades to the unknown-command path.
                 match super::split_plugin_command(t) {
                     Some((cmd, argv)) => ReplCommand::ProviderCommand {
                         cmd,

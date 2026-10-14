@@ -1,5 +1,3 @@
-//! OpenAI-compatible streaming LLM provider.
-
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -21,22 +19,14 @@ use crate::openai_profile::{
     OpenAiAuthorization, OpenAiHeaderSource, OpenAiProviderProfile, OpenAiRequestPolicy, OpenAiWire,
 };
 
-/// Default API base URL pointing to OpenRouter.
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-/// Maximum retry attempts for transient errors.
 const MAX_ATTEMPTS: usize = 5;
 
-/// Initial retry backoff (exponential, jittered, `Retry-After`-floored).
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
-/// Exponential backoff cap: growth stops here, `Retry-After` still wins via max.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-/// An OpenAI-compatible LLM provider implementing the `Provider` trait.
-///
-/// `Debug` is redacted by hand: the struct carries a plaintext API key,
-/// so the derived impl would leak it into any log that formats the provider.
 #[derive(Clone)]
 pub struct OpenAiProvider {
     base_url: Url,
@@ -44,21 +34,16 @@ pub struct OpenAiProvider {
     model: String,
     http: reqwest::Client,
     reasoning_effort: Option<String>,
-    /// Optional sampling passthroughs (None = leave the server default).
+
     temperature: Option<f32>,
     top_p: Option<f32>,
-    /// Stable per-process id sent as `prompt_cache_key` (Responses API and
-    /// chat completions alike) so callers pin one cache shard per session for
-    /// prompt caching. Also sent as the `x-opencode-session` header (Console Go
-    /// routes on it; required).
+
     session_id: Option<String>,
-    /// Declared dynamic profile; `None` preserves the built-in provider path.
+
     profile: Option<OpenAiProviderProfile>,
-    /// Resolved once at construction — request building reads fields here
-    /// instead of re-deriving model×host quirks per call.
+
     caps: ModelCaps,
-    /// Lease source for dynamic profiles. The agent keeps it alive for the
-    /// whole sidecar lifecycle.
+
     credential_source: Option<Arc<dyn CredentialSource>>,
 }
 
@@ -71,8 +56,6 @@ impl std::fmt::Debug for OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    /// Constructs an `OpenAiProvider`. An empty `base_url` selects
-    /// [`DEFAULT_BASE_URL`]; `session_id` pins the prompt-cache shard.
     pub fn new(
         api_key: impl Into<String>,
         model: impl Into<String>,
@@ -89,9 +72,6 @@ impl OpenAiProvider {
         let base_url = Url::parse(&base_url_str)
             .map_err(|e| format!("invalid base_url '{base_url_str}': {e}"))?;
 
-        // default client with a 120s idle-read timeout so a stalled server
-        // (finish_reason then silence, hung proxy) can't freeze a turn
-        // forever. Total timeout stays off: long generations are legal.
         let http = Self::http_client(true);
         let model = model.into();
 
@@ -123,8 +103,6 @@ impl OpenAiProvider {
             .expect("reqwest client with timeouts")
     }
 
-    /// Build a profile-driven provider. Gray owns the credential source, so
-    /// this path never stores a static API key.
     pub fn new_with_profile(
         model: impl Into<String>,
         reasoning_effort: Option<String>,
@@ -150,9 +128,6 @@ impl OpenAiProvider {
         })
     }
 
-    /// Sampling passthrough: providers that accept `temperature`/`top_p` get
-    /// them on every chat request; `None` keeps whatever the server defaults
-    /// to (the pre-existing behaviour).
     pub fn with_sampling(mut self, temperature: Option<f32>, top_p: Option<f32>) -> Self {
         self.temperature = temperature;
         self.top_p = top_p;
@@ -176,18 +151,16 @@ pub(crate) struct OpenAiChatRequest {
     reasoning: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<Value>,
-    /// Output cap (`ChatRequest::max_tokens`; the cache warmer's 1-token replay).
+
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
-    /// The same cap under OpenAI's own name: api.openai.com rejects
-    /// `max_tokens` on its reasoning models.
+
     #[serde(skip_serializing_if = "Option::is_none")]
     max_completion_tokens: Option<u32>,
     messages: Vec<OpenAiMessageRequest>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OpenAiToolDefRequest>,
-    /// Cache-shard affinity (the session id goes here, mirroring the
-    /// Responses `prompt_cache_key`); without it chat turns rotate shards.
+
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
 }
@@ -202,8 +175,7 @@ struct OpenAiMessageRequest {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<Value>,
-    /// Reasoning from a prior assistant turn, sent back so reasoning models
-    /// keep their chain-of-thought in context (deepseek/openai-compat style).
+
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -262,13 +234,13 @@ struct OpenAiChoiceChunk {
 struct OpenAiDeltaChunk {
     #[serde(default)]
     content: Option<String>,
-    /// DeepSeek style.
+
     #[serde(default)]
     reasoning_content: Option<String>,
-    /// OpenRouter style (ox-alpha et al.).
+
     #[serde(default)]
     reasoning: Option<String>,
-    /// Ollama / Gemini / Qwen style.
+
     #[serde(default)]
     thought: Option<String>,
     #[serde(default)]
@@ -304,18 +276,17 @@ struct OpenAiUsageChunk {
     completion_tokens_details: Option<OpenAiCompletionDetails>,
     #[serde(default, alias = "input_tokens_details")]
     prompt_tokens_details: Option<OpenAiPromptDetails>,
-    /// DeepSeek / OpenRouter / Kimi top-level fields
+
     #[serde(
         default,
         alias = "prompt_cache_hit_tokens",
         alias = "promptCacheHitTokens"
     )]
     cached_tokens: usize,
-    /// DeepSeek explicit miss count — preferred over prompt-minus-cached
+
     #[serde(default, alias = "promptCacheMissTokens")]
     prompt_cache_miss_tokens: usize,
 
-    /// Anthropic native breakdown (when not via OpenAI compat)
     #[serde(
         default,
         alias = "cache_creation_input_tokens",
@@ -328,7 +299,7 @@ struct OpenAiUsageChunk {
         alias = "cacheReadInputTokens"
     )]
     cache_read_input_tokens: usize,
-    /// Provider total if supplied (OpenAI `total_tokens`, Anthropic not)
+
     #[serde(default, alias = "total_tokens", alias = "totalTokens")]
     total_tokens: usize,
 }
@@ -363,9 +334,6 @@ fn is_muse_model(model: &str) -> bool {
     lower.contains("muse") || lower.contains("spark") || lower.contains("glimmer")
 }
 
-/// OpenAI's own host takes the chat output cap as `max_completion_tokens`
-/// (its reasoning models reject `max_tokens`); compatible servers keep the
-/// older name, which is the one they all accept.
 fn names_cap_max_completion_tokens(base_url: &Url) -> bool {
     base_url.host_str() == Some("api.openai.com")
 }
@@ -374,9 +342,6 @@ fn is_deepseek_model(model: &str) -> bool {
     model.to_lowercase().contains("deepseek")
 }
 
-/// The output-cap field name a host accepts: OpenAI's own API takes the
-/// reasoning-era `max_completion_tokens` (its reasoning models reject
-/// `max_tokens`); compatible servers keep the older name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum CapField {
     #[default]
@@ -384,47 +349,26 @@ pub(crate) enum CapField {
     MaxCompletionTokens,
 }
 
-/// The wire-level capabilities of one model, resolved once from the model
-/// id (and, where host dialect matters, the base URL). This table is the
-/// declared replacement for the old per-site `contains("claude")` name
-/// sniffing: every model×host quirk the request builders need is a field
-/// here, and the family keys live in one function instead of eight.
-///
-/// Reasoning-field diversity is deliberately not a field: the wire stamps
-/// `reasoning_effort`/`reasoning`/`thinking` together and the
-/// response-driven retry ([`should_retry_without_reasoning`]) handles
-/// providers that reject them — that path keys off the server's error
-/// body, not the model name.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ModelCaps {
-    /// Anthropic prompt caching: `cache_control` breakpoints on the system
-    /// prompt, last tool def, and last text-bearing message — plus
-    /// `thinking.budget_tokens` and the warm-output-cap bump for
-    /// claude-via-OpenAI-wire.
     pub anthropic_cache: bool,
-    /// Replay `reasoning_content` (empty when absent) on every assistant
-    /// message — DeepSeek rejects assistant turns without the field.
+
     pub replay_reasoning_content: bool,
-    /// Native video input parts (the gemini/gemma lines only).
+
     pub accepts_video: bool,
-    /// `input_audio` on the chat wire for every supported format (gemini).
+
     pub chat_audio_all: bool,
-    /// `input_audio` restricted to wav/mp3 (OpenAI `*audio*` models).
+
     pub chat_audio_wav_mp3: bool,
-    /// `input_file` PDF parts on the Responses wire (vision-era OpenAI).
+
     pub responses_pdf: bool,
-    /// Prefer the Responses wire over chat completions — muse models on
-    /// the zen/commandcode relays, whose chat dialect rejects their
-    /// payloads.
+
     pub prefer_responses: bool,
-    /// The chat output-cap field this host accepts.
+
     pub cap_field: CapField,
 }
 
 impl ModelCaps {
-    /// Resolve the model-derived fields. An unlisted model gets the
-    /// conservative defaults — no caching markers, no media parts, chat
-    /// wire — which is what the old name-sniff answered too.
     pub(crate) fn for_model(model: &str) -> Self {
         let id = model.to_ascii_lowercase();
         let leaf = id.rsplit('/').next().unwrap_or(&id);
@@ -443,9 +387,6 @@ impl ModelCaps {
         }
     }
 
-    /// Apply the host-derived fields: muse's Responses preference only
-    /// holds on the relays that serve it, and the cap field name is a
-    /// property of the endpoint dialect, not the model.
     pub(crate) fn with_host(mut self, base_url: &Url) -> Self {
         self.prefer_responses = self.prefer_responses
             && (base_url.as_str().contains("opencode.ai/zen")
@@ -456,9 +397,6 @@ impl ModelCaps {
         self
     }
 
-    /// Which media a chat-completions body takes natively under these
-    /// capabilities: video where declared, `input_audio` per the format
-    /// table. PDFs have no base64 part on this wire — extracted text only.
     pub(crate) fn chat_accepts(&self, media_type: &str) -> bool {
         if media_type.starts_with("video/") {
             return self.accepts_video;
@@ -470,8 +408,6 @@ impl ModelCaps {
         }
     }
 
-    /// Which media a Responses-API body takes natively: `input_file` PDFs
-    /// where declared, and video where declared.
     pub(crate) fn responses_accepts(&self, media_type: &str) -> bool {
         match media_type {
             "application/pdf" => self.responses_pdf,
@@ -481,10 +417,6 @@ impl ModelCaps {
     }
 }
 
-/// Wire encoding for a tool result: neither the chat `tool` message nor the
-/// Responses `function_call_output` item has an `is_error` slot, so an error
-/// result is prefixed (model-visible, strict-provider-safe — no unknown
-/// fields). Success content passes through byte-identical.
 pub(crate) fn wire_tool_output(content: &str, is_error: bool) -> String {
     if is_error {
         format!("Error: {content}")
@@ -493,17 +425,6 @@ pub(crate) fn wire_tool_output(content: &str, is_error: bool) -> String {
     }
 }
 
-/// Anthropic prompt caching, pi `applyAnthropicCacheControl`: breakpoints on
-/// 1. the system prompt,
-/// 2. the last tool definition,
-/// 3. the last conversation message that carries text.
-///
-/// Claude caches only at `cache_control` breakpoints — `prompt_cache_key` is
-/// an OpenAI field it ignores — so without these a Claude model behind an
-/// OpenAI-compatible router (OpenRouter) re-bills the whole prompt on every
-/// request. OpenRouter/Anthropic read `cache_control` only on content blocks,
-/// so the marker goes on a text part (pi `addCacheControlToTextContent`); a
-/// message-level field is not a documented placement and caches nothing.
 fn apply_anthropic_cache_control(
     messages: &mut [OpenAiMessageRequest],
     tools: &mut [OpenAiToolDefRequest],
@@ -521,8 +442,6 @@ fn apply_anthropic_cache_control(
         last_tool.cache_control = Some(cache_control.clone());
     }
 
-    // Walk back past messages without text (tool-call-only assistant turns,
-    // image-only parts) to the newest one that can hold the marker.
     for m in messages.iter_mut().rev() {
         if matches!(m.role.as_str(), "user" | "assistant" | "tool")
             && add_cache_control_to_text_content(m, &cache_control)
@@ -532,8 +451,6 @@ fn apply_anthropic_cache_control(
     }
 }
 
-/// Marks the last text part of `m`, promoting plain string content to a
-/// one-part text array first. `false` when there is no text to mark.
 fn add_cache_control_to_text_content(m: &mut OpenAiMessageRequest, cache_control: &Value) -> bool {
     if let Some(Value::String(text)) = &mut m.content {
         if text.is_empty() {
@@ -565,15 +482,10 @@ fn image_data_url(media_type: &str, data: &str) -> String {
     format!("data:{media_type};base64,{data}")
 }
 
-/// Does this model take a native video part? Only the Gemini line
-/// documents video input, and a wrong answer either 400s at the provider or
-/// burns a huge prompt — an unlisted model gets the media block's fallback.
-/// (The capability itself is declared in [`ModelCaps`].)
 pub fn model_accepts_video(model: &str) -> bool {
     ModelCaps::for_model(model).accepts_video
 }
 
-/// `input_audio.format` for a media type, when the chat wire has one.
 fn input_audio_format(media_type: &str) -> Option<&'static str> {
     Some(match media_type {
         "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
@@ -611,14 +523,12 @@ fn is_valid_tool_name(name: &str, id: &str) -> bool {
     }
 }
 
-/// `thinking.budget_tokens` for an effort level on Anthropic models
-/// reached through an OpenAI-compatible host (the chat mapper's table).
 fn chat_thinking_budget(effort: &str) -> u32 {
     match effort {
         "low" => 1024,
         "medium" => 4096,
         "max" => 32768,
-        _ => 16384, // high / default
+        _ => 16384,
     }
 }
 
@@ -631,7 +541,6 @@ fn map_chat_request(
     let max_tokens = req.max_tokens;
     let mut messages = Vec::new();
 
-    // 1. Map system prompt
     if let Some(system) = req.system {
         messages.push(OpenAiMessageRequest {
             role: "system".to_string(),
@@ -642,7 +551,6 @@ fn map_chat_request(
         });
     }
 
-    // 2. Map conversation messages
     for msg in req.messages {
         match msg.role {
             Role::Assistant => {
@@ -705,8 +613,6 @@ fn map_chat_request(
                 };
 
                 let reasoning_content = if thinking_parts.is_empty() {
-                    // DeepSeek expects the reasoning field on every assistant
-                    // message: send it (possibly empty) where declared.
                     caps.replay_reasoning_content.then(String::new)
                 } else {
                     Some(thinking_parts.join("\n"))
@@ -734,9 +640,7 @@ fn map_chat_request(
                 let role_str = match msg.role {
                     Role::User => "user",
                     Role::System => "system",
-                    // A novel wire role landing in this arm (outer pattern
-                    // extended without updating this map) errors instead of
-                    // panicking the turn.
+
                     other => {
                         return Err(ProviderError::BadRequest(format!(
                             "unsupported message role for chat completions: {other}"
@@ -745,7 +649,7 @@ fn map_chat_request(
                 };
 
                 let mut text_parts = Vec::new();
-                // Images, video and audio parts in block order.
+
                 let mut media_parts = Vec::new();
                 let mut tool_results = Vec::new();
 
@@ -781,9 +685,7 @@ fn map_chat_request(
                                 "type":"input_audio",
                                 "input_audio":{"data": data, "format": format},
                             })),
-                            // Gemini's OpenAI-compatible surface takes video
-                            // as a video_url part carrying a data URL, the
-                            // same shape as image_url above.
+
                             None => media_parts.push(serde_json::json!({
                                 "type":"video_url",
                                 "video_url":{"url": image_data_url(&media_type, &data)},
@@ -799,9 +701,7 @@ fn map_chat_request(
                         ContentBlock::ToolUse { id, name, args } => {
                             tool_results.push((id, format!("{name}: {args}")));
                         }
-                        // Reasoning from user/system turns isn't a thing; drop
-                        // stale assistant thinking here rather than echoing it
-                        // into tool results.
+
                         ContentBlock::Thinking { .. } => {}
                     }
                 }
@@ -840,8 +740,6 @@ fn map_chat_request(
         }
     }
 
-    // Tool-result media (and any fallback text riding with it) must follow
-    // the entire contiguous result run: a user message inside it 400s.
     let mut ordered = Vec::with_capacity(messages.len());
     let mut deferred_images = Vec::new();
     let mut in_results = false;
@@ -861,7 +759,6 @@ fn map_chat_request(
     ordered.append(&mut deferred_images);
     let messages = ordered;
 
-    // 3. Map tools — drop empty names that would trigger 400 `name` must be non-empty
     let mut tools: Vec<OpenAiToolDefRequest> = filter_valid_tools(req.tools)
         .into_iter()
         .map(|tool| OpenAiToolDefRequest {
@@ -875,10 +772,6 @@ fn map_chat_request(
         })
         .collect();
 
-    // Orphan guard (same class as the Responses mapper): an assistant
-    // tool_call with no following tool result 400s on strict providers —
-    // synthesize a stub result when a non-tool message (or end of history)
-    // arrives with calls still unanswered.
     let mut fixed: Vec<OpenAiMessageRequest> = Vec::with_capacity(messages.len());
     let mut outstanding: Vec<String> = Vec::new();
     let stub = |id: &str| OpenAiMessageRequest {
@@ -923,8 +816,6 @@ fn map_chat_request(
     }
     let mut messages = fixed;
 
-    // Anthropic prompt caching (pi): marked after the orphan guard so the
-    // "last message" breakpoint lands on what is actually sent last.
     if caps.anthropic_cache {
         apply_anthropic_cache_control(&mut messages, &mut tools);
     }
@@ -933,9 +824,7 @@ fn map_chat_request(
         Some("off") => (None, None, Some(serde_json::json!({ "type": "disabled" }))),
         Some(eff) => {
             let budget = chat_thinking_budget(eff);
-            // A budget must sit below the output cap; a capped request (the
-            // cache warmer's replay) leaves the budget out rather than send
-            // one the server rejects.
+
             let thinking = max_tokens
                 .is_none_or(|cap| budget < cap)
                 .then(|| serde_json::json!({ "type": "enabled", "budget_tokens": budget }));
@@ -951,8 +840,7 @@ fn map_chat_request(
     Ok(OpenAiChatRequest {
         model: model.to_string(),
         stream: true,
-        // Sampling passthroughs are stamped by the provider after mapping
-        // (`with_sampling`); the mapper itself has no config to read.
+
         temperature: None,
         top_p: None,
         stream_options: Some(OpenAiStreamOptions {
@@ -969,8 +857,6 @@ fn map_chat_request(
     })
 }
 
-/// `serde_json::to_value` on the send hot path: a failure is a client-side
-/// bug, surfaced as `BadRequest` instead of panicking the turn.
 fn serialize_body<T: Serialize>(body: &T, what: &'static str) -> Result<Value, ProviderError> {
     serde_json::to_value(body)
         .map_err(|e| ProviderError::BadRequest(format!("failed to serialize {what}: {e}")))
@@ -988,22 +874,18 @@ fn map_finish_reason(reason: &str) -> Option<StopReason> {
 }
 
 fn map_usage(u: &OpenAiUsageChunk) -> Usage {
-    // Opencode v2 logic: inclusive totals + non-overlapping breakdown with clamping.
-    // OpenAI: prompt_tokens is inclusive, cached is subset -> non_cached = subtract(inclusive, cached)
-    // Anthropic: prompt_tokens is non-cached only, plus read/write -> inclusive = sum(non_cached, read, write)
     let mut reasoning = 0usize;
     if let Some(details) = &u.completion_tokens_details {
         reasoning = details.reasoning_tokens;
     }
 
-    // Extract cache fields from all possible shapes
     let mut cache_read = 0usize;
     let mut cache_write = 0usize;
     if let Some(details) = &u.prompt_tokens_details {
         cache_read = details.cached_tokens.max(details.cache_read_tokens);
         cache_write = details.cache_creation_tokens;
     }
-    // Top-level fallbacks (Anthropic native or OpenRouter)
+
     if cache_read == 0 {
         cache_read = u.cached_tokens.max(u.cache_read_input_tokens);
     } else if u.cache_read_input_tokens != 0 {
@@ -1016,12 +898,9 @@ fn map_usage(u: &OpenAiUsageChunk) -> Usage {
     let is_anthropic_shape = u.cache_creation_input_tokens != 0 || u.cache_read_input_tokens != 0;
 
     let (input_inclusive, non_cached) = if is_anthropic_shape {
-        // Anthropic: prompt_tokens = non-cached only
         let inclusive = u.prompt_tokens + cache_read + cache_write;
         (inclusive, u.prompt_tokens)
     } else {
-        // OpenAI: prompt_tokens is inclusive. DeepSeek reports an explicit
-        // miss count — prefer it over subtraction.
         let non_cached = if u.prompt_cache_miss_tokens != 0 {
             u.prompt_cache_miss_tokens
         } else {
@@ -1073,33 +952,21 @@ pub(crate) struct ResponsesRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ResponsesTool>,
     stream: bool,
-    /// Cache-shard affinity (the session id goes here).
+
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
-    /// Server-side retention off: with store enabled the backend
-    /// folds generated reasoning into its cached prompt, which breaks the
-    /// exact-prefix match on later turns (measured: turn 3+ misses at 0%).
+
     store: bool,
-    /// Reasoning summaries (`summary: "auto"`, opencode parity): without this
-    /// the backend returns encrypted-only thinking and there is nothing to
-    /// display — no `response.reasoning_summary_text.delta` events arrive.
+
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<Value>,
-    /// Ask for `reasoning.encrypted_content` back (pi_agent_rust parity):
-    /// without this there is nothing replayable and every turn re-pays full
-    /// prefix processing. Only sent when `reasoning` is.
+
     #[serde(skip_serializing_if = "Option::is_none")]
     include: Option<Vec<String>>,
-    /// Output cap (`ChatRequest::max_tokens`). The Responses API rejects
-    /// values under 16, so a smaller cap is raised to that floor.
+
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
-    /// Resume a previously started response after a retryable mid-stream
-    /// failure (Codex parity): the server continues the prefix instead of
-    /// gray replaying the turn. A strict backend may 400 on the unknown id
-    /// (`previous_response_not_found`) — that strips the id and replays once
-    /// (see `should_retry_without_previous_response`) — or ignore the id and
-    /// replay from scratch (duplicating already-yielded text).
+
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_response_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1152,7 +1019,6 @@ fn map_chat_to_responses(
                             }
                         }
                         ContentBlock::Image { media_type, data } => {
-                            // Responses supports image input as content part; send as data URL text placeholder
                             let url = image_data_url(&media_type, &data);
                             if !text_parts.is_empty() {
                                 input.push(serde_json::json!({"role": role_str, "content": text_parts.join("\n")}));
@@ -1226,10 +1092,6 @@ fn map_chat_to_responses(
                             model: Some(m),
                             ..
                         } if m == model => {
-                            // Replay the raw reasoning item verbatim so the
-                            // server keeps its cache shard warm (pi_agent_rust
-                            // parity). Same-model only: a foreign model cannot
-                            // decrypt the blob and strict servers 400 on it.
                             reasoning_items.push(serde_json::json!({"type": "reasoning", "id": id, "summary": [], "encrypted_content": ec}));
                         }
                         ContentBlock::Thinking { .. } => {}
@@ -1267,10 +1129,7 @@ fn map_chat_to_responses(
     if input.is_empty() {
         input.push(serde_json::json!({"role":"user","content":""}));
     }
-    // Transcripts can contain a `function_call` whose output never followed
-    // (turn cancelled mid-tool round before this guard existed). Strict
-    // providers 400 on the orphan, bricking the session forever — synthesize
-    // a stub output for any unanswered call.
+
     let answered: std::collections::HashSet<&str> = input
         .iter()
         .filter(|v| v.get("type").and_then(Value::as_str) == Some("function_call_output"))
@@ -1301,8 +1160,7 @@ fn map_chat_to_responses(
         })
         .collect();
     let reasoning = map_responses_reasoning(reasoning_effort);
-    // Encrypted-content include rides with reasoning (nothing to replay
-    // without it; omitted entirely when reasoning is off).
+
     let include = reasoning
         .as_ref()
         .map(|_| vec!["reasoning.encrypted_content".to_string()]);
@@ -1356,13 +1214,6 @@ fn apply_dynamic_policy(
         .map(|verbosity| serde_json::json!({"verbosity": verbosity}));
 }
 
-/// `reasoning: {effort, summary: "auto"}` for the Responses API.
-/// `None`/missing effort omits the field (backend default); `"off"` omits it
-/// too (display is suppressed separately via hide_thinking). `max` is a
-/// documented Responses-API value on newer models (e.g. GPT-5.6) — forward it
-/// verbatim; a model that rejects it 400s and the strip-and-retry path drops
-/// reasoning.
-/// https://developers.openai.com/api/docs/guides/reasoning
 fn map_responses_reasoning(reasoning_effort: Option<&str>) -> Option<Value> {
     match reasoning_effort {
         None | Some("off") => None,
@@ -1370,38 +1221,25 @@ fn map_responses_reasoning(reasoning_effort: Option<&str>) -> Option<Value> {
     }
 }
 
-/// True when a chat-completions body carries any reasoning wire params
-/// (`reasoning_effort` / `reasoning` / `thinking`). Pure: drives the
-/// strip-and-retry decision without touching the network.
 pub(crate) fn chat_has_reasoning_params(body: &OpenAiChatRequest) -> bool {
     body.reasoning_effort.is_some() || body.reasoning.is_some() || body.thinking.is_some()
 }
 
-/// Drops all three reasoning wire params so a provider that rejects them
-/// (e.g. glm-5.2 400ing `Extra inputs are not permitted, field: 'reasoning'`,
-/// or a thinking-only model 400ing `thinking: disabled`) falls back to its
-/// defaults. The requested effort label is untouched (no cosmetic switch).
 pub(crate) fn strip_chat_reasoning_params(body: &mut OpenAiChatRequest) {
     body.reasoning_effort = None;
     body.reasoning = None;
     body.thinking = None;
 }
 
-/// True when a Responses body carries reasoning (`include` rides with it).
 pub(crate) fn responses_has_reasoning(body: &ResponsesRequest) -> bool {
     body.reasoning.is_some()
 }
 
-/// Drops Responses reasoning + its encrypted-content include.
 pub(crate) fn strip_responses_reasoning(body: &mut ResponsesRequest) {
     body.reasoning = None;
     body.include = None;
 }
 
-/// Retry predicate for a rejected resume id: the server 400/404s naming
-/// `previous_response` because the id is unknown/expired (restart, eviction,
-/// `store: false` backends that never kept it). With an id actually sent,
-/// retry ONCE with it stripped (true full replay). Pure, no network.
 pub(crate) fn should_retry_without_previous_response(
     status: u16,
     snippet: &str,
@@ -1426,10 +1264,6 @@ pub(crate) fn should_retry_without_previous_response(
     NOT_FOUND_HINTS.iter().any(|h| lower.contains(h))
 }
 
-/// Retry predicate for the glm-5.2 catch-22: at max/low the wire `reasoning`
-/// field 400s (`Extra inputs are not permitted`); at off the `thinking:
-/// disabled` 400s on a thinking-only model. On a 400 naming reasoning params
-/// with params actually sent, retry ONCE with them omitted. Pure, no network.
 pub(crate) fn should_retry_without_reasoning(
     status: u16,
     snippet: &str,
@@ -1464,16 +1298,12 @@ pub(crate) fn should_retry_without_reasoning(
     REJECTION_HINTS.iter().any(|h| lower.contains(h))
 }
 
-/// Clear terminal error naming the conflict (model + rejected field + fix).
-/// Appends to the classified message so status/cf-ray/request-id survive.
 pub(crate) fn reasoning_conflict_hint(model: &str, snippet: &str) -> String {
     format!(
         "{snippet} [model '{model}' rejected reasoning params — set effort off in /model; no setting was changed]"
     )
 }
 
-/// Wraps a terminal `BadRequest` that names reasoning params with the
-/// conflict hint. Non-reasoning errors pass through untouched.
 pub(crate) fn maybe_annotate_reasoning_conflict(err: ProviderError, model: &str) -> ProviderError {
     match err {
         ProviderError::BadRequest(msg) => {
@@ -1491,8 +1321,6 @@ pub(crate) fn maybe_annotate_reasoning_conflict(err: ProviderError, model: &str)
     }
 }
 
-/// `error.message` (OpenAI, Anthropic, OpenRouter) or a top-level `message`
-/// from a JSON error body; `None` when the body is not that shape.
 fn error_body_message(body: &str) -> Option<String> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     let msg = v
@@ -1503,14 +1331,8 @@ fn error_body_message(body: &str) -> Option<String> {
     (!msg.is_empty()).then(|| msg.to_string())
 }
 
-// Billing/quota exhaustion must surface immediately: re-hitting an
-// exhausted balance burns the full request body against zero quota (and
-// the 429 floor would stall the turn for nothing). Narrow phrases only —
-// bare "billing"/"plan" also appear in legit rate-limit upsell copy.
-const QUOTA_EXHAUSTED_HINTS: [&str; 11] = [
+const QUOTA_EXHAUSTED_HINTS: [&str; 14] = [
     "insufficient_quota",
-    // ChatGPT plan usage (Sign in with ChatGPT): the plan's or this app's
-    // cap is spent; only the user raising it in ChatGPT settings helps.
     "subscription_sharing_usage_limit_exceeded",
     "insufficient quota",
     "insufficient credits",
@@ -1521,9 +1343,11 @@ const QUOTA_EXHAUSTED_HINTS: [&str; 11] = [
     "quota_exceeded",
     "gousagelimiterror",
     "available balance",
+    "usage limit reached",
+    "session limit",
+    "resets in ~",
 ];
 
-/// `error.code` or `error.type` from a JSON error body, as text.
 fn error_body_code(body: &str) -> Option<String> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     v.pointer("/error/code")
@@ -1536,10 +1360,6 @@ fn error_body_code(body: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Classify a failed response into the provider taxonomy, carrying the
-/// parsed fields on [`ProviderError::Detailed`]: status, vendor code and
-/// message, cf-ray and request id — everything format.rs used to scrape
-/// back out of the formatted string.
 pub(crate) fn classify_http_error(
     status: reqwest::StatusCode,
     snippet: &str,
@@ -1564,8 +1384,6 @@ fn classify_http_error_inner(
     cf_ray: Option<&str>,
     req_id: Option<&str>,
 ) -> ProviderError {
-    // Display the provider's own sentence, not its JSON envelope; the full
-    // body still drives classification below.
     let shown = error_body_message(snippet).unwrap_or_else(|| snippet.to_string());
     let mut msg = if shown.is_empty() {
         format!("status {status}")
@@ -1579,20 +1397,14 @@ fn classify_http_error_inner(
         msg.push_str(&format!(", request-id: {rid}"));
     }
     let lower = snippet.to_lowercase();
-    // A Cloudflare edge error page ("error code: 1010" — the owner banned this
-    // client signature) means the request never reached the provider; the key
-    // was never evaluated. It flaps request-to-request, so it's retryable —
-    // classifying it Auth would send the user to rotate a working key.
+
     if status == reqwest::StatusCode::FORBIDDEN
         && cf_ray.is_some()
         && lower.trim_start().starts_with("error code: 1")
     {
         return ProviderError::ServerError(format!("provider edge blocked the request ({msg})"));
     }
-    // Taxonomy lite: context exhaustion compacts + retries once (never retried
-    // blindly); content filters are terminal bad requests. Narrowed to avoid
-    // false positives: `max_tokens` needs a context qualifier, bare
-    // violates/flagged/safety are not filters.
+
     const CONTEXT_OVERFLOW_HINTS: [&str; 4] = [
         "context length",
         "context window",
@@ -1614,41 +1426,32 @@ fn classify_http_error_inner(
         || lower.contains("unsupported")
         || lower.contains("model not found")
         || lower.contains("unknown model");
-    // Some gateways report an unknown model with 401 (OpenRouter did: 401 +
-    // `ModelError: model … is not supported`). Classify on the body first —
-    // an Auth verdict would send the user to re-auth for a model problem.
+
     if is_unsupported {
         return ProviderError::BadRequest(msg);
     }
     let quota_exhausted = QUOTA_EXHAUSTED_HINTS.iter().any(|h| lower.contains(h));
     match status.as_u16() {
         401 | 403 => ProviderError::Auth(msg),
-        // 402 is definitionally billing; a 429 naming quota exhaustion is not
-        // a rate limit. Both surface immediately (Auth is terminal).
+
         402 => ProviderError::Auth(msg),
         429 if quota_exhausted => ProviderError::Auth(msg),
         429 => ProviderError::RateLimited(msg),
-        // 413 is a too-large payload, not a blip: compact once via the
-        // ContextOverflow path, never generic-retry.
+
         413 => ProviderError::ContextOverflow(format!(
             "context exhausted — start /new or compact ({msg})"
         )),
         400 | 404 => ProviderError::BadRequest(msg),
-        // is_unsupported already returned BadRequest above; this arm is the
-        // generic provider-side 5xx (the request was valid).
+
         500..=599 => ProviderError::ServerError(format!("provider-side {msg} (request was valid)")),
         _ => ProviderError::Stream(msg),
     }
 }
 
 pub(crate) fn is_retryable_error(err: &ProviderError) -> bool {
-    // Delegates to the method so `Detailed` wraps classify the same.
     err.retryable()
 }
 
-/// A bare 403 gets exactly one same-key re-POST: gateway edges emit transient
-/// "Authentication failed" 403s that clear on the next request. 401 and
-/// quota/billing-flavored 403s stay terminal (re-POSTing burns zero quota).
 fn should_retry_request(err: &ProviderError, http_status: u16, attempt: usize) -> bool {
     if is_retryable_error(err) {
         return true;
@@ -1660,34 +1463,17 @@ fn should_retry_request(err: &ProviderError, http_status: u16, attempt: usize) -
     http_status == 403 && attempt == 1 && !QUOTA_EXHAUSTED_HINTS.iter().any(|h| lower.contains(h))
 }
 
-/// True for the body-level transport failures `eventsource-stream` reports
-/// once the response has started: a truncated chunked body, or a connection
-/// reset mid-body. reqwest has no decompression enabled here (features are
-/// `json,stream,rustls-tls`), so these are framing/connection failures —
-/// always transient, never the model's output.
-///
-/// Deliberately narrow: `Transport` only. `Parse` (a malformed SSE line) and
-/// `InvalidContentType` are the server's own shape and must stay terminal.
 fn is_midstream_transport(err: &eventsource_stream::EventStreamError<reqwest::Error>) -> bool {
     matches!(err, eventsource_stream::EventStreamError::Transport(_))
 }
 
-/// Codex steal (`notify_stream_error`): `Reconnecting... n/m` + short cause.
-/// Details are capped so a multi-KB upstream blob never reaches the transcript.
 pub(crate) fn retry_notice_event(attempt: usize, max: usize, err: &ProviderError) -> StreamEvent {
     let details: String = err.to_string().chars().take(200).collect();
     StreamEvent::stream_error(format!("Reconnecting... {attempt}/{max}"), details)
 }
 
-/// Server-asked delay cap: a `Retry-After: 3600` must not park a turn for an
-/// hour (Esc still aborts via stream-drop, but drains without a cancel branch
-/// would stall out the full delay).
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
-/// `Retry-After` (delay-seconds or HTTP-date) plus the de-facto
-/// `retry-after-ms` millis header; server-asked delays are capped at 60s.
-/// Garbage and absent headers stay `None` (callers fall back to the
-/// synthesized floor).
 pub(crate) fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     if let Some(ms) = headers
         .get("retry-after-ms")
@@ -1707,8 +1493,6 @@ pub(crate) fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<
     parse_http_date_delay(raw).map(|d| d.min(MAX_RETRY_AFTER))
 }
 
-/// IMF-fixdate `Retry-After` (`Sun, 06 Nov 1994 08:49:37 GMT`) as a delay
-/// from now; past dates are zero (retry now). Anything else is `None`.
 fn parse_http_date_delay(raw: &str) -> Option<Duration> {
     let rest = raw
         .strip_suffix(" GMT")
@@ -1746,7 +1530,7 @@ fn parse_http_date_delay(raw: &str) -> Option<Duration> {
     if clock_parts.next().is_some() || hour > 23 || min > 59 || sec > 60 {
         return None;
     }
-    // Days-from-civil (Hinnant): one header form doesn't justify a date dep.
+
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -1759,8 +1543,6 @@ fn parse_http_date_delay(raw: &str) -> Option<Duration> {
     Some(Duration::from_secs((target - now).max(0) as u64))
 }
 
-/// Exponential backoff with jitter, capped at `MAX_BACKOFF`, floored by
-/// `Retry-After` when present (server-asked delay still wins via max).
 pub(crate) fn backoff_delay(
     initial: Duration,
     attempt: usize,
@@ -1782,17 +1564,10 @@ pub(crate) fn backoff_delay(
     retry_after.map(|floor| base.max(floor)).unwrap_or(base)
 }
 
-/// 429 floor when the server sends no `Retry-After`: re-hitting an exhausted
-/// quota ~1s later re-burns the full request body against zero quota.
-/// Floor of several seconds with exponential growth per failed attempt; a
-/// present `Retry-After` still wins via `backoff_delay`'s max.
 fn rate_limit_floor(failed_attempt: usize) -> Duration {
     Duration::from_secs(5 * (1u64 << failed_attempt.saturating_sub(1).min(6)))
 }
 
-/// 429-aware retry floor: keep the server's `Retry-After` when present, else
-/// synthesize the escalating 429 floor. Non-429 errors pass through untouched
-/// (their ~1s+jitter backoff is correct for blips).
 fn retry_floor(
     err: &ProviderError,
     floor: Option<Duration>,
@@ -1804,11 +1579,6 @@ fn retry_floor(
     floor
 }
 
-/// Session-affinity header for one POST (empty without a session id).
-/// `x-opencode-session`: Console Go (opencode.ai/zen) routes on it and 400s
-/// MissingSessionID without it; unknown `x-` headers are ignored elsewhere.
-/// Prompt-cache affinity is carried by the request body's `prompt_cache_key`,
-/// so no per-host sticky-routing header is needed.
 fn session_affinity_headers(session_id: Option<&str>) -> Vec<(&'static str, &str)> {
     let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
         return Vec::new();
@@ -1816,9 +1586,6 @@ fn session_affinity_headers(session_id: Option<&str>) -> Vec<(&'static str, &str
     vec![("x-opencode-session", sid)]
 }
 
-/// Single POST attempt (no retry). Retry + `Reconnecting...` notices live in
-/// `stream_unfold_step` so each attempt surfaces to the UI like Codex's
-/// `notify_stream_error` instead of stalling silently in a sleep loop.
 #[allow(clippy::result_large_err)]
 async fn send_json_once(
     client: &reqwest::Client,
@@ -1860,9 +1627,7 @@ async fn send_json_once(
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
             let text = res.text().await.unwrap_or_default();
-            // 4000-char classifier input: quota/context signals can sit past a
-            // long JSON prefix. The transcript notice stays capped at 200
-            // (retry_notice_event) so blobs never reach the UI.
+
             let snippet: String = text.chars().take(4000).collect();
             Err((
                 classify_http_error(status, &snippet, cf_ray.as_deref(), req_id.as_deref()),
@@ -1889,7 +1654,6 @@ type BoxedEventStream = BoxStream<
     Result<eventsource_stream::Event, eventsource_stream::EventStreamError<reqwest::Error>>,
 >;
 
-/// One provider stream acquired through a host-owned credential lease.
 #[derive(Default)]
 struct DynamicToolCall {
     index: usize,
@@ -1898,10 +1662,6 @@ struct DynamicToolCall {
     done: bool,
 }
 
-/// Per-stream SSE breadcrumb: total events parsed plus the last 8 event
-/// `type` strings, carried in the streaming state so an
-/// "ended before response.completed" warn log can name what the stream
-/// actually contained. Logging only — no behavior change.
 #[derive(Default)]
 struct EventTrail {
     count: usize,
@@ -2220,10 +1980,6 @@ fn process_dynamic_event(
     Ok(false)
 }
 
-/// A `response.failed`/`error` event as an error. Quota exhaustion is
-/// terminal exactly like its HTTP twin in [`classify_http_error`] (the code
-/// may arrive only here, after the stream opened); anything else stays a
-/// retryable stream failure.
 fn stream_failure(event: &Value, detail: String) -> ProviderError {
     let code = event
         .get("response")
@@ -2234,7 +1990,11 @@ fn stream_failure(event: &Value, detail: String) -> ProviderError {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_lowercase();
-    if QUOTA_EXHAUSTED_HINTS.iter().any(|h| code.contains(h)) {
+    let lower = detail.to_lowercase();
+    if QUOTA_EXHAUSTED_HINTS
+        .iter()
+        .any(|h| code.contains(h) || lower.contains(h))
+    {
         ProviderError::Auth(detail)
     } else {
         ProviderError::Stream(detail)
@@ -2411,12 +2171,7 @@ impl OpenAiProvider {
             self.reasoning_effort.as_deref(),
         );
         apply_dynamic_policy(&mut body, &profile.request, self.session_id.as_deref());
-        // The per-turn relay URL only exists after `acquire` (the sidecar
-        // opens the loopback in `provider/chat`), so URL selection moves
-        // after the lease: `metadata[relay_url]` is already the full
-        // `/responses` URL, used verbatim. Anything else falls back to the
-        // declared base. Core stays agnostic — a URL override, never the
-        // relay wire shape.
+
         let profile_url = match responses_url(&profile.base_url) {
             Ok(url) => url,
             Err(error) => return stream::once(async move { Err(error) }).boxed(),
@@ -2476,9 +2231,7 @@ enum StreamState {
         attempt: usize,
         retry_after: Option<Duration>,
         stream_attempt: usize,
-        // Tool-arg prefix inherited from the interrupted stream: carried into
-        // the fresh `ResponsesStreaming` on POST success so suffix deltas
-        // append (empty on fresh turns and `None`-id full replays).
+
         tools_by_call_id: BTreeMap<String, (usize, String, String)>,
         index_to_call_id: BTreeMap<usize, String>,
     },
@@ -2489,39 +2242,29 @@ enum StreamState {
         last_usage: Option<Usage>,
         pending_events: VecDeque<StreamEvent>,
         completed: bool,
-        // Request state, carried so a body-level transport failure can
-        // re-POST instead of ending the turn.
+
         client: reqwest::Client,
         url: Url,
         api_key: String,
         body: OpenAiChatRequest,
         attempt: usize,
-        /// True once a delta has been yielded to the caller. A retry is
-        /// only invisible while this is false: the agent loop commits
-        /// streamed text to history as it arrives, so replaying after a
-        /// visible delta would duplicate what the user already read.
+
         emitted: bool,
     },
     ResponsesStreaming {
         event_stream: BoxedEventStream,
-        // keyed by call_id -> (index, name, args)
+
         tools_by_call_id: BTreeMap<String, (usize, String, String)>,
-        // index -> call_id for ordering at completion
+
         index_to_call_id: BTreeMap<usize, String>,
         last_usage: Option<Usage>,
         pending_events: VecDeque<StreamEvent>,
         completed: bool,
-        // True once output text deltas have been yielded. A provider that
-        // closes SSE without `response.completed` after text has still
-        // produced a usable text turn; unconfirmed tool calls stay fatal.
+
         saw_output_text: bool,
-        // (output_index, content_index) of the part that most recently
-        // yielded visible text; a delta on a different part is a new text
-        // block and needs a paragraph break or the two blocks glue.
+
         last_text_part: Option<(u64, u64)>,
-        // Re-POST context for mid-stream resume (Responses only): a
-        // retryable transport failure rebuilds ResponsesInit from these
-        // with `previous_response_id = last_response_id`.
+
         client: reqwest::Client,
         url: Url,
         api_key: String,
@@ -2556,10 +2299,6 @@ fn normalize_tool_args(args: &str, index: usize) -> Result<String, ProviderError
     )))
 }
 
-/// Drains accumulated tool-call fragments and queues the completion event.
-///
-/// Argument fragments are joined and parsed exactly once here; malformed
-/// argument JSON surfaces as a `Stream` error instead of being forwarded.
 fn emit_tool_calls_and_completion(
     accumulated_tools: &mut BTreeMap<usize, (String, String, String)>,
     stop_reason: Option<StopReason>,
@@ -2567,9 +2306,6 @@ fn emit_tool_calls_and_completion(
     pending_events: &mut VecDeque<StreamEvent>,
 ) -> Result<(), ProviderError> {
     for (index, (id, name, args)) in std::mem::take(accumulated_tools) {
-        // Ghost fragment: an index the model never gave a name or payload
-        // for (padding deltas, resumed-stream stragglers). Dropping it here
-        // keeps the agent loop's empty-name guard from firing per turn.
         if name.is_empty() && args.trim().is_empty() {
             log::debug!(target: "gray_provider", "skipping ghost tool-call fragment at index {index} (no name, no args)");
             continue;
@@ -2593,15 +2329,12 @@ fn emit_responses_tool_calls_and_completion(
     usage: Option<Usage>,
     pending_events: &mut VecDeque<StreamEvent>,
 ) -> Result<(), ProviderError> {
-    // Emit in index order for deterministic tool ordering
     let mut ordered: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
     for (call_id, (idx, name, args)) in std::mem::take(tools_by_call_id) {
         ordered.insert(idx, (call_id, name, args));
     }
     index_to_call_id.clear();
     for (idx, (call_id, name, args)) in ordered {
-        // Ghost fragment (see chat-path emit): never forward an index the
-        // model attached no name and no payload to.
         if name.is_empty() && args.trim().is_empty() {
             log::debug!(target: "gray_provider", "skipping ghost Responses tool-call fragment at index {idx} (no name, no args)");
             continue;
@@ -2630,17 +2363,10 @@ fn emit_responses_tool_calls_and_completion(
     Ok(())
 }
 
-/// Accumulated Responses tool-call fragments, keyed by call id.
-/// (Type alias: keeps the resume helper's signature under clippy's
-/// complexity threshold.)
 type ResponsesToolsByCallId = BTreeMap<String, (usize, String, String)>;
-/// Index → call id ordering for the accumulated fragments.
+
 type ResponsesIndexToCallId = BTreeMap<usize, String>;
 
-/// Resume rebuild (pure): stamp `previous_response_id` on the body and decide
-/// the tool-arg prefix's fate. `Some(id)` continues the server-side prefix —
-/// the server will NOT re-emit prefix deltas, so the maps are carried for
-/// suffix appends. `None` is a true full replay — stale prefix is dropped.
 fn resume_body_and_tool_prefix(
     mut body: ResponsesRequest,
     tools_by_call_id: ResponsesToolsByCallId,
@@ -2651,7 +2377,6 @@ fn resume_body_and_tool_prefix(
     ResponsesToolsByCallId,
     ResponsesIndexToCallId,
 ) {
-    // Upstream provider rejects previous_response_id when encrypted reasoning is used.
     let has_reasoning = body.reasoning.is_some()
         || body
             .include
@@ -2682,16 +2407,6 @@ fn stream_unfold_step(
                     attempt,
                     retry_after,
                 } => {
-                    // Backoff for attempts 2+ runs here so the previous
-                    // `Reconnecting...` notice is already on screen (Codex:
-                    // notify then sleep, not sleep then notify). Abort
-                    // contract: this sleep lives inside the polled
-                    // `stream.next()` future, so the consumer's cancel
-                    // `select!` (agent_loop) drops it instantly — Esc never
-                    // waits out the delay. Applies to every backoff sleep in
-                    // this function; server-asked delays are additionally
-                    // capped at 60s in `parse_retry_after` for drains without
-                    // a cancel branch.
                     if attempt > 1 {
                         tokio::time::sleep(backoff_delay(
                             INITIAL_BACKOFF,
@@ -2736,9 +2451,6 @@ fn stream_unfold_step(
                             };
                         }
                         Err((err, floor, http_status)) => {
-                            // glm-5.2 catch-22: a 400 naming reasoning params
-                            // retries ONCE with them omitted (provider
-                            // defaults apply; the effort label is unchanged).
                             if attempt == 1
                                 && chat_has_reasoning_params(&body)
                                 && should_retry_without_reasoning(
@@ -2776,9 +2488,7 @@ fn stream_unfold_step(
                                     attempt: attempt + 1,
                                     retry_after: retry_floor(&err, floor, attempt),
                                 };
-                                // One notice per burst: the transcript is
-                                // append-only, so retries 2+ stay silent
-                                // instead of stacking `Reconnecting...` cells.
+
                                 if attempt == 1 {
                                     let notice = retry_notice_event(attempt, MAX_ATTEMPTS, &err);
                                     return Some((Ok(notice), next));
@@ -2832,10 +2542,7 @@ fn stream_unfold_step(
                         Ok(response) => {
                             let event_stream: BoxedEventStream =
                                 response.bytes_stream().eventsource().boxed();
-                            // Seed from the request: a resumed stream that
-                            // fails before yielding an id keeps chaining from
-                            // the id it resumed with (else it would degrade
-                            // to a full replay); fresh streams seed None.
+
                             let last_response_id = body.previous_response_id.clone();
                             state = StreamState::ResponsesStreaming {
                                 event_stream,
@@ -2851,18 +2558,12 @@ fn stream_unfold_step(
                                 stream_attempt,
                                 last_response_id,
                                 saw_output_text: false,
-                                // A resumed stream re-opens on the part that
-                                // was mid-flight: seeding None keeps its next
-                                // delta glued, which is the right side of the
-                                // seam — a mid-part split is the real replay.
+
                                 last_text_part: None,
                                 trail: EventTrail::default(),
                             };
                         }
                         Err((err, floor, http_status)) => {
-                            // Unknown/expired resume id: strip it and replay
-                            // once from scratch instead of ending the turn
-                            // with a terminal BadRequest.
                             if attempt == 1
                                 && body.previous_response_id.is_some()
                                 && should_retry_without_previous_response(
@@ -2882,8 +2583,7 @@ fn stream_unfold_step(
                                     attempt: attempt + 1,
                                     retry_after: floor,
                                     stream_attempt,
-                                    // Full replay: stale tool-arg prefix no
-                                    // longer has a server-side continuation.
+
                                     tools_by_call_id: BTreeMap::new(),
                                     index_to_call_id: BTreeMap::new(),
                                 };
@@ -2930,7 +2630,7 @@ fn stream_unfold_step(
                                     tools_by_call_id,
                                     index_to_call_id,
                                 };
-                                // One notice per burst (see Init above).
+
                                 if attempt == 1 {
                                     let notice = retry_notice_event(attempt, MAX_ATTEMPTS, &err);
                                     return Some((Ok(notice), next));
@@ -2988,8 +2688,6 @@ fn stream_unfold_step(
                         Some(Ok(sse_event)) => {
                             let data = sse_event.data.trim();
                             if data == "[DONE]" {
-                                // Guard against double-completion when
-                                // finish_reason already ended the stream.
                                 if !completed {
                                     completed = true;
                                     if let Err(err) = emit_tool_calls_and_completion(
@@ -3038,14 +2736,6 @@ fn stream_unfold_step(
 
                                             if let Some(tool_calls) = choice.delta.tool_calls {
                                                 for tc in tool_calls {
-                                                    // no index cap here — the agent
-                                                    // owns the guard (hard error). A silent
-                                                    // drop loses model intent with a clean
-                                                    // EndTurn; forwarding keeps one policy.
-                                                    // A delta with no id, name, or args (some
-                                                    // gateways pad the final chunk with empty
-                                                    // tool_call entries) must not materialize
-                                                    // a ghost fragment the loop then WARNs about.
                                                     let carries_anything = tc.id.is_some()
                                                         || tc.function.as_ref().is_some_and(|f| {
                                                             f.name.is_some()
@@ -3078,10 +2768,6 @@ fn stream_unfold_step(
                                             }
 
                                             if let Some(reason_str) = choice.finish_reason {
-                                                // Defer MessageComplete until [DONE]/stream
-                                                // end: OpenRouter & co. send usage in a final
-                                                // chunk AFTER finish_reason; emitting here would
-                                                // drop it and report 0 tokens every turn.
                                                 last_finish_reason = map_finish_reason(&reason_str);
                                             }
                                         }
@@ -3114,16 +2800,7 @@ fn stream_unfold_step(
                         }
                         Some(Err(err)) => {
                             log::error!(target: "gray_provider", "stream error: {err}");
-                            // A body-level transport failure — a truncated
-                            // chunked body, or a connection reset mid-body —
-                            // is transient, and reqwest can only report it as
-                            // "error decoding response body". While nothing
-                            // has been yielded the re-POST is invisible, so
-                            // retry exactly like a pre-stream failure. Once a
-                            // delta has reached the caller the agent loop has
-                            // already committed it to history, so a replay
-                            // would duplicate what the user read: say so
-                            // instead.
+
                             if !emitted && attempt < MAX_ATTEMPTS && is_midstream_transport(&err) {
                                 log::warn!(
                                     target: "gray_provider",
@@ -3138,9 +2815,7 @@ fn stream_unfold_step(
                                     attempt: attempt + 1,
                                     retry_after: None,
                                 };
-                                // One notice per burst, same rule as the
-                                // pre-stream path: the transcript is
-                                // append-only, so attempts 2+ stay silent.
+
                                 if attempt == 1 {
                                     let notice = retry_notice_event(
                                         attempt,
@@ -3153,11 +2828,6 @@ fn stream_unfold_step(
                                 continue;
                             }
                             if emitted && accumulated_tools.is_empty() {
-                                // The caller has already committed the visible
-                                // delta to history. Replaying here would duplicate
-                                // text the user read, so finish this turn with a
-                                // clear, nonfatal interruption notice instead of
-                                // turning a usable partial answer into CoreError.
                                 let details = err.to_string().chars().take(200).collect::<String>();
                                 pending_events.push_back(StreamEvent::stream_error(
                                     "Connection interrupted; partial answer kept",
@@ -3191,11 +2861,6 @@ fn stream_unfold_step(
                         }
                         None => {
                             if last_finish_reason.is_none() {
-                                // Providers (seen on opencode zen) can close the
-                                // stream right after the last delta with no finish
-                                // chunk. A complete tool call is still usable, so
-                                // keep it and warn; a truncated call must never
-                                // execute, so anything else stays retryable.
                                 let complete = accumulated_tools.values().all(|(_, _, args)| {
                                     let trimmed = args.trim();
                                     !trimmed.is_empty()
@@ -3205,14 +2870,7 @@ fn stream_unfold_step(
                                     let err = ProviderError::Stream(
                                         "Chat stream ended without a finish reason".into(),
                                     );
-                                    // A clean EOF with no finish chunk is the same
-                                    // transient failure as a truncated body (empty
-                                    // 200 from a gateway, early close). While no
-                                    // delta has reached the caller the re-POST is
-                                    // invisible, and buffered partial tool calls
-                                    // were never executed, so retry like the
-                                    // mid-body transport path instead of failing
-                                    // the turn on the first attempt.
+
                                     if !emitted && !completed && attempt < MAX_ATTEMPTS {
                                         log::warn!(
                                             target: "gray_provider",
@@ -3227,8 +2885,7 @@ fn stream_unfold_step(
                                             attempt: attempt + 1,
                                             retry_after: None,
                                         };
-                                        // One notice per burst; attempts 2+ stay
-                                        // silent (append-only transcript).
+
                                         if attempt == 1 {
                                             let notice =
                                                 retry_notice_event(attempt, MAX_ATTEMPTS, &err);
@@ -3385,9 +3042,7 @@ fn stream_unfold_step(
                             };
                             let typ = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             trail.push(typ);
-                            // Retain the response envelope id for resume:
-                            // `response.created`/`response.completed` carry
-                            // `response.id`, deltas carry `response_id`.
+
                             if let Some(rid) = value
                                 .get("response_id")
                                 .and_then(|v| v.as_str())
@@ -3408,10 +3063,7 @@ fn stream_unfold_step(
                                         && !delta.is_empty()
                                     {
                                         saw_output_text = true;
-                                        // A delta on a new output item or
-                                        // content part opens a new visible
-                                        // block; without a boundary the two
-                                        // blocks' text glues into one word.
+
                                         let part = (
                                             value
                                                 .get("output_index")
@@ -3645,9 +3297,6 @@ fn stream_unfold_step(
                                     }
                                 }
                                 "response.failed" | "error" => {
-                                    // Terminal provider failure: surfacing it as
-                                    // an error (never a clean EndTurn) keeps a
-                                    // truncated turn from persisting as success.
                                     let detail = value
                                         .get("response")
                                         .and_then(|r| r.get("error"))
@@ -3674,9 +3323,6 @@ fn stream_unfold_step(
                                     ));
                                 }
                                 "response.output_item.done" => {
-                                    // Capture completed reasoning items (id +
-                                    // encrypted blob) for verbatim replay next
-                                    // turn. Other item types need no action.
                                     if value
                                         .get("item")
                                         .and_then(|i| i.get("type"))
@@ -3738,17 +3384,9 @@ fn stream_unfold_step(
                             };
                         }
                         Some(Err(err)) => {
-                            // Retryable transport failure: re-POST with
-                            // `previous_response_id = last_response_id`
-                            // (`None` degrades to today's full replay). The
-                            // tool-arg prefix rides along on `Some(id)` so
-                            // suffix deltas append; already-yielded deltas
-                            // stay out and the server continues the prefix.
                             if stream_attempt < MAX_ATTEMPTS {
                                 log::warn!(target: "gray_provider", "responses stream error, resuming (stream attempt {stream_attempt}): {err}");
-                                // Throttle the re-POST like pre-stream
-                                // retries (transport errors carry no
-                                // Retry-After).
+
                                 tokio::time::sleep(backoff_delay(
                                     INITIAL_BACKOFF,
                                     stream_attempt,
@@ -3782,12 +3420,6 @@ fn stream_unfold_step(
                             ));
                         }
                         None => {
-                            // Some Responses-compatible gateways close SSE
-                            // after the final text event without ever sending
-                            // `response.completed`. That is still a complete
-                            // text turn. Unconfirmed tool calls remain fatal:
-                            // an argument fragment is not proof the provider
-                            // finished the call.
                             if tools_by_call_id.is_empty() && saw_output_text {
                                 log::warn!(
                                     target: "gray_provider",
@@ -3817,11 +3449,7 @@ fn stream_unfold_step(
                                 };
                                 continue;
                             }
-                            // Name what the stream actually contained: total
-                            // events, last few types, unconfirmed tool calls
-                            // (distinct output indices, deduping the
-                            // call_id/item_id twins), and whether a response
-                            // id ever arrived (some/none — never the value).
+
                             let pending_tool_calls = tools_by_call_id
                                 .values()
                                 .map(|(idx, _, _)| *idx)
@@ -3856,10 +3484,6 @@ impl Provider for OpenAiProvider {
         &self.model
     }
 
-    /// Anthropic models reached through an OpenAI-compatible host carry
-    /// the same cache-keyed `thinking.budget_tokens`; any cap above the
-    /// budget keeps the field identical (`map_chat_request` drops it only
-    /// when it no longer fits under the cap).
     fn warm_output_cap(&self, _req: &ChatRequest) -> u32 {
         match self.reasoning_effort.as_deref() {
             Some(eff) if eff != "off" && self.caps.anthropic_cache => chat_thinking_budget(eff) + 1,
@@ -3915,9 +3539,7 @@ impl Provider for OpenAiProvider {
             Ok(b) => b,
             Err(e) => return stream::once(async move { Err(e) }).boxed(),
         };
-        // Session affinity (Responses parity): the `x-opencode-session`
-        // header alone leaves chat turns rotating cache shards — stamp the
-        // body key too so consecutive chat turns pin one shard.
+
         body.prompt_cache_key = self.session_id.clone().filter(|s| !s.is_empty());
         body.temperature = self.temperature;
         body.top_p = self.top_p;

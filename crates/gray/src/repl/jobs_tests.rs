@@ -131,7 +131,6 @@ fn picker_rows_tag_their_kind_and_lock_stopping_jobs() {
     assert!(dashboard(&[], &[], NOW).contains("nothing pending"));
 }
 
-/// Answers the two calls `/jobs` makes; `execute` is never reached.
 struct FakeExec(std::sync::Mutex<Vec<String>>);
 
 impl ToolExecutor for FakeExec {

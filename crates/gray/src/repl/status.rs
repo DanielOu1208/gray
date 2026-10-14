@@ -1,8 +1,5 @@
-//! Session status: totals, usage, context window, compact (split from `repl`).
-
 use super::*;
 
-/// Running token + cost totals for the current process session (reset on `/new`).
 #[derive(Debug, Default, Clone)]
 pub(crate) struct SessionTotals {
     pub(crate) turns: usize,
@@ -11,23 +8,20 @@ pub(crate) struct SessionTotals {
     pub(crate) cost: f64,
     pub(crate) total_duration_ms: u64,
     pub(crate) timed_turns: usize,
-    /// Prompt tokens served from cache (`cache_read`, `cached` fallback).
+
     pub(crate) cache_read: usize,
-    /// Prompt tokens written into cache.
+
     pub(crate) cache_write: usize,
-    /// Dollars not spent vs. the same turns fully uncached; goes negative
-    /// while cache-write premiums outrun read savings.
+
     pub(crate) saved: f64,
-    /// Extra paid for cache writes over plain input pricing.
+
     pub(crate) write_premium: f64,
-    /// Any turn reported cache activity — gates the panel's cache rows; a
-    /// provider that never caches hides them all.
+
     pub(crate) cache_reported: bool,
-    /// Cache misses this process observed (StepUsage path; never restored).
+
     pub(crate) misses: MissTally,
 }
 
-/// Session cache-miss counters, bucketed by the cause the tracker observed.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct MissTally {
     pub(crate) count: usize,
@@ -48,7 +42,7 @@ impl SessionTotals {
         self.turns += 1;
         self.input += usage.input_tokens;
         self.output += usage.output_tokens;
-        // Legacy reports fill only `cached_tokens`; it counts as a read.
+
         let read = usage.cache_read_input_tokens.max(usage.cached_tokens);
         let write = usage.cache_write_input_tokens;
         self.cache_read += read;
@@ -74,8 +68,6 @@ impl SessionTotals {
         }
     }
 
-    /// Tallies one cache miss from the StepUsage tracker. Process-local by
-    /// design: misses are a this-run observation, never persisted/restored.
     pub(crate) fn note_miss(&mut self, m: &crate::cache::CacheMiss) {
         self.misses.count += 1;
         self.misses.tokens += m.missed_tokens;
@@ -89,14 +81,10 @@ impl SessionTotals {
         }
     }
 
-    /// Rebuilds totals from stored session entries. Usage is recorded on the
-    /// last message of each turn, so entries carrying usage map 1:1 to turns.
     pub(crate) fn from_entries(
         entries: &[crate::session_store::SessionEntry],
         model: &str,
     ) -> Self {
-        // A startup resume rebuilds here before the spawned catalog fetches
-        // prime the rate table — without this a resumed `/usage` prices $0.
         crate::setup::context::warm_rates_from_disk_cache();
         let mut t = SessionTotals::default();
         for e in entries.iter().filter(|e| e.usage.is_some()) {
@@ -107,8 +95,6 @@ impl SessionTotals {
     }
 }
 
-/// Output tokens/sec for a turn — opencode v2 `turnTokensPerSecond` style.
-/// Gray tracks whole-turn time (tools included), not stream-only time.
 pub(crate) fn turn_tokens_per_second(output_tokens: usize, duration_ms: u64) -> Option<u64> {
     if output_tokens == 0 || duration_ms == 0 {
         return None;
@@ -116,12 +102,6 @@ pub(crate) fn turn_tokens_per_second(output_tokens: usize, duration_ms: u64) -> 
     Some((output_tokens as f64 * 1000.0 / duration_ms as f64).round() as u64)
 }
 
-/// `⬡ 12,400 tokens · 82 tps · 6s · $0.004 ($0.41 session)` — rate/time/cost
-/// parts appear only when known; otherwise the footer stays tokens-only.
-/// The rate divides by `streamed_ms` (streaming time only, from
-/// `TurnStreamClock`), never the whole-turn `duration_ms` the `· 6s` shows:
-/// tool waits and inter-round gaps must not dilute it, and a turn that
-/// produced no output tokens (pure tool turn) shows no rate at all.
 pub(crate) fn turn_footer(
     usage: &gray_core::event::Usage,
     model: &str,
@@ -148,9 +128,6 @@ pub(crate) fn turn_footer(
     }
 }
 
-/// Handles `/copy`: last assistant response to the OS clipboard.
-/// Native CLI helpers (`pbcopy`, `wl-copy`, `xclip -selection clipboard`); when no clipboard exists the text goes to
-/// stdout instead — never a silent no-op. Empty transcript reports plainly.
 pub(crate) fn handle_copy(agent: &Option<Agent>, tui: Option<&crate::composer::SharedTui>) {
     let text = agent
         .as_ref()
@@ -176,12 +153,10 @@ pub(crate) fn handle_copy(agent: &Option<Agent>, tui: Option<&crate::composer::S
             &format!("copied {} chars to clipboard", text.chars().count()),
         );
     } else {
-        // No clipboard (headless/ssh): print so the text is still reachable.
         super::say(tui, &format!("no clipboard available — response:\n{text}"));
     }
 }
 
-/// One clipboard write via platform helpers. `true` on first success.
 fn copy_to_clipboard(text: &str) -> bool {
     #[cfg(target_os = "macos")]
     let helpers: &[(&str, &[&str])] = &[("pbcopy", &[])];
@@ -218,9 +193,6 @@ fn copy_to_clipboard(text: &str) -> bool {
     false
 }
 
-/// Handles `/usage` / `/cost`: the cache-aware session panel — `✓` action
-/// header plus the label/value rows [`usage_panel`] builds (same rows as
-/// the headless plain render, styles stripped).
 pub(crate) fn handle_usage(
     totals: &SessionTotals,
     config: &Config,
@@ -229,9 +201,6 @@ pub(crate) fn handle_usage(
     handle_usage_inner(totals, config, tui, true)
 }
 
-/// Mid-turn `/usage`: session totals only. Subscription probes can spawn
-/// sidecars, so they stay on the idle path rather than freezing the turn's
-/// key watcher behind a provider RPC.
 pub(crate) fn handle_turn_usage(
     totals: &SessionTotals,
     config: &Config,
@@ -250,8 +219,6 @@ fn handle_usage_inner(
     tui: Option<&crate::composer::SharedTui>,
     include_subscriptions: bool,
 ) {
-    // Probe subscriptions before the session-usage early-out: a fresh
-    // session still has quota windows worth showing.
     let subs = include_subscriptions
         .then(collect_subscription_usage)
         .unwrap_or_default();
@@ -267,10 +234,6 @@ fn handle_usage_inner(
     use usage_panel::{PanelInput, Warmth};
     if let Some(shared) = tui {
         if include_subscriptions {
-            // Two slides, Claude Code's shape: subscription quota first,
-            // session tokens second. `r` inside the modal re-probes via
-            // this closure — warmth reads live off the composer, totals
-            // off the caller's counters.
             let bg = shared.lock().expect("tui lock").snapshot();
             let mut rebuild = || {
                 let warmth = {
@@ -294,8 +257,7 @@ fn handle_usage_inner(
             if opened.is_ok() {
                 return;
             }
-            // No drawable terminal: the same pages land as transcript
-            // cards instead of silently dropping the panel.
+
             for p in rebuild() {
                 let mut t = shared.lock().expect("tui lock");
                 t.push_action(&p.title, None);
@@ -351,12 +313,6 @@ fn handle_usage_inner(
     }
 }
 
-/// `/usage` subscription section: each installed plugin provider with an
-/// auth-store row gets a `provider/usage` call on its own thread + tokio
-/// runtime (the [`plugin_models_rpc`] spawn discipline — probing sidecars
-/// parallel, never holding the TUI lock). Errors, `Protocol` rejections and
-/// `available: false` drop out silently: a connected-but-unreadable
-/// subscription simply has no windows to draw.
 fn collect_subscription_usage() -> Vec<(String, gray_plugin::ProviderUsageLimits)> {
     use std::collections::BTreeSet;
     let Ok(home) = crate::setup::gray_home() else {
@@ -395,8 +351,6 @@ fn collect_subscription_usage() -> Vec<(String, gray_plugin::ProviderUsageLimits
     })
 }
 
-/// One `provider/usage` RPC on an own-runtime sidecar (`plugin_models_rpc`
-/// discipline): spawn, ask, drop — the runtime's Drop kills the sidecar.
 fn plugin_usage_rpc(
     installed: &crate::providers::InstalledProvider,
 ) -> Option<gray_plugin::ProviderUsageLimits> {
@@ -477,7 +431,6 @@ pub(crate) async fn handle_context_window(
         context_breakdown_text(config, parts)
     }
     let Some(val) = direct else {
-        // Bare `/context`: modal in the TUI, static breakdown on pipes.
         if tui.is_some() {
             let model = config.model.clone().unwrap_or_default();
             let breakdown = collect_parts(cwd, agent, tui);
@@ -488,8 +441,6 @@ pub(crate) async fn handle_context_window(
             match res {
                 Ok(Some(summary)) => emit(summary, tui, true),
                 Ok(None) => {
-                    // Dismissed modal leaves the slash card with no feedback:
-                    // gap so it doesn't jam the input box.
                     if let Some(shared) = tui {
                         shared.lock().expect("tui lock").ensure_gap();
                     }
@@ -547,12 +498,7 @@ pub(crate) fn collect_context_parts(
     let tools_toks = serde_json::to_string(&crate::profile::builtin_registry().defs())
         .map(|s| crate::setup::estimate_str_tokens(&s))
         .unwrap_or(0);
-    // Provider `total` already bills system + tools + history as input,
-    // so adding their estimates on top double-counts (opencode parity:
-    // its context number is the last usage report alone). When a real
-    // report is in force, messages is the residual after the other
-    // estimates, keeping `used()` equal to the provider total;
-    // otherwise it is the plain history estimate.
+
     let history_est = messages.iter().map(crate::compact::estimate_tokens).sum();
     let messages = match latest.map(|u| u.total()).filter(|t| *t > 0) {
         Some(total) => total.saturating_sub(sys.saturating_add(tools_toks)),
@@ -582,9 +528,7 @@ pub(crate) fn context_breakdown_text(
     let keep = crate::setup::user_keep_for(window);
     let used = parts.used();
     let free = parts.free(window, reserve);
-    // The trigger auto-compaction actually fires at: an explicit
-    // --compact-at/GRAY_COMPACT_AT or the provider's price cliff can pull it
-    // below the window - reserve bound this table otherwise implies.
+
     let compact_at = crate::compact::effective_compact_ceiling(config);
     let pct = |n: usize| {
         n.checked_mul(100)
@@ -640,7 +584,7 @@ pub(crate) fn apply_context_arg(config: &mut Config, val: &str) -> (String, bool
         config.context_window = None;
         crate::setup::set_user_context_window(None);
         persist_context_window(config);
-        // re-prime cache if model present
+
         if let Some(m) = config.model.clone()
             && crate::setup::get_cached_model_context(&m).is_none()
         {
@@ -661,7 +605,7 @@ pub(crate) fn apply_context_arg(config: &mut Config, val: &str) -> (String, bool
             true,
         );
     }
-    // Subcommands: `reserve <n|auto|default>` and `keep <n|auto|default|off`
+
     let mut parts = lower.splitn(2, char::is_whitespace);
     let head = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
@@ -756,9 +700,6 @@ pub(crate) fn apply_context_arg(config: &mut Config, val: &str) -> (String, bool
     }
 }
 
-/// Handles the `/compact` / `/compress` command family.
-/// `⬢ Context compacted · 9s` box, the same card as the cron and job boxes,
-/// with the detail as one dim body row. Pure so the layout is testable.
 pub(super) fn compaction_card(
     elapsed: &str,
     detail: &str,
@@ -775,8 +716,6 @@ pub(super) fn compaction_card(
     (Line::from(spans), body)
 }
 
-/// Pushes the compaction card through the composer, or prints it plainly
-/// when no TUI owns the terminal.
 pub(super) fn push_compaction_card(
     tui: Option<&crate::composer::SharedTui>,
     elapsed: &str,
@@ -810,7 +749,6 @@ pub(crate) async fn handle_compact(
         .await;
     }
     let Some(ag) = agent.as_mut() else {
-        // reload_agent already reported the cause via say(); no second line.
         return;
     };
 
@@ -831,9 +769,6 @@ pub(crate) async fn handle_compact(
 
     let msg_count = messages.len();
 
-    // Codex `/compact` parity (`slash_dispatch.rs`): raise `Compacting
-    // context` with its own clock before the backend work; the input box
-    // stays mounted, only the status dock changes.
     let compaction_id = format!("manual-{}", uuid::Uuid::new_v4().as_simple());
     if let Some(shared) = tui {
         shared
@@ -866,8 +801,6 @@ pub(crate) async fn handle_compact(
         let _ = watcher.await;
     }
 
-    // Restore idle (manual has no turn to return to) in the same lock;
-    // the `Context compacted` line below is the single completion signal.
     let elapsed = tui
         .and_then(|shared| {
             shared
@@ -880,9 +813,6 @@ pub(crate) async fn handle_compact(
 
     match compact_res {
         Ok(Some(summary)) => {
-            // Record to session storage if active (helper already set_messages):
-            // boundary marker + replacement so reload replays the active
-            // transcript instead of original + replacement duplicated.
             if let Some(state) = session_state {
                 let _ = state
                     .store
@@ -890,14 +820,11 @@ pub(crate) async fn handle_compact(
                     .await;
             }
 
-            // History just shrank (see session.rs threshold path): reseed
-            // the gauge to the compacted size instead of the stale StepUsage.
             if let Some(shared) = tui {
                 let mut t = shared.lock().expect("tui lock");
                 let est = crate::compact::estimate_context_tokens(ag.messages(), None);
                 t.seed_estimate_usage(est);
-                // Fresh summary = new content, not re-billed content: drop
-                // the pre-compact request as the cache-miss baseline.
+
                 t.reset_cache();
             }
 

@@ -18,14 +18,10 @@ pub struct EditTool {
 }
 
 impl EditTool {
-    /// Share `ledger` (the registry/plugin wiring); [`Default`] keeps a
-    /// private ledger so existing tests compile.
     pub fn new(ledger: Arc<FileLedger>) -> Self {
         Self { ledger }
     }
 
-    /// T3.2: only the staleness rule applies to edit (it reads the file to
-    /// match, so unread/partial needs no guard).
     pub(crate) fn is_stale(entry: &LedgerEntry, meta: &std::fs::Metadata) -> bool {
         meta.modified().is_ok_and(|t| t != entry.mtime) || meta.len() != entry.size
     }
@@ -135,8 +131,6 @@ fn parse_edits(args: &Value) -> Result<Vec<Edit>, String> {
     Ok(edits)
 }
 
-/// Top-level single-edit form (`oldText`/`newText`; legacy names are
-/// renamed to these by the central ALIASES table in `crate`/coerce_args).
 fn parse_single_or_legacy(args: &Value) -> Result<Vec<Edit>, String> {
     let old = args.get("oldText");
     let new = args.get("newText");
@@ -230,8 +224,6 @@ impl Tool for EditTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: Value) -> ToolOutput {
-        // Legacy path names (file_path/TargetFile/…) are renamed by the
-        // ALIASES table in `crate` (coerce_args) before lookup.
         let path = match get_str(&args, "path") {
             Ok(p) => p,
             Err(e) => return e,
@@ -249,8 +241,7 @@ impl Tool for EditTool {
                 "edit failed for {path}: edits must contain at least one replacement"
             ));
         }
-        // Explicitly reject empty searches before any I/O: an empty oldText
-        // would match everywhere (single fast path or common engine alike).
+
         for (i, e) in edits.iter().enumerate() {
             if e.old_text.is_empty() {
                 let detail = if edits.len() == 1 {
@@ -263,15 +254,14 @@ impl Tool for EditTool {
         }
 
         let full = resolve_path(&ctx.cwd, &path);
-        // T3.2 ledger: refuse only when the file changed since it was read
-        // (mtime/size here; byte comparison after the read below).
+
         if let Some(entry) = self.ledger.get(&full)
             && let Ok(meta) = std::fs::metadata(&full)
             && Self::is_stale(&entry, &meta)
         {
             return fail(notices::edit_changed(&full.display().to_string()));
         }
-        // Validate regular files before reading (metadata follows symlinks).
+
         if let Ok(meta) = std::fs::metadata(&full)
             && !meta.file_type().is_file()
         {
@@ -281,8 +271,6 @@ impl Tool for EditTool {
             ));
         }
 
-        // Distinguish NotFound (clear miss) from other read errors: neither
-        // becomes an empty string.
         let raw = match tokio::fs::read_to_string(&full).await {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -293,8 +281,7 @@ impl Tool for EditTool {
             }
             Err(e) => return fail(format!("edit failed for {}: {e}", full.display())),
         };
-        // Freshness via bytes when already read: same mtime/size but different
-        // bytes still counts as changed.
+
         if let Some(entry) = self.ledger.get(&full)
             && let (Some(expected), Some(actual)) =
                 (entry.content_hash, FileLedger::hash_bytes(raw.as_bytes()))
@@ -307,8 +294,7 @@ impl Tool for EditTool {
         let bom = split_bom(&raw);
         let ending = detect_line_ending(&bom.text);
         let normalized = normalize_to_lf(&bom.text);
-        // T1.6: exact (then existing fuzzy) first; only on failure retry once
-        // with cat -n prefixes stripped from oldText/newText together.
+
         let (applied, repaired) =
             match apply_edits_to_normalized_content(&normalized, &edits, &path) {
                 Ok(r) => (r, false),
@@ -320,20 +306,17 @@ impl Tool for EditTool {
                 },
             };
         let final_content = bom.bom + &restore_line_endings(&applied.new_content, ending);
-        // Audit #8: the freshness checks above ran before the (slow) edit
-        // application; re-prove the file is still what we read, right here.
+
         let recheck_hash = self.ledger.get(&full).and_then(|e| e.content_hash);
         let recheck_meta = std::fs::metadata(&full).ok();
         if !crate::write::still_fresh(&full, recheck_meta.as_ref(), recheck_hash) {
             return fail(notices::edit_changed(&full.display().to_string()));
         }
-        // Atomic replace (temp + rename, mode preserved); see
-        // crate::write::atomic_write for symlink/hardlink semantics.
+
         if let Err(e) = crate::write::atomic_write(&full, final_content.as_bytes()).await {
             return fail(format!("edit failed for {}: {e}", full.display()));
         }
-        // T3.2 ledger: the whole new content is known — the next write is
-        // allowed without a re-read.
+
         self.ledger.mark_written(&full, final_content.as_bytes());
         let patch = crate::edit_diff::generate_unified_patch(
             &path,
@@ -341,8 +324,7 @@ impl Tool for EditTool {
             &applied.new_content,
             3,
         );
-        // The diff echoes file bytes verbatim — redact, or it re-exposes
-        // secrets the read/shell outputs just scrubbed.
+
         let patch = gray_core::redaction::redact_for_disclosure(&patch).into_text();
         let mut all_notes = applied.notes;
         if repaired {

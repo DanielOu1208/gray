@@ -6,9 +6,6 @@ use crate::skills::Skill;
 use gray_pkg::errors::ErrorEntry;
 use gray_pkg::ops::LockEntry;
 
-/// Test-local row renderer over the sidecar lock entry (mirrors the removed
-/// `format_plugin_row` wrapper): the modal itself renders either lock type
-/// through `format_plugin_row_parts`.
 fn format_plugin_row(name: &str, entry: &LockEntry) -> String {
     format_plugin_row_parts(
         name,
@@ -45,8 +42,6 @@ fn entry(ecosystem: &str, enabled: bool) -> LockEntry {
 
 #[test]
 fn manager_specs_differ_only_where_expected() {
-    // Contract pin: the two managers share one loop; any new divergence
-    // must update this test deliberately.
     let skills = &super::SKILLS_SPEC;
     assert_eq!(skills.title, "Skills");
     assert_eq!(skills.empty_hint, "no skills discovered");
@@ -95,8 +90,6 @@ fn row_caps_long_descriptions() {
 
 #[test]
 fn error_row_holds_for_varied_entries() {
-    // The old skills modal delegated to the plugins formatter; the
-    // single shared renderer must keep parity for any input.
     for (source, item, message) in [
         ("skills", "demo", "boom"),
         ("index", "some-plugin", "fetch failed: 404"),
@@ -140,7 +133,7 @@ fn cli_ecosystem_labels_plugin_commands() {
         format_plugin_row("demo", &entry("gray-cli", true)),
         "✓ demo 1.2.3 (user) [Plugin command]"
     );
-    // The modal renders `lock.json` CLI rows through the same builder.
+
     assert_eq!(
         format_plugin_row_parts("demo", "1.2.3", "user", "gray-cli", true),
         format_plugin_row("demo", &entry("gray-cli", true))
@@ -181,12 +174,12 @@ fn enter_routes_to_setup_only_for_flagged_rows_with_a_flow() {
         enter_action(Some(&setup_row(true)), true, &spec),
         EnterAction::Setup
     ));
-    // No flow supplied: the flagged row still toggles, exactly as before.
+
     assert!(matches!(
         enter_action(Some(&setup_row(true)), false, &spec),
         EnterAction::Toggle
     ));
-    // A configured row toggles even when a flow exists.
+
     assert!(matches!(
         enter_action(Some(&setup_row(false)), true, &spec),
         EnterAction::Toggle
@@ -208,7 +201,7 @@ fn enter_ignores_rows_that_never_carried_an_action() {
         enter_action(None, true, &spec),
         EnterAction::Ignore
     ));
-    // A remove-only manager never toggles.
+
     let remove_only = ManagerSpec {
         supports_toggle: false,
         supports_remove: true,

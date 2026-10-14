@@ -1,12 +1,3 @@
-//! `gray cmd` — the headless slash-command surface for channel adapters
-//! (GRAY-CMD-CONTRACT.md). Adapters spawn `GRAY_HOME=<home> gray cmd <verb>`;
-//! every answer is one JSON object on stdout — the wire is stdout only.
-//!
-//! Verbs: `list` (command table), `run <name> [args]` (text or ui result),
-//! `interact <token> [action-json]` (pending-doc revisions). Commands the
-//! REPL needs a TTY for answer `local_only`; `interactive` ones may answer
-//! `kind:"ui"` whose pending draft lives under `<GRAY_HOME>/cmd_ui/`.
-
 mod registry;
 mod store;
 mod ui;
@@ -24,9 +15,6 @@ use crate::repl::{SessionTotals, cron, handlers};
 use crate::session_store::{JsonlSessionStore, SessionId};
 use crate::setup::variants::{Parts, RowShape};
 
-/// A `run`/`interact` answer. `text` is final (`close` says the adapter
-/// strips components); `ui` carries a pending document the adapter renders
-/// (`fallback_text` is the same content for component-less platforms).
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum CommandResult {
@@ -54,7 +42,6 @@ impl CommandResult {
     }
 }
 
-/// Wire error: the envelope's `error.code`/`error.message`.
 #[derive(Debug)]
 struct CmdError(&'static str, String);
 
@@ -93,8 +80,6 @@ fn fail(e: CmdError) -> Value {
     json!({"ok": false, "error": {"code": e.0, "message": e.1, "retryable": false}})
 }
 
-/// `gray cmd <verb>` entry point: dispatch and print exactly one envelope
-/// line. Nothing else may write stdout while this runs.
 pub async fn run_cli(verb: CmdVerb, config: &mut Config) -> anyhow::Result<()> {
     let out = match verb {
         CmdVerb::List => ok(registry::list_json()),
@@ -168,8 +153,6 @@ async fn run_command(
     Err(CmdError::unknown(name))
 }
 
-/// `/help`: the registry lines plus plugin commands and prompt templates —
-/// the same text the headless REPL prints, minus the terminal rule.
 fn help_result() -> CommandResult {
     let mut out = String::new();
     for d in crate::repl::REGISTRY {
@@ -199,9 +182,6 @@ fn help_result() -> CommandResult {
     CommandResult::text(out.trim_end())
 }
 
-/// `/usage`: session totals rebuilt from the stored entries — the adapter's
-/// pointed session first, else the home's most recently active one (the
-/// same precedence a resumed turn takes).
 async fn usage_result(config: &Config, home: &Path) -> Result<CommandResult, CmdError> {
     let store = JsonlSessionStore::new(home.join("sessions"));
     let summaries = store.list().await;
@@ -242,8 +222,6 @@ async fn usage_result(config: &Config, home: &Path) -> Result<CommandResult, Cmd
     Ok(CommandResult::text(text))
 }
 
-/// The adapter's session pointer (`<home>/session.json` → `session_id`),
-/// `None` when missing or malformed.
 fn pointed_session(home: &Path) -> Option<SessionId> {
     std::fs::read(home.join("session.json"))
         .ok()
@@ -257,8 +235,6 @@ fn pointed_session(home: &Path) -> Option<SessionId> {
         .map(SessionId::new)
 }
 
-/// `/models`: bare mints the editable picker doc; `model <id>` is the
-/// direct-set path shared with the REPL handler.
 fn model_result(config: &mut Config, home: &Path, rest: &str) -> Result<CommandResult, CmdError> {
     let raw = rest.trim();
     if !raw.is_empty() {
@@ -271,8 +247,6 @@ fn model_result(config: &mut Config, home: &Path, rest: &str) -> Result<CommandR
         ));
     }
     let mut draft = store::ModelDraft {
-        // No current model: preselect the top row like the TUI picker, so a
-        // bare `apply` still does something sensible.
         model: config
             .model
             .clone()
@@ -290,17 +264,14 @@ fn model_result(config: &mut Config, home: &Path, rest: &str) -> Result<CommandR
         .and_then(|m| models.iter().position(|(id, _)| id == m))
         .map(|i| i / MAX_SELECT_OPTIONS)
         .unwrap_or(0);
-    // Composite rows carry their declared shapes into the pending doc —
-    // `interact` re-renders the slot selects and validates parts from the
-    // record, never the wire.
+
     let mut shapes = BTreeMap::new();
     for (id, _) in &models {
         if let Some(shape) = crate::setup::variants::row_shape(id).filter(|s| s.is_composite()) {
             shapes.insert(id.clone(), (*shape).clone());
         }
     }
-    // The selected row's slots open on the live selection (when it is this
-    // row), else the row's default — the TUI picker's `parts_of` seed.
+
     if let Some(shape) = draft.model.as_deref().and_then(|id| shapes.get(id)) {
         draft.parts = if draft.model.as_deref() == config.model.as_deref() {
             crate::setup::selection_parts(shape, &config.model_parts)
@@ -326,10 +297,6 @@ fn model_result(config: &mut Config, home: &Path, rest: &str) -> Result<CommandR
     })
 }
 
-/// `model <id> [slot=option ...]`: the direct-set path shared with the
-/// REPL handler. A composite row additionally takes per-slot picks
-/// (`model fusion lead=opus sidekick=a`); bare `<id>` on a composite
-/// lands the remembered — else default — combination.
 fn model_direct(config: &mut Config, home: &Path, raw: &str) -> Result<CommandResult, CmdError> {
     let path = home.join("config.json");
     let mut tokens = raw.split_whitespace();
@@ -351,8 +318,7 @@ fn model_direct(config: &mut Config, home: &Path, raw: &str) -> Result<CommandRe
     if picks.is_empty() {
         let applied = handlers::apply_model_selection_at(config, id, None, None, Some(&path))
             .map_err(CmdError::args)?;
-        // A composite row picked bare lands its settled parts; a plain
-        // row sheds a stale composite's (empty clears the live field).
+
         let shape = crate::setup::variants::row_shape(&applied.model).filter(|s| s.is_composite());
         let parts = shape
             .as_ref()
@@ -363,9 +329,7 @@ fn model_direct(config: &mut Config, home: &Path, raw: &str) -> Result<CommandRe
             crate::setup::composite_label_for(config).unwrap_or_else(|| applied.model.clone());
         return Ok(CommandResult::text(model_set_text(&applied, &name)));
     }
-    // Slot picks need the row's declared slots. A registered composite
-    // row resolves in-process; anything else canonicalizes (names, case)
-    // against the known list before its shape lookup.
+
     let (id, shape) = match crate::setup::variants::row_shape(id).filter(|s| s.is_composite()) {
         Some(shape) => (id.to_string(), shape),
         None => {
@@ -404,9 +368,7 @@ fn model_direct(config: &mut Config, home: &Path, raw: &str) -> Result<CommandRe
             )));
         }
     }
-    // Each pick is a constraint: the winning variant satisfies them all
-    // and stays closest to the remembered/default combination, so a lone
-    // `sidekick=b` lands `swe` when only `swe × b` exists.
+
     let baseline = opening_parts(prev.as_deref(), config, home, &id, &shape);
     let satisfies =
         |v: &gray_plugin::ModelVariant| picks.iter().all(|(k, val)| v.parts.get(k) == Some(val));
@@ -440,9 +402,6 @@ fn model_direct(config: &mut Config, home: &Path, raw: &str) -> Result<CommandRe
     Ok(CommandResult::text(model_set_text(&applied, &name)))
 }
 
-/// The combination a composite row opens at for `model <id>`: the live
-/// selection when `current` is this row, the remembered pick, else the
-/// catalog default — the TUI picker's `parts_of` precedence.
 fn opening_parts(
     current: Option<&str>,
     config: &Config,
@@ -466,9 +425,6 @@ fn opening_parts(
     shape.settle_parts(want.as_ref())
 }
 
-/// The composite half of an apply: live `config.model_parts` plus the
-/// saved selection (and the row's remembered pick). Empty clears the
-/// live field — a plain row sheds a stale composite's parts.
 fn commit_parts(config: &mut Config, home: &Path, parts: &Parts) {
     config.model_parts = parts.clone();
     let path = home.join("config.json");
@@ -483,8 +439,6 @@ fn commit_parts(config: &mut Config, home: &Path, parts: &Parts) {
     let _ = crate::setup::save_saved_config_at(&path, &saved);
 }
 
-/// "Row · Lead × Sidekick" for the apply receipt — `None` (the caller
-/// falls back to the row id) when the parts don't fill every slot.
 fn composite_name(
     row: &str,
     models: &[(String, String)],
@@ -502,8 +456,6 @@ fn composite_name(
         .map(|segs| segs.into_iter().map(|(t, _)| t).collect())
 }
 
-/// The picker's options: the live provider list, then the cached list as
-/// the offline fallback, the current model last resort.
 fn model_list_for(config: &Config) -> Vec<(String, String)> {
     let (_, rows) = crate::setup::provider_models_for_config(config);
     if !rows.is_empty() {
@@ -521,8 +473,6 @@ fn model_list_for(config: &Config) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// Selects cap at 25 options on the strictest adapter — pin `keep` first,
-/// then fill, so the current selection is never clipped out.
 const MAX_SELECT_OPTIONS: usize = 25;
 
 fn cap_options(models: &mut Vec<(String, String)>, keep: Option<&str>) {
@@ -538,10 +488,6 @@ fn cap_options(models: &mut Vec<(String, String)>, keep: Option<&str>) {
     models.truncate(MAX_SELECT_OPTIONS);
 }
 
-/// `/new`: reset the home's current-session pointer. The adapter's
-/// `session.json` loses its `session_id` and advances `generation` — the
-/// same semantics as the adapter's own reset, so a still-running turn's
-/// write-back is discarded. Session files stay (they remain resumable).
 async fn new_result(home: &Path) -> Result<CommandResult, CmdError> {
     let state_path = home.join("session.json");
     if let Ok(bytes) = std::fs::read(&state_path)
@@ -553,8 +499,7 @@ async fn new_result(home: &Path) -> Result<CommandResult, CmdError> {
         state["last_activity"] = json!(crate::cron::now_secs());
         let _ = crate::cron::store::atomic_write_json(&state_path, &state);
     }
-    // gray's own per-cwd remembered pointer — cleared for the process cwd
-    // and the `work` dir channel adapters spawn turns in.
+
     let store = JsonlSessionStore::new(home.join("sessions"));
     for cwd in [std::env::current_dir().ok(), Some(home.join("work"))]
         .into_iter()
@@ -567,7 +512,6 @@ async fn new_result(home: &Path) -> Result<CommandResult, CmdError> {
     ))
 }
 
-/// `/sessions`: resumable sessions in this home, newest activity first.
 async fn sessions_result(home: &Path, rest: &str) -> Result<CommandResult, CmdError> {
     if !rest.trim().is_empty() {
         return Err(CmdError::args(
@@ -587,8 +531,6 @@ async fn sessions_result(home: &Path, rest: &str) -> Result<CommandResult, CmdEr
     Ok(CommandResult::text(out.trim_end()))
 }
 
-/// `/cron`: the read-only dashboard (bare) or one job's row (`<id|name>`),
-/// plus the ticker-liveness line — the headless REPL render verbatim.
 fn cron_result(home: &Path, rest: &str) -> Result<CommandResult, CmdError> {
     let store = crate::cron::CronStore::open(home.join("cron"))
         .map_err(|e| CmdError::unavailable(format!("{e:#}")))?;
@@ -1148,12 +1090,6 @@ fn skill_command_result(name: &str, args_raw: &str) -> Option<Result<CommandResu
     })())
 }
 
-// ---------------------------------------------------------------------------
-// interact: pending-doc revisions
-// ---------------------------------------------------------------------------
-
-/// The adapter-normalized action (`{user?, values?, submit?}` — all keys
-/// optional; a bare `interact` re-renders the current draft).
 #[derive(Debug, Default, serde::Deserialize)]
 struct Action {
     #[serde(default)]
@@ -1164,9 +1100,6 @@ struct Action {
     submit: Option<String>,
 }
 
-/// `gray cmd interact <token> [action-json]`: the next `CommandResult` for
-/// a pending `editable` doc — a revision for `values`/`fast`, a final text
-/// for `apply`/`cancel` (which consume the token).
 fn interact(
     config: &mut Config,
     home: &Path,
@@ -1188,8 +1121,6 @@ fn interact(
         ),
     };
     if let Some(a) = &action {
-        // The first user to interact claims the doc; later interactors must
-        // match — adapters on shared channels pass `user` for exactly this.
         match (&rec.user, &a.user) {
             (Some(owner), Some(u)) if u != owner => return Err(CmdError::not_owner()),
             (Some(_), None) => return Err(CmdError::not_owner()),
@@ -1206,8 +1137,7 @@ fn interact(
                         )));
                     }
                     rec.draft.model = Some(v.to_string());
-                    // A new row opens on its own defaults — the slot
-                    // selects re-render for it on the revised doc.
+
                     rec.draft.parts = rec
                         .shapes
                         .get(v)
@@ -1231,8 +1161,7 @@ fn interact(
                     else {
                         return Err(CmdError::invalid_action(format!("unknown control '{k}'")));
                     };
-                    // The pick wins, earlier slots hold, later ones take
-                    // the serving variant's — the TUI dropdown's coerce.
+
                     let cur = shape.settle_parts(Some(&rec.draft.parts));
                     match shape.option_parts(&cur, key, v) {
                         Some(parts) => rec.draft.parts = parts,
@@ -1266,8 +1195,7 @@ fn interact(
                 let Some(model) = rec.draft.model.clone() else {
                     return Err(CmdError::invalid_action("no model selected"));
                 };
-                // Exact parts match: a composite's picks must resolve to a
-                // concrete variant or the apply bounces back unfinal.
+
                 let shape = rec.shapes.get(&model).filter(|s| s.is_composite());
                 let parts = match shape {
                     Some(s) => {
@@ -1320,8 +1248,7 @@ fn interact(
                             .unwrap_or_else(|| applied.model.clone());
                         Ok(CommandResult::text(model_set_text(&applied, &name)))
                     }
-                    // A failed apply is not the end of the flow: the doc
-                    // stays pending and the adapter keeps its components.
+
                     Err(msg) => Ok(CommandResult::Text {
                         text: msg,
                         close: false,
@@ -1353,8 +1280,6 @@ fn save_err(e: std::io::Error) -> CmdError {
     CmdError::unavailable(format!("cannot save pending doc: {e}"))
 }
 
-/// The picker doc re-rendered from the current draft (`editable` revisions
-/// re-use the token — the record, not the wire, carries the state).
 fn revised_doc(token: &str, rec: &store::PendingDoc) -> CommandResult {
     CommandResult::Ui {
         token: token.to_string(),
@@ -1373,10 +1298,6 @@ fn model_set_text(applied: &handlers::ModelApply, name: &str) -> String {
     text
 }
 
-// ---------------------------------------------------------------------------
-// the model picker document (contract reference)
-// ---------------------------------------------------------------------------
-
 fn clip(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
@@ -1390,9 +1311,6 @@ fn picker_header(draft: &store::ModelDraft) -> String {
     )
 }
 
-/// `document_id: "model-picker"`, `visibility: ephemeral`,
-/// `lifecycle: editable` — the contract's reference doc rendered from
-/// `draft`.
 fn model_picker_doc(
     draft: &store::ModelDraft,
     models: &[(String, String)],
@@ -1445,8 +1363,7 @@ fn model_picker_doc(
             }],
         },
     ];
-    // A composite row's slots sit between the model and effort selects —
-    // one `slot:<key>` select per declared slot.
+
     if let Some(shape) = draft_shape(draft, shapes) {
         for slot in &shape.slots {
             components.push(slot_select_row(
@@ -1524,7 +1441,6 @@ fn model_picker_doc(
     )
 }
 
-/// The selected row's declared shape, when it is composite.
 fn draft_shape<'a>(
     draft: &store::ModelDraft,
     shapes: &'a BTreeMap<String, RowShape>,
@@ -1536,9 +1452,6 @@ fn draft_shape<'a>(
         .filter(|s| s.is_composite())
 }
 
-/// One `slot:<key>` select for a composite slot — the draft's pick (or
-/// the first option) is the default, pinned inside the 25-option cap so
-/// it never clips out.
 fn slot_select_row(slot: &gray_plugin::ModelSlot, current: Option<&str>) -> ui::MessageNode {
     let mut options: Vec<(String, String)> = slot
         .options
@@ -1567,8 +1480,6 @@ fn slot_select_row(slot: &gray_plugin::ModelSlot, current: Option<&str>) -> ui::
     }
 }
 
-/// The same content as a numbered/text menu — component-less platforms post
-/// this and rely on `run <name> <args>` arg syntax.
 fn model_picker_fallback(
     draft: &store::ModelDraft,
     models: &[(String, String)],
@@ -1583,8 +1494,7 @@ fn model_picker_fallback(
         };
         out.push_str(&format!("\n{}. {}", i + 1, label));
     }
-    // A composite row's slots read as numbered option lists; component-less
-    // platforms set them through the `slot=option` arg syntax.
+
     if let Some(shape) = draft_shape(draft, shapes) {
         for slot in &shape.slots {
             out.push_str(&format!("\n{}:", slot.label.to_lowercase()));

@@ -1,12 +1,3 @@
-//! Whole-disk file search for macOS: a fuzzy name index over every entry on
-//! disk, kept live from FSEvents, plus a trigram content index for text
-//! files. `Engine` runs it all in-process; the `fsearch` binary wraps one in
-//! a daemon with a JSON-lines socket.
-//!
-//! Unix only — paths are raw bytes, the daemon speaks on a Unix socket, and
-//! liveness comes from FSEvents/inotify. On Windows the crate is empty and
-//! `gray-tools` picks another index backend.
-
 #[cfg(unix)]
 pub mod alloc;
 #[cfg(unix)]
@@ -33,6 +24,31 @@ pub mod walk;
 #[cfg(unix)]
 pub use content::{Case, FileMatches, Grep, GrepResult, Hit, grep_file};
 #[cfg(unix)]
-pub use engine::{Engine, Found, Options, Status, default_dir, gated, has_full_disk_access, no_materialize, diag};
+pub use engine::{Engine, Found, Options, Status, default_dir, gated, has_full_disk_access, no_materialize};
 #[cfg(unix)]
 pub use query::{GrepMode, Query};
+
+#[cfg(unix)]
+mod diag {
+    use std::sync::{Arc, RwLock};
+    type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
+    static SINK: RwLock<Option<LogSink>> = RwLock::new(None);
+
+    pub fn set_log_sink(sink: Option<LogSink>) {
+        *SINK.write().unwrap_or_else(|e| e.into_inner()) = sink;
+    }
+
+    pub fn line(msg: impl AsRef<str>) {
+        let line = format!("{} {}", crate::query::now_secs(), msg.as_ref());
+        match SINK.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            Some(f) => f(&line),
+            None => eprintln!("{line}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[doc(hidden)]
+pub use diag::line as diag_line;
+#[cfg(unix)]
+pub use diag::set_log_sink;

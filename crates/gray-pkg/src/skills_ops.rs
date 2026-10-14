@@ -1,14 +1,5 @@
-//! Agent skills backend: install/list/remove over `<agent_dir>/skills/`.
-//!
-//! Install resolves `github:` / `url:` /
-//! local-path specs into `<agent_dir>/skills/<slug>/` (agent dir is
-//! [`crate::gray_home`], exactly like [`crate::ops`]), reusing the Task 2
-//! download/verify paths. `update` is OUT (later task).
-
 use std::path::{Path, PathBuf};
 
-/// Install origin, written to `<skill>/.gray-origin.json`: version +
-/// registry/slug/owner + pinned version + timestamp + inspectable URL.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SkillOrigin {
     pub version: u32,
@@ -26,9 +17,6 @@ pub struct SkillOrigin {
     pub source_url: String,
 }
 
-/// One installed skill: `name` is the `<agent_dir>/skills/` dir name (the
-/// install key); `version`/`source` come from the origin file when present
-/// (`""`/`"local"` for hand-placed skills without one).
 #[derive(Debug, Clone)]
 pub struct InstalledSkill {
     pub name: String,
@@ -37,24 +25,17 @@ pub struct InstalledSkill {
     pub origin: Option<SkillOrigin>,
 }
 
-/// Origin sidecar filename inside each installed skill dir.
 pub const ORIGIN_FILE: &str = ".gray-origin.json";
 
-/// Agent skills dir: [`crate::gray_home`] + `skills` (same agent-dir
-/// resolution [`crate::ops`] uses via [`crate::plugins_dir`]).
 pub(crate) fn skills_dir() -> PathBuf {
     crate::gray_home().join("skills")
 }
 
-/// Specs this installer resolves remotely (`github:`/`url:`);
-/// anything else is a local path. Shared so `plugin install` routes skill
-/// specs here instead of into the plugin lock.
 pub fn is_skill_spec(spec: &str) -> bool {
     let t = spec.trim();
     t.starts_with("github:") || t.starts_with("url:")
 }
 
-/// `(registry, item)` identity for install failures, from the spec kind.
 fn spec_identity(spec: &str) -> (String, String) {
     let t = spec.trim();
     match t.split_once(':') {
@@ -89,9 +70,6 @@ async fn install_inner(spec: &str) -> anyhow::Result<crate::ops::Report> {
     finish_skill(stage_local(t)?)
 }
 
-/// A validated bundle awaiting the shared copy + origin write. `_staging`
-/// keeps tempdirs (git clone, url SKILL.md) alive until
-/// the copy completes; local paths stage nothing.
 struct PendingSkill {
     _staging: Option<tempfile::TempDir>,
     root: PathBuf,
@@ -104,9 +82,6 @@ struct PendingSkill {
     source_url: String,
 }
 
-/// Validate the SKILL.md bundle, copy it into `<skills>/<slug>/`, write the
-/// origin sidecar, and report. Failures leave no half-state (a partial dest
-/// is removed).
 fn finish_skill(p: PendingSkill) -> anyhow::Result<crate::ops::Report> {
     crate::ops::validate_install_key(&p.slug)?;
     if !p.root.join("SKILL.md").is_file() {
@@ -175,8 +150,6 @@ fn finish_skill(p: PendingSkill) -> anyhow::Result<crate::ops::Report> {
     })
 }
 
-/// Split `github:<owner/repo[/path]>` (path parts must be plain names —
-/// no `.`/`..`/empties/backslashes, so the join stays under the clone).
 fn parse_github_spec(body: &str) -> anyhow::Result<(String, String, Option<String>)> {
     let parts: Vec<&str> = body.trim().split('/').collect();
     if parts.len() < 2
@@ -196,9 +169,6 @@ fn parse_github_spec(body: &str) -> anyhow::Result<(String, String, Option<Strin
     Ok((owner, repo, subpath))
 }
 
-/// A hub-index `skill` row: verified tarball (index sha256) unpacked into
-/// staging, then the shared bundle finish. `entry` comes from the hub
-/// index lookup in `ops::install_index`.
 pub async fn install_hub_entry(
     client: &reqwest::Client,
     name: &str,
@@ -215,8 +185,7 @@ pub async fn install_hub_entry(
     let unpacked = crate::fetch::unpack_tar_gz(&archive, staging.path());
     let _ = std::fs::remove_file(&archive);
     unpacked?;
-    // Some bundles wrap everything in `package/` — the same convention the
-    // registry's SKILL.md check accepts.
+
     let root = {
         let wrapped = staging.path().join("package");
         if wrapped.is_dir() {
@@ -233,8 +202,7 @@ pub async fn install_hub_entry(
         root,
         slug: name.to_string(),
         version: entry.version.clone(),
-        // Index-hash verified: this is the same trust level as a plugin
-        // index install.
+
         unverified: false,
         warn_source: None,
         registry: "hub".to_string(),
@@ -244,9 +212,6 @@ pub async fn install_hub_entry(
     })
 }
 
-/// `github:<owner/repo[/path]>`: shallow-clone via the shared git helper,
-/// then take the repo root (or the subpath) as the bundle. No hash pin
-/// exists, so this is always the honest unverified path.
 async fn stage_github(body: &str) -> anyhow::Result<PendingSkill> {
     let (owner, repo, subpath) = parse_github_spec(body)?;
     let url = format!("https://github.com/{owner}/{repo}.git");
@@ -287,16 +252,13 @@ async fn stage_github(body: &str) -> anyhow::Result<PendingSkill> {
     })
 }
 
-/// Derive the install slug from a `url:` SKILL.md URL: `…/<slug>/SKILL.md`
-/// → `<slug>`; `…/<name>.md` → `<name>`; anything else → the last segment.
 fn slug_from_url(url: &str) -> anyhow::Result<String> {
     let after_scheme = url.split("://").nth(1).unwrap_or(url);
     let path = after_scheme
         .split(['?', '#'])
         .next()
         .unwrap_or(after_scheme);
-    // Drop the authority (first segment) when a scheme is present, so a
-    // bare host (`https://h/`) yields no slug instead of the hostname.
+
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let segs: &[&str] = if url.contains("://") && !segs.is_empty() {
         &segs[1..]
@@ -322,9 +284,6 @@ fn slug_from_url(url: &str) -> anyhow::Result<String> {
     Ok(slug.to_string())
 }
 
-/// `url:<https SKILL.md>`: download the file (https-only, 64 MiB cap via
-/// the shared downloader) and install it as `<slug>/SKILL.md`. Always
-/// unverified (no hash pin).
 async fn stage_url(client: &reqwest::Client, body: &str) -> anyhow::Result<PendingSkill> {
     let url = body.trim();
     if url.is_empty() {
@@ -356,8 +315,6 @@ async fn stage_url(client: &reqwest::Client, body: &str) -> anyhow::Result<Pendi
     })
 }
 
-/// Local path: a bundle dir (slug = dir name) or a SKILL.md file (bundle =
-/// parent, slug = parent name). The user's own disk needs no verification.
 fn stage_local(path_str: &str) -> anyhow::Result<PendingSkill> {
     let p = Path::new(path_str.trim());
     if path_str.trim().is_empty() {
@@ -401,9 +358,6 @@ fn stage_local(path_str: &str) -> anyhow::Result<PendingSkill> {
     })
 }
 
-/// Minimal frontmatter parse (no new deps): `(name, description)` from the
-/// `---` block, `""` when absent/unclosed. Mirrors the gray loader's
-/// single-line `key: value` + quote-strip rules.
 fn parse_skill_frontmatter(text: &str) -> (String, String) {
     let mut name = String::new();
     let mut desc = String::new();
@@ -451,7 +405,6 @@ fn parse_skill_frontmatter(text: &str) -> (String, String) {
     (name, desc)
 }
 
-/// Recursive bundle copy (symlinks refused for safety).
 fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -467,16 +420,12 @@ fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
         if ft.is_dir() {
             copy_dir_all(&entry.path(), &target)?;
         } else {
-            // `target` is `dst` + one file name: confined by construction
-            // (archive unpackers already rejected `..`/absolute entries).
             std::fs::copy(entry.path(), &target)?;
         }
     }
     Ok(())
 }
 
-/// Read an origin sidecar; corrupt/missing → `None` (hand-placed skills
-/// simply have no origin — list stays total).
 fn read_origin(path: &Path) -> Option<SkillOrigin> {
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
@@ -489,9 +438,6 @@ pub fn list() -> anyhow::Result<Vec<InstalledSkill>> {
     })
 }
 
-/// Scan `<agent_dir>/skills/` in the existing discovery layout: each direct
-/// child dir holding `SKILL.md` is one installed skill (dot-dirs skipped,
-/// mirroring the loader).
 fn list_inner() -> anyhow::Result<Vec<InstalledSkill>> {
     let rd = match std::fs::read_dir(skills_dir()) {
         Ok(r) => r,
@@ -535,7 +481,6 @@ pub fn remove(name: &str) -> anyhow::Result<()> {
     })
 }
 
-/// Delete `<agent_dir>/skills/<name>`; miss message matches `ops::remove`.
 fn remove_inner(name: &str) -> anyhow::Result<()> {
     if name.is_empty() || name.contains('/') || name.contains("..") {
         anyhow::bail!("not installed: {name}");

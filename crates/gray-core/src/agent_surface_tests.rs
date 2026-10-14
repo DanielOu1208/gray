@@ -1,6 +1,3 @@
-// `Agent::with_tool_surface_of` — a model switch keeps the running plugins
-// (executor, tools, hooks) and swaps only the model side.
-
 use super::*;
 use crate::message::Message;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -62,7 +59,6 @@ fn model_switch_keeps_plugin_surface_and_new_model_side() {
         .with_tool_surface_of(old)
         .with_messages(history);
 
-    // Plugin side carried over.
     assert!(Arc::ptr_eq(&fresh.executor_handle(), &executor));
     let names: Vec<_> = fresh.tool_defs().iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, ["bash", "web_fetch"]);
@@ -71,9 +67,9 @@ fn model_switch_keeps_plugin_surface_and_new_model_side() {
         Some("Ran")
     );
     assert_eq!(fresh.hooks().len(), 1);
-    // The donor's rewrite hook is the one `with_messages` fires.
+
     assert_eq!(rewrites.load(Ordering::SeqCst), 1);
-    // Model side is the new agent's.
+
     assert_eq!(fresh.provider.model_id(), "new-model");
     assert_eq!(fresh.system, "new system");
     assert_eq!(fresh.context_window, Some(256_000));

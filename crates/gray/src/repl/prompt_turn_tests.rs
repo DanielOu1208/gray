@@ -1,5 +1,3 @@
-// UNRUN (cargo test banned under X): run in TTY/CI.
-
 use super::*;
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
@@ -7,9 +5,6 @@ use gray_core::agent::{PluginHooks, Provider, ToolBefore, ToolExecutor};
 use gray_core::event::StreamEvent;
 use gray_core::message::{ChatRequest, Message, ToolDef};
 
-/// Provider whose responses are scripted up front, one event list per
-/// request. `hang` streams the events and then never completes, so a cancel
-/// lands mid-stream instead of after the turn already finished.
 struct ScriptProvider {
     scripts: std::sync::Mutex<std::collections::VecDeque<Vec<StreamEvent>>>,
     hang: bool,
@@ -50,8 +45,6 @@ impl Provider for ScriptProvider {
     }
 }
 
-/// Executor that never answers and ignores cancellation: a stuck child
-/// process group, or a sidecar prompt waiting on a user who walked away.
 struct StuckExecutor;
 
 impl ToolExecutor for StuckExecutor {
@@ -65,9 +58,6 @@ impl ToolExecutor for StuckExecutor {
     }
 }
 
-/// `tool/before` hook that never returns. The loop awaits it with no cancel
-/// arm, so a Ctrl-C during a plugin permission prompt parks the whole turn
-/// here — exactly the stall the REPL's bounded grace has to survive.
 struct StuckBeforeHook;
 
 #[async_trait::async_trait]
@@ -100,10 +90,6 @@ fn answer_round() -> Vec<StreamEvent> {
     ]
 }
 
-/// Every `tool_use` the assistant asked for must carry a `tool_result`:
-/// strict providers 400 on an orphaned call and the saved session is then
-/// permanently broken. This is the transcript `persist_turn_messages`
-/// writes verbatim after an interrupt.
 fn orphaned_tool_uses(messages: &[Message]) -> Vec<String> {
     let mut answered = std::collections::HashSet::new();
     let mut asked = Vec::new();
@@ -124,7 +110,6 @@ fn orphaned_tool_uses(messages: &[Message]) -> Vec<String> {
         .collect()
 }
 
-/// Cancel from a watcher task, the way the key watcher does mid-turn.
 fn spawn_canceller(cancel: &tokio_util::sync::CancellationToken) -> tokio::task::JoinHandle<()> {
     let token = cancel.clone();
     tokio::spawn(async move {
@@ -141,10 +126,6 @@ fn ctx(cancel: tokio_util::sync::CancellationToken) -> gray_core::agent::ToolCon
     }
 }
 
-/// The repro: Ctrl-C lands while the loop is parked in a plugin hook that
-/// nothing can interrupt. The REPL's grace expires, the run future is
-/// dropped, and whatever reaches `persist_turn_messages` must still be an
-/// answerable transcript — the interrupted turn must save completely.
 #[tokio::test]
 async fn interrupt_with_stuck_hook_saves_answerable_transcript() {
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -181,8 +162,6 @@ async fn interrupt_with_stuck_hook_saves_answerable_transcript() {
     );
 }
 
-/// Same contract for a tool that ignores cancellation outright: the loop's
-/// own grace answers it, so the saved transcript keeps its result.
 #[tokio::test]
 async fn interrupt_with_stuck_tool_saves_answerable_transcript() {
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -217,8 +196,6 @@ async fn interrupt_with_stuck_tool_saves_answerable_transcript() {
     );
 }
 
-/// Mid-stream text the user already saw must survive the interrupt: the
-/// transcript is what a resumed session replays.
 #[tokio::test]
 async fn interrupt_keeps_streamed_text_visible_on_resume() {
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -259,9 +236,6 @@ async fn interrupt_keeps_streamed_text_visible_on_resume() {
     );
 }
 
-/// The steer drain takes the oldest text-only entry and leaves everything else
-/// for the post-turn path: an entry with images must keep them, and whatever is
-/// left must still be there afterwards (sent once, never twice).
 #[test]
 fn steer_takes_the_oldest_text_entry_and_leaves_the_rest() {
     let mut queued = std::collections::VecDeque::from([
@@ -277,13 +251,11 @@ fn steer_takes_the_oldest_text_entry_and_leaves_the_rest() {
     assert_eq!(left, vec!["with image", "third"]);
 }
 
-/// An empty queue is the common case (nobody typed): the drain answers without
-/// inventing a turn.
 #[test]
 fn steer_on_an_empty_queue_takes_nothing() {
     let mut queued = std::collections::VecDeque::new();
     assert_eq!(super::take_steerable(&mut queued), None);
-    // An image-only queue has nothing steerable either; it waits for its turn.
+
     let mut images = std::collections::VecDeque::from([(
         "pic".to_string(),
         vec![std::path::PathBuf::from("/tmp/x.png")],

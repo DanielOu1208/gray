@@ -1,30 +1,16 @@
-//! External `$EDITOR` launch helpers for the Gray system prompt.
-
 use std::path::{Path, PathBuf};
 
-/// Whether `$EDITOR` requests the external editor: set and non-blank.
-/// Pure (takes the env value) so unit tests never spawn a real editor.
 pub fn should_use_external_editor(editor: Option<&str>) -> bool {
     editor.is_some_and(|s| !s.trim().is_empty())
 }
 
-/// `$EDITOR` when set and non-blank, else `vi`.
 fn editor_program(editor: Option<&str>) -> &str {
     editor
         .filter(|e| should_use_external_editor(Some(e)))
         .unwrap_or("vi")
 }
 
-/// Splits `$EDITOR` into program + args on *unquoted* whitespace (see
-/// `split_editor_words`); the caller appends the file path (git-style
-/// `$EDITOR <file>`).
-/// Split an `$EDITOR` value on unquoted whitespace, honouring single and
-/// double quotes (audit #22): `split_whitespace` breaks
-/// `"/c/Program Files/Notepad++/notepad++.exe" -multiInst` and any quoted
-/// argument. An unterminated quote runs to the end of the value.
 pub fn split_editor_words(editor: &str) -> Vec<String> {
-    // shlex covers POSIX quoting; an unterminated quote is a config error,
-    // for which whitespace-split is the honest fallback.
     shlex::split(editor).unwrap_or_else(|| {
         editor
             .split_whitespace()
@@ -39,9 +25,6 @@ pub fn parse_editor_cmd(editor: &str) -> (String, Vec<String>) {
     (prog, parts.collect())
 }
 
-/// Copies `path` to `<name>.bak` (`<name>.bak-2`… on collision — same `-N`
-/// dedup loop as feedback save). `Ok(None)` when there is nothing to back
-/// up. Call BEFORE overwriting.
 pub fn backup_before_overwrite(path: &Path) -> std::io::Result<Option<PathBuf>> {
     if !path.exists() {
         return Ok(None);
@@ -61,9 +44,6 @@ pub fn backup_before_overwrite(path: &Path) -> std::io::Result<Option<PathBuf>> 
     Ok(Some(backup))
 }
 
-/// Runs the external editor via `spawn` (the real `$EDITOR` wait in
-/// production, a file-writing stub in tests) and reports the outcome:
-/// `Ok(Some(new_body))` when saved, `Ok(None)` when unchanged.
 pub fn run_external_editor_with(
     path: &Path,
     initial: &str,
@@ -78,8 +58,6 @@ pub fn run_external_editor_with(
     }
 }
 
-/// Git-style `$EDITOR <file>` + wait, then saved/unchanged detection.
-/// `$EDITOR` unset or blank falls back to `vi`.
 pub fn run_external_editor(path: &Path, initial: &str) -> anyhow::Result<Option<String>> {
     let editor = std::env::var("EDITOR").ok();
     let (prog, mut args) = parse_editor_cmd(editor_program(editor.as_deref()));

@@ -1,10 +1,7 @@
 use super::*;
-// UNRUN (cargo test banned under X): run in TTY/CI.
 
 #[test]
 fn plugin_cli_alias_plugins_resolves() {
-    // `gray plugins ...` is the visible alias of `gray plugin ...`: both
-    // spellings parse to the identical subcommand.
     for (a, b) in [
         (["gray", "plugin", "list"], ["gray", "plugins", "list"]),
         (["gray", "plugin", "update"], ["gray", "plugins", "update"]),
@@ -25,8 +22,6 @@ fn plugin_cli_alias_plugins_resolves() {
 
 #[test]
 fn cron_cli_parses_add_shapes() {
-    // `add` takes schedule + prompt positionally (`--` separates a
-    // dash-leading prompt); flags are optional.
     let cli = Cli::try_parse_from([
         "gray",
         "cron",
@@ -147,7 +142,6 @@ fn cache_key_prefers_session_id() {
 
 #[test]
 fn cache_key_fallback_is_stable_per_process() {
-    // Rebuilds mid-session (reload, lazy builds) must not rotate the key.
     assert_eq!(provider_cache_key(None), provider_cache_key(None));
     assert_eq!(provider_cache_key(Some("")), provider_cache_key(None));
 }
@@ -182,12 +176,8 @@ fn cron_cli_parses_a_reminder() {
     }
 }
 
-/// `gray --skill` is how another agent learns to drive gray, so the file has
-/// to stay true: a flag it names that no longer exists is a command the next
-/// agent runs and fails on.
 const SKILL_MD: &str = include_str!("../gray-skill.md");
 
-/// Every flag-looking token in the skill, `-p` and `--json` alike.
 fn flags_named_in(md: &str) -> Vec<String> {
     md.split_whitespace()
         .map(|t| t.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
@@ -196,7 +186,6 @@ fn flags_named_in(md: &str) -> Vec<String> {
         .collect()
 }
 
-/// The whole command tree's help, so a flag on any subcommand counts.
 fn all_help() -> String {
     fn walk(mut cmd: clap::Command, out: &mut String) {
         out.push_str(&cmd.render_long_help().to_string());
@@ -236,7 +225,6 @@ fn every_flag_the_skill_names_still_exists() {
     }
 }
 
-/// The examples are the part an agent copies, so each one must parse.
 #[test]
 fn every_command_the_skill_shows_actually_parses() {
     let examples: &[&[&str]] = &[
@@ -307,7 +295,6 @@ fn warm_config(base_url: &str, effort: Option<&str>, plugin: bool) -> Config {
 
 #[test]
 fn cache_warm_covers_openai_compatible_hosts() {
-    // GRAY_NO_CACHE_WARM must be unset for the Some-legs; the None-legs hold either way.
     if std::env::var_os("GRAY_NO_CACHE_WARM").is_some() {
         return;
     }
@@ -344,7 +331,7 @@ fn cache_warm_covers_openai_compatible_hosts() {
 #[test]
 fn cache_warm_stays_off_for_plugin_creds_but_covers_claude_thinking() {
     let url = "https://api.openai.com/v1";
-    // Relay-style plugin creds (no warm_replay opt-in) keep warming off.
+
     assert!(
         cache_warm_policy(
             &warm_config(url, Some("off"), true),
@@ -357,9 +344,7 @@ fn cache_warm_stays_off_for_plugin_creds_but_covers_claude_thinking() {
     if std::env::var_os("GRAY_NO_CACHE_WARM").is_some() {
         return;
     }
-    // A plugin-credentialed provider whose manifest opts in (its transport
-    // is a real HTTPS endpoint the host calls directly, e.g. codex-sub)
-    // warms like any built-in path.
+
     assert!(
         cache_warm_policy(
             &warm_config(url, Some("off"), true),
@@ -369,10 +354,7 @@ fn cache_warm_stays_off_for_plugin_creds_but_covers_claude_thinking() {
         )
         .is_some()
     );
-    // A Claude thinking budget is sized from the output cap, so the
-    // replay carries a budget-preserving cap instead of 1 token: natively
-    // or through a router it re-derives the same budget_tokens and lands
-    // on the same cache key.
+
     assert!(
         cache_warm_policy(
             &warm_config("https://api.anthropic.com/v1", Some("high"), false),
@@ -398,7 +380,7 @@ fn cache_warm_runs_with_reasoning_effort_off_claude() {
     if std::env::var_os("GRAY_NO_CACHE_WARM").is_some() {
         return;
     }
-    // The reported case: Muse Spark at xhigh on an OpenAI-compatible host.
+
     for (url, model, effort) in [
         (
             "https://api.commandcode.ai/provider/v1",

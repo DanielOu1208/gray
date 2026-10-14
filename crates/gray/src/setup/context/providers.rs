@@ -1,8 +1,5 @@
-//! Provider models, context caches, rates (split from `context`).
-
 use super::*;
 
-/// Converts a raw model ID to a friendly human-readable display name.
 pub fn friendly_model_name(model_id: &str) -> String {
     if model_id.is_empty() {
         return String::new();
@@ -30,10 +27,7 @@ pub fn friendly_model_name(model_id: &str) -> String {
             }
         })
         .collect();
-    // The split above destroys version dots: `claude-opus-5-5` was `5.5`
-    // upstream, never `5 5`. Merge a lone digit onto a word ending in a
-    // digit (`v3-1` -> `v3.1`, `5-5` -> `5.5`); longer tokens (`2025`,
-    // `0324`, `30b`) stay separate so dates and size stamps survive.
+
     let mut merged: Vec<String> = Vec::with_capacity(words.len());
     for w in words {
         let lone_digit = w.len() == 1 && w.bytes().next().is_some_and(|b| b.is_ascii_digit());
@@ -51,11 +45,6 @@ pub fn friendly_model_name(model_id: &str) -> String {
     merged.join(" ")
 }
 
-/// Whether a model can reason, keyed like the context cache (exact id +
-/// lowercase + `provider/` tail). Populated from models.dev's `reasoning`
-/// flag and live `/models` payloads (`supported_parameters` on OpenRouter,
-/// `reasoning` bool elsewhere) — the same sources opencode's
-/// `capabilities.reasoning` comes from. `None` = provider never said.
 static MODEL_REASONING: std::sync::OnceLock<
     std::sync::RwLock<std::collections::HashMap<String, bool>>,
 > = std::sync::OnceLock::new();
@@ -78,9 +67,6 @@ pub fn cache_model_reasoning(model_id: &str, reasoning: bool) {
     }
 }
 
-/// Per-model effort values from models.dev `reasoning_options` (the automatic
-/// source opencode derives variants from via `reasoningVariants`). Same keying
-/// as the reasoning cache. `None` = no source has spoken for this model.
 static MODEL_EFFORTS: std::sync::OnceLock<
     std::sync::RwLock<std::collections::HashMap<String, Vec<String>>>,
 > = std::sync::OnceLock::new();
@@ -92,18 +78,12 @@ fn model_efforts_cell() -> &'static std::sync::RwLock<std::collections::HashMap<
 
 pub(crate) fn cache_model_efforts(model_id: &str, efforts: Vec<String>) {
     if let Ok(mut g) = model_efforts_cell().write() {
-        // Exact key as the provider names it: authoritative, always wins.
         g.insert(model_id.to_string(), efforts.clone());
         let lower = model_id.to_lowercase();
         if lower != model_id {
             g.insert(lower, efforts.clone());
         }
-        // Suffix alias (`provider/model` -> `model`): gap-fill only. A
-        // qualified entry must not clobber another provider's exact bare id:
-        // kilo/openrouter list `meta/muse-spark-1.3-contributor` WITH `max`
-        // while bare-id providers list the contributor id WITHOUT it (the
-        // provider 400-rejects `max`) — last-writer-wins here leaked `max`
-        // into the bare id's picker rows.
+
         if let Some((_, suffix)) = model_id.rsplit_once('/') {
             g.entry(suffix.to_string()).or_insert(efforts.clone());
             g.entry(suffix.to_lowercase()).or_insert(efforts);
@@ -131,16 +111,12 @@ fn model_efforts(model_id: &str) -> Option<Vec<String>> {
     None
 }
 
-/// Capability/shape facts the recommended-model ranking needs, keyed like
-/// the reasoning cache (exact id + lowercase + `provider/` tail). models.dev
-/// is the authoritative source; live `/models` payloads gap-fill fields it
-/// never spoke for. `None` fields = no source has spoken for that fact.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelMeta {
     pub tool_call: Option<bool>,
-    /// Output is text-only (`modalities.output == ["text"]`).
+
     pub text_only: Option<bool>,
-    /// `YYYY-MM-DD`; lexicographic order is chronological.
+
     pub release_date: Option<String>,
     pub family: Option<String>,
 }
@@ -153,16 +129,12 @@ fn model_meta_cell() -> &'static std::sync::RwLock<std::collections::HashMap<Str
     MODEL_META.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
 }
 
-/// models.dev write: its statement replaces whatever is cached (it is the
-/// authoritative source, and it speaks for every field on every model).
 pub fn cache_model_meta(model_id: &str, meta: ModelMeta) {
     if let Ok(mut g) = model_meta_cell().write() {
         g.insert(model_id.to_string(), meta);
     }
 }
 
-/// Live-payload write: fills only fields no source has spoken for —
-/// models.dev values always win regardless of arrival order.
 pub(crate) fn cache_model_meta_gap_fill(model_id: &str, meta: ModelMeta) {
     if let Ok(mut g) = model_meta_cell().write() {
         let entry = g.entry(model_id.to_string()).or_default();
@@ -181,8 +153,6 @@ pub(crate) fn cache_model_meta_gap_fill(model_id: &str, meta: ModelMeta) {
     }
 }
 
-/// What any source has said about `model_id`, resolved like the context
-/// cache: exact, lowercase, then `provider/` tail.
 pub fn model_meta(model_id: &str) -> Option<ModelMeta> {
     let g = model_meta_cell().read().ok()?;
     if let Some(m) = g.get(model_id).cloned() {
@@ -203,8 +173,6 @@ pub fn model_meta(model_id: &str) -> Option<ModelMeta> {
     None
 }
 
-/// `Some(true/false)` when a provider source advertised reasoning support,
-/// `None` when no source has spoken for this model.
 pub fn model_supports_reasoning(model_id: &str) -> Option<bool> {
     let g = model_reasoning_cell().read().ok()?;
     if let Some(v) = g.get(model_id).copied() {
@@ -225,21 +193,7 @@ pub fn model_supports_reasoning(model_id: &str) -> Option<bool> {
     None
 }
 
-/// Effort tiers a model family actually accepts. Automatic source first:
-/// models.dev `reasoning_options` effort values cached by
-/// `parse_models_dev_json` (same derivation as opencode's `reasoningVariants`;
-/// `null` means `none`). Family tables below are the fallback for models
-/// with no cached options. Each branch cites the provider's own API docs —
-/// that is the source of truth; opencode is only the shape reference. Gray
-/// `off` covers OpenAI `none` (omit reasoning). `None` = family unknown
-/// (offer the full catalog); empty = no reasoning.
 pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
-    // CommandCode's Settings docs list `reasoningEffort` values as
-    // low/medium/high/xhigh/max (https://api.commandcode.ai/docs/settings).
-    // models.dev has no CommandCode rows, and its qualified
-    // `xiaomi/mimo-v2.6-pro` rows from other gateways only say high; those
-    // cached rows clamped a real xhigh request to high. The provider-specific
-    // MiMo v2.6 Pro tier must win over the shared cache.
     let active = active_provider_base_url();
     if active.contains("commandcode.ai") && is_mimo_v26_pro(model_id) {
         return Some(vec!["off", "low", "medium", "high", "xhigh", "max"]);
@@ -259,11 +213,7 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
         }
     }
     let id = model_id.to_lowercase();
-    // Plugin-relay providers (loopback base) may serve effort-in-id
-    // catalogs: `swe-2-max`, `claude-opus-5-5-low-fast` bake the tier into
-    // the name — there is no runtime knob to offer. Declared efforts won
-    // above; this catches stale saved picks and hand-typed ids. Real API
-    // endpoints are unaffected (the rule never runs for them).
+
     if is_loopback_base(&active_provider_base_url()) {
         let leaf = id.rsplit('/').next().unwrap_or(id.as_str());
         let core = leaf
@@ -275,9 +225,7 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
             return Some(vec![]);
         }
     }
-    // OpenAI: values are model-dependent —
-    // https://developers.openai.com/api/docs/guides/reasoning
-    // (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
+
     if id.contains("deep-research") {
         return Some(vec!["medium"]);
     }
@@ -287,12 +235,10 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
         || id.starts_with("o4")
         || id.contains("deep-research")
     {
-        // Chat-only GPT-5 variant takes a single effort.
         if id.contains("-chat") {
             return Some(vec!["medium"]);
         }
-        // Unversioned gpt-5-pro takes `high` only; versioned gpt-5.x-pro
-        // takes medium/high/xhigh.
+
         if id.contains("pro") {
             if ["5.1", "5.2", "5.3", "5.4", "5.5", "5.6"]
                 .iter()
@@ -302,8 +248,7 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
             }
             return Some(vec!["high"]);
         }
-        // Codex variants: gpt-5.3+ takes none/low/medium/high/xhigh;
-        // codex-max and gpt-5.2 codex take low/medium/high/xhigh.
+
         if id.contains("codex") {
             if id.contains("codex-max")
                 || ["5.2", "5.3", "5.4", "5.5", "5.6"]
@@ -318,33 +263,25 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
             }
             return Some(vec!["low", "medium", "high"]);
         }
-        // GPT-5.6 adds `max` (OpenAI GPT-5.6 model pages list it distinctly
-        // from `xhigh`).
+
         if id.contains("5.6") {
             return Some(vec!["off", "low", "medium", "high", "xhigh", "max"]);
         }
-        // GPT-5.2–5.5 add `xhigh`; GPT-5.1 replaced `minimal` with `none`.
+
         if ["5.2", "5.3", "5.4", "5.5"].iter().any(|v| id.contains(v)) {
             return Some(vec!["off", "low", "medium", "high", "xhigh"]);
         }
         if id.contains("5.1") {
             return Some(vec!["off", "low", "medium", "high"]);
         }
-        // Unversioned gpt-5 keeps `minimal`.
+
         if id.contains("gpt-5") {
             return Some(vec!["off", "minimal", "low", "medium", "high"]);
         }
-        // Unknown or future GPT-family models (e.g. gpt-6-astra): opencode's
-        // generic path offers none/low/medium/high/xhigh to post-2025-12-04
-        // models; mirror that — a model rejecting xhigh 400s and the
-        // strip-and-retry path drops reasoning.
+
         return Some(vec!["off", "low", "medium", "high", "xhigh"]);
     }
-    // Anthropic: availability is per-model —
-    // https://platform.claude.com/docs/en/build-with-claude/effort
-    // Modern models (Opus 4.7+, Sonnet 5, Fable, Mythos) take
-    // low/medium/high/xhigh/max; the 4.6 generation and older take
-    // low/medium/high/max (no xhigh).
+
     if id.contains("claude") || id.contains("anthropic") {
         if id.contains("4.7")
             || id.contains("4-7")
@@ -361,11 +298,8 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
         }
         return Some(vec!["low", "medium", "high", "max"]);
     }
-    // Gemini: thinking levels per model —
-    // https://ai.google.dev/gemini-api/docs/thinking
+
     if id.contains("gemini") || id.contains("gemma") {
-        // Pro image models reason at one level; flash image models take
-        // minimal/high; Gemini 3 flash takes minimal/low/medium/high.
         if id.contains("pro-image") || id.contains("pro_image") {
             return Some(vec!["high"]);
         }
@@ -377,8 +311,7 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
         }
         return Some(vec!["low", "high"]);
     }
-    // xAI: documented `--effort` levels (no off/minimal/xhigh on 4.5) —
-    // https://docs.x.ai/docs/guides/reasoning#control-how-hard-the-model-thinks
+
     if id.contains("grok") || id.contains("xai") {
         if id.contains("4.6") || id.contains("4-6") {
             return Some(vec!["low", "medium", "high", "xhigh"]);
@@ -388,51 +321,38 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
         }
         return Some(vec!["low", "medium", "high"]);
     }
-    // Kimi's Anthropic-compatible transports implement adaptive thinking
-    // effort (opencode maps the family to low/medium/high/xhigh/max).
+
     if id.contains("kimi") || id.contains("k2p") || id.contains("moonshot") {
         return Some(vec!["low", "medium", "high", "xhigh", "max"]);
     }
     if id.contains("deepseek") && id.contains("reasoner") {
         return Some(vec!["low", "medium", "high"]);
     }
-    // DeepSeek v4 on OpenAI-compatible transports additionally accepts max.
+
     if id.contains("deepseek-v4") || id.contains("deepseek_v4") {
         return Some(vec!["low", "medium", "high", "max"]);
     }
-    // Muse Spark / Glimmer: effort values per models.dev reasoning_options —
-    // [minimal, low, medium, high, xhigh] (no `max`; the provider 400-rejects it).
+
     if id.contains("muse") || id.contains("spark") || id.contains("glimmer") {
         return Some(vec!["minimal", "low", "medium", "high", "xhigh"]);
     }
     None
 }
 
-/// CommandCode's MiMo v2.6 Pro family (`-pro` and its UltraSpeed tier).
 fn is_mimo_v26_pro(model_id: &str) -> bool {
     let id = model_id.to_lowercase();
     id.contains("mimo") && (id.contains("v2.6-pro") || id.contains("v2.6_pro"))
 }
 
-/// The step family: StepFun's API always reasons. `thinking: {"type":
-/// "disabled"}` is ignored — measured against api.stepfun.ai, 1088
-/// reasoning deltas still streamed at effort=off — and its `/models`
-/// advertises `reasoning: false`, so both the disable flag and the
-/// advertised metadata are lies this family has to override.
 pub fn step_family(model_id: &str) -> bool {
     let id = model_id.rsplit('/').next().unwrap_or(model_id);
     id.starts_with("step-") || id.starts_with("step_")
 }
 
-/// Whether `off` really stops reasoning on this model. A family that
-/// ignores the disable flag (the step family, measured) must not be
-/// offered `off — No reasoning`: the row would be a lie, and selecting it
-/// hides text the provider keeps streaming and keeps billing.
 pub fn reasoning_off_is_honest(model_id: &str) -> bool {
     !step_family(model_id)
 }
 
-/// The levels the step family accepts — there is no `off` to offer.
 pub const STEP_LEVELS: &[(&str, &str)] = &[
     ("low", "Light reasoning"),
     ("medium", "Moderate reasoning"),
@@ -440,12 +360,7 @@ pub const STEP_LEVELS: &[(&str, &str)] = &[
     ("max", "Maximum reasoning"),
 ];
 
-/// Levels from `THINKING_LEVELS` the model actually accepts. `off` is
-/// offered when the model honors it (see [`reasoning_off_is_honest`]).
-/// Unknown family → full catalog; known non-reasoning → just `off`.
 pub fn supported_thinking_levels(model_id: &str) -> Vec<(&'static str, &'static str)> {
-    // Family truth outranks advertised metadata: the step family always
-    // reasons, whatever its /models endpoint or the models.dev cache says.
     if step_family(model_id) {
         return STEP_LEVELS.to_vec();
     }
@@ -463,13 +378,6 @@ pub fn supported_thinking_levels(model_id: &str) -> Vec<(&'static str, &'static 
         .collect()
 }
 
-/// Clamps a thinking level to what `model_id` actually accepts (Prime-Agent
-/// `clampThinkingLevel` parity). Keeps `level` when supported, else the
-/// nearest level in `THINKING_LEVELS` order — upward first, then downward
-/// (so `max`→`xhigh` on Spark). `off` is always valid; unknown family
-/// → full catalog (kept); `model_supports_reasoning == Some(false)` →
-/// `off` only. Unknown/empty `level` falls back to the first supported level
-/// (`off`).
 pub fn clamp_thinking_level(model_id: &str, level: &str) -> &'static str {
     let supported = supported_thinking_levels(model_id);
     if let Some((l, _)) = supported.iter().find(|(l, _)| *l == level) {
@@ -495,11 +403,6 @@ pub fn clamp_thinking_level(model_id: &str, level: &str) -> &'static str {
     supported.first().map(|(l, _)| *l).unwrap_or("off")
 }
 
-/// Dynamically queries the provider's live /models endpoint (e.g. OpenAI, OpenRouter, Ollama, vLLM, LMStudio, etc.).
-/// The model-list URLs worth trying for a base, most likely first:
-/// `/models` (`/tags` for Ollama), with root prefixes for bases that
-/// aren't already `/v1`-shaped. Shared by [`fetch_models_async`] and the
-/// custom-endpoint reachability probe.
 fn model_list_candidates(trimmed_base: &str) -> Vec<String> {
     if trimmed_base.contains("openrouter.ai") {
         vec!["https://openrouter.ai/api/v1/models".to_string()]
@@ -518,12 +421,6 @@ fn model_list_candidates(trimmed_base: &str) -> Vec<String> {
     }
 }
 
-/// What the custom-endpoint screen learns from probing a base URL.
-/// `Up` carries the model count when the list route answered and parsed;
-/// `Auth` means the endpoint is alive but wants a credential (401/403) —
-/// the key screen is the right next step, not an error; `Down` is every
-/// other outcome — nothing listening, wrong port, or no OpenAI-shaped
-/// list route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndpointProbe {
     Up { models: usize },
@@ -531,9 +428,6 @@ pub enum EndpointProbe {
     Down,
 }
 
-/// One probe GET on each candidate until something answers. Auth-free:
-/// the point is "is there an OpenAI-shaped server here", not "does the
-/// key work" — [`verify_api_key`] answers that on the next screen.
 async fn probe_endpoint_async(base: String) -> EndpointProbe {
     let Ok(client) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
@@ -563,8 +457,6 @@ async fn probe_endpoint_async(base: String) -> EndpointProbe {
     EndpointProbe::Down
 }
 
-/// Count of rows in a parsed model-list body — `data`, `models`, or a
-/// bare array; unknown shapes count as 0 (still "up", just unnamed).
 fn count_models_json(json: &serde_json::Value) -> usize {
     if let Some(arr) = json.as_array() {
         arr.len()
@@ -577,8 +469,6 @@ fn count_models_json(json: &serde_json::Value) -> usize {
     }
 }
 
-/// Reachability probe for the custom-endpoint screen. Same own-runtime
-/// discipline as [`fetch_live_provider_models`].
 pub fn probe_custom_endpoint(base_url: &str) -> EndpointProbe {
     let base = base_url.to_string();
     std::thread::scope(|s| {
@@ -596,18 +486,13 @@ pub fn probe_custom_endpoint(base_url: &str) -> EndpointProbe {
     })
 }
 
-/// One local-server suggestion on the custom endpoint screen.
 pub struct LocalEndpointSuggestion {
     pub name: &'static str,
     pub url: &'static str,
-    /// `GET {url}/models` answered inside the probe window.
+
     pub running: bool,
 }
 
-/// Probe every [`KNOWN_LOCAL_ENDPOINTS`](crate::setup::catalog::KNOWN_LOCAL_ENDPOINTS)
-/// entry at once — one short-lived runtime per port, ~200ms wall — so the
-/// suggestion list can badge what is actually running instead of listing
-/// dead guesses. Same thread+runtime pattern as [`ollama_running`].
 pub fn probe_local_endpoints() -> Vec<LocalEndpointSuggestion> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = crate::setup::catalog::KNOWN_LOCAL_ENDPOINTS
@@ -641,8 +526,6 @@ pub fn probe_local_endpoints() -> Vec<LocalEndpointSuggestion> {
     })
 }
 
-/// The live `/models` (or `/tags`) probe. Split out so the blocking entry
-/// point and a background refresher thread can share one implementation.
 async fn fetch_models_async(base: String, key: Option<String>) -> Vec<(String, String)> {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(3000))
@@ -695,9 +578,7 @@ async fn fetch_models_async(base: String, key: Option<String>) -> Vec<(String, S
                         if let Some(len) = extract_context_length_from_json(item) {
                             cache_model_context(id_str, len);
                         }
-                        // OpenRouter advertises `supported_parameters:
-                        // [..., "reasoning", ...]`; other OpenAI-style
-                        // endpoints may carry a `reasoning` bool.
+
                         if let Some(r) = item
                             .get("supported_parameters")
                             .and_then(|v| v.as_array())
@@ -706,9 +587,7 @@ async fn fetch_models_async(base: String, key: Option<String>) -> Vec<(String, S
                         {
                             cache_model_reasoning(id_str, r);
                         }
-                        // OpenRouter-shaped items carry the facts the
-                        // recommended-model ranking needs; gap-fill only,
-                        // models.dev stays authoritative.
+
                         let tool_call = item
                             .get("supported_parameters")
                             .and_then(|v| v.as_array())
@@ -745,15 +624,10 @@ async fn fetch_models_async(base: String, key: Option<String>) -> Vec<(String, S
     Vec::new()
 }
 
-/// Live provider model list. Blocking by design: every caller wants an
-/// answer before it draws. With no ambient runtime (a background thread)
-/// run a short-lived one rather than quietly returning an empty list.
 pub fn fetch_live_provider_models(base_url: &str, api_key: Option<&str>) -> Vec<(String, String)> {
     let base = base_url.to_string();
     let key = api_key.map(|k| k.to_string());
-    // ponytail: isolated short-lived runtime, never the ambient Handle — block_on
-    // on a borrowed handle panics with "Tokio 1.x context ... being shutdown"
-    // when a background fetch outlives REPL shutdown. Own runtime = no coupling.
+
     let live = std::thread::scope(|s| {
         s.spawn(move || {
             match tokio::runtime::Builder::new_current_thread()
@@ -767,8 +641,7 @@ pub fn fetch_live_provider_models(base_url: &str, api_key: Option<&str>) -> Vec<
         .join()
         .unwrap_or_default()
     });
-    // The synthesized fusion row rides every list the picker refreshes
-    // with — derived at read time, never persisted.
+
     let Ok(home) = crate::setup::catalog::gray_home() else {
         return live;
     };
@@ -784,13 +657,6 @@ pub fn fetch_live_provider_models(base_url: &str, api_key: Option<&str>) -> Vec<
     rows.iter().map(|r| r.pair()).collect()
 }
 
-/// Live model list for a plugin-backed provider: the sidecar's
-/// `provider/models` RPC is the only real source — the declared `base_url`
-/// is a relay placeholder an HTTP fetch can never satisfy. A non-empty
-/// result persists under [`crate::setup::catalog::plugin_models_key`], so
-/// the `/model` picker paints instantly on the next open (loopback bases
-/// themselves get no disk entry — see `save_provider_model_list_at`).
-/// Same own-runtime discipline as [`fetch_live_provider_models`].
 pub(crate) fn fetch_plugin_provider_models(
     installed: crate::providers::InstalledProvider,
 ) -> Vec<(String, String)> {
@@ -809,10 +675,6 @@ pub(crate) fn fetch_plugin_provider_models(
     })
 }
 
-/// The async half of [`fetch_plugin_provider_models`]: spawn the sidecar,
-/// ask for its catalog, persist a usable list. The stored credential goes
-/// in when one exists; subscription plugins that keep their own login state
-/// answer to an empty envelope (the connect-login path uses exactly that).
 async fn plugin_models_rpc(
     installed: &crate::providers::InstalledProvider,
 ) -> Vec<(String, String)> {
@@ -850,21 +712,13 @@ async fn plugin_models_rpc(
     let Ok(catalog) = runtime.rpc().models(request).await else {
         return Vec::new();
     };
-    // Provider-declared metadata feeds the same caches a live /models
-    // payload does — effort levels the plugin advertises become
-    // authoritative for the clamp and picker rows. A plugin catalog IS
-    // the declaration: an empty efforts list means "no effort knob" (the
-    // tier is baked into the model id, e.g. Devin's `swe-2-max`), not
-    // "didn't say" — mark it so the picker reports no levels, the footer
-    // hides the effort badge, and no default effort is sent.
+
     for m in &catalog.models {
         if let Some(w) = m.context_window {
             cache_model_context_if_absent(&m.id, w as usize);
         }
     }
-    // Rows go to disk as objects (efforts, variants, slots ride along) so
-    // the next open — and the request builder resolving a variant — knows
-    // them before any RPC; registering feeds the in-memory caches now.
+
     let rows: Vec<crate::setup::variants::CachedRow> = catalog
         .models
         .iter()
@@ -892,8 +746,7 @@ async fn plugin_models_rpc(
     if !rows.is_empty() {
         save_provider_model_rows(&list_key, rows.clone());
     }
-    // The synthesized fusion row appends after the save — it is never
-    // persisted, so its sidekick options always derive from live caches.
+
     let mut rows = rows;
     if let Ok(home) = crate::setup::catalog::gray_home() {
         crate::fusion::extend_with_fusion(&home, &list_key, &mut rows);
@@ -904,9 +757,6 @@ async fn plugin_models_rpc(
     rows.iter().map(|r| r.pair()).collect()
 }
 
-/// Verdict of the connect-modal key check. `Rejected` is the provider's own
-/// answer (an auth refusal); `Unknown` is every inconclusive probe — offline,
-/// timeout, odd provider — and must never block connecting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyCheck {
     Valid,
@@ -914,23 +764,14 @@ pub enum KeyCheck {
     Unknown,
 }
 
-/// How the check authenticates: a Bearer header everywhere except Anthropic,
-/// whose API wants `x-api-key` + `anthropic-version` instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthStyle {
     Bearer,
     Anthropic,
 }
 
-/// Hosts that answer a bad key with 400 instead of 401 — measured: Google
-/// (`generativelanguage.googleapis.com`) and xAI (`api.x.ai`) both reject a
-/// fake Bearer on `/models` with 400.
 const BAD_KEY_IS_400: &[&str] = &["generativelanguage.googleapis.com", "api.x.ai"];
 
-/// The (url, auth, reject-400) probe for `base_url`: OpenRouter's `/key`
-/// (its `/models` is public and validates nothing), Anthropic's `/models`
-/// under its native headers, everything else's `/models` under Bearer. The
-/// flag marks hosts whose 400 means "bad key" rather than "bad request".
 pub(crate) fn key_check_request(base_url: &str) -> (String, AuthStyle, bool) {
     let trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.contains("openrouter.ai") {
@@ -956,9 +797,6 @@ pub(crate) fn key_check_request(base_url: &str) -> (String, AuthStyle, bool) {
     )
 }
 
-/// HTTP status → verdict: only an explicit auth refusal is a rejection —
-/// 401/403 anywhere, 400 on the hosts that use it for auth — anything else
-/// (5xx, redirects, odd 2xx-adjacent) stays inconclusive.
 pub(crate) fn classify_key_status(status: u16, reject_400: bool) -> KeyCheck {
     match status {
         200..=299 => KeyCheck::Valid,
@@ -983,16 +821,13 @@ async fn key_check_async(url: String, style: AuthStyle, reject_400: bool, key: S
             .header("x-api-key", key)
             .header("anthropic-version", "2023-06-01"),
     };
-    // The body is never read: providers may echo key fragments back.
+
     match req.send().await {
         Ok(resp) => classify_key_status(resp.status().as_u16(), reject_400),
         Err(_) => KeyCheck::Unknown,
     }
 }
 
-/// Ask the provider whether `key` works — the connect modal's pre-save check.
-/// Blocking with a hard 5s cap on its own short-lived runtime, the same
-/// discipline as [`fetch_live_provider_models`].
 pub fn verify_api_key(base_url: &str, key: &str) -> KeyCheck {
     let (url, style, reject_400) = key_check_request(base_url);
     let key = key.to_string();
@@ -1011,9 +846,6 @@ pub fn verify_api_key(base_url: &str, key: &str) -> KeyCheck {
     })
 }
 
-/// Local Ollama probe for the connect list's `(running locally)` badge —
-/// one ~300ms ask of `/api/tags`, taken once when the modal opens (the item
-/// list rebuilds every loop pass, far too often for a probe).
 pub(crate) fn ollama_running() -> bool {
     std::thread::scope(|s| {
         s.spawn(|| {
@@ -1043,9 +875,6 @@ pub(crate) fn ollama_running() -> bool {
     })
 }
 
-/// Provider-declared price cliffs (`price_cliff_tokens` on catalog rows):
-/// model id → prompt tokens above which a higher price tier bills. Fed by
-/// `CachedRow::register` like the effort/shape caches.
 static MODEL_PRICE_CLIFFS: std::sync::OnceLock<
     std::sync::RwLock<std::collections::HashMap<String, u32>>,
 > = std::sync::OnceLock::new();
@@ -1054,8 +883,6 @@ fn price_cliff_map() -> &'static std::sync::RwLock<std::collections::HashMap<Str
     MODEL_PRICE_CLIFFS.get_or_init(Default::default)
 }
 
-/// Record a row's declared cliff; `None` clears it (a fresh catalog row
-/// without a cliff is authoritative, same rule as efforts/shapes).
 pub fn cache_model_price_cliff(model_id: &str, cliff: Option<u32>) {
     if let Ok(mut m) = price_cliff_map().write() {
         match cliff {
@@ -1069,9 +896,6 @@ pub fn cache_model_price_cliff(model_id: &str, cliff: Option<u32>) {
     }
 }
 
-/// The declared price cliff for a model id, when its provider said one.
-/// Normalizes like [`get_cached_model_context`]: exact, lowercase, then the
-/// tail of a `provider/model` id.
 pub fn get_cached_model_price_cliff(model_id: &str) -> Option<u32> {
     let g = price_cliff_map().read().ok()?;
     if let Some(v) = g.get(model_id).copied() {
@@ -1111,7 +935,6 @@ pub fn get_cached_model_context(model_id: &str) -> Option<usize> {
     None
 }
 
-/// Model discovery is connection-scoped, unlike the global context/pricing cache.
 #[derive(Default)]
 struct ProviderModels {
     active: String,
@@ -1125,15 +948,12 @@ fn provider_models_cell() -> &'static std::sync::RwLock<ProviderModels> {
     PROVIDER_MODELS.get_or_init(|| std::sync::RwLock::new(ProviderModels::default()))
 }
 
-/// Called at startup and after connecting, never by background fetches.
-/// A late response from the previous connection must not change completion scope.
 pub fn set_active_model_provider(base_url: &str) {
     if let Ok(mut cache) = provider_models_cell().write() {
         cache.active = base_url.trim_end_matches('/').to_string();
     }
 }
 
-/// The provider endpoint currently selected for model discovery.
 fn active_provider_base_url() -> String {
     provider_models_cell()
         .read()
@@ -1153,7 +973,6 @@ pub(crate) fn cache_provider_model_ids(base_url: &str, models: &[(String, String
     }
 }
 
-/// Only ids advertised by the active endpoint; no I/O per keystroke.
 pub fn cached_model_ids() -> Vec<String> {
     provider_models_cell()
         .read()
@@ -1162,8 +981,6 @@ pub fn cached_model_ids() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Loopback endpoint (`localhost`, `127.0.0.0/8`, `::1`) by host, unparseable
-/// input treated as not loopback (the caller is a normalized base URL).
 fn is_loopback_base(base: &str) -> bool {
     reqwest::Url::parse(base)
         .ok()
@@ -1171,7 +988,6 @@ fn is_loopback_base(base: &str) -> bool {
         .is_some_and(|host| is_loopback_host(&host))
 }
 
-/// Loopback by name or by address, IPv6 brackets included.
 fn is_loopback_host(host: &str) -> bool {
     let host = host
         .strip_prefix('[')
@@ -1183,12 +999,6 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// A previous session's provider model list, so the picker paints instantly
-/// and only the background refresh touches the network. On-disk list cache
-/// (`~/.gray/provider_models.json`, `{ "<base>": [["id", "name"], ...] }`),
-/// keyed like `recent_models` by normalized base URL. Rows with catalog
-/// metadata (plugin efforts / variants / slots) are stored as objects
-/// instead of pairs; both forms load ([`crate::setup::variants::CachedRow`]).
 pub(crate) fn save_provider_model_list_at(
     home: &std::path::Path,
     base_url: &str,
@@ -1201,9 +1011,6 @@ pub(crate) fn save_provider_model_list_at(
     save_provider_model_rows_at(home, base_url, rows);
 }
 
-/// [`save_provider_model_list_at`] for rows that may carry metadata. A bare
-/// pair re-saved over an object (a generic refresh of the same id) keeps the
-/// object's metadata and takes the new name.
 pub(crate) fn save_provider_model_rows_at(
     home: &std::path::Path,
     base_url: &str,
@@ -1211,16 +1018,10 @@ pub(crate) fn save_provider_model_rows_at(
 ) {
     use crate::setup::variants::CachedRow;
     if rows.is_empty() {
-        // A failed fetch must never wipe the last good list.
         return;
     }
     let base = crate::setup::catalog::normalize_custom_base_url(base_url);
     if base.is_empty() || is_loopback_base(&base) {
-        // Loopback gets no disk entry: the fetch is already sub-millisecond
-        // local (nothing to paint ahead of), and the port changes on every
-        // restart — each one a dead key this cache would keep forever (a unit
-        // test's random port added one per `cargo test`). There is no
-        // eviction, so refusing the write is the only bound that holds.
         return;
     }
     let path = home.join("provider_models.json");
@@ -1248,7 +1049,7 @@ pub(crate) fn save_provider_model_rows_at(
     let Ok(s) = serde_json::to_string(&map) else {
         return;
     };
-    // Atomic tmp-file + rename (models.json precedent).
+
     let tmp = path.with_extension(format!(
         "json.tmp-{}-{}",
         std::process::id(),
@@ -1260,13 +1061,8 @@ pub(crate) fn save_provider_model_rows_at(
     let _ = std::fs::rename(&tmp, path);
 }
 
-/// Cached model lists age out after a month: provider catalogs churn and an
-/// expired base key would paint a stale list forever (nothing else evicts).
 const PROVIDER_MODELS_TTL_SECS: u64 = 30 * 24 * 3600;
 
-/// One `provider_models.json` entry: the timestamped object current writes
-/// produce, or the legacy bare row array (age unknown — kept as-is; the
-/// next successful refresh rewrites it stamped).
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 enum CacheEntry {
@@ -1284,8 +1080,6 @@ impl CacheEntry {
         }
     }
 
-    /// Expired stamped entries are dead keys: dropping them makes the caller
-    /// fall back to a live fetch, and the next save removes them from disk.
     fn fresh(self) -> Option<Self> {
         match &self {
             CacheEntry::Stamped { fetched_at, .. }
@@ -1302,8 +1096,6 @@ fn unix_now() -> u64 {
     u64::try_from(gray_core::spill::now_secs()).unwrap_or_default()
 }
 
-/// The raw cache map with expired entries already dropped; missing or
-/// corrupt reads as empty.
 fn read_model_entries(path: &std::path::Path) -> std::collections::BTreeMap<String, CacheEntry> {
     std::fs::read_to_string(path)
         .ok()
@@ -1316,8 +1108,6 @@ fn read_model_entries(path: &std::path::Path) -> std::collections::BTreeMap<Stri
         .collect()
 }
 
-/// The whole cache file as plain row lists; missing or corrupt reads as
-/// empty.
 fn read_model_list_map(
     path: &std::path::Path,
 ) -> std::collections::BTreeMap<String, Vec<crate::setup::variants::CachedRow>> {
@@ -1327,16 +1117,12 @@ fn read_model_list_map(
         .collect()
 }
 
-/// Every cached provider row list — the whole `provider_models.json`
-/// map. Local fusion enumerates it for sidekick candidates and to
-/// resolve qualified ids back to their connections.
 pub(crate) fn provider_model_lists(
     home: &std::path::Path,
 ) -> std::collections::BTreeMap<String, Vec<crate::setup::variants::CachedRow>> {
     read_model_list_map(&home.join("provider_models.json"))
 }
 
-/// Best-effort load of one provider's cached rows (pairs and objects).
 pub(crate) fn load_provider_model_rows_at(
     home: &std::path::Path,
     base_url: &str,
@@ -1347,8 +1133,6 @@ pub(crate) fn load_provider_model_rows_at(
         .unwrap_or_default()
 }
 
-/// Best-effort load: missing file, unknown base, or corrupt JSON reads as
-/// an empty list and the caller falls back to the live fetch.
 #[cfg(test)]
 pub(crate) fn load_provider_model_list_at(
     home: &std::path::Path,
@@ -1360,8 +1144,6 @@ pub(crate) fn load_provider_model_list_at(
         .collect()
 }
 
-/// Thin `gray_home` wrappers; the `_at` forms above stay testable without
-/// touching process env.
 pub(crate) fn save_provider_model_list(base_url: &str, models: &[(String, String)]) {
     if let Ok(home) = crate::setup::catalog::gray_home() {
         save_provider_model_list_at(&home, base_url, models);
@@ -1377,9 +1159,6 @@ pub(crate) fn save_provider_model_rows(
     }
 }
 
-/// The cached list for `base_url`; object rows register their metadata
-/// (efforts, variants, slots) on the way out, so whoever reads the list
-/// next — picker or request builder — sees the declared shapes.
 pub(crate) fn load_provider_model_list(base_url: &str) -> Vec<(String, String)> {
     let Ok(home) = crate::setup::catalog::gray_home() else {
         return Vec::new();
@@ -1393,18 +1172,14 @@ pub(crate) fn load_provider_model_list(base_url: &str) -> Vec<(String, String)> 
     rows.iter().map(|r| r.pair()).collect()
 }
 
-/// Gap-fill insert: leaves an existing entry (e.g. provider-fetched) alone.
-/// Provider values always win over the LiteLLM table regardless of arrival order.
 pub fn cache_model_context_if_absent(model_id: &str, length: usize) {
     cache_model_context_with_source(model_id, length, "litellm", false);
 }
 
-/// Gap-fill insert for models.dev values (same provider-wins semantics).
 pub fn cache_models_dev_if_absent(model_id: &str, length: usize) {
     cache_model_context_with_source(model_id, length, "models.dev", false);
 }
 
-/// Shared insert behind the cache fns above; also fans out the source tag.
 fn cache_model_context_with_source(
     model_id: &str,
     length: usize,
@@ -1439,8 +1214,6 @@ fn model_context_source_cell()
     MODEL_CONTEXT_SOURCE.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
 }
 
-/// Tags a cached window with its origin. Gap-fill callers pass
-/// `overwrite: false` so a live value keeps its "live" tag.
 fn record_context_source(model_id: &str, src: &'static str, overwrite: bool) {
     if let Ok(mut g) = model_context_source_cell().write() {
         if overwrite || !g.contains_key(model_id) {
@@ -1474,7 +1247,6 @@ fn get_cached_source(model_id: &str) -> Option<&'static str> {
     None
 }
 
-/// Where the effective window for `model` came from.
 pub fn context_source(model: &str) -> &'static str {
     if get_user_context_window().is_some() {
         return "override";
@@ -1492,14 +1264,6 @@ fn json_usize(v: &serde_json::Value) -> Option<usize> {
         .or_else(|| v.as_f64().map(|f| f as usize))
 }
 
-/// USD-per-token rates from LiteLLM's table (same source as the context
-/// windows — and the one T3 Code prices against). Base tier, like T3.
-/// A priced context tier (models.dev `cost.tiers`, LiteLLM
-/// `*_above_200k_tokens`): when a turn's inclusive input exceeds `size`,
-/// these rates replace the base ones — opencode `getUsage` semantics
-/// (`context > tier.size`, largest matching tier wins). Fields left `None`
-/// inherit the base rate: models.dev `context_over_200k` often omits
-/// `cache_write`, and zero-filling it (opencode's `?? 0`) undercharges.
 #[derive(Debug, Clone, Copy)]
 pub struct RateTier {
     pub size: usize,
@@ -1515,9 +1279,9 @@ pub struct ModelRate {
     pub output: f64,
     pub cache_read: f64,
     pub cache_write: f64,
-    /// False when the entry had no cache prices — price all input at `input`.
+
     pub has_cache_prices: bool,
-    /// Context-priced tiers, sorted descending by `size`. Empty = flat rate.
+
     pub tiers: Vec<RateTier>,
 }
 
@@ -1529,10 +1293,6 @@ fn model_rates_cell() -> &'static std::sync::RwLock<std::collections::HashMap<St
     MODEL_RATES.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
 }
 
-/// Tiers seen before their base rate exists (a models.dev entry that ships
-/// `cost.tiers`/`context_over_200k` but no base `input`/`output`). Drained by
-/// the next rate write for that id — whichever source prices it first picks
-/// the tiers up, so apply order between the catalog fetches never loses one.
 static PENDING_TIERS: std::sync::OnceLock<
     std::sync::RwLock<std::collections::HashMap<String, Vec<RateTier>>>,
 > = std::sync::OnceLock::new();
@@ -1563,9 +1323,6 @@ fn take_pending_tiers(model_id: &str) -> Vec<RateTier> {
         .unwrap_or_default()
 }
 
-/// Union tier lists by `size`; an incoming tier replaces the stored one at
-/// the same size (the caller's source is authoritative for the tiers it
-/// ships). Result stays sorted descending.
 fn merge_tiers(existing: &mut Vec<RateTier>, incoming: Vec<RateTier>) {
     for t in incoming {
         match existing.iter_mut().find(|e| e.size == t.size) {
@@ -1576,9 +1333,6 @@ fn merge_tiers(existing: &mut Vec<RateTier>, incoming: Vec<RateTier>) {
     existing.sort_by_key(|tier| std::cmp::Reverse(tier.size));
 }
 
-/// LiteLLM path: the base rates replace (authoritative); tiers union into
-/// whatever arrived earlier so a models.dev apply in either boot order
-/// yields the same merged rate.
 fn cache_model_rate(model_id: &str, rate: ModelRate) {
     fn merge_into(
         map: &mut std::collections::HashMap<String, ModelRate>,
@@ -1607,9 +1361,6 @@ fn cache_model_rate(model_id: &str, rate: ModelRate) {
     }
 }
 
-/// models.dev path: gap-fill — base rates are added only when no source has
-/// priced the model (LiteLLM/OpenRouter stay authoritative); tiers always
-/// merge, but an existing tier at the same size keeps its rates.
 fn cache_models_dev_rate(model_id: &str, base: Option<ModelRate>, tiers: Vec<RateTier>) {
     if base.is_none() && tiers.is_empty() {
         return;
@@ -1648,8 +1399,6 @@ fn cache_models_dev_rate(model_id: &str, base: Option<ModelRate>, tiers: Vec<Rat
     }
 }
 
-/// Rate for a model id, with the same `provider/model` tail fallback as the
-/// context cache. None = unpriced (LiteLLM has no rate for it).
 pub fn get_model_rate(model_id: &str) -> Option<ModelRate> {
     if let Ok(g) = model_rates_cell().read() {
         if let Some(r) = g.get(model_id).cloned() {
@@ -1674,9 +1423,6 @@ fn json_rate(v: &serde_json::Value) -> Option<f64> {
         .or_else(|| v.as_u64().map(|n| n as f64))
 }
 
-/// Turn cost in USD, or None when the model is unpriced. Cache-aware: fresh
-/// input at `input`, cached reads/writes at their prices; providers that only
-/// fill inclusive `input_tokens` get it all priced fresh.
 pub fn turn_cost(usage: &gray_core::event::Usage, model: &str) -> Option<f64> {
     let r = get_model_rate(model)?;
     let (input, output, cache_read, cache_write, has_cache) =
@@ -1695,19 +1441,12 @@ pub fn turn_cost(usage: &gray_core::event::Usage, model: &str) -> Option<f64> {
     Some(input_cost + usage.output_tokens as f64 * output)
 }
 
-/// The same turn with caching off: every input token at the plain input
-/// rate (same [`rate_at_context`] tier selection as [`turn_cost`]) plus
-/// output. The `Saved` row's counterfactual — `turn_cost` subtracted from
-/// this is what prompt caching kept off the bill. `None` when unpriced.
 pub fn uncached_cost(usage: &gray_core::event::Usage, model: &str) -> Option<f64> {
     let r = get_model_rate(model)?;
     let (input, output, ..) = rate_at_context(&r, usage.input_tokens);
     Some(usage.input_tokens as f64 * input + usage.output_tokens as f64 * output)
 }
 
-/// The rate in force for a prompt of `context` tokens — the base rate, or
-/// the largest tier strictly below it (opencode `getUsage`: tiers apply on
-/// `context > tier.size`; models.dev only ships `type: "context"` tiers).
 fn rate_at_context(r: &ModelRate, context: usize) -> (f64, f64, f64, f64, bool) {
     let Some(t) = r
         .tiers
@@ -1732,7 +1471,6 @@ fn rate_at_context(r: &ModelRate, context: usize) -> (f64, f64, f64, f64, bool) 
     )
 }
 
-/// `$0.004`, `$0.41`, `$1.50` — 4 decimals trimmed, 2 minimum past a dollar.
 pub fn format_cost(usd: f64) -> String {
     if usd >= 1.0 {
         return format!("${:.2}", usd);
@@ -1751,11 +1489,6 @@ pub fn format_cost(usd: f64) -> String {
     format!("${trimmed}")
 }
 
-// Field subsets of the public catalogs. Deserializing straight into these,
-// never into a full `Value` tree (5+ MB of tiny nodes), keeps startup
-// memory flat: a dropped tree leaves its pages pinned by cache entries
-// allocated in between. Leaf fields stay `Value` so a type change in one
-// field reads as absent; `BTreeMap` keeps the sorted order `Value` maps had.
 type Field = Option<serde_json::Value>;
 
 #[derive(serde::Deserialize)]
@@ -1766,7 +1499,7 @@ pub struct LiteLlmEntry {
     output_cost_per_token: Field,
     cache_read_input_token_cost: Field,
     cache_creation_input_token_cost: Field,
-    /// Anthropic-style long-context surcharge: present => tier at 200k.
+
     input_cost_per_token_above_200k_tokens: Field,
     output_cost_per_token_above_200k_tokens: Field,
     cache_read_input_token_cost_above_200k_tokens: Field,
@@ -1785,9 +1518,9 @@ pub struct ModelsDevEntry {
     max_input_tokens: Field,
     reasoning: Field,
     reasoning_options: Option<Vec<ModelsDevOption>>,
-    /// USD per 1M tokens (opencode `model.cost`), with optional context tiers.
+
     cost: Option<ModelsDevCost>,
-    /// Recommended-ranking facts: tool support, output shape, freshness.
+
     tool_call: Field,
     modalities: Option<ModelsDevModalities>,
     release_date: Field,
@@ -1804,7 +1537,7 @@ pub struct ModelsDevCost {
     cache_read: Field,
     cache_write: Field,
     tiers: Option<Vec<ModelsDevCostTier>>,
-    /// Flattened 200k tier (newer key for opencode's `experimentalOver200K`).
+
     context_over_200k: Option<ModelsDevTierRates>,
     #[serde(alias = "experimentalOver200K")]
     experimental_over_200k: Option<ModelsDevTierRates>,
@@ -1857,11 +1590,6 @@ pub struct OpenRouterPricing {
     completion: Field,
 }
 
-/// Projects LiteLLM's public `model_prices_and_context_window.json` (the same
-/// table T3 Code / ccusage price against) into the context cache.
-/// `max_input_tokens` is the window; legacy `max_tokens` is the fallback
-/// (on new entries it can mean output size, so it loses). Gap-fill only.
-/// Returns the number of models cached.
 pub fn parse_litellm_context_json(val: &serde_json::Value) -> usize {
     serde::Deserialize::deserialize(val).map_or(0, apply_litellm)
 }
@@ -1879,15 +1607,13 @@ fn apply_litellm(map: LiteLlm) -> usize {
             .or_else(|| entry.max_tokens.as_ref().and_then(json_usize));
         if let Some(len) = len.filter(|&v| v >= 1024) {
             cache_model_context_if_absent(key, len);
-            // Keys are usually bare (`gpt-4o`); index the tail too so
-            // `provider/model` lookups hit without knowing every prefix.
+
             if let Some((_, suffix)) = key.rsplit_once('/') {
                 cache_model_context_if_absent(suffix, len);
             }
             n += 1;
         }
-        // Rates ride the same loop. Both base rates required — a half-priced
-        // model silently under-reports, which is worse than unpriced.
+
         let rate = |f: &Field| f.as_ref().and_then(json_rate);
         if let (Some(input), Some(output)) = (
             rate(&entry.input_cost_per_token),
@@ -1932,9 +1658,6 @@ fn apply_litellm(map: LiteLlm) -> usize {
     n
 }
 
-/// Fetches LiteLLM's model table in the background and caches context windows.
-/// Fire-and-forget: callers `tokio::spawn` this at boot next to the provider
-/// `/models` fetch. Failures are silent — the hardcoded fallback covers offline.
 pub async fn fetch_litellm_context_windows() {
     const URL: &str = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
     if load_catalog("litellm.json", URL, apply_litellm).await > 0 {
@@ -1942,10 +1665,6 @@ pub async fn fetch_litellm_context_windows() {
     }
 }
 
-/// Projects models.dev's public `api.json` (`providers -> models ->
-/// `limit.context`, the same shape opencode's provider.ts consumes) into the
-/// context cache. Also accepts `context_window` / `max_input_tokens` keys.
-/// Gap-fill only. Returns the number of models cached.
 pub fn parse_models_dev_json(val: &serde_json::Value) -> usize {
     serde::Deserialize::deserialize(val).map_or(0, apply_models_dev)
 }
@@ -1968,14 +1687,11 @@ fn apply_models_dev(providers: ModelsDev) -> usize {
                 }
                 n += 1;
             }
-            // models.dev `reasoning` bool — same flag opencode maps to
-            // `capabilities.reasoning`.
+
             if let Some(r) = entry.reasoning.as_ref().and_then(|v| v.as_bool()) {
                 cache_model_reasoning(key, r);
             }
-            // Capability/shape facts for the recommended-model ranking;
-            // text-only means output is exactly `["text"]` (an image-output
-            // model like nano-banana must not be recommended).
+
             let meta = ModelMeta {
                 tool_call: entry.tool_call.as_ref().and_then(|v| v.as_bool()),
                 text_only: entry
@@ -2001,10 +1717,7 @@ fn apply_models_dev(providers: ModelsDev) -> usize {
                     cache_model_meta(suffix, meta);
                 }
             }
-            // models.dev `reasoning_options` effort values — the automatic
-            // per-model source opencode derives variants from
-            // (`reasoningVariants`, transform.ts). `null` means `none`.
-            // Toggle/budget-only entries stay on family tables.
+
             if let Some(values) = entry
                 .reasoning_options
                 .iter()
@@ -2025,10 +1738,7 @@ fn apply_models_dev(providers: ModelsDev) -> usize {
                     cache_model_efforts(key, efforts);
                 }
             }
-            // models.dev `cost` (per-1M USD, divided here to match the
-            // per-token LiteLLM rates). Gap-fill: LiteLLM stays authoritative
-            // for base rates; tiers union (weaker `context_over_200k` first,
-            // explicit `tiers` last so they win a same-size slot).
+
             if let Some(cost) = &entry.cost {
                 let per_m = |f: &Field| f.as_ref().and_then(json_rate).map(|v| v / 1_000_000.0);
                 let mut tiers: Vec<RateTier> = Vec::new();
@@ -2054,8 +1764,7 @@ fn apply_models_dev(providers: ModelsDev) -> usize {
                     let Some(size) = bound.size.as_ref().and_then(json_usize) else {
                         continue;
                     };
-                    // Same-size replaces (explicit tier wins over the flat
-                    // 200k shorthand) — one `size` maps one rate.
+
                     tiers.retain(|e| e.size != size);
                     tiers.push(RateTier {
                         size,
@@ -2071,8 +1780,7 @@ fn apply_models_dev(providers: ModelsDev) -> usize {
                         output,
                         cache_read: per_m(&cost.cache_read).unwrap_or(0.0),
                         cache_write: per_m(&cost.cache_write).unwrap_or(0.0),
-                        // Cache-aware only when both sides are priced —
-                        // a read-only price would bill writes at input rate.
+
                         has_cache_prices: per_m(&cost.cache_read).is_some()
                             && per_m(&cost.cache_write).is_some(),
                         tiers: Vec::new(),
@@ -2089,9 +1797,6 @@ fn apply_models_dev(providers: ModelsDev) -> usize {
     n
 }
 
-/// Fetches models.dev's table in the background and caches context windows.
-/// Same fire-and-forget contract as `fetch_litellm_context_windows`.
-/// Returns the number of models cached (0 on any failure).
 pub async fn fetch_models_dev_context() -> usize {
     const URL: &str = "https://models.dev/api.json";
     let n = load_catalog("models.dev.json", URL, apply_models_dev).await;
@@ -2107,16 +1812,12 @@ fn cache_model_rate_if_absent(model_id: &str, rate: ModelRate) {
     {
         return;
     }
-    // New rate: merge may stash nothing when tiers predate the base (the
-    // models.dev-only-tier case) — fold the pending list in here instead.
+
     let mut rate = rate;
     merge_tiers(&mut rate.tiers, take_pending_tiers(model_id));
     cache_model_rate(model_id, rate);
 }
 
-/// OpenRouter's `/models` carries per-model `pricing` (USD/token as strings).
-/// Gap-fill only — LiteLLM stays authoritative; this just covers models too
-/// new for LiteLLM's table (e.g. Muse Spark at launch).
 pub fn parse_openrouter_models_json(val: &serde_json::Value) -> usize {
     serde::Deserialize::deserialize(val).map_or(0, apply_openrouter)
 }
@@ -2163,16 +1864,11 @@ fn apply_openrouter(list: OpenRouter) -> usize {
     n
 }
 
-/// Same fire-and-forget contract as `fetch_litellm_context_windows`.
-/// No auth needed — OpenRouter's model list is public.
 pub async fn fetch_openrouter_rates() -> usize {
     const URL: &str = "https://openrouter.ai/api/v1/models";
     load_catalog("openrouter.json", URL, apply_openrouter).await
 }
 
-/// The website's curated connect-id → model-id ranking
-/// (`{"version":1,"providers":{"openrouter":[...]}}`; unknown fields
-/// ignored). Keys are connect ids, the same ids the picker looks up.
 #[derive(serde::Deserialize)]
 struct RecommendedModels {
     providers: Option<std::collections::BTreeMap<String, Vec<String>>>,
@@ -2187,9 +1883,6 @@ fn recommended_cell() -> &'static std::sync::RwLock<std::collections::BTreeMap<S
     RECOMMENDED_MODELS.get_or_init(|| std::sync::RwLock::new(std::collections::BTreeMap::new()))
 }
 
-/// Curated model ids for a connect id (e.g. `openrouter`), best first.
-/// `None` when the website never published a list — the picker's automatic
-/// ranking takes over.
 pub fn curated_recommended(connect_id: &str) -> Option<Vec<String>> {
     recommended_cell().read().ok()?.get(connect_id).cloned()
 }
@@ -2203,22 +1896,14 @@ fn apply_recommended(list: RecommendedModels) -> usize {
     n
 }
 
-/// Fetches the curated recommended-model table in the background. Same
-/// fire-and-forget contract as [`fetch_models_dev_context`] (24h disk TTL,
-/// stale fallback). A 404 or offline day reads as no curation — returns 0
-/// and the automatic ranking covers it.
 pub async fn fetch_recommended_models() -> usize {
     let url = std::env::var("GRAY_RECOMMENDED_URL")
         .unwrap_or_else(|_| "https://gray.alignment.id/models/recommended.json".to_string());
     load_catalog("recommended.json", &url, apply_recommended).await
 }
 
-/// Catalogs change a few times a day at most; a day-old copy is plenty.
 const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
-/// Applies a public catalog: the on-disk copy (`~/.gray/cache/<name>`) while
-/// it is under a day old, else a fresh download (saved for next launch),
-/// else the stale copy so offline still has data.
 async fn load_catalog<T: serde::de::DeserializeOwned>(
     name: &str,
     url: &str,
@@ -2275,16 +1960,12 @@ async fn fetch_body(url: &str) -> Option<impl AsRef<[u8]>> {
     resp.bytes().await.ok()
 }
 
-/// A previous session's live/litellm/models.dev values beat the hardcoded
-/// guess on cold boot, before any fetch completes.
-/// On-disk context cache (`~/.gray/models.json`, `{ "model-id": tokens }`).
 fn models_cache_path() -> Option<std::path::PathBuf> {
     crate::setup::catalog::gray_home()
         .ok()
         .map(|h| h.join("models.json"))
 }
 
-/// Loads the disk cache into memory (gap-fill, source "disk"). Best-effort.
 pub fn load_models_cache_to_memory() -> usize {
     let Some(path) = models_cache_path() else {
         return 0;
@@ -2306,9 +1987,6 @@ pub fn load_models_cache_to_memory() -> usize {
     n
 }
 
-/// Merges in-memory entries over the disk map. `None` = nothing new (caller
-/// must skip the write so mtime stays stable and concurrent boots don't
-/// rewrite/race every fetch).
 fn merged_models_cache(
     mut disk: std::collections::HashMap<String, usize>,
     mem: impl IntoIterator<Item = (String, usize)>,
@@ -2323,10 +2001,6 @@ fn merged_models_cache(
     if dirty { Some(disk) } else { None }
 }
 
-/// Persists the in-memory cache to disk (read-modify-write, best-effort).
-/// Called after any successful fetch so cold boot beats the guess.
-/// Skips the write when memory adds nothing new; the write itself is atomic
-/// tmp-file + rename (delivery.rs precedent).
 pub fn save_models_cache_to_disk() {
     let Some(path) = models_cache_path() else {
         return;
@@ -2353,9 +2027,7 @@ pub fn save_models_cache_to_disk() {
     {
         return;
     }
-    // Audit #18: a shared models.json.tmp lets two concurrent refreshes
-    // clobber or rename each other's temporary write; the pid+random
-    // suffix makes each rename target distinct.
+
     let tmp = path.with_extension(format!(
         "json.tmp-{}-{}",
         std::process::id(),
@@ -2367,8 +2039,6 @@ pub fn save_models_cache_to_disk() {
     let _ = std::fs::rename(&tmp, path);
 }
 
-/// One-shot cold-boot load so disk values are present before first resolve.
-/// (The only startup hook reachable without touching other modules.)
 pub(crate) fn ensure_disk_loaded() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -2376,16 +2046,7 @@ pub(crate) fn ensure_disk_loaded() {
     });
 }
 
-/// Disk-only rate priming for callers that price before the spawned catalog
-/// fetches land — a startup resume rebuilds session totals ahead of them and
-/// would otherwise price every turn $0. Applies `~/.gray/cache/` bodies
-/// through the same parsers the fetch tasks run (merge semantics keep
-/// re-application idempotent); never touches the network.
 pub(crate) fn warm_rates_from_disk_cache() {
-    // Unit tests share these process-global tables. Reading the developer's
-    // real `~/.gray/cache` would make results depend on whatever models.dev
-    // last served (e.g. gateway rows adding `xhigh` to a model), and on test
-    // order. Tests seed the tables themselves.
     if cfg!(test) {
         return;
     }

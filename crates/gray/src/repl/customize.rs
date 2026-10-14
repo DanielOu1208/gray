@@ -1,6 +1,3 @@
-//! `/theme`, `/hotkeys` and `/reload`: user themes, keybindings and the
-//! file-based customizations they share a reload path with.
-
 use std::path::Path;
 
 use ratatui::style::{Color, Modifier, Style};
@@ -10,20 +7,14 @@ use super::{say, say_lines};
 use crate::composer::transcript::prose_width;
 use crate::theme::{self, UiTheme};
 
-/// What a `/theme` invocation decided: text for the user, plus the palette
-/// to apply (`Some((theme, name))`, `name` `None` for the built-in one).
 #[derive(Debug)]
 pub(crate) struct ThemeOutcome {
     pub(crate) message: String,
     pub(crate) apply: Option<(UiTheme, Option<String>)>,
-    /// The success card for a switch. `message` stays the plain text for
-    /// paths without a transcript and for `/reload`; the card is laid out at
-    /// render time, once the transcript width is known.
+
     pub(crate) card: Option<ThemeCard>,
 }
 
-/// What the success card names: the theme switched to, plus any save or
-/// palette notes that print as plain text beneath it.
 #[derive(Debug)]
 pub(crate) struct ThemeCard {
     pub(crate) name: String,
@@ -55,14 +46,8 @@ fn with_warnings(mut msg: String, warnings: &[String]) -> String {
     msg
 }
 
-/// Columns of padding inside the success card, left and right of its text.
 const CARD_PAD: usize = 1;
 
-/// The success card for a theme switch, `width` columns wide and painted on
-/// the palette's `surface_bg`. Row 1 is `✓ Theme <name>` (plus `(built-in)`
-/// for the built-in palette) with the swatch at the right edge; row 2 spells
-/// the accent roles in their own colors. The swatch keeps its own cell
-/// colors, since those pairs are the sample.
 fn theme_card_lines(
     palette: &UiTheme,
     name: &str,
@@ -92,7 +77,7 @@ fn theme_card_lines(
     let text_w: usize = head.iter().map(Span::width).sum();
     let swatch_w: usize = swatch.iter().map(Span::width).sum();
     let gap = width.saturating_sub(text_w + swatch_w + CARD_PAD);
-    // Too narrow for the swatch beside the text: it steps aside, not wraps.
+
     if gap >= 2 {
         head.push(pad(gap));
         head.extend(swatch);
@@ -116,8 +101,6 @@ fn theme_card_lines(
     vec![card_row(head, width, bg), card_row(specimen, width, bg)]
 }
 
-/// A card row padded out to `width` with `bg`, so the card's color runs to
-/// its edge rather than stopping at the last span.
 fn card_row(mut spans: Vec<Span<'static>>, width: usize, bg: Color) -> Line<'static> {
     let used: usize = spans.iter().map(Span::width).sum();
     if used < width {
@@ -126,8 +109,6 @@ fn card_row(mut spans: Vec<Span<'static>>, width: usize, bg: Color) -> Line<'sta
     Line::from(spans)
 }
 
-/// The success block: the card, then its notes as plain dim rows. One block,
-/// so the notes sit directly under the card.
 fn theme_success_lines(palette: &UiTheme, card: &ThemeCard, width: usize) -> Vec<Line<'static>> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     let mut lines = theme_card_lines(palette, &card.name, card.builtin, width);
@@ -139,8 +120,6 @@ fn theme_success_lines(palette: &UiTheme, card: &ThemeCard, width: usize) -> Vec
     lines
 }
 
-/// `/theme` core against explicit paths (test seam). `active` is the name
-/// of the theme in use now (`None` = built-in).
 pub(crate) fn theme_command(
     arg: Option<&str>,
     active: Option<&str>,
@@ -294,8 +273,7 @@ pub(crate) fn handle_theme(arg: Option<String>, tui: Option<&crate::composer::Sh
     if let Some((t, name)) = &outcome.apply {
         theme::set_theme(*t, name.as_deref());
     }
-    // Re-emit the history under the palette now live, before the card below
-    // paints under it (see `Tui::repaint_for_palette`).
+
     if let Some(shared) = tui {
         shared.lock().expect("tui lock").repaint_for_palette();
     }
@@ -305,9 +283,6 @@ pub(crate) fn handle_theme(arg: Option<String>, tui: Option<&crate::composer::Sh
     }
 }
 
-/// Paints a `/theme` result: the success card on the applied palette when
-/// there is a transcript to paint it in, the plain text otherwise. The card
-/// fills the transcript's prose column, so it lines up with the answers.
 fn show_outcome(tui: Option<&crate::composer::SharedTui>, outcome: &ThemeOutcome) {
     match (tui, &outcome.card, &outcome.apply) {
         (Some(shared), Some(card), Some((palette, _))) => {
@@ -318,8 +293,6 @@ fn show_outcome(tui: Option<&crate::composer::SharedTui>, outcome: &ThemeOutcome
     }
 }
 
-/// `/hotkeys` core against an explicit gray home (test seam). Returns the
-/// text to show and, for `reload`, the keymap to activate.
 pub(crate) fn keys_command(
     arg: Option<&str>,
     gray_home: &Path,
@@ -394,9 +367,6 @@ pub(crate) fn handle_keys(arg: Option<String>, tui: Option<&crate::composer::Sha
     say(tui, &msg);
 }
 
-/// `/reload`: re-reads every file-based customization in place — the
-/// active theme, `keybindings.json`, and prompt templates. Plugins keep
-/// running (`/plugin` manages those).
 pub(crate) fn handle_reload(tui: Option<&crate::composer::SharedTui>) {
     let mut lines = Vec::new();
     match theme::active_theme_name() {

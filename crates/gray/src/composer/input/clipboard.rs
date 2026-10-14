@@ -1,28 +1,9 @@
-//! System-clipboard paste backend — opencode `prompt.paste` parity.
-//!
-//! Gray's paste path used to accept terminal-driven bracketed paste
-//! (`Event::Paste`) plus an image-only Ctrl+V. There was no text fallback:
-//! Ctrl+V was a silent no-op when the clipboard backend was missing,
-//! and any terminal that doesn't emit bracketed paste (or a `$EDITOR` that
-//! cleared mode 2004 mid-session) left the user with no way to paste at
-//! all. Opencode perfected this with a `prompt.paste` command (bound to
-//! ctrl+v) that reads the OS clipboard — image first, then text — plus an
-//! empty-bracketed-paste → clipboard-read fallback. This module is that
-//! backend half; the frontend (draw code) is untouched.
-//!
-//! Text reads are native helpers only (`pbpaste`, `wl-paste`,
-//! `xclip`, `xsel`, PowerShell, termux) with timeout + tests.
-
 use super::Tui;
 
-/// opencode parity: Windows ConPTY/Terminal often sends CR-only newlines in
-/// bracketed paste — replace CRLF first, then any remaining CR.
 pub(crate) fn normalize_paste(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// Candidate text-clipboard readers for this OS, in probe order (opencode
-/// `clipboard.ts` order: native Wayland/X11 helpers, platform shell-outs).
 pub(crate) fn text_clipboard_candidates() -> Vec<(String, Vec<String>)> {
     #[cfg(target_os = "macos")]
     {
@@ -65,8 +46,7 @@ pub(crate) fn text_clipboard_candidates() -> Vec<(String, Vec<String>)> {
             ),
             ("termux-clipboard-get".to_string(), vec![]),
         ];
-        // Prefer wl-paste under Wayland but still probe the rest: headless
-        // boxes often only have one of them installed.
+
         if std::env::var_os("WAYLAND_DISPLAY").is_none()
             && let Some(pos) = out.iter().position(|(c, _)| c == "wl-paste")
         {
@@ -77,8 +57,6 @@ pub(crate) fn text_clipboard_candidates() -> Vec<(String, Vec<String>)> {
     }
 }
 
-/// Full path of `cmd` inside `paths`, or `None` when absent.
-/// Absolute/relative paths are checked directly.
 pub(crate) fn resolve_in(cmd: &str, paths: &str) -> Option<std::path::PathBuf> {
     if cmd.contains('/') || cmd.contains('\\') {
         let p = std::path::Path::new(cmd);
@@ -98,21 +76,13 @@ pub(crate) fn resolve_in(cmd: &str, paths: &str) -> Option<std::path::PathBuf> {
     })
 }
 
-/// Production entry: native helpers on the real PATH.
 pub(crate) fn read_system_clipboard_text() -> Option<String> {
     let paths = std::env::var_os("PATH").unwrap_or_default();
     read_system_clipboard_text_with_paths(&paths.to_string_lossy())
 }
 
-/// Bound for one clipboard helper: `wl-paste` blocks until the compositor
-/// answers, which used to freeze the draw loop inside `Command::output`.
 const CLIPBOARD_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2000);
 
-/// `Command::output` on a spawned thread (`std::thread::spawn` + mpsc, same
-/// shape as other modal flights) with a bounded wait so a hung
-/// helper can't block the UI thread. `None` on spawn failure/timeout —
-/// same as the old blocking `.ok()?` path. The orphaned thread exits on
-/// its own when the helper does; its send then fails silently.
 pub(crate) fn output_with_timeout(
     full: &std::path::Path,
     args: &[String],
@@ -127,16 +97,12 @@ pub(crate) fn output_with_timeout(
     rx.recv_timeout(CLIPBOARD_CMD_TIMEOUT).ok()?.ok()
 }
 
-/// Reads OS clipboard text via native helpers found in `paths`. Hermetic
-/// (takes the PATH explicitly) so tests can point it at shim binaries.
-/// Executes the resolved full path — `Command::new(cmd)` would re-resolve
-/// via the real PATH and miss the shims.
 pub(crate) fn read_system_clipboard_text_with_paths(paths: &str) -> Option<String> {
     for (cmd, args) in text_clipboard_candidates() {
         let Some(full) = resolve_in(&cmd, paths) else {
             continue;
         };
-        // one spawn path; None on spawn failure/timeout/non-zero/blank.
+
         let out = output_with_timeout(&full, &args)?;
         if !out.status.success() {
             continue;
@@ -150,9 +116,6 @@ pub(crate) fn read_system_clipboard_text_with_paths(paths: &str) -> Option<Strin
     None
 }
 
-/// opencode `prompt.paste`: image attach first, then clipboard text through
-/// the normal bracketed-paste path (normalization + large-paste collapse).
-/// True when anything landed in the composer.
 pub(crate) fn paste_from_system_clipboard(tui: &mut Tui) -> bool {
     if super::try_attach_clipboard_image(tui) {
         return true;

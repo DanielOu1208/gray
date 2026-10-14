@@ -43,7 +43,7 @@ fn turn_cap_fires_at_limit() {
 #[test]
 fn spend_cap_ignores_unpriced_and_fires_when_priced() {
     let mut c = cfg();
-    c.max_cost_micros = Some(100_000); // $0.10
+    c.max_cost_micros = Some(100_000);
     assert_eq!(check_caps(&c, 0, 0.0), None);
     assert!(check_caps(&c, 5, 0.11).is_some());
 }

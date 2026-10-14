@@ -1,15 +1,7 @@
-//! Attachment helpers (split from `input`; re-exported there).
-
 use super::*;
 
-// ---------------------------------------------------------------------------
-// Attachment helpers — verbatim from mod.rs 759-885
-// ---------------------------------------------------------------------------
-
 pub(crate) fn attach_image(tui: &mut Tui, path: PathBuf) {
-    let marker = crate::repl::attachments::attachment_marker(&path);
     tui.attachments.push(path);
-    tui.textarea.insert_element(&marker);
     let _ = tui.draw();
 }
 
@@ -23,14 +15,8 @@ pub(crate) fn strip_attachment_marker(tui: &mut Tui, path: &std::path::Path) {
     }
 }
 
-/// Max attachable file size. `repl::attachments` caps only oversized
-/// inputs, so this local sane cap refuses multi-GB drops before
-/// ffmpeg/image decode OOMs.
 pub(crate) const MAX_ATTACH_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
-/// Strip `file://` (+ optional `localhost`) and percent-decode (%20 etc.).
-/// Raw (non-`file://`) paths pass through untouched so literal `%` in real
-/// filenames is never corrupted. Shared by paste + clipboard-text paths.
 fn decoded_paste_path(raw: &str) -> String {
     let s = raw
         .trim()
@@ -57,8 +43,6 @@ fn file_size_exceeds(path: &Path, limit: u64) -> bool {
         .unwrap_or(false)
 }
 
-/// Any file the media pipeline accepts (images, pdf, video, audio) —
-/// opencode parity: MIME-driven, not image-only.
 pub(crate) fn is_attachable_path(path: &str) -> bool {
     use crate::repl::attachments::{AttachmentKind, attachment_kind};
     let decoded = decoded_paste_path(path);
@@ -98,10 +82,6 @@ pub(crate) fn try_attach_image_paste(tui: &mut Tui, pasted: &str) -> bool {
     false
 }
 
-/// Paste an image from the OS clipboard via native helpers
-/// (wl-paste/xclip). Image first, then clipboard text via the caller.
-// arboard removed, native helpers only. If Wayland session
-// quirks ever bite, the text-path fallback below still catches pasted paths.
 pub(crate) fn try_attach_clipboard_image(tui: &mut Tui) -> bool {
     for (cmd, args) in [
         ("wl-paste", vec!["--type", "image/png"]),
@@ -110,8 +90,6 @@ pub(crate) fn try_attach_clipboard_image(tui: &mut Tui) -> bool {
             vec!["-selection", "clipboard", "-t", "image/png", "-o"],
         ),
     ] {
-        // The image probe gets the same bounded spawn the text path uses:
-        // a wedged wl-paste/xclip must not freeze Ctrl+V (audit #16).
         if let Some(out) = super::clipboard::output_with_timeout(
             std::path::Path::new(cmd),
             &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),

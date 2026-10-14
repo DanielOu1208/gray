@@ -1,13 +1,3 @@
-//! Linux stand-in for the FSEvents stream.
-//!
-//! There is no persistent, replayable filesystem event log to vend on
-//! Linux: inotify wants one watch per directory (hundreds of thousands on
-//! a whole disk), and fanotify's filesystem marks want CAP_SYS_ADMIN. So
-//! this stream emits nothing past HISTORY_DONE. Freshness instead comes
-//! from the apply loop's minute tick, which relists folders whose mtimes
-//! moved — the same recovery path macOS takes when FSEvents drops history
-//! (`relist_changed` in engine.rs).
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -22,13 +12,10 @@ pub struct Event {
     pub path: Vec<u8>,
     pub flags: u32,
     pub id: u64,
-    /// Which `watch` delivered it (its `stream` number).
+
     pub stream: u32,
 }
 
-/// An id, not a position: monotonic within the process and ordered across
-/// restarts (saves compare `saved > ours`), so it rides the wall clock and
-/// steps one per call within a millisecond.
 pub fn current_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
@@ -41,9 +28,6 @@ pub struct Stream {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Open a stream. `since` is advisory — nothing can be replayed — so the
-/// only event is HISTORY_DONE, ending the replaying state. The apply
-/// loop's periodic `relist_changed` supplies freshness after that.
 pub fn watch(_since: u64, _latency: f64, tx: Sender<Vec<Event>>, stream: u32) -> Stream {
     let stop = Arc::new(AtomicBool::new(false));
     let thread = {

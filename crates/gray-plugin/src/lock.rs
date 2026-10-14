@@ -1,10 +1,3 @@
-//! Plugin lockfile (`<home>/plugins/lock.json`).
-//!
-//! Records resolved sidecar plugins so future boots can reuse them.
-//! Schema is always 1. Missing file is empty (not an error); corrupt
-//! file is an error (callers warn). Atomic writes via tempfile + rename.
-//! Never logs argv or URLs (may carry tokens).
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +5,6 @@ fn default_true() -> bool {
     true
 }
 
-/// One locked plugin entry.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LockEntry {
     pub ecosystem: String,
@@ -23,56 +15,40 @@ pub struct LockEntry {
     pub adapter_version: String,
     pub installed_at: String,
     pub scope: String,
-    /// Disabled plugins are skipped at boot (old locks without the field
-    /// load as enabled).
+
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Capability ids the operator consented to. Empty until an interactive
-    /// install asked; see [`crate::capabilities`].
+
     #[serde(default)]
     pub granted_capabilities: Vec<String>,
-    /// Digest of the declared list at consent time. `None` marks a
-    /// pre-consent entry: it is grandfathered to whatever it declares,
-    /// because it ran with those powers before consent existed.
+
     #[serde(default)]
     pub capabilities_hash: Option<String>,
-    /// [`Some("provider_only")] marks a protocol-1.2 provider sidecar.
-    /// The provider runtime owns its lifecycle, so the normal boot must
-    /// skip it; an ordinary plugin leaves this `None`.
+
     #[serde(default)]
     pub runtime_role: Option<String>,
-    /// argv for `gray <name> …` forwarding and plugin slash capture; `None` = sidecar-only.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_argv: Option<Vec<String>>,
-    /// Boots in every GRAY_HOME (`gray plugin enable <name> --global`):
-    /// sessions under a different home still load it from the real user
-    /// lock, and its `prompt/context` survives the lean prompt.
+
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub global: bool,
 }
 
-/// Lockfile body: schema + plugins keyed by manifest name.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LockFile {
     pub schema: u32,
     pub plugins: BTreeMap<String, LockEntry>,
 }
 
-/// Lockfile path for a home dir: `<home>/plugins/lock.json`.
 pub fn lock_path(home: &Path) -> PathBuf {
     home.join("plugins/lock.json")
 }
 
-/// Project-scope lock path: `<cwd>/.gray/plugins.json` (same `LockFile`
-/// shape as the user lock). Runtime data, never committed. A project entry
-/// for the same plugin name wins over the user entry (see
-/// [`disabled_sidecar_argvs`]).
 pub fn project_lock_path(cwd: &Path) -> PathBuf {
     cwd.join(".gray/plugins.json")
 }
 
-/// Effective `enabled` flag for a plugin name: the project overlay wins per
-/// name on the flag, missing entries default to enabled.
 pub fn effective_enabled(user: &LockFile, project: &LockFile, name: &str) -> bool {
     project
         .plugins
@@ -82,12 +58,6 @@ pub fn effective_enabled(user: &LockFile, project: &LockFile, name: &str) -> boo
         .unwrap_or(true)
 }
 
-/// Sidecar argv lists disabled by the user lock with the project lock
-/// overlaid as an enabled-flag-only delta: a project entry for the same
-/// name wins on the flag. Boot skips spawning a sidecar whose argv is in
-/// the result. Names without argv (builtins) never match a spawn, and
-/// project-only names (no user entry, so no known argv) contribute nothing:
-/// the overlay toggles, it never discovers.
 pub fn disabled_sidecar_argvs(user: &LockFile, project: &LockFile) -> Vec<Vec<String>> {
     let names: std::collections::BTreeSet<&String> =
         user.plugins.keys().chain(project.plugins.keys()).collect();
@@ -111,8 +81,6 @@ impl LockFile {
         }
     }
 
-    /// Load the lockfile. Missing file is empty with schema 1 (not an
-    /// error); corrupt content is an error, never a panic.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(text) => Ok(serde_json::from_str(&text)?),
@@ -121,8 +89,6 @@ impl LockFile {
         }
     }
 
-    /// Save atomically: write to a tempfile in the same dir, then rename.
-    /// Schema is always written as 1.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let mut out = self.clone();
         out.schema = 1;

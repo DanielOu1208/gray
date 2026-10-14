@@ -1,25 +1,11 @@
-//! Video → a single contact-sheet JPEG, so `cat clip.mp4` in bash works on
-//! every model regardless of whether it takes a native video part.
-//!
-//! ffprobe supplies the duration (it sets how fast `fps` samples), and ffmpeg
-//! does the rest in one pass: `fps` picks `frames` stills spread evenly over
-//! that duration, `scale` shrinks each to fit, `tile` lays them out in a
-//! grid. The result is capped by the caller's normalizer like any other
-//! image. A clip ffmpeg can decode but ffprobe cannot describe still gets a
-//! sheet, sampled at an assumed 30s instead.
-
 use std::path::Path;
 use std::time::Duration;
 
 use crate::images::MediaError;
 
-/// ffmpeg on a long clip is not instant; past this we return the error
-/// rather than block a turn forever.
 const SHEET_TIMEOUT: Duration = Duration::from_secs(60);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Default tile count. 16 reads as a 4x4 sheet at a glance; more is just a
-/// bigger image to the model.
 pub const DEFAULT_FRAMES: usize = 16;
 const MAX_FRAMES: usize = 64;
 
@@ -58,7 +44,6 @@ pub(crate) fn detail(out: &std::process::Output, fallback: &str) -> MediaError {
     }
 }
 
-/// Clip duration in seconds via ffprobe, or `None` if it cannot be read.
 fn duration_secs(path: &Path) -> Option<f64> {
     let p = path.display().to_string();
     let out = run(
@@ -81,15 +66,10 @@ fn duration_secs(path: &Path) -> Option<f64> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
-/// `frames` stills of `path` tiled into one JPEG. The returned bytes go
-/// through the caller's image normalizer, so the 5MB byte cap and the
-/// PNG re-encode behave exactly as they do for a screenshot.
 pub fn video_sheet(path: &Path, frames: usize) -> Result<Vec<u8>, MediaError> {
     let frames = frames.clamp(1, MAX_FRAMES);
     let p = path.display().to_string();
 
-    // ffmpeg's own "no such file" is a fine error, but it arrives as three
-    // lines of muxer chatter. Check first so a typo reads like a typo.
     if !path.is_file() {
         return Err(MediaError::Extract(format!(
             "{}: no such file",
@@ -97,22 +77,15 @@ pub fn video_sheet(path: &Path, frames: usize) -> Result<Vec<u8>, MediaError> {
         )));
     }
 
-    // fps=frames/duration spreads the tiles over the whole clip; when the
-    // duration is unreadable, assume a 30s clip rather than dropping to a
-    // single frame, so a weird container still yields a useful sheet.
     let fps = match duration_secs(path) {
         Some(d) if d > 0.0 => format!("{:.6}", frames as f64 / d),
         _ => format!("{:.6}", frames as f64 / 30.0),
     };
-    // 4 columns reads best in a near-square grid for the usual counts.
+
     let cols = if frames <= 4 { frames } else { 4 };
-    // ffmpeg's tile takes a literal WxH and only accepts -1 for the *height*
-    // (pad to the stream end), so the row count is computed here. A partial
-    // last row is fine: tile pads the missing cells itself.
+
     let rows = frames.div_ceil(cols);
-    // One pass: sample, shrink to fit, tile, encode. tile emits a single
-    // frame once it has its full WxH grid; -frames:v 1 stops it there even if
-    // a longer clip would yield another grid.
+
     let vf = format!("fps={fps},scale='min(640,iw)':-2,tile={cols}x{rows}");
     let out = run(
         "ffmpeg",

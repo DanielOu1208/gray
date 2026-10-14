@@ -1,24 +1,6 @@
-//! `gray.yml` profile loader: ordered plugin entries (builtin or sidecar).
-//!
-//! Format:
-//! ```yaml
-//! plugins:
-//!   - builtin: skills
-//!   - sidecar: ~/.gray/plugins/my-tools
-//!   - sidecar: [npx, -y, my-tools]
-//! ```
-//! Bare names (`- skills`) are accepted as builtins. `builtin:` names
-//! resolve against the host's catalog; the `bash` surface is implicit
-//! (registered by the builder, not a plugin) and needs no entry.
-
-// Hand-rolled line parser instead of a YAML dependency;
-// switch to a YAML dependency if profiles grow beyond a flat entry list.
-
-/// A sidecar plugin spec: argv to spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidecarSpec(pub Vec<String>);
 
-/// One ordered entry in the `plugins:` list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginEntry {
     Builtin(String),
@@ -29,7 +11,6 @@ fn unquote(s: &str) -> &str {
     s.trim().trim_matches('"').trim_matches('\'')
 }
 
-/// Parse a single `- ...` entry line into a [`PluginEntry`].
 fn parse_entry(entry: &str) -> Option<PluginEntry> {
     let entry = entry.trim();
     if let Some(v) = entry.strip_prefix("builtin:") {
@@ -38,7 +19,7 @@ fn parse_entry(entry: &str) -> Option<PluginEntry> {
     }
     if let Some(v) = entry.strip_prefix("sidecar:") {
         let v = v.trim();
-        // Argv list form: `sidecar: [npx, -y, my-tools]`
+
         if let Some(inner) = v.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
             let argv: Vec<String> = inner
                 .split(',')
@@ -47,10 +28,9 @@ fn parse_entry(entry: &str) -> Option<PluginEntry> {
                 .collect();
             return (!argv.is_empty()).then_some(PluginEntry::Sidecar(SidecarSpec(argv)));
         }
-        // String path form: `sidecar: ~/.gray/plugins/my-tools` (single argv).
+
         let path = unquote(v);
-        // Tilde belongs to the user profile, not an overridden GRAY_HOME.
-        // Keep unresolved paths literal so spawn reports the actual failure.
+
         let expanded = match (path.strip_prefix("~/"), gray_core::paths::user_home()) {
             (Some(rest), Some(home)) => home.join(rest).to_string_lossy().into_owned(),
             (None, Some(home)) if path == "~" => home.to_string_lossy().into_owned(),
@@ -58,15 +38,11 @@ fn parse_entry(entry: &str) -> Option<PluginEntry> {
         };
         return (!expanded.is_empty()).then(|| PluginEntry::Sidecar(SidecarSpec(vec![expanded])));
     }
-    // Bare `- name` form: builtin.
+
     let name = unquote(entry);
     (!name.is_empty()).then(|| PluginEntry::Builtin(name.to_string()))
 }
 
-/// Load the ordered [`PluginEntry`] list from a profile file.
-/// This is the boot path: it preserves both builtin and sidecar entries
-/// in file order. Missing file / no `plugins:` section is an error
-/// (callers warn + fall back to builtins).
 pub fn load_entries(path: &str) -> anyhow::Result<Vec<PluginEntry>> {
     let text = std::fs::read_to_string(path)?;
     let mut entries = Vec::new();

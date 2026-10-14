@@ -109,7 +109,7 @@ fn thinking_budget_fits_under_max_tokens_and_drops_sampling() {
     assert_eq!(v["thinking"]["budget_tokens"], 16384);
     assert_eq!(v["max_tokens"], 32_000);
     assert!(v.get("temperature").is_none());
-    // The warmer's one-token replay cannot carry a budget: none is sent.
+
     let mut warm = turn();
     warm.max_tokens = Some(1);
     let v = map_request(warm, MODEL, Some("high"), None, None).unwrap();
@@ -196,8 +196,6 @@ fn decoder_maps_the_event_stream() {
 
 #[test]
 fn separate_text_blocks_in_one_message_get_a_blank_line() {
-    // One assistant message, [text][thinking][text]: the second text block
-    // must not glue onto the first (`…now.Sorry…`).
     let events = vec![
         json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
         json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "one"}}),

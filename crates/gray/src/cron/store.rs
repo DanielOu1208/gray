@@ -1,47 +1,26 @@
-//! Persistent job store with atomic at-most-once claim (Task 2).
-//!
-//! Gray-minimal port of the hermes `cron/jobs.py` claim logic: one
-//! load-modify-save pass under `<cron>/.jobs.lock` (same flock + 300s-claim
-//! shape the daemon used), 1200s fire-claim TTL, 120s one-shot grace,
-//! fast-forward of stale recurring jobs. Deliberate deltas vs hermes,
-//! documented at each site:
-//! - owner stamp is `pid:boot-uuid` (no pid-start-time helper in gray; a dead
-//!   process never reuses its boot uuid, which is all the TTL needs).
-//! - no NL weekday schedules, no per-job model/skill overrides (follow-ups).
-
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use crate::cron::schedule::{ONESHOT_GRACE_SECS, Schedule, next_run, parse_schedule};
 
-/// Fire-claim TTL: a live claim blocks re-fire; a stale one is reclaimable
-/// after a crashed ticker; exceeds script + agent deadlines plus delivery margin.
 pub const FIRE_CLAIM_TTL_SECS: i64 = 1200;
-/// Max job name length (keeps the `cron list` table readable).
+
 pub const MAX_NAME_LEN: usize = 50;
-/// Job ids are this many hex chars of a uuid v4.
+
 const JOB_ID_HEX_LEN: usize = 12;
 
-/// Ticker liveness horizon: a heartbeat inside this window means a driver is
-/// running. 5x the 60s tick cadence, so one slow pass never reads as dead.
 pub const TICKER_STALE_SECS: i64 = 300;
 
 pub fn now_secs() -> i64 {
     gray_core::spill::now_secs()
 }
 
-/// Who holds a job while it fires: `at` is epoch seconds, `by` is
-/// `pid:boot-uuid` of the claimant.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Claim {
     pub at: i64,
     pub by: String,
 }
 
-/// Heartbeat left by every tick pass. `kind` names the driver: `serve`, `cli`
-/// (one-shot `gray cron tick`), or `repl` (the in-session thread). Without a
-/// stamp a store cannot tell "nothing is due" from "nobody is ticking", and a
-/// job can sit due forever in silence.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TickStamp {
     pub at: i64,
@@ -49,8 +28,6 @@ pub struct TickStamp {
     pub kind: String,
 }
 
-/// A job that should have fired and did not: `next_run_at` is older than the
-/// liveness horizon, so a ticker that ran recently would have claimed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverdueJob {
     pub id: String,
@@ -58,8 +35,6 @@ pub struct OverdueJob {
     pub next_run_at: i64,
 }
 
-/// Store liveness for the reporting surfaces (`cron list`, `cron add`,
-/// `/cron`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CronHealth {
     pub last_tick: Option<TickStamp>,
@@ -67,7 +42,6 @@ pub struct CronHealth {
 }
 
 impl CronHealth {
-    /// True when a ticker has been seen inside the liveness horizon.
     pub fn ticker_live(&self, now: i64) -> bool {
         self.last_tick
             .as_ref()
@@ -75,7 +49,6 @@ impl CronHealth {
     }
 }
 
-/// Where a finished job's output goes (targets resolve fully in Task 4).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Deliver {
@@ -85,40 +58,29 @@ pub enum Deliver {
     Target(String),
 }
 
-/// Chat the job was created from (drives the default `Origin` delivery).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Origin {
     pub platform: String,
-    /// The origin chat. When it is a session UUID the fire also mirrors its
-    /// output into that transcript, so a reply continues in context; any
-    /// other opaque id is delivery-only (the mirror is skipped, never
-    /// invented as a phantom session).
+
     pub chat: String,
     #[serde(default)]
     pub thread: Option<String>,
-    /// Opaque platform routing token — a Discord channel id, a Telegram
-    /// chat id. gray never interprets it; a platform resolves it to the
-    /// surface a delivery goes to.
+
     #[serde(default)]
     pub route: Option<String>,
 }
 
-/// Lifecycle: `Paused`/`Done` (terminal) never fire; `claim_due` skips them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JobState {
     #[default]
     Active,
-    /// Stale `awaiting_approval` rows from before the request gate was
-    /// removed decode as paused: nothing fires them until the user resumes
-    /// them by hand.
+
     #[serde(alias = "awaiting_approval")]
     Paused,
     Done,
 }
 
-/// Outcome of the last fire. `delivery_failed` (send broke, run was fine) is
-/// distinct from `error` (the run itself broke) — two columns like hermes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RunStatus {
     #[serde(rename = "ok")]
@@ -129,9 +91,6 @@ pub enum RunStatus {
     DeliveryFailed,
 }
 
-/// Bounded recurrence (hermes `repeat`): `times: None` runs forever;
-/// `completed` counts finished fires and retires the job once it reaches
-/// `times`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Repeat {
     #[serde(default)]
@@ -173,8 +132,7 @@ pub struct CronJob {
     pub script: Option<PathBuf>,
     #[serde(default)]
     pub fire_claim: Option<Claim>,
-    /// A reminder: `prompt` is literal text delivered as-is at fire time.
-    /// No script, no skills, no model turn, no tools.
+
     #[serde(default)]
     pub reminder: bool,
     #[serde(default)]
@@ -185,10 +143,6 @@ fn default_enabled() -> bool {
     true
 }
 
-/// Whole-file JSON write via tmp-file + rename (atomic on the same fs), mode
-/// 0600 on unix. Owned here so the store has no cross-crate edge for its
-/// write path — so gray-cron owns this copy.
-/// Do NOT add another copy elsewhere.
 pub fn atomic_write_json(path: &Path, value: &impl serde::Serialize) -> anyhow::Result<()> {
     use std::io::Write as _;
     let body = serde_json::to_string_pretty(value)?;
@@ -197,8 +151,7 @@ pub fn atomic_write_json(path: &Path, value: &impl serde::Serialize) -> anyhow::
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
-    // Unique private tmp: no predictable-name collisions, mode set at
-    // creation (not after a world-readable window), dir synced with data.
+
     let tmp = parent.join(format!(".gray-{}.tmp", uuid::Uuid::new_v4()));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -222,13 +175,6 @@ pub fn atomic_write_json(path: &Path, value: &impl serde::Serialize) -> anyhow::
     result
 }
 
-/// Cross-process mutual exclusion for one load-modify-save pass (same
-/// flock/claim shape the daemon used). Blocking variant: the critical
-/// section is milliseconds long, and the 30s deadline matches hermes
-/// `_JOBS_LOCK_TIMEOUT_SECONDS`. Lock open/timeout/unsupported errors abort
-/// the pass instead of running it unguarded: at-most-once claims require
-/// actual mutual exclusion, and a disabled scheduler is safer than an
-/// approximate one.
 fn with_jobs_lock<T>(lock_path: &Path, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -253,7 +199,7 @@ fn with_jobs_lock<T>(lock_path: &Path, f: impl FnOnce() -> anyhow::Result<T>) ->
             Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
         }
     }
-    // Closing the file releases the lock, including on error/unwind.
+
     f()
 }
 
@@ -307,8 +253,6 @@ fn new_job_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..JOB_ID_HEX_LEN].to_owned()
 }
 
-/// `dir` is the cron dir itself (holds `jobs.json` + `.jobs.lock`), e.g.
-/// `CronStore::open(home.join("cron"))`.
 #[derive(Debug, Clone)]
 pub struct CronStore {
     cron_dir: PathBuf,
@@ -333,10 +277,6 @@ impl CronStore {
         self.cron_dir.join(".last_tick")
     }
 
-    /// Record a tick heartbeat. Every driver writes one per pass — including
-    /// passes that fire nothing, which is precisely the signal that separates
-    /// "nothing due" from "nothing ticking". Callers treat failure as
-    /// best-effort: a missing heartbeat must never stop a job from firing.
     pub fn record_tick(&self, kind: &str) -> anyhow::Result<()> {
         atomic_write_json(
             &self.tick_stamp_path(),
@@ -348,8 +288,6 @@ impl CronStore {
         )
     }
 
-    /// Last heartbeat, if any. Missing or corrupt reads as `None` (warned):
-    /// liveness reporting must never fail a `list`.
     pub fn last_tick(&self) -> anyhow::Result<Option<TickStamp>> {
         let body = match std::fs::read_to_string(self.tick_stamp_path()) {
             Ok(b) => b,
@@ -368,10 +306,6 @@ impl CronStore {
         }
     }
 
-    /// Liveness + overdue jobs for the reporting surfaces. Read-only and
-    /// deliberately not under the jobs lock: a stale read only mislabels a
-    /// line of text, while `list` must not queue behind a job that is busy
-    /// firing.
     pub fn health(&self, now: i64) -> anyhow::Result<CronHealth> {
         let last_tick = self.last_tick()?;
         let mut overdue = Vec::new();
@@ -388,7 +322,7 @@ impl CronStore {
             if let Some(claim) = &job.fire_claim
                 && now.saturating_sub(claim.at) <= FIRE_CLAIM_TTL_SECS
             {
-                continue; // a driver is on it right now
+                continue;
             }
             overdue.push(OverdueJob {
                 id: job.id.clone(),
@@ -399,10 +333,6 @@ impl CronStore {
         Ok(CronHealth { last_tick, overdue })
     }
 
-    /// Raw records; supports the bare array we write plus the `{"jobs": [...]}`
-    /// envelope. Missing/empty reads as empty; anything malformed or
-    /// unreadable is an error — a later save must never silently overwrite a
-    /// corrupt store with just the new record.
     fn load_raw(&self) -> anyhow::Result<Vec<serde_json::Value>> {
         let data = match std::fs::read_to_string(self.jobs_path()) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -423,7 +353,6 @@ impl CronStore {
         }
     }
 
-    /// Parsed jobs; one malformed record warns and skips, never aborts the scan.
     fn parse_jobs(raw: &[serde_json::Value]) -> Vec<CronJob> {
         let mut jobs = Vec::new();
         for v in raw {
@@ -435,8 +364,6 @@ impl CronStore {
         jobs
     }
 
-    /// Write back, substituting updated jobs by id so malformed/unknown records
-    /// survive the pass (poison-proof save to match the poison-proof load).
     fn save_jobs(&self, raw: &mut Vec<serde_json::Value>, jobs: &[CronJob]) -> anyhow::Result<()> {
         for job in jobs {
             let v = serde_json::to_value(job)?;
@@ -451,9 +378,6 @@ impl CronStore {
         atomic_write_json(&self.jobs_path(), raw)
     }
 
-    /// Nine args is the store's creation seam (name/schedule/prompt/deliver/
-    /// origin/workdir/skills/script): one constructor, validated once. Splitting
-    /// it would scatter the atomic insert across call sites.
     #[allow(clippy::too_many_arguments)]
     pub fn add_full(
         &self,
@@ -533,7 +457,6 @@ impl CronStore {
         })
     }
 
-    /// Lookup by id or name (CLI convenience, mirrors the old sidecar).
     pub fn get(&self, id_or_name: &str) -> anyhow::Result<Option<CronJob>> {
         let lock = self.lock_path();
         with_jobs_lock(&lock, || {
@@ -560,13 +483,6 @@ impl CronStore {
         })
     }
 
-    /// Claim all due jobs for `owner` in one pass (poison-proof): skip
-    /// disabled/paused/done, skip live claims (reclaim claims older than
-    /// [`FIRE_CLAIM_TTL_SECS`]), skip the not-yet-due, retire missed
-    /// one-shots (never fire), and stamp + advance everything else.
-    /// Stale recurring jobs fast-forward (`next_run_at` jumps past now) but
-    /// STILL fire once now — no grace branch is needed because stale and fresh
-    /// recurring jobs behave identically. Single save at end.
     pub fn claim_due(&self, now: i64, owner: &str) -> anyhow::Result<Vec<CronJob>> {
         self.claim_due_limited(now, owner, usize::MAX, &[])
     }
@@ -590,10 +506,7 @@ impl CronStore {
                 if !job.enabled || job.state != JobState::Active {
                     continue;
                 }
-                // A live claim blocks re-claim. A claim older than the TTL is a
-                // crashed worker (mark_done always clears on completion): reclaim
-                // it once, loudly, for this owner. At-most-once is preserved for
-                // any claimant whose claim is younger than the TTL.
+
                 if let Some(claim) = &job.fire_claim {
                     if now.saturating_sub(claim.at) <= FIRE_CLAIM_TTL_SECS {
                         continue;
@@ -608,7 +521,7 @@ impl CronStore {
                     dirty = true;
                 }
                 if matches!(job.schedule, Schedule::Once { .. }) && job.last_run_at.is_some() {
-                    continue; // completed one-shot, retained for inspection
+                    continue;
                 }
                 let next = match job.next_run_at {
                     Some(n) => n,
@@ -636,7 +549,7 @@ impl CronStore {
                         job.state = JobState::Done;
                         job.last_error = Some("missed one-shot window".to_string());
                         dirty = true;
-                        continue; // retire, never fire
+                        continue;
                     }
                 } else {
                     match next_run(now, &job.schedule) {
@@ -663,14 +576,6 @@ impl CronStore {
         })
     }
 
-    /// Record a fire outcome: clears the claim, stamps status + timestamps. A
-    /// finished one-shot goes terminal (`Done`) so it is retained but never
-    /// re-fires. `DeliveryFailed` writes the delivery column, anything else the
-    /// run column (hermes parity).
-    /// Pause (`paused=true` → `Paused`) or resume (`false` → `Active`).
-    /// Resume recomputes `next_run_at` from now so a long-paused job is not
-    /// instantly stale. Returns false when the job is unknown.
-    /// `enabled` is left untouched: `claim_due` already requires both.
     pub fn set_paused(&self, id_or_name: &str, paused: bool) -> anyhow::Result<bool> {
         with_jobs_lock(&self.lock_path(), || {
             let mut raw = self.load_raw()?;
@@ -692,10 +597,6 @@ impl CronStore {
         })
     }
 
-    /// Claim one job by id/name for `owner`, bypassing due-ness (implements
-    /// `gray cron run`). Same guards as `claim_due`: skip disabled/paused/
-    /// done, skip live claims (reclaim past [`FIRE_CLAIM_TTL_SECS`]), retire
-    /// missed one-shots without firing, advance recurring schedules.
     pub fn claim_one(
         &self,
         now: i64,
@@ -782,9 +683,6 @@ impl CronStore {
         })
     }
 
-    /// Edit a job in place under the lock. `f` may reject the change; the
-    /// result is re-validated like a new job, and a schedule edit on an
-    /// active job recomputes `next_run_at`. `Ok(false)` when unknown.
     pub fn update(
         &self,
         id_or_name: &str,

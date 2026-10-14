@@ -4,8 +4,6 @@ fn row_text(l: &Line<'_>) -> String {
     l.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
-/// The live header's headline row (no label or preview: the streamed args
-/// alone), for the partial-args assertions below.
 fn live_row(name: &str, args_so_far: &str) -> Line<'static> {
     format_live_tool_header(name, args_so_far, None, None, None)
         .into_iter()
@@ -19,9 +17,6 @@ fn bash_args(cmd: &str) -> serde_json::Value {
 
 #[test]
 fn bash_heredoc_write_renders_code_then_output() {
-    // Bash-only harness: file writes arrive as heredocs whose bodies the
-    // one-line header never shows. The box must carry the written code
-    // (like the `write` arm) plus the command output.
     let cmd = "cat <<'EOF' > pid.rs\nfn main() {}\nEOF";
     let out = "exit 0 · patched pid.rs";
     let lines =
@@ -74,7 +69,6 @@ fn bash_shell_fence_is_stripped_for_display() {
 
 #[test]
 fn bash_half_fence_from_truncation_still_strips() {
-    // Budget truncation may keep only one half of the fence.
     let open_only = "<untrusted-output task=\"t3\">\npartial body";
     let text: String = format_tool_result_lines_with_context("bash", None, open_only, false, None)
         .iter()
@@ -95,9 +89,6 @@ fn bash_half_fence_from_truncation_still_strips() {
 
 #[test]
 fn bash_header_plus_fence_is_stripped_for_display() {
-    // Real bash shape is header + fence(body), not fence-first:
-    // `exit …` on line 1, opener on line 2, body, closer last.
-    // The old stripper only handled fence-first and leaked the opener.
     let out = "exit 0 \u{00b7} 0.0s \u{00b7} 1 lines \u{00b7} log ~/.gray/shell/nosession/t1.log\n<untrusted-output task=\"t1\">\nhi\n</untrusted-output>";
     let lines = format_tool_result_lines_with_context("bash", None, out, false, None);
     let rendered: String = lines.iter().map(row_text).collect::<Vec<_>>().join("\n");
@@ -111,8 +102,6 @@ fn bash_header_plus_fence_is_stripped_for_display() {
 
 #[test]
 fn bash_promotion_trailer_keeps_body_but_drops_fence() {
-    // Promotion shape: header, fence, trailer after the closer.
-    // Closer is not the last line, so end-anchored stripping missed it.
     let out = "still running after 1s \u{2192} promoted to background as t6 \u{00b7} pid 4242 \u{00b7} log ~/.gray/shell/nosession/t6.log\n<untrusted-output task=\"t6\">\ntick 1\n</untrusted-output>\nshell_output(task_id=\"t6\", from_offset=12) for the rest \u{00b7} next_offset=12";
     let lines = format_tool_result_lines_with_context("bash", None, out, false, None);
     let rendered: String = lines.iter().map(row_text).collect::<Vec<_>>().join("\n");
@@ -133,8 +122,6 @@ fn bash_promotion_trailer_keeps_body_but_drops_fence() {
 
 #[test]
 fn bash_escaped_closer_in_body_is_restored() {
-    // Body containing a literal closer is escaped as `<\\/` by fence();
-    // display should restore the original text, not leak plumbing.
     let out = "exit 0 \u{00b7} 0.0s \u{00b7} 2 lines \u{00b7} log ~/.gray/shell/nosession/t1.log\n<untrusted-output task=\"t1\">\nfirst\n<\\/untrusted-output> tail\n</untrusted-output>";
     let lines = format_tool_result_lines_with_context("bash", None, out, false, None);
     let rendered: String = lines.iter().map(row_text).collect::<Vec<_>>().join("\n");
@@ -158,7 +145,7 @@ fn bash_caps_long_output_like_code_blocks() {
         .join("\n");
     let lines = format_tool_result_lines_with_context("bash", None, &out, false, None);
     let first_rows: Vec<String> = lines.iter().map(row_text).collect();
-    // 18 head + 1 omission marker + 6 tail
+
     assert_eq!(lines.len(), 25);
     assert!(
         first_rows.iter().any(|r| r.contains("… +36 lines")),
@@ -168,8 +155,6 @@ fn bash_caps_long_output_like_code_blocks() {
 
 #[test]
 fn ls_caps_home_dir_flooding() {
-    // Screenshot case: `ls ~` with 180 entries dumped literally
-    // everything into the TUI transcript.
     let out: String = (1..=180)
         .map(|i| format!("entry-{i}"))
         .collect::<Vec<_>>()
@@ -205,9 +190,6 @@ fn bash_html_is_split_one_tag_per_line() {
 
 #[test]
 fn render_code_block_608_line_file_has_unique_gutters() {
-    // Screenshot case: a 608-line Write box painted head rows on the
-    // left and tail rows AGAIN on the right. Gutter numbers must each
-    // appear exactly once: 1..=18 head, 603..=608 tail.
     let mut src: Vec<String> = vec![
         "<!DOCTYPE html>".to_string(),
         "<html lang=\"en\">".to_string(),
@@ -253,7 +235,7 @@ fn render_code_block_cap_unchanged() {
         .collect::<Vec<_>>()
         .join("\n");
     let lines = render_code_block(&content, None);
-    // 18 head + 1 omission marker + 6 tail
+
     assert_eq!(lines.len(), 25);
     assert!(row_text(&lines[18]).contains("… +26 lines"));
 }
@@ -296,8 +278,6 @@ fn live_header_garbage_never_panics_and_names_tool() {
 
 #[test]
 fn live_header_huge_raw_still_streams_prefix() {
-    // No 1MB Box: oversized partials cap the extracted scalar, the header
-    // still streams from the same prefix the final card truncates to.
     let big = format!(r#"{{"command":"{}"#, "x".repeat(9000));
     let full = format!(r#"{{"command":"{}"}}"#, "x".repeat(9000));
     let v: serde_json::Value = serde_json::from_str(&full).unwrap();
@@ -307,22 +287,14 @@ fn live_header_huge_raw_still_streams_prefix() {
     );
 }
 
-/// The reported crash: a bash command whose first line carries multi-byte
-/// text (here the `🟠` from a pasted PR review) straddling byte offset 80.
-/// `truncate_cmd` used to byte-slice at a fixed 80 and panic the whole
-/// REPL mid-stream. It must cut on a char boundary at 80 cells instead.
 #[test]
 fn truncate_cmd_never_splits_a_multibyte_char() {
-    // 79 ASCII bytes, then the 4-byte emoji at bytes 79..83 — the exact
-    // geometry of the reported panic.
     let head = "114.3k/300k · 0.0% cache ";
     assert_eq!(head.len(), 26);
     let pad = "x".repeat(53);
     let cmd = format!("{head}{pad}\u{1f7e0} High · up to 553c7cd\nsecond line");
     let cut = super::truncate_cmd(&cmd);
-    // The old code byte-sliced at 80 and died here; the cut must land on a
-    // char boundary, be a prefix, and fit 80 cells (bytes may exceed 80 —
-    // cells are what the terminal renders).
+
     assert!(cmd.is_char_boundary(cut.len()), "cut mid-char");
     assert!(cmd.starts_with(cut), "cut is not a prefix: {cut:?}");
     assert!(
@@ -330,7 +302,7 @@ fn truncate_cmd_never_splits_a_multibyte_char() {
         "cut not within 80 cells: {} cells",
         crate::text_width::display_width(cut)
     );
-    // Only the first line is ever shown.
+
     assert!(!cut.contains("second line"));
 }
 
@@ -345,10 +317,10 @@ fn truncate_cmd_ascii_still_cuts_at_exactly_80() {
 #[test]
 fn truncate_cmd_short_and_wide_text_is_untouched() {
     assert_eq!(super::truncate_cmd("echo hi"), "echo hi");
-    // Under the cap: no cut at all, multi-byte or not.
+
     let wide = "café ☕ ok";
     assert_eq!(super::truncate_cmd(wide), wide);
-    // Wide text now fills the same 80 cells (4x more chars than a byte cut).
+
     let cjk = "日本語".repeat(40);
     let cut = super::truncate_cmd(&cjk);
     assert_eq!(
@@ -358,8 +330,6 @@ fn truncate_cmd_short_and_wide_text_is_untouched() {
     );
 }
 
-/// The live-header path is where the crash surfaced (streaming bash args),
-/// so drive the real entry point with the same shape.
 #[test]
 fn live_bash_header_survives_multibyte_command() {
     let head = "Merge Risk: _";
@@ -431,9 +401,6 @@ fn web_fetch_renders_a_verb_with_the_url() {
 
 #[test]
 fn web_search_body_renders_like_bash() {
-    // Screenshot case: each `web_search` was a header-only dark card.
-    // The sidecar returns JSON; the card must render the results as
-    // readable numbered lines, not bare JSON and not an empty body.
     let out = r#"{"provider":"bing","results":[{"title":"t","url":"https://example.com","snippet":"hi"}]}"#;
     let lines = format_tool_result_lines_with_context("web_search", None, out, false, None);
     assert!(
@@ -451,8 +418,6 @@ fn web_search_body_renders_like_bash() {
 
 #[test]
 fn web_fetch_body_renders_like_bash() {
-    // Same header-only bug for `web_fetch`: fetched text never reached
-    // the card. Plain text must render numbered like bash output.
     let out = "line one\nline two";
     let lines = format_tool_result_lines_with_context("web_fetch", None, out, false, None);
     assert!(
@@ -469,7 +434,6 @@ fn web_fetch_body_renders_like_bash() {
 
 #[test]
 fn web_search_caps_long_output_like_bash() {
-    // Non-JSON output falls back to the generic path and caps like bash.
     let out: String = (1..=60)
         .map(|i| format!("result {i}"))
         .collect::<Vec<_>>()
@@ -530,9 +494,6 @@ fn web_fetch_decodes_entities_and_keeps_unknown_literal() {
 
 #[test]
 fn web_fetch_giant_line_is_char_truncated_not_row_flooded() {
-    // One ~5000-char line used to wrap into hundreds of rows (the 40-line
-    // cap counts raw lines, not wrapped rows); the body is cut to ~2000
-    // chars with a `… +N chars` marker instead.
     let out = "word ".repeat(1000);
     let lines = format_tool_result_lines_with_context("web_fetch", None, &out, false, None);
     let text: String = lines.iter().map(row_text).collect::<Vec<_>>().join("\n");
@@ -547,7 +508,6 @@ fn web_fetch_giant_line_is_char_truncated_not_row_flooded() {
 
 #[test]
 fn web_search_many_results_hit_the_omission_marker() {
-    // 20 results → 60 body lines → bash-style 18-head/6-tail cap.
     let results: Vec<String> = (1..=20)
         .map(|i| {
             format!(r#"{{"title":"title {i}","url":"https://r{i}.example","snippet":"s{i}"}}"#)
@@ -578,8 +538,6 @@ fn an_unknown_tool_humanizes_its_name_and_shows_args() {
 
 #[test]
 fn plugin_preview_path_renders_first_string_at_that_path() {
-    // The declared dot path arrives as the separate display param — wire
-    // args carry only real arguments, never the display directive.
     let args = serde_json::json!({"document": {"title": "  ## Hello  "}});
     let text = row_text(&format_tool_call_header(
         "some_surface_tool",
@@ -619,7 +577,6 @@ fn plugin_preview_path_missing_falls_back_to_generic_dump() {
 
 #[test]
 fn unknown_tool_surfaces_first_string_arg_and_flags_the_rest() {
-    // `recall` with only filters set reads like the CLI, not a JSON dump.
     let args = serde_json::json!({"all": true, "limit": 10});
     let text = row_text(&format_tool_call_header("recall", &args, None, None));
     assert!(text.contains("recall"), "headline missing: {text:?}");
@@ -627,7 +584,6 @@ fn unknown_tool_surfaces_first_string_arg_and_flags_the_rest() {
     assert!(text.contains("limit=10"), "scalar missing: {text:?}");
     assert!(!text.contains("all=true"), "raw bool leaked: {text:?}");
 
-    // A search-shaped call leads with the query string.
     let args = serde_json::json!({"query": "wifi password", "all": true, "limit": 5});
     let text = row_text(&format_tool_call_header("recall", &args, None, None));
     assert!(
@@ -685,8 +641,7 @@ fn unknown_tools_humanize_and_labels_override() {
 fn live_header_streams_plugin_scalars() {
     let text = row_text(&live_row("web_search", r#"{"query":"LibreWolf AppI"#));
     assert!(text.contains("LibreWolf AppI"), "got {text:?}");
-    // Unknown plugin tools stream a scalar too: the fallback guesses the
-    // headline key from the buffer (`path` beats `pattern`/`command`).
+
     let text = row_text(&live_row("my_surface_tool", r#"{"path":"/tmp/gra"#));
     assert!(text.contains("/tmp/gra"), "got {text:?}");
 }
@@ -703,8 +658,6 @@ fn a_cut_bash_header_ends_in_an_ellipsis() {
     let short = serde_json::json!({"command": "make"});
     assert!(row_text(&format_tool_call_header("bash", &short, None, None)).ends_with("Ran make"));
 }
-
-// --- bash: one tool, five actions; headers say which, jobs go by name. ---
 
 fn header(args: serde_json::Value) -> String {
     row_text(&format_tool_call_header("bash", &args, None, None))
@@ -727,7 +680,7 @@ fn a_run_header_shows_the_command_without_its_setup() {
         text.ends_with("Ran cargo check -p gray-provider --tests \u{00b7} ~/wt/provider-chat"),
         "{text:?}"
     );
-    // Setup that could do work is never hidden.
+
     let risky = header(serde_json::json!({"command": "rm -rf build && cargo check"}));
     assert!(
         risky.ends_with("Ran rm -rf build && cargo check"),
@@ -832,7 +785,7 @@ fn a_finished_job_drops_its_id_line_and_keeps_the_output() {
     );
     assert!(text.contains("exit 0"), "{text:?}");
     assert!(text.contains("error[E0308]"), "{text:?}");
-    // Command output is never rewritten, even when it looks like a hint.
+
     assert!(
         text.contains("Continue other work is fine inside output"),
         "{text:?}"
@@ -884,8 +837,6 @@ fn an_error_lines_up_with_numbered_output() {
 
 #[test]
 fn an_unknown_tool_renders_its_args_verbatim() {
-    // Plugin tools get no hard-coded rendering: the wire name humanizes and
-    // the args print as they arrived — markup stays literal.
     let args = serde_json::json!({"content": "**updated**"});
     let text = row_text(&format_tool_call_header(
         "my_channel_send",
@@ -896,8 +847,6 @@ fn an_unknown_tool_renders_its_args_verbatim() {
     assert!(text.contains("My Channel Send"), "name missing: {text:?}");
     assert!(text.contains("**updated**"), "arg missing: {text:?}");
 }
-
-// --- bash: read-only commands say what they looked at, not "Ran". ---
 
 #[test]
 fn read_only_commands_name_what_they_looked_at() {
@@ -964,7 +913,7 @@ fn a_view_drops_the_shown_echo_but_keeps_its_notes() {
     assert_eq!(body(args.clone(), "Shown: /tmp/a.png"), "");
     let noted = body(args, "Shown: /tmp/a.png; skipped: /tmp/b.png: no such file");
     assert!(noted.contains("skipped"), "{noted:?}");
-    // The same line from a non-view command is real output.
+
     let echo = body(serde_json::json!({"command": "make"}), "Shown: x");
     assert!(echo.contains("Shown: x"), "{echo:?}");
 }
@@ -977,7 +926,7 @@ fn noop_commands_read_as_skipped_not_ran() {
         assert!(text.ends_with("no-op, nothing ran"), "{text:?}");
         assert!(!text.contains("Ran"), "{text:?}");
     }
-    // Real work that merely starts with echo still reads as Ran.
+
     for cmd in ["echo x > f", "true && make"] {
         let text = header(serde_json::json!({"command": cmd}));
         assert!(text.contains("Ran "), "{text:?}");
@@ -1009,8 +958,6 @@ fn discord_send_preview_strips_pairs_but_keeps_singles() {
     }
 }
 
-// ── Template `preview` (plugin manifests) ─────────────────────────────────
-
 fn spawn_args() -> serde_json::Value {
     serde_json::json!({
         "name": "e2e-theme",
@@ -1020,8 +967,6 @@ fn spawn_args() -> serde_json::Value {
     })
 }
 
-/// The footer's short model name, read from the real helper so these
-/// assertions follow gray's display logic instead of a copy of it.
 fn short_model_name(id: &str) -> String {
     let friendly = crate::setup::friendly_model_name(id);
     friendly
@@ -1047,7 +992,7 @@ fn template_renders_headline_suffix_and_second_line() {
         row_text(&lines[1]).starts_with(indent.as_str()),
         "second line not under the headline text: {lines:?}"
     );
-    // The template owns the suffix: no raw `k=v` dump after the headline.
+
     assert!(
         !row_text(&lines[0]).contains("name="),
         "dump leaked: {lines:?}"
@@ -1056,7 +1001,7 @@ fn template_renders_headline_suffix_and_second_line() {
         !row_text(&lines[0]).contains("prompt"),
         "dump leaked: {lines:?}"
     );
-    // The single-line header is line one, so every surface shows one headline.
+
     assert_eq!(
         row_text(&format_tool_call_header(
             "subagent_spawn",
@@ -1077,7 +1022,7 @@ fn template_headline_falls_back_to_the_humanized_name() {
 #[test]
 fn template_drops_segments_whose_placeholders_are_all_empty() {
     let args = serde_json::json!({"name": "e2e-theme", "model": "claude-haiku-5-5"});
-    // `{effort}` is missing: its segment goes, literal text and all.
+
     assert_eq!(
         render_template(&args, "{name} · {model|model} · effort {effort}"),
         (
@@ -1085,13 +1030,12 @@ fn template_drops_segments_whose_placeholders_are_all_empty() {
             None
         )
     );
-    // A literal-only segment always survives; literal text beside an empty
-    // placeholder does not.
+
     assert_eq!(
         render_template(&args, "Started · run {name} · tier ({effort})"),
         ("Started · run e2e-theme".to_string(), None)
     );
-    // Nothing resolves: the whole template is empty.
+
     assert_eq!(
         render_template(&args, "{missing} · ({also})"),
         (String::new(), None)
@@ -1114,13 +1058,13 @@ fn template_filters_model_firstline_and_unknown_filters() {
         render_template(&args, "{prompt|firstline}").0,
         "first real line"
     );
-    // The first line is capped at the header budget (80 cells) with `…`.
+
     let long = render_template(&args, "{long|firstline}").0;
     assert_eq!(long.chars().count(), 81, "not capped: {long:?}");
     assert!(long.ends_with('\u{2026}'), "no ellipsis: {long:?}");
-    // An unknown filter reads as no filter.
+
     assert_eq!(render_template(&args, "{name|shout}").0, "e2e-theme");
-    // A plain placeholder stays on one line: the value's own breaks become spaces.
+
     assert_eq!(
         render_template(&args, "{prompt}").0,
         "first real line second line"
@@ -1155,12 +1099,12 @@ fn template_second_line_splits_on_either_break_and_omits_empty() {
         render_template(&args, "{name}\n{missing}"),
         ("e2e".to_string(), None)
     );
-    // A later break reads as a space, never as a third line.
+
     assert_eq!(
         render_template(&args, "{name}\n{prompt}\\n{name}"),
         ("e2e".to_string(), Some("do it e2e".to_string()))
     );
-    // A break inside a value is not a break in the template.
+
     assert_eq!(render_template(&args, "{p}"), ("a b".to_string(), None));
 }
 
@@ -1178,7 +1122,6 @@ fn template_preview_flattens_for_json_and_dot_paths_stay_put() {
 
 #[test]
 fn dot_path_preview_header_is_unchanged() {
-    // Byte-for-byte the pre-template header: one line, quoted value.
     let args = serde_json::json!({"document": {"title": "## Hello"}});
     let lines = format_tool_call_lines("some_surface_tool", &args, None, Some("document.title"));
     assert_eq!(lines.len(), 1, "a dot path adds no second line");
@@ -1223,8 +1166,6 @@ fn row_texts(lines: &[Line<'_>]) -> Vec<String> {
 
 #[test]
 fn manifest_label_beats_a_wire_label_arg() {
-    // A wire arg named `label` must not shadow the manifest headline. The
-    // display copy is what changes; the caller's args stay as sent.
     let args = serde_json::json!({"label": "wire-value", "name": "x"});
     let lines = format_tool_card_lines("my_tool", &args, None, Some("Manifest Label"), None);
     let head = row_text(&lines[0]);
@@ -1235,7 +1176,6 @@ fn manifest_label_beats_a_wire_label_arg() {
 
 #[test]
 fn live_header_with_label_and_template_matches_the_final_card() {
-    // Complete args: the live card and the final card render the same rows.
     let raw = r#"{"name":"e2e-theme","model":"claude-haiku-5-5","effort":"max","prompt":"verify the theme fixes\nmore"}"#;
     let v: serde_json::Value = serde_json::from_str(raw).unwrap();
     let spec = "{name} · {model|model} · {effort}\n{prompt|firstline}";

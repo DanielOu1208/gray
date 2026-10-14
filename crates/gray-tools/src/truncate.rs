@@ -1,5 +1,3 @@
-//! Truncation utilities — limits tool output to 2000 lines / 12 KiB (same budget as `tool_out`). Keeps the *first* N lines/bytes.
-
 pub const DEFAULT_MAX_LINES: usize = 2000;
 pub const DEFAULT_MAX_BYTES: usize = 12 * 1024;
 
@@ -9,7 +7,6 @@ pub struct TruncationResult {
     pub truncated: bool,
 }
 
-/// Human-readable byte size (mirrors `formatSize` in pi).
 pub fn format_size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes}B")
@@ -20,7 +17,6 @@ pub fn format_size(bytes: usize) -> String {
     }
 }
 
-/// Append the standard `[a. b]` notice block to `output` when non-empty.
 pub fn append_notices(output: &mut String, notices: &[String]) {
     if !notices.is_empty() {
         output.push_str("\n\n[");
@@ -40,9 +36,6 @@ fn split_lines_for_counting(content: &str) -> Vec<&str> {
     lines
 }
 
-/// Keep the first `DEFAULT_MAX_LINES` / `DEFAULT_MAX_BYTES` of `content`,
-/// never splitting a line. Byte counting is UTF-8 length + 1 per newline
-/// (matching `Buffer.byteLength` in TS).
 pub fn truncate_head(content: &str) -> TruncationResult {
     let max_lines = DEFAULT_MAX_LINES;
     let max_bytes = DEFAULT_MAX_BYTES;

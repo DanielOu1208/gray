@@ -6,7 +6,7 @@ fn b64_decode_standard_vectors() {
     assert_eq!(b64_decode("Zg==").unwrap(), b"f");
     assert_eq!(b64_decode("Zm9v").unwrap(), b"foo");
     assert_eq!(b64_decode("Zm9vYmFy").unwrap(), b"foobar");
-    // 64-byte digest shape (sha512 length) round-trips.
+
     let raw: Vec<u8> = (0..64).collect();
     let enc = base64::engine::general_purpose::STANDARD.encode(&raw);
     assert_eq!(b64_decode(&enc).unwrap(), raw);
@@ -27,11 +27,8 @@ fn refuses_plain_http_remote() {
     assert!(check_url("http://localhost:9/x.tar.gz").is_ok());
 }
 
-/// Minimal stored-ZIP builder (method selectable per file).
-
 #[test]
 fn rejects_dotdot_entries() {
-    // Hand-crafted ustar (the tar builder itself refuses `..` at write time).
     fn evil_tar_gz(name: &str) -> Vec<u8> {
         use std::io::Write;
         let mut hdr = [0u8; 512];
@@ -65,12 +62,11 @@ fn rejects_dotdot_entries() {
 #[test]
 fn tar_rejects_lying_size_and_special_entries() {
     use std::io::Write;
-    // Header claims >256 MiB while carrying 4 bytes: must fail before
-    // writing anything.
+
     let mut hdr = [0u8; 512];
     hdr[..8].copy_from_slice(b"big.bin\0");
     hdr[100..108].copy_from_slice(b"0000777\0");
-    hdr[124..136].copy_from_slice(b"20000000001\0"); // 2*8^9+1 > 256 MiB
+    hdr[124..136].copy_from_slice(b"20000000001\0");
     hdr[148..156].copy_from_slice(b"        ");
     hdr[156] = b'0';
     hdr[257..262].copy_from_slice(b"ustar");
@@ -89,7 +85,7 @@ fn tar_rejects_lying_size_and_special_entries() {
     let dest = dir.path().join("out");
     assert!(unpack_tar_gz(&archive, &dest).is_err());
     assert!(!dest.join("big.bin").exists());
-    // Symlink entries are unsupported, even in-workspace ones.
+
     let mut ar_bytes = Vec::new();
     {
         let mut ar = tar::Builder::new(&mut ar_bytes);
@@ -141,7 +137,7 @@ fn tar_gz_refuses_windows_drive_prefixed_entries() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out");
     let archive = dir.path().join("a.tar.gz");
-    // Reuse the hand-crafted ustar writer from rejects_dotdot_entries.
+
     fn evil_tar_gz(name: &str) -> Vec<u8> {
         use std::io::Write;
         let mut hdr = [0u8; 512];

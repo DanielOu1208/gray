@@ -1,6 +1,3 @@
-//! Backdrop dim is carried by the color map, not just SGR faint:
-//! terminals that ignore `Modifier::DIM` (web UIs, some GPU terms) must
-//! still see the background drop behind modals.
 use gray::composer::build_welcome_lines;
 use gray::setup::{BackgroundSnapshot, dim_color, render_dimmed_background};
 
@@ -62,7 +59,7 @@ fn backdrop_input_arrow_fg_is_color_dimmed() {
 fn backdrop_footer_fg_is_color_dimmed() {
     let theme = gray::theme::theme();
     let buf = draw_bg(150, 45);
-    // footer row carries the cache readout; find its cells by content
+
     let area = buf.area;
     let mut found = 0;
     for y in 0..area.height {

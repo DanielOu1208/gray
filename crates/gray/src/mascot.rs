@@ -1,50 +1,25 @@
-//! The graychan mascot: the anime art, painted into the terminal as
-//! half-blocks. `/hehe` only — the welcome screen stays the plain ASCII
-//! logo unless the user asks for graychan.
-//!
-//! One character cell carries two vertical pixels — `▀` takes the top
-//! pixel as its foreground and the bottom pixel as its background — so a
-//! truecolor terminal shows the art at the full cell grid with no graphics
-//! protocol and no extra dependency beyond the `image` crate the view tool
-//! already uses. Non-truecolor terminals (`NO_COLOR`) and tiny terminals
-//! decline it, so the art never degenerates into escape-code soup.
-
 use std::io::{IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-/// Upper half block: top pixel becomes the glyph's fg, bottom pixel its bg.
 const BLOCK: char = '\u{2580}';
 
-/// One horizontal same-color cell run: top RGB, bottom RGB, width in cells.
 type MascotRun = ((u8, u8, u8), (u8, u8, u8), usize);
 
-/// The mascot, cropped to its content box and downscaled to 1024px wide
-/// (the original is 4082px): wide enough for any terminal, small enough to
-/// `include_bytes!` at ~330 KB. Aspect 1024:902 is preserved at render time.
 const MASCOT_PNG: &[u8] = include_bytes!("../assets/graychan.png");
 
-/// `/hehe` toggle state: graychan is in the transcript (`true`) vs the
-/// default gray ASCII banner (`false`). Process-wide because the composer
-/// and the piped path are two skins of the same session and both need the
-/// toggle. Nothing in the default render path reads it, so the startup
-/// screen never depends on it.
 static MASCOT_SHOWN: AtomicBool = AtomicBool::new(false);
 
-/// Is the graychan art currently in the transcript?
 pub(crate) fn mascot_shown() -> bool {
     MASCOT_SHOWN.load(Ordering::Relaxed)
 }
 
-/// Record whether the graychan art is in the transcript.
 pub(crate) fn set_mascot_shown(shown: bool) {
     MASCOT_SHOWN.store(shown, Ordering::Relaxed);
 }
 
-/// Decoded + rescaled mascot: `cols` cell columns, `rows` cell rows, and an
-/// RGB buffer of `cols * rows * 2` pixels (two pixel rows per cell row).
 pub(crate) struct MascotGrid {
     cols: usize,
     rows: usize,
@@ -57,9 +32,6 @@ impl MascotGrid {
         (self.px[i], self.px[i + 1], self.px[i + 2])
     }
 
-    /// Horizontal same-color runs of one cell row as `(top, bottom, width)`.
-    /// Both renderers walk this so the run merging lives in one place: the
-    /// white margins cost a single styled run, not one span per column.
     fn runs(&self, row: usize) -> Vec<MascotRun> {
         let mut out = Vec::new();
         let mut x = 0;
@@ -79,7 +51,6 @@ impl MascotGrid {
         out
     }
 
-    /// Cell rows as half-block lines, each row prefixed with `pad` spaces.
     fn lines(&self, pad: usize) -> Vec<Line<'static>> {
         let mut out = Vec::with_capacity(self.rows);
         for row in 0..self.rows {
@@ -101,12 +72,6 @@ impl MascotGrid {
     }
 }
 
-/// Decodes and rescales the mascot to a half-block grid that fits
-/// `term_cols` x `term_rows`. The grid takes every column it can use but
-/// keeps 9 rows of headroom so the version banner and the input viewport
-/// stay on screen under it (a fully visible mascot beats a scrolled one).
-/// Too-small terminals (or an undecodable asset) yield `None` — the caller
-/// then falls back to the ASCII logo.
 pub(crate) fn decode_grid(term_cols: u16, term_rows: u16) -> Option<MascotGrid> {
     let cols = term_cols as usize;
     let rows = term_rows as usize;
@@ -144,10 +109,6 @@ pub(crate) fn decode_grid(term_cols: u16, term_rows: u16) -> Option<MascotGrid> 
     })
 }
 
-/// Mascot lines for a terminal of `term_cols` x `term_rows`, horizontally
-/// centered within `center_in` columns (the transcript width). Returns
-/// `None` when the terminal can't show it (`NO_COLOR`, too small) so the
-/// caller can say so instead of drawing nothing.
 pub(crate) fn mascot_lines(
     term_cols: u16,
     term_rows: u16,
@@ -159,8 +120,6 @@ pub(crate) fn mascot_lines(
     mascot_lines_unchecked(term_cols, term_rows, center_in)
 }
 
-/// The grid→lines render without the `NO_COLOR` gate — tests and callers
-/// that have already decided the terminal can paint.
 fn mascot_lines_unchecked(
     term_cols: u16,
     term_rows: u16,
@@ -174,9 +133,6 @@ fn mascot_lines_unchecked(
     Some(grid.lines(pad))
 }
 
-/// Paints the mascot straight to stdout as ANSI half-blocks (the non-composer
-/// path: piped/`-p` runs where no TUI owns the terminal). Returns `false`
-/// when nothing was drawn so callers can explain why.
 pub(crate) fn print_mascot() -> bool {
     if !std::io::stdout().is_terminal() {
         return false;
@@ -211,10 +167,6 @@ pub(crate) fn print_mascot() -> bool {
     true
 }
 
-/// The piped `/hehe` toggle: graychan while it is off, the plain ASCII
-/// logo when it is on again (the revert). Returns false when graychan
-/// can't be painted (no tty, `NO_COLOR`, tiny terminal), which also leaves
-/// the toggle off so the next press tries again.
 pub(crate) fn print_banner() -> bool {
     if mascot_shown() {
         set_mascot_shown(false);

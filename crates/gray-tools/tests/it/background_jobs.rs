@@ -1,8 +1,3 @@
-//! Real shell processes, file barriers, and the production registry/agent
-//! path. The model-facing surface is `command` + `timeout`: a command that
-//! outlives its timeout becomes a background job (never killed), the model
-//! peeks with `tail`, stops it with the advertised `kill -- -<pgid>`, and is
-//! woken by a notification when it finishes.
 use gray_core::agent::{Tool, ToolContext, ToolExecutor, ToolOutput};
 use gray_tools::{BashTool, Registry};
 use serde_json::{Value, json};
@@ -18,7 +13,6 @@ fn ctx(dir: &Path) -> ToolContext {
     }
 }
 
-/// The job id from a hand-off notice (`still running · job <id> · …`).
 fn job_id(out: &ToolOutput) -> String {
     assert!(!out.is_error, "{}", out.content);
     assert!(out.content.starts_with("still running"), "{}", out.content);
@@ -32,7 +26,6 @@ fn job_id(out: &ToolOutput) -> String {
         .into()
 }
 
-/// The log path from a hand-off notice's first line.
 fn log_path(out: &ToolOutput) -> String {
     out.content
         .lines()
@@ -44,7 +37,6 @@ fn log_path(out: &ToolOutput) -> String {
         .to_string()
 }
 
-/// The in-band stop command a hand-off notice advertises.
 fn stop_command(out: &ToolOutput) -> String {
     out.content
         .split("Stop: `")
@@ -86,8 +78,7 @@ async fn timed_out_commands_keep_running_and_other_work_proceeds() {
     let reg = Registry::new(vec![Arc::new(BashTool::default())]);
     let mut ids = vec![];
     let mut logs = vec![];
-    // Each job waits until all three are running: a timeout that killed, or
-    // a call that blocked to completion, cannot pass this barrier.
+
     for n in 0..3 {
         let out = tokio::time::timeout(Duration::from_secs(10), reg.execute(&ctx, "bash", json!({
             "command": format!("echo early-{n}; touch ready{n}; while [ ! -f release ]; do sleep 0.05; done; echo done-{n}; exit {n}"),
@@ -120,10 +111,6 @@ async fn timed_out_commands_keep_running_and_other_work_proceeds() {
         .collect();
     assert_eq!(listed, ids, "oldest first, for /jobs");
 
-    // Other work runs normally, and names the running jobs at the end.
-    // `release` must NOT be touched here: on a slow runner a job can observe
-    // it and exit before the still-going listing is snapshotted, which made
-    // the assertion below flaky on the macOS/Windows runners.
     let other = reg
         .execute(&ctx, "bash", json!({"command": "echo independent | cat"}))
         .await;
@@ -160,8 +147,6 @@ async fn timed_out_commands_keep_running_and_other_work_proceeds() {
 
 #[tokio::test]
 async fn the_turn_end_wake_fires_when_a_job_finishes() {
-    // Headless `-p` holds the turn on this, so a run that handed work off
-    // does not exit and orphan it.
     let dir = tempfile::tempdir().unwrap();
     let ctx = ctx(dir.path());
     let reg = Registry::new(vec![Arc::new(BashTool::default())]);
@@ -215,8 +200,7 @@ async fn removed_arguments_and_their_aliases_fail_loudly_and_never_spawn() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = ctx(dir.path());
     let reg = Registry::new(vec![Arc::new(BashTool::default())]);
-    // Aliases other harnesses use normalize onto the removed names, so they
-    // fail with the same instruction instead of being silently dropped.
+
     for args in [
         json!({"command": "touch BAD", "background": true}),
         json!({"command": "touch BAD", "run_in_background": "true"}),
@@ -229,9 +213,7 @@ async fn removed_arguments_and_their_aliases_fail_loudly_and_never_spawn() {
         assert!(out.is_error, "{args}: {}", out.content);
         assert!(out.content.contains("remove it"), "{args}: {}", out.content);
     }
-    // Schema-echoed wait/yield windows on a plain run carry no intent —
-    // the call blocks to exit or timeout anyway — so they drop instead of
-    // failing (gpt-6 fills every property; rejecting them looped the turn).
+
     for args in [
         json!({"command": "echo fine | cat", "yield_time_ms": "10000"}),
         json!({"command": "echo fine | cat", "yield_ms": 100}),
@@ -374,7 +356,7 @@ fn runtime_teardown_kills_a_running_background_group() {
         job_id(&out);
         wait_file(&dir.path().join("ready")).await;
     });
-    // Keep the tool alive: cleanup must not depend on Jobs::drop being polled.
+
     drop(runtime);
     std::thread::sleep(Duration::from_millis(4000));
     assert!(!dir.path().join("escaped").exists());
@@ -396,6 +378,6 @@ async fn job_ids_are_named_after_the_command() {
             .await;
         ids.push(job_id(&out));
     }
-    // Readable, and a repeat gets a counter instead of a clash.
+
     assert_eq!(ids, ["sleep", "sleep-2"]);
 }

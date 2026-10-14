@@ -100,13 +100,13 @@ fn editor_words_honour_quotes() {
             .collect::<Vec<_>>(),
         vec!["my editor", "--wait"]
     );
-    // Unterminated quote runs to the end; empties never become tokens.
+
     assert_eq!(
         super::split_editor_words("'unterminated"),
         vec!["unterminated".to_string()]
     );
     assert!(super::split_editor_words("   ").is_empty());
-    // parse_editor_cmd inherits the quoting: a quoted program stays whole.
+
     let (prog, args) = super::parse_editor_cmd(r#""/c/Program Files/ed.exe" -w"#);
     assert_eq!(prog, "/c/Program Files/ed.exe");
     assert_eq!(args, vec!["-w".to_string()]);

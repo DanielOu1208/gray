@@ -1,10 +1,3 @@
-//! Git status for search results (annotations, `git:modified` filters) and
-//! which files your recent commits touched (frecency). A repo's status is read
-//! once with `git status`, then only for the folders FSEvents reports
-//! changed, in the background: a search never waits on git, and a busy repo
-//! costs a pathspec-limited status per change instead of a full one (on
-//! Chromium 0.05-0.13 s vs 7.5 s).
-
 use crate::frecency::decay;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -15,9 +8,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-/// Status bits. Changed in the worktree:
 pub const MODIFIED: u8 = 1;
-/// Changed in the index (staged): also ADDED, RENAMED or DELETED.
+
 pub const STAGED: u8 = 2;
 pub const ADDED: u8 = 4;
 pub const RENAMED: u8 = 8;
@@ -26,7 +18,6 @@ pub const UNTRACKED: u8 = 32;
 pub const IGNORED: u8 = 64;
 pub const CONFLICT: u8 = 128;
 
-/// The word results carry for a status (none when clean).
 pub fn word(s: u8) -> Option<&'static str> {
     Some(match s {
         0 => return None,
@@ -41,10 +32,8 @@ pub fn word(s: u8) -> Option<&'static str> {
     })
 }
 
-/// A `git:` filter (`git:modified`, or a prefix: `git:m`).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Sel {
-    /// Changed in any way: modified, staged, untracked (fff's sense).
     Modified,
     Untracked,
     Staged,
@@ -68,7 +57,6 @@ impl Sel {
         all.into_iter().find(|(n, _)| !v.is_empty() && n.starts_with(v)).map(|(_, s)| s)
     }
 
-    /// Does a file with status `s` (None: in no repo) pass?
     pub fn test(self, s: Option<u8>) -> bool {
         let Some(s) = s else { return false };
         match self {
@@ -82,27 +70,21 @@ impl Sel {
         }
     }
 
-    /// The statuses a snapshot lists: such files can be enumerated. (Clean
-    /// and tracked files aren't listed, so those filters check each hit.)
     pub fn listed(self) -> bool {
         !matches!(self, Sel::Clean | Sel::Tracked)
     }
 }
 
-/// What a repo's status said: paths relative to its root, files and the
-/// folders git reports whole (untracked or ignored, `dir/`).
 #[derive(Default, Clone)]
 pub struct Snap {
     pub files: HashMap<Box<[u8]>, u8>,
     pub dirs: HashMap<Box<[u8]>, u8>,
-    /// Your own commits of the last two months (non-merge, under 50 files
-    /// each) as frecency at `at`: each an open of its files when written.
+
     pub history: HashMap<Box<[u8]>, f32>,
     pub at: u32,
-    /// The commit HEAD was at when `history` was read.
+
     head: Vec<u8>,
-    /// Its config names programs git would run (see `Git::trusted`): no
-    /// status is read.
+
     untrusted: bool,
 }
 
@@ -131,17 +113,15 @@ pub struct Repo {
     pub root: Vec<u8>,
     snap: RwLock<Option<Arc<Snap>>>,
     loaded: (Mutex<bool>, Condvar),
-    /// Changes waiting to be read: folders (relative; true: and all below)
-    /// and whether `.git` changed (index, HEAD, refs).
+
     pending: Mutex<(HashMap<Vec<u8>, bool>, bool)>,
     last_event: AtomicU64,
-    /// When a search last asked (ms): repos unused for a while are dropped.
+
     used: AtomicU64,
     queued: AtomicBool,
 }
 
 impl Repo {
-    /// The latest snapshot, waiting up to `wait` for the first.
     pub fn snap(&self, wait: Duration) -> Option<Arc<Snap>> {
         self.used.store(ms(), Ordering::Relaxed);
         if wait > Duration::ZERO {
@@ -165,27 +145,21 @@ pub struct Git {
     home: Vec<u8>,
     bin: Option<std::path::PathBuf>,
     repos: Mutex<Vec<Arc<Repo>>>,
-    /// Folder → the repo holding it (None: none), as found walking up.
+
     dirs: Mutex<HashMap<Vec<u8>, Option<Arc<Repo>>>>,
     work: Mutex<Sender<Arc<Repo>>>,
 }
 
-/// Changes settle this long before a repo is re-read.
 const QUIET: Duration = Duration::from_millis(100);
-/// A repo no search asked about for this long is dropped (re-read when
-/// asked again), so only repos in use cost anything...
+
 const IDLE_MS: u64 = 20 * 60 * 1000;
-/// ...checked this often while any is held (never, with none: no wakeups).
+
 const IDLE_CHECK: Duration = Duration::from_secs(5 * 60);
-/// A git command still running after this long is killed.
+
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The git command running now (one at a time: the worker's), as its own
-/// process group, until its output is in.
 static RUNNING: AtomicI32 = AtomicI32::new(0);
 
-/// Have SIGTERM and SIGINT stop the running git command too, then the
-/// daemon as before: it would run on, orphaned (a Chromium status, seconds).
 pub fn kill_on_term() {
     extern "C" fn on_term(sig: i32) {
         let p = RUNNING.load(Ordering::Relaxed);
@@ -201,7 +175,7 @@ pub fn kill_on_term() {
         unsafe { libc::signal(sig, on_term as extern "C" fn(i32) as libc::sighandler_t) };
     }
 }
-/// Past this many changed folders at once, re-read the whole repo.
+
 const MAX_PATHSPECS: usize = 2000;
 
 fn ms() -> u64 {
@@ -219,9 +193,6 @@ impl Git {
         g
     }
 
-    /// The repo holding `path` (a file or folder), found walking up from
-    /// its folder (remembered per folder); not one rooted at the home
-    /// folder or `/` (dotfiles: not a project).
     pub fn repo(&self, path: &[u8]) -> Option<Arc<Repo>> {
         self.bin.as_ref()?;
         let dir = &path[..path.iter().rposition(|&b| b == b'/').unwrap_or(0)];
@@ -250,9 +221,6 @@ impl Git {
         found
     }
 
-    /// `repo`, its status read (in the background) if it isn't yet: only
-    /// the repos searches are about get read, never every repo a result
-    /// happens to be in (a full status costs seconds on a big one).
     pub fn load(&self, path: &[u8]) -> Option<Arc<Repo>> {
         let r = self.repo(path)?;
         r.used.store(ms(), Ordering::Relaxed);
@@ -280,24 +248,18 @@ impl Git {
         r
     }
 
-    /// The status of `path`: None if it is in no repo, or one whose status
-    /// isn't read (see `load`).
     pub fn status(&self, path: &[u8]) -> Option<u8> {
         let r = self.repo(path)?;
         let s = r.snap(Duration::ZERO)?;
         Some(s.status(r.rel(path)?))
     }
 
-    /// `path`'s frecency from your commits (`Snap::history`), now; 0 if its
-    /// repo's status isn't read.
     pub fn history(&self, path: &[u8], now: u32) -> f32 {
         let Some(r) = self.repo(path) else { return 0.0 };
         let Some(s) = r.snap(Duration::ZERO) else { return 0.0 };
         r.rel(path).and_then(|rel| s.history.get(rel)).map_or(0.0, |&h| h * decay(now.saturating_sub(s.at)))
     }
 
-    /// The files your commits touched under `dir`, by the history of the
-    /// repo holding it, with their frecency now.
     pub fn history_under(&self, dir: &[u8], now: u32) -> Vec<(Vec<u8>, f32)> {
         let Some(r) = self.repo(&[dir, b"/."].concat()) else { return Vec::new() };
         let Some(s) = r.snap(Duration::ZERO) else { return Vec::new() };
@@ -306,17 +268,11 @@ impl Git {
         paths.filter(|(p, _)| p.starts_with(dir) && p.get(dir.len()) == Some(&b'/')).collect()
     }
 
-    /// Repos already known at or under `dir`.
     pub fn known_under(&self, dir: &[u8]) -> Vec<Arc<Repo>> {
         self.repos.lock().unwrap().iter().filter(|r| r.root.starts_with(dir) && r.root.get(dir.len()).is_none_or(|&b| b == b'/')).cloned().collect()
     }
 
-    /// FSEvents saw these folders change (`Engine::on_change`; true: and
-    /// maybe anything below, as when it lost track of a subtree or of /):
-    /// queue the ones in loaded repos.
     pub fn changed(&self, dirs: &[(&[u8], bool)]) {
-        // A memoized folder that gained or lost a `.git` (git init, rm -rf)
-        // makes the memo stale.
         {
             let mut memo = self.dirs.lock().unwrap();
             let stale = dirs.iter().any(|(d, _)| {
@@ -332,10 +288,9 @@ impl Git {
         let repos = self.repos.lock().unwrap().clone();
         let mut hit: Vec<&Arc<Repo>> = Vec::new();
         for &(d, below) in dirs {
-            // Anything below a folder above a repo: all of the repo.
             let above = |r: &&Arc<Repo>| below && r.root.starts_with(d) && (d.ends_with(b"/") || r.root.get(d.len()) == Some(&b'/'));
             let mut todo: Vec<(&Arc<Repo>, &[u8])> = repos.iter().filter(above).map(|r| (r, &b""[..])).collect();
-            // The deepest repo holding it decides (a nested repo is its own).
+
             todo.extend(repos.iter().filter_map(|r| Some((r, r.rel(d)?))).max_by_key(|(r, _)| r.root.len()));
             for (r, rel) in todo {
                 let mut p = r.pending.lock().unwrap();
@@ -395,8 +350,6 @@ impl Git {
         }
     }
 
-    /// Forget repos no search asked about lately (their status goes stale
-    /// unwatched; they're re-read when asked again).
     fn drop_idle(&self) {
         let now = ms();
         let mut repos = self.repos.lock().unwrap();
@@ -409,8 +362,6 @@ impl Git {
         self.dirs.lock().unwrap().retain(|_, r| r.as_ref().is_none_or(|r| !idle.iter().any(|i| Arc::ptr_eq(i, r))));
     }
 
-    /// Bring a repo's snapshot up to date: all of it the first time, then
-    /// the folders that changed, and the index when `.git` did.
     fn refresh(&self, r: &Repo) {
         let (dirs, head) = std::mem::take(&mut *r.pending.lock().unwrap());
         let old = r.snap.read().unwrap().clone();
@@ -425,7 +376,7 @@ impl Git {
         let first = !std::mem::replace(&mut *r.loaded.0.lock().unwrap(), true);
         r.loaded.1.notify_all();
         if first || t.elapsed() > Duration::from_millis(500) {
-            fsearch::diag(format!("git: read {} in {:.2?}", String::from_utf8_lossy(&r.root), t.elapsed()));
+            fsearch::diag_line(format!("git: read {} in {:.2?}", String::from_utf8_lossy(&r.root), t.elapsed()));
         }
     }
 
@@ -443,31 +394,25 @@ impl Git {
         Some(s)
     }
 
-    /// Whether git can be run in the repo: not if its own config names a
-    /// filter (`git status` runs clean filters on changed files), which
-    /// would then run with the daemon's Full Disk Access. Such a repo gets
-    /// no status.
     fn trusted(&self, root: &[u8]) -> bool {
         let filters = self.run(root, &["config", "--local", "--includes", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"], &[]);
         if filters.as_ref().is_some_and(|f| !f.is_empty()) {
-            fsearch::diag(format!("git: {} configures its own filters; not reading its status", String::from_utf8_lossy(root)));
+            fsearch::diag_line(format!("git: {} configures its own filters; not reading its status", String::from_utf8_lossy(root)));
             return false;
         }
         true
     }
 
-    /// The commit HEAD is at (empty before the first).
     fn head(&self, root: &[u8]) -> Vec<u8> {
         self.run(root, &["rev-parse", "-q", "--verify", "HEAD"], &[]).unwrap_or_default()
     }
 
     fn update(&self, r: &Repo, old: &Snap, dirs: HashMap<Vec<u8>, bool>, head: bool) -> Option<Snap> {
         if old.untrusted {
-            // Until its config changes (`.git` did).
             return if head { self.read_all(r) } else { None };
         }
         let mut s = old.clone();
-        // A changed .gitignore re-decides everything below it.
+
         let mut dirs = dirs;
         for (d, rec) in dirs.iter_mut() {
             let gi = [&r.root[..], b"/", d, if d.is_empty() { b"" } else { b"/" }, b".gitignore"].concat();
@@ -484,9 +429,6 @@ impl Git {
             if *rec {
                 specs.push([b":(literal)", &d[..]].concat());
             } else if d.is_empty() {
-                // The root's own entries, one by one (a folder as itself, not
-                // all below): a `*` there makes git look through every folder
-                // for untracked files (1.5 s on Chromium).
                 for e in std::fs::read_dir(OsStr::from_bytes(&r.root)).into_iter().flatten().flatten() {
                     let name = e.file_name();
                     if name.as_bytes() == b".git" {
@@ -501,10 +443,7 @@ impl Git {
                 specs.push([b":(glob)", &glob_escape(d)[..], b"/*"].concat());
             }
         }
-        // `.git` changed: the files staged now or before, by what the index
-        // holds against HEAD and what the snapshot says (a file staged
-        // again, `git add` after more edits, stays staged but its worktree
-        // is no longer modified); your commits again if HEAD moved.
+
         if head {
             if !self.trusted(&r.root) {
                 return Some(Snap { untrusted: true, ..Snap::default() });
@@ -523,7 +462,7 @@ impl Git {
             return Some(s);
         }
         let found = parse(&self.run(&r.root, &status_args(), &specs)?);
-        // Out with what the pathspecs covered, in with what git says now.
+
         let covered = |p: &[u8]| {
             let parent = &p[..p.iter().rposition(|&b| b == b'/').unwrap_or(0)];
             dirs.iter().any(|(d, rec)| if *rec { d.is_empty() || p == &d[..] || p.starts_with(&[&d[..], b"/"].concat()) } else { parent == &d[..] })
@@ -537,8 +476,6 @@ impl Git {
         Some(s)
     }
 
-    /// See `Snap::history`. By author time (a rebase isn't new work), as
-    /// `user.email`; none without one.
     fn history_of(&self, root: &[u8]) -> (HashMap<Box<[u8]>, f32>, u32) {
         let (mut out, now) = (HashMap::new(), fsearch::query::now_secs());
         let me = self.run(root, &["config", "user.email"], &[]).map(|e| String::from_utf8_lossy(&e).trim().to_string());
@@ -560,10 +497,6 @@ impl Git {
         (out, now)
     }
 
-    /// Run git in `root` (never taking its locks, nor running a program the
-    /// repo's config names: no fsmonitor hook, no signature checks; below
-    /// normal priority, killed after GIT_TIMEOUT); its output if it
-    /// succeeded.
     fn run(&self, root: &[u8], args: &[&str], specs: &[Vec<u8>]) -> Option<Vec<u8>> {
         let mut c = std::process::Command::new(self.bin.as_ref()?);
         c.arg("-C").arg(OsStr::from_bytes(root));
@@ -584,8 +517,7 @@ impl Git {
         let mut child = c.spawn().ok()?;
         RUNNING.store(child.id() as i32, Ordering::Relaxed);
         let mut stdout = child.stdout.take()?;
-        // Read on another thread, so a git that hangs is killed through its
-        // handle before it is waited for (its pid can't have been reused).
+
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut out = Vec::new();
@@ -593,7 +525,7 @@ impl Git {
             let _ = tx.send(out);
         });
         let out = rx.recv_timeout(GIT_TIMEOUT).ok();
-        // Before it's waited for: a signal must never find a reaped pid here.
+
         RUNNING.store(0, Ordering::Relaxed);
         if out.is_none() {
             let _ = child.kill();
@@ -614,7 +546,6 @@ fn insert(s: &mut Snap, path: Vec<u8>, bits: u8) {
     };
 }
 
-/// `git status --porcelain=v2 -z` as (path, status bits); folders end in `/`.
 fn parse(out: &[u8]) -> Vec<(Vec<u8>, u8)> {
     let mut v = Vec::new();
     let mut recs = out.split(|&b| b == 0);
@@ -623,7 +554,7 @@ fn parse(out: &[u8]) -> Vec<(Vec<u8>, u8)> {
         let (path, bits) = match rec.first() {
             Some(b'1') => (field(8), xy(rec)),
             Some(b'2') => {
-                recs.next(); // the original path
+                recs.next();
                 (field(9), xy(rec))
             }
             Some(b'u') => (field(10), CONFLICT),
@@ -638,7 +569,6 @@ fn parse(out: &[u8]) -> Vec<(Vec<u8>, u8)> {
     v
 }
 
-/// The bits of an ordinary or renamed entry's XY field.
 fn xy(rec: &[u8]) -> u8 {
     let (x, y) = (rec.get(2).copied().unwrap_or(b'.'), rec.get(3).copied().unwrap_or(b'.'));
     let staged = match x {
@@ -667,8 +597,6 @@ fn glob_escape(p: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A git that runs without asking: not /usr/bin/git's stub, which pops up
-/// an installer when the developer tools are missing.
 fn git_bin() -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let dirs = std::env::split_paths(&path).filter(|d| d != std::path::Path::new("/usr/bin"));
@@ -709,7 +637,7 @@ mod tests {
     fn changes_below() {
         let g = Git::new("/nonexistent");
         let r = g.add(b"/p/repo");
-        // Queued already: the worker never takes what's pending here.
+
         r.queued.store(true, Ordering::Relaxed);
         let pending = || {
             let (dirs, head) = std::mem::take(&mut *r.pending.lock().unwrap());

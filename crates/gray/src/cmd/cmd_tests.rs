@@ -1,13 +1,7 @@
-//! `gray cmd` tests: list shape, ui doc serde, the model picker doc, and
-//! the interact draft flow — all against tempdir homes, never the real one.
-
 use super::*;
 use clap::Parser as _;
 use gray_plugin::{ModelSlot, ModelVariant, SlotOption};
 
-/// A config that can never reach the network: a base_url nothing caches
-/// under (empty known list → model validation fails open) and no plugin
-/// credentials.
 fn test_config() -> Config {
     let cli = crate::Cli::try_parse_from(["gray"]).expect("cli");
     let mut config = Config::resolve_with(&cli, |_| None).expect("config");
@@ -45,8 +39,6 @@ fn picker_rec(models: &[(String, String)]) -> store::PendingDoc {
     }
 }
 
-/// A two-slot composite row: `lead` {opus, swe} × `sidekick` {a, b} — but
-/// only {opus,a} and {swe,b} have variants, so {opus,b} is unservable.
 fn composite_models() -> Vec<(String, String)> {
     vec![
         ("m0".to_string(), "Model Zero".to_string()),
@@ -119,7 +111,7 @@ fn list_shape_matches_contract() {
     assert_eq!(by_name("theme")["surface"], "local");
     assert_eq!(by_name("sessions")["surface"], "text");
     assert_eq!(by_name("usage")["args"], json!([]));
-    // Every registry command is listed, aliases included.
+
     for d in crate::repl::REGISTRY {
         assert_eq!(by_name(d.name)["description"], d.desc);
     }
@@ -178,7 +170,7 @@ fn ui_doc_serde_wire_shape() {
     let button = &v["components"][2]["children"][1];
     assert_eq!(button["type"], "button");
     assert_eq!(button["style"], "primary");
-    // Round-trips so adapters' parsers see a stable shape.
+
     let back: ui::UiDoc = serde_json::from_value(v).unwrap();
     assert_eq!(back, doc);
 }
@@ -205,7 +197,7 @@ fn model_picker_doc_from_draft() {
     assert_eq!(options.len(), 3);
     assert_eq!(options[0]["value"], "m0");
     assert_eq!(options[0]["default"], true);
-    assert!(options[1]["default"].is_null()); // absent when false
+    assert!(options[1]["default"].is_null());
     let effort = &v["components"][2]["children"][0];
     assert_eq!(effort["logical_id"], "effort");
     let eopts = effort["options"].as_array().unwrap();
@@ -228,7 +220,6 @@ async fn interact_values_and_fast_revise_the_doc() {
     let token = store::put(home.path(), &rec).unwrap();
     let mut config = test_config();
 
-    // values → draft updates, revised doc comes back on the same token.
     let res = interact(
         &mut config,
         home.path(),
@@ -254,7 +245,6 @@ async fn interact_values_and_fast_revise_the_doc() {
     assert_eq!(saved.draft.model.as_deref(), Some("m1"));
     assert_eq!(saved.draft.effort.as_deref(), Some("low"));
 
-    // submit fast toggles the draft and re-renders the button label.
     let res = interact(
         &mut config,
         home.path(),
@@ -300,7 +290,7 @@ async fn interact_apply_persists_and_closes() {
     };
     assert!(close);
     assert!(text.contains("Model set to m1"), "text: {text}");
-    // The token is consumed; config persisted through the home's config.json.
+
     assert!(store::get(home.path(), &token, crate::cron::now_secs()).is_err());
     assert_eq!(config.model.as_deref(), Some("m1"));
     assert_eq!(config.thinking_effort.as_deref(), Some("low"));
@@ -334,10 +324,10 @@ async fn interact_cancel_closes() {
 async fn interact_expired_and_bad_actions() {
     let home = tempfile::tempdir().unwrap();
     let mut config = test_config();
-    // Never minted.
+
     let err = interact(&mut config, home.path(), "nope", None).unwrap_err();
     assert_eq!(err.0, "expired");
-    // Past the TTL the record is gone.
+
     let mut rec = picker_rec(&fake_models());
     rec.created_at = crate::cron::now_secs() - store::PENDING_TTL_SECS - 1;
     let token = store::put(home.path(), &rec).unwrap();
@@ -350,11 +340,11 @@ async fn interact_expired_and_bad_actions() {
             .join(format!("{token}.json"))
             .exists()
     );
-    // Malformed action json.
+
     let token = store::put(home.path(), &picker_rec(&fake_models())).unwrap();
     let err = interact(&mut config, home.path(), &token, Some("{")).unwrap_err();
     assert_eq!(err.0, "invalid_action");
-    // Unknown control / submit / option value.
+
     for (action, want) in [
         (r#"{"values":{"bogus":["x"]}}"#, "unknown control"),
         (r#"{"submit":"bogus"}"#, "unknown submit"),
@@ -365,7 +355,7 @@ async fn interact_expired_and_bad_actions() {
         assert_eq!(err.0, "invalid_action");
         assert!(err.1.contains(want), "{} vs {}", err.1, want);
     }
-    // A different user on an owned doc is rejected.
+
     let mut owned = picker_rec(&fake_models());
     owned.user = Some("u1".to_string());
     let token = store::put(home.path(), &owned).unwrap();
@@ -394,7 +384,7 @@ async fn run_rejects_local_and_unknown() {
         assert_eq!(err.0, "local_only", "{name}");
         assert!(err.1.contains(name));
     }
-    // Aliases resolve to the same local rejection.
+
     let err = run_command(&mut config, home.path(), "reboot", &[])
         .await
         .unwrap_err();
@@ -403,7 +393,7 @@ async fn run_rejects_local_and_unknown() {
         .await
         .unwrap_err();
     assert_eq!(err.0, "local_only");
-    // Args a text command can't use.
+
     let err = run_command(&mut config, home.path(), "skills", &["paste".to_string()])
         .await
         .unwrap_err();
@@ -452,7 +442,6 @@ async fn run_help_and_cron_and_skills_text() {
     };
     assert!(text.contains("no cron jobs"));
 
-    // `cwd` decides discovery — a home with a skill lists it.
     let skills_dir = home.path().join("skills").join("demo-skill");
     std::fs::create_dir_all(&skills_dir).unwrap();
     std::fs::write(
@@ -466,7 +455,7 @@ async fn run_help_and_cron_and_skills_text() {
     let CommandResult::Text { text, .. } = res else {
         panic!("expected text");
     };
-    // The real cwd may or may not discover anything; only the shape holds.
+
     assert!(!text.is_empty());
 }
 
@@ -500,7 +489,7 @@ fn model_picker_doc_composite_row_gets_slot_selects() {
     };
     let v = serde_json::to_value(model_picker_doc(&draft, &models, &shapes, 0)).unwrap();
     let comps = v["components"].as_array().unwrap();
-    // text · model · slot:lead · slot:sidekick · effort · buttons
+
     assert_eq!(comps.len(), 6);
     let lead = &comps[2]["children"][0];
     assert_eq!(lead["type"], "string_select");
@@ -548,8 +537,6 @@ async fn interact_slot_values_update_draft_parts() {
     let token = store::put(home.path(), &composite_rec()).unwrap();
     let mut config = test_config();
 
-    // lead=swe isn't servable with sidekick=a — the pick coerces to the
-    // serving variant's parts, like the TUI dropdown.
     let res = interact(
         &mut config,
         home.path(),
@@ -570,7 +557,6 @@ async fn interact_slot_values_update_draft_parts() {
     assert_eq!(saved.draft.parts["lead"], "swe");
     assert_eq!(saved.draft.parts["sidekick"], "b");
 
-    // Switching rows resets parts; switching back lands the row defaults.
     interact(
         &mut config,
         home.path(),
@@ -591,8 +577,6 @@ async fn interact_slot_values_update_draft_parts() {
     assert_eq!(saved.draft.parts["lead"], "opus");
     assert_eq!(saved.draft.parts["sidekick"], "a");
 
-    // A slot the row doesn't declare and an option no variant serves
-    // are both rejected.
     for action in [
         r#"{"values":{"slot:nope":["x"]}}"#,
         r#"{"values":{"slot:lead":["zzz"]}}"#,
@@ -600,7 +584,7 @@ async fn interact_slot_values_update_draft_parts() {
         let err = interact(&mut config, home.path(), &token, Some(action)).unwrap_err();
         assert_eq!(err.0, "invalid_action");
     }
-    // Slot values on a plain row are an unknown control.
+
     interact(
         &mut config,
         home.path(),
@@ -659,7 +643,7 @@ async fn interact_apply_composite_persists_parts() {
 async fn interact_apply_unserved_combo_bounces() {
     let home = tempfile::tempdir().unwrap();
     let mut rec = composite_rec();
-    // {opus,b} — no variant serves it.
+
     rec.draft.parts = BTreeMap::from([
         ("lead".to_string(), "opus".to_string()),
         ("sidekick".to_string(), "b".to_string()),
@@ -678,7 +662,7 @@ async fn interact_apply_unserved_combo_bounces() {
     };
     assert!(!close);
     assert!(text.contains("no fusion-x variant serves"), "text: {text}");
-    // The doc stays pending; nothing was applied.
+
     assert!(store::get(home.path(), &token, crate::cron::now_secs()).is_ok());
     assert_ne!(config.model.as_deref(), Some("fusion-x"));
 }
@@ -718,7 +702,6 @@ async fn run_model_direct_composite_args() {
     assert_eq!(saved.model.as_deref(), Some("fusion-x"));
     assert_eq!(saved.model_parts["lead"], "swe");
 
-    // A partial pick merges over the row's defaults.
     let res = run_command(
         &mut config,
         home.path(),
@@ -733,8 +716,6 @@ async fn run_model_direct_composite_args() {
     assert_eq!(config.model_parts["lead"], "opus");
     assert_eq!(config.model_parts["sidekick"], "a");
 
-    // Unknown slot, unknown option, unserved combination, bad token, and
-    // slot args on a plain row are all arg errors.
     for (args, want) in [
         (vec!["fusion-x", "bogus=x"], "unknown slot 'bogus'"),
         (vec!["fusion-x", "lead=zzz"], "unknown lead option 'zzz'"),

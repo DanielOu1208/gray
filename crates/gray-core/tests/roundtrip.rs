@@ -44,7 +44,6 @@ fn test_full_chat_request_with_all_content_blocks_and_tools_roundtrip() {
         ),
     ];
 
-    // Message containing all ContentBlock variants
     let composite_message = Message::new(
         Role::Assistant,
         vec![
@@ -75,18 +74,14 @@ fn test_full_chat_request_with_all_content_blocks_and_tools_roundtrip() {
         max_tokens: None,
     };
 
-    // Serialize to JSON string
     let json_output = serde_json::to_string_pretty(&request)
         .expect("Serialization of full ChatRequest must succeed");
 
-    // Deserialize back
     let roundtripped: ChatRequest = serde_json::from_str(&json_output)
         .expect("Deserialization of full ChatRequest must succeed");
 
-    // Assert full equality
     assert_eq!(request, roundtripped);
 
-    // Validate structural fields in JSON
     let parsed_json: serde_json::Value =
         serde_json::from_str(&json_output).expect("Must parse into serde_json::Value");
 
@@ -97,7 +92,6 @@ fn test_full_chat_request_with_all_content_blocks_and_tools_roundtrip() {
     assert_eq!(parsed_json["tools"].as_array().map(Vec::len), Some(2));
     assert_eq!(parsed_json["messages"].as_array().map(Vec::len), Some(4));
 
-    // Validate ContentBlock tagging in serialized JSON
     let blocks = &parsed_json["messages"][2]["content"];
     assert_eq!(blocks[0]["type"], "text");
     assert_eq!(
@@ -209,7 +203,6 @@ fn test_thinking_block_roundtrips_losslessly() {
 
 #[test]
 fn test_legacy_thinking_without_replay_fields_still_parses() {
-    // Session files written before encrypted replay existed must load.
     let legacy = r#"{"role":"assistant","content":[{"type":"thinking","text":"private"},{"type":"text","text":"visible"}]}"#;
     let msg: Message = serde_json::from_str(legacy).unwrap();
     assert_eq!(msg.content.len(), 2);

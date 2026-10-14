@@ -64,14 +64,12 @@ async fn tool_before_allow_and_command_joins_argv() {
             .await,
         Some(CommandOutcome::Say("hi there".into()))
     );
-    // Unclaimed command on a claiming plugin: no RPC, None.
+
     assert_eq!(p.run_command("/nope", vec![]).await, None);
 }
 
 #[tokio::test]
 async fn unclaimed_hooks_fail_open_without_rpc() {
-    // hang fixture never replies: any request would hit the 30s timeout, so
-    // fast defaults prove the hooks/commands gate sends nothing.
     let p = SidecarPlugin::spawn(vec!["testdata/hang_plugin.sh".into()])
         .await
         .unwrap();
@@ -95,7 +93,7 @@ fn tool_before_parses_deny_modify_and_unknown() {
         ToolBefore::from_result(&serde_json::json!({"decision": "modify", "args": {"path": "/y"}})),
         ToolBefore::Modify(serde_json::json!({"path": "/y"}))
     );
-    // Unknown shapes and arg-less modify fail closed.
+
     assert_eq!(
         ToolBefore::from_result(&serde_json::json!({})),
         ToolBefore::Deny("plugin returned an unrecognized policy verdict".into())
@@ -112,7 +110,6 @@ fn tool_before_parses_deny_modify_and_unknown() {
 
 #[tokio::test]
 async fn echo_reference_plugin_manifest_and_command_round_trip() {
-    // Reference plugin ships with the repo; boot the real script, not a fixture.
     let p = SidecarPlugin::spawn(vec!["testdata/echo.sh".into()])
         .await
         .unwrap();
@@ -138,8 +135,6 @@ async fn echo_reference_plugin_manifest_and_command_round_trip() {
     );
 }
 
-/// Scripted provider: one event list per expected request, recording every
-/// `ChatRequest` so e2e tests can assert on prompt wiring.
 struct ScriptedProvider {
     scripted: std::sync::Mutex<std::collections::VecDeque<Vec<StreamEvent>>>,
     seen_requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
@@ -168,7 +163,6 @@ impl Provider for ScriptedProvider {
     }
 }
 
-/// Executor that records every call and answers a canned output.
 struct RecordingExecutor {
     calls: Arc<std::sync::Mutex<Vec<String>>>,
     output: ToolOutput,
@@ -291,7 +285,7 @@ async fn e2e_sidecar_tool_before_deny_blocks_executor() {
 #[tokio::test]
 async fn e2e_sidecar_command_run_routes_echo() {
     let hooks = e2e_hooks("/tmp").await;
-    // Same source the REPL reads via `agent.hooks()` for `/help` + routing.
+
     let names: Vec<String> = hooks
         .iter()
         .flat_map(|h| h.commands())
@@ -307,7 +301,7 @@ async fn e2e_sidecar_command_run_routes_echo() {
             .await,
         Some(CommandOutcome::Say("hello world".into()))
     );
-    // Empty-text replies filter to None so the REPL never prints a blank line.
+
     assert_eq!(hooks[0].run_command("/echo", vec![]).await, None);
 }
 
@@ -320,7 +314,7 @@ async fn command_run_prompt_variant() {
         p.run_command("/ask", vec![]).await,
         Some(CommandOutcome::Prompt("hello from plugin".into()))
     );
-    // Unclaimed command: no RPC, None.
+
     assert_eq!(p.run_command("/nope", vec![]).await, None);
 }
 
@@ -333,9 +327,7 @@ async fn session_param_present_when_claimed() {
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("session.log");
     let script = dir.join("logger.sh");
-    // Logger sidecar: records every wire line with a session, replies canned.
-    // Claims prompt/context + tool/before + /sess + tool `sess` so all 4
-    // requests + notify are exercised.
+
     let body = format!(
         r#"#!/bin/sh
 LOG="{}"
@@ -363,8 +355,7 @@ done
 "#,
         log.display()
     );
-    // Write-then-rename: nothing ever holds the executed path open, so
-    // the spawn cannot race a writer (ETXTBSY).
+
     let staging = dir.join("caller.sh.new");
     std::fs::write(&staging, body).unwrap();
     #[cfg(unix)]
@@ -377,7 +368,6 @@ done
         .await
         .unwrap();
 
-    // Drive all 4 requests + one notify with distinctive cwd/session.
     let prompt_cwd = "/tmp/session-prompt-cwd";
     assert_eq!(p.prompt_context(prompt_cwd).await.as_deref(), Some("CTX"));
     assert_eq!(
@@ -401,7 +391,7 @@ done
         usage: Usage::default(),
     })
     .await;
-    // Notify is fire-and-forget: poll for the log line.
+
     let t = std::time::Instant::now();
     while t.elapsed() < std::time::Duration::from_secs(2) {
         let Ok(text) = std::fs::read_to_string(&log) else {
@@ -416,12 +406,12 @@ done
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let lines: Vec<&str> = text.lines().collect();
     assert!(lines.len() >= 5, "4 requests + notify logged, got: {text}");
-    // Every wire line carries a session object with id + cwd.
+
     for l in &lines {
         assert!(l.contains("\"session\""), "session present: {l}");
         assert!(l.contains("\"cwd\""), "cwd present: {l}");
     }
-    // tool/call carries ctx session_id + cwd.
+
     let tool_line = lines
         .iter()
         .find(|l| l.contains("tool/call"))
@@ -434,7 +424,7 @@ done
         tool_line.contains("/tmp/session-tool-cwd"),
         "ctx cwd: {tool_line}"
     );
-    // prompt/context carries its cwd arg.
+
     let prompt_line = lines
         .iter()
         .find(|l| l.contains("prompt/context"))
@@ -455,8 +445,7 @@ async fn pre_v1_sidecar_never_receives_shutdown_line() {
     let dir = std::env::temp_dir().join(format!("gray-prev1-{}-{}", std::process::id(), n));
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("pre_v1.log");
-    // Tee wrapper: logs every stdin line, pipes to pre-v1 hooks fixture
-    // (which has no shutdown handling and no `protocol`).
+
     let argv = vec![
         "sh".to_string(),
         "-c".to_string(),
@@ -470,7 +459,7 @@ async fn pre_v1_sidecar_never_receives_shutdown_line() {
         t.elapsed() < std::time::Duration::from_secs(6),
         "no hang on pre-v1 shutdown"
     );
-    // Give tee a moment to flush, then prove the shutdown line never arrived.
+
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let logged = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
@@ -490,9 +479,7 @@ async fn an_ungranted_host_call_is_refused_with_the_grant_command() {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let n = N.fetch_add(1, Ordering::SeqCst);
-    // Unique per attempt, not per process: a stale directory from an
-    // earlier run could still hold the script open for writing, and
-    // execve on a file another process is writing fails with ETXTBSY.
+
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -520,8 +507,7 @@ done
 "#,
         log.display()
     );
-    // Write-then-rename: nothing ever holds the executed path open, so
-    // the spawn cannot race a writer (ETXTBSY).
+
     let staging = dir.join("caller.sh.new");
     std::fs::write(&staging, body).unwrap();
     #[cfg(unix)]
@@ -530,9 +516,7 @@ done
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     std::fs::rename(&staging, &script).unwrap();
-    // Spawn with no host handler at all: proving the refusal happens
-    // before any handler could run. Also never grant anything, so the
-    // sidecar's declared `host/ask` stays exactly that — declared.
+
     let p = SidecarPlugin::spawn(vec![script.to_string_lossy().to_string()])
         .await
         .unwrap();
@@ -557,7 +541,7 @@ done
                 text.contains("gray plugin capabilities"),
                 "the error names how to grant it, got: {text}"
             );
-            // And nothing answered the question: no handler was needed.
+
             assert!(!text.contains("no host handler"));
             let _ = std::fs::remove_dir_all(&dir);
             return;
@@ -580,8 +564,7 @@ async fn host_requests_round_trip_with_string_ids() {
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("host.log");
     let script = dir.join("caller.sh");
-    // Caller sidecar: answers manifest, then issues host/say + host/run
-    // with STRING ids and logs the replies it gets back.
+
     let body = format!(
         r#"#!/bin/sh
 LOG="{}"
@@ -602,8 +585,7 @@ done
 "#,
         log.display()
     );
-    // Write-then-rename: nothing ever holds the executed path open, so
-    // the spawn cannot race a writer (ETXTBSY).
+
     let staging = dir.join("caller.sh.new");
     std::fs::write(&staging, body).unwrap();
     #[cfg(unix)]
@@ -634,10 +616,9 @@ done
         fut
     });
     p.set_host_handler(handler).await;
-    // Consent is a separate step from declaring: without it the host
-    // refuses. This test grants, so the round trip proceeds.
+
     p.set_capabilities(vec!["host.say".into(), "host.turn".into()]);
-    // Poll for both replies (string ids echoed back, separate namespace).
+
     let t = std::time::Instant::now();
     while t.elapsed() < std::time::Duration::from_secs(5) {
         let text = std::fs::read_to_string(&log).unwrap_or_default();

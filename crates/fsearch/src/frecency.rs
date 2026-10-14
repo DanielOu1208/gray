@@ -1,37 +1,26 @@
-//! Frecency: what you (or an agent) worked on lately ranks higher. Editors
-//! and hooks report opens (`{"op":"open","path":...}`); each path keeps a
-//! count that halves every two weeks, saved in the data dir as a few KB of
-//! text. Before any open is reported, your own recent commits (`git.rs`)
-//! and files' modification times stand in: replaying Linux's history, the
-//! file a commit was about to change ranks first for its name 72% -> 84%.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Two weeks: replays did best between one and four.
 pub const HALF_LIFE: f32 = 14.0 * 86_400.0;
-/// Entries that decayed below this (one open ~8 weeks ago) are dropped.
+
 const FLOOR: f32 = 0.06;
 const MAX_ENTRIES: usize = 4096;
-/// Reopening within this long (an editor refocusing a tab) isn't another open.
+
 const DEBOUNCE: u32 = 30;
 
-/// What `age` seconds take off one open.
 pub fn decay(age: u32) -> f32 {
     (-(age as f32) / HALF_LIFE).exp2()
 }
 
-/// A hit's lift for frecency `s`: one open ~+8, five +21, at most +40
-/// (name scores run ~100-300).
 pub fn boost(s: f32) -> i32 {
     if s > 0.0 { (12.0 * s.ln_1p()).min(40.0) as i32 } else { 0 }
 }
 
 pub struct Frecency {
     file: PathBuf,
-    /// Path → (score at `last`, `last` in seconds).
+
     map: Mutex<HashMap<Vec<u8>, (f32, u32)>>,
     saving: AtomicBool,
 }
@@ -56,7 +45,6 @@ impl Frecency {
         Arc::new(Frecency { file, map: Mutex::new(map), saving: AtomicBool::new(false) })
     }
 
-    /// Record an open of `path`; its new score.
     pub fn open(self: &Arc<Self>, path: &[u8], now: u32) -> f32 {
         let mut map = self.map.lock().unwrap();
         let e = map.entry(path.to_vec()).or_insert((0.0, now));
@@ -76,20 +64,16 @@ impl Frecency {
         score
     }
 
-    /// `path`'s score now (0 if never opened).
     pub fn score(&self, path: &[u8], now: u32) -> f32 {
         self.map.lock().unwrap().get(path).map_or(0.0, |&e| decayed(e, now))
     }
 
-    /// Every path under `dir` (`/`: anywhere) with its score.
     pub fn under(&self, dir: &[u8], now: u32) -> Vec<(Vec<u8>, f32)> {
         let map = self.map.lock().unwrap();
         let inside = |p: &[u8]| dir == b"/" || (p.starts_with(dir) && p.get(dir.len()) == Some(&b'/'));
         map.iter().filter(|(p, _)| inside(p)).map(|(p, &e)| (p.clone(), decayed(e, now))).collect()
     }
 
-    /// Write the file a couple of seconds after a change (one write for a
-    /// burst of opens), dropping what decayed away.
     fn save_soon(self: &Arc<Self>) {
         if self.saving.swap(true, Ordering::Relaxed) {
             return;
@@ -104,8 +88,6 @@ impl Frecency {
                 let mut map = me.map.lock().unwrap();
                 map.retain(|_, e| decayed(*e, now) >= FLOOR);
                 for (p, &(s, t)) in map.iter() {
-                    // One line each: a path with a newline (or starting
-                    // with a quote) as a JSON string, if it's UTF-8.
                     let quoted = (p.contains(&b'\n') || p.first() == Some(&b'"'))
                         .then(|| std::str::from_utf8(p).ok().map(|p| serde_json::json!(p).to_string()));
                     let p = match &quoted {
@@ -120,7 +102,7 @@ impl Frecency {
             }
             let tmp = me.file.with_extension("new");
             if let Err(e) = std::fs::write(&tmp, out).and_then(|_| std::fs::rename(&tmp, &me.file)) {
-                log::warn!("frecency: save failed: {e}");
+                fsearch::diag_line(format!("frecency: save failed: {e}"));
             }
         });
     }

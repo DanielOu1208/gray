@@ -1,10 +1,3 @@
-//! Agent turn loop: [`Agent::run`] / [`run_streaming`](Agent::run_streaming).
-//!
-//! Split from `agent.rs` (move-only): the multi-turn stream → finalize →
-//! dispatch cycle plus its loop backstop. Shared transcript helpers live in
-//! `agent.rs`, tool-call plumbing in `agent_tools`, compaction in
-//! `agent_compact`.
-
 use futures::StreamExt as _;
 
 use crate::agent::{
@@ -18,28 +11,14 @@ use crate::event::{
 };
 use crate::message::{ChatRequest, ContentBlock, Message, Role};
 
-/// Empty-turn provider retries before nudging or ending on `(empty)`.
 const MAX_EMPTY_RETRIES: u8 = 2;
-/// Truncated-turn (`MaxTokens`) continuations before keeping the partial.
+
 const MAX_CONTINUATIONS: u8 = 2;
 
-/// Leaked-tool-call-markup nudges per run. Gray never guesses intent from the
-/// model's prose (an earlier "announced a next step" heuristic injected
-/// user-looking messages and pushed models into unapproved work); it only
-/// reacts to a call that visibly failed to materialize.
 const MAX_LEAK_NUDGES: u8 = 3;
 
-/// Whole-turn retries after the provider's own in-request budget (5 attempts
-/// with backoff) is exhausted on a retryable failure — the log shows bursts of
-/// 503s outlasting exactly that budget, ending a turn the user is waiting on.
-/// Each whole-turn retry sleeps a short ramp (the provider already backed off
-/// ~1+2+4+8+9s across its attempts) and never fires after a visible delta:
-/// once the user has read text, a replay would duplicate it — the provider's
-/// partial-answer path owns that case.
 const MAX_TURN_RETRIES: u8 = 2;
 
-/// Base sleep before turn-retry 1 (attempt 2 doubles it). Zero in tests so
-/// scripted-failure suites stay instant.
 #[cfg(not(test))]
 fn turn_retry_delay() -> std::time::Duration {
     std::time::Duration::from_secs(3)
@@ -49,32 +28,12 @@ fn turn_retry_delay() -> std::time::Duration {
     std::time::Duration::ZERO
 }
 
-/// Replaces a contaminated salvaged partial in outbound requests (never in
-/// the persisted transcript — the transcript keeps the full text the user
-/// saw). Tells the model the failure happened without handing it the broken
-/// trajectory to anchor on (arXiv:2605.08563).
 pub(crate) const CONTAMINATED_SCRUB_MARKER: &str =
     "(previous attempt was cut off by a stream error; partial output omitted — start fresh)";
 
-/// Rounds a tool result must age out before the stale-output mask may claim
-/// it. Ten rounds is past the point where the model is still reasoning from
-/// the raw bytes, and well before a long session's history is anywhere near
-/// the compaction trigger.
 const MASK_STALE_ROUNDS: usize = 10;
 
 impl Agent {
-    /// History as the model is allowed to see it: contaminated salvaged
-    /// partials (arXiv:2605.08563) replaced by the one-line scrub marker, and
-    /// stale at-threshold tool outputs replaced by their ARC citation stub.
-    ///
-    /// `self.messages` — and so the persisted transcript — keeps the full
-    /// text the user saw; only outbound requests and the compaction input
-    /// use this view. Compaction has to run on the same view: summarizing the
-    /// *unscrubbed* history baked the failed partial into the summary that
-    /// every later request then reads, which is exactly the broken trajectory
-    /// the scrub exists to keep out of the model's hands. The marker keeps
-    /// the assistant role so call/result pairing and role alternation are
-    /// untouched.
     pub(crate) fn scrubbed_messages(&self) -> Vec<Message> {
         let mut msgs = self.messages.clone();
         for &idx in &self.contaminated {
@@ -100,8 +59,6 @@ impl Agent {
         msgs
     }
 
-    /// Index of the first message that has aged past [`MASK_STALE_ROUNDS`]
-    /// rounds, or 0 when the transcript is younger than that.
     fn stale_boundary(&self) -> usize {
         let groups = crate::compact::atomic_groups(&self.messages);
         if groups.len() <= MASK_STALE_ROUNDS {
@@ -113,11 +70,6 @@ impl Agent {
             .sum()
     }
 
-    /// Masks every stale result now (arXiv:2607.25066). Only for a caller
-    /// that knows the prompt cache is already cold: the next request re-bills
-    /// the whole prefix whatever it contains, so rewriting it is free and the
-    /// shorter prompt is what gets cached from here on. Never mid-turn — a
-    /// prefix rewrite on a warm cache re-bills the whole prefix.
     pub fn mask_stale_tool_output(&mut self) {
         let boundary = self.stale_boundary();
         if boundary > self.masked_prefix {
@@ -127,9 +79,6 @@ impl Agent {
     }
 }
 
-/// True when a message carries no billable input: empty content, or nothing
-/// but blank `Text` blocks. Any non-text block (image, tool use/result,
-/// thinking) counts as input — never silently dropped.
 fn is_blank_input(msg: &Message) -> bool {
     msg.content.iter().all(|b| match b {
         ContentBlock::Text { text } => text.trim().is_empty(),
@@ -138,7 +87,6 @@ fn is_blank_input(msg: &Message) -> bool {
 }
 
 impl Agent {
-    /// Append observations only with all outstanding tool results settled.
     fn collect_background_notifications(&mut self, ctx: &ToolContext) -> bool {
         let notices = self.executor.drain_notifications(ctx);
         let any = !notices.is_empty();
@@ -150,11 +98,6 @@ impl Agent {
         any
     }
 
-    /// Put this session's still-running background jobs in front of the
-    /// model: at the start of a turn, and again after a compaction may have
-    /// summarized away the notice that introduced them. Appended to the
-    /// transcript (never a per-request extra) so the history stays strictly
-    /// append-only for the prefix cache and subscription relays.
     fn surface_running_jobs(&mut self, ctx: &ToolContext) {
         if let Some(note) = self.executor.running_jobs_note(ctx) {
             self.messages.push(Message::user_injected(format!(
@@ -163,18 +106,12 @@ impl Agent {
         }
     }
 
-    /// Best-effort `turn_end` fan-out: hook failures must never fail the turn
-    /// (hooks are infallible by signature, same as `tool_before`).
     async fn emit_turn_end(&self, usage: &Usage) {
         for hook in &self.hooks {
             hook.turn_end(usage).await;
         }
     }
 
-    /// Validation + `tool/before`/`pre_tool` pre-pass shared by both dispatch
-    /// lanes. `Err` is a ready-to-record error result (unknown tool,
-    /// non-object args, or a hook deny); `Ok` carries the possibly
-    /// hook-rewritten args the executor may run.
     async fn preflight(
         &self,
         name: &str,
@@ -215,21 +152,6 @@ impl Agent {
         Ok(effective_args)
     }
 
-    /// Runs the agent loop starting from `input`, returning every event
-    /// emitted along the way.
-    ///
-    /// Blank input is a no-op: rejected before it touches history.
-    ///
-    /// Per turn: build a [`ChatRequest`], stream the response while
-    /// forwarding `TextDelta`s in arrival order, finalize the assistant
-    /// message, then execute any requested tools sequentially and feed their
-    /// outputs back as tool-result messages. Stops when a turn ends without
-    /// tool calls (`TurnEnd`) or when cancellation fires
-    /// ([`CoreError::Cancelled`]). 6 identical consecutive tool calls abort
-    /// with [`CoreError::LoopDetected`]. A tool-free ending whose text still
-    /// announces a next step is nudged once before the stop is honored.
-    /// Tool failures are *not* errors: they become `is_error` tool results
-    /// so the model can recover.
     pub async fn run(
         &mut self,
         input: Message,
@@ -245,9 +167,6 @@ impl Agent {
         self.run_inner(ctx, None).await
     }
 
-    /// Streaming variant of [`run`]: every [`AgentEvent`] is handed to
-    /// `on_event` the moment it is produced (text deltas arrive token-by-token)
-    /// *and* collected into the returned Vec, which equals `run`'s output.
     pub async fn run_streaming(
         &mut self,
         input: Message,
@@ -264,9 +183,6 @@ impl Agent {
         self.run_inner(ctx, Some(on_event)).await
     }
 
-    /// `tool/after` (protocol 2.0): claimed hooks may replace a tool
-    /// result before `post_tool` observers and history see it (pi
-    /// `tool_result`). Hooks chain in order.
     async fn apply_tool_after(&self, name: &str, output: &ToolOutput) -> ToolOutput {
         let mut output = output.clone();
         for hook in &self.hooks {
@@ -277,11 +193,6 @@ impl Agent {
         output
     }
 
-    /// `input/submit` (protocol 2.0): hooks get the submitted text in
-    /// order, each seeing the previous rewrite. `Handled` swallows the
-    /// input entirely (no turn, nothing recorded). Only plain-text user
-    /// input goes through the hook — a rewrite would silently drop any
-    /// non-text blocks (images, structured input).
     async fn apply_input_hooks(&self, input: Message) -> Option<Message> {
         if input.role != Role::User
             || !input
@@ -299,8 +210,7 @@ impl Agent {
                 InputSubmit::Rewrite(t) => text = t,
             }
         }
-        // A rewrite to blank is a swallow: history must not grow a
-        // message the model can never have intended.
+
         if text.trim().is_empty() {
             return None;
         }
@@ -312,23 +222,19 @@ impl Agent {
         ctx: ToolContext,
         mut sink: Option<&mut dyn FnMut(&AgentEvent)>,
     ) -> Result<Vec<AgentEvent>, CoreError> {
-        // The session id rides the per-run context; compaction cites it in
-        // elided-output stubs.
         self.session_id = ctx.session_id.clone();
-        // Live executors (plugin tool sets) may have changed since the
-        // last turn; pick up the current defs before the first request.
+
         self.refresh_tools();
         log::info!(target: "gray_agent", "agent run start ({} messages)", self.messages.len());
         let mut events = Vec::new();
-        // Loop backstop: 6 identical consecutive tool calls → LoopDetected.
+
         let mut last_sig: Option<String> = None;
         let mut repeat: usize = 0;
-        // A turn whose every round is a job-progress notice clears the streak
-        // below, so it would otherwise bill forever on a no-timeout job.
+
         let mut poll_rounds: usize = 0;
-        // Running jobs are shown once per turn, and again after compaction.
+
         let mut jobs_note_due = true;
-        // Forward each event to the optional streaming sink, then collect it.
+
         macro_rules! emit {
             ($ev:expr) => {{
                 let ev = $ev;
@@ -340,41 +246,24 @@ impl Agent {
         }
         emit!(AgentEvent::Start);
         let mut total_usage = Usage::default();
-        // Billable turn totals: every provider request bills its full
-        // input, so turn_end/cost accounting sums every round's report.
-        // total_usage stays the context gauge (opencode parity: the latest
-        // round's report only — each round's input already contains the
-        // whole history, so summing outputs across rounds double-counts
-        // and the gauge blows up superlinearly).
+
         let mut billed = Usage::default();
         let mut empty_retries: u8 = 0;
         let mut continuations: u8 = 0;
-        // Whole-turn retries of a request the provider never answered (see
-        // MAX_TURN_RETRIES). Reset per run; shared by every round in the run
-        // so a pathological provider cannot loop forever across rounds.
+
         let mut turn_retries: u8 = 0;
-        // Post-tool empty nudge fires once per run; silent-retry budget unchanged.
+
         let mut empty_nudge_sent = false;
-        // One stall reminder per run at `SIGNATURE_NUDGE_REPEATS` identical
-        // calls; the abort at `SIGNATURE_ABORT_REPEATS` is unchanged.
+
         let mut stall_nudge_sent = false;
-        // Consecutive leaked-markup endings get bounded nudges; a round with
-        // real calls resets the streak.
+
         let mut leak_nudges: u8 = 0;
 
-        // Protocol v1 `prompt/context`: fetched once per turn, not per round,
-        // so the fetched text stays byte-stable across a turn's requests and
-        // sidecar hooks pay one call per turn instead of one per tool round.
         let mut hook_context = String::new();
         if let Some(hook) = self.checkpoint.clone() {
             hook(&self.messages, self.history_revision()).await;
         }
         for hook in &self.hooks {
-            // Lean prompt: hooks that only inject context are skipped —
-            // the system prefix stays the stored prompt alone, so lean
-            // turns cost close to `--bare` per request without losing
-            // tools, plugins or compaction. A global plugin's context
-            // (operator-installed, e.g. memory) still lands.
             if self.lean_prompt && !hook.is_global() {
                 continue;
             }
@@ -388,22 +277,13 @@ impl Agent {
             }
         }
 
-        // The hook text rides a transcript note, not `system`: relay
-        // sidecars match their pooled native session on `instructions`
-        // byte-for-byte and provider prefix caches key on the same head,
-        // so per-turn text there (rules re-reads, ledger tails, subagent
-        // notices) forced a session respawn — a full re-bill — whenever it
-        // drifted. As a user message it lands in the absorbed prefix once,
-        // then re-sends only when the text actually changed (or compaction
-        // dropped the earlier copy).
         if !hook_context.is_empty() {
             let note = Message::user_injected(format!("[Context update]\n{hook_context}"));
             if !self.messages.contains(&note) {
                 self.messages.push(note);
             }
         }
-        // `agent/before_start` (protocol 2.0): per-turn context a plugin
-        // wants in history as a user message (pi `before_agent_start`).
+
         if !self.lean_prompt {
             for hook in &self.hooks {
                 if let Some(text) = hook.agent_before_start().await {
@@ -411,13 +291,10 @@ impl Agent {
                 }
             }
         }
-        // Capture before pre-turn compaction so its request uses this same prefix.
+
         self.turn_system = Some(self.system.clone());
 
         'turn: loop {
-            // Cancellation is honored between turns, never mid-stream: a
-            // half-finished assistant message would leave the transcript
-            // inconsistent for the provider.
             if ctx.cancel.is_cancelled() {
                 self.emit_turn_end(&billed).await;
                 return Err(CoreError::Cancelled);
@@ -428,11 +305,6 @@ impl Agent {
                 self.surface_running_jobs(&ctx);
             }
 
-            // Mid-turn steer: text the user typed while this turn was running
-            // joins it here, at the boundary between two model requests, so it
-            // can never land inside a stream or between a tool call and its
-            // result. Steering only appends -- cancelling stays Ctrl-C/Esc, and
-            // the turn keeps everything it has already done.
             if let Some(steer) = self.steer.clone()
                 && let Some(text) = steer()
             {
@@ -440,19 +312,10 @@ impl Agent {
                 self.messages.push(Message::user(text));
             }
 
-            // Step boundary: everything so far is consistent, hand it to the
-            // host to persist before the next (slow, killable) request. Runs
-            // after notification collection and steering so a kill between the
-            // append and the checkpoint cannot drop the queued message.
             if let Some(hook) = self.checkpoint.clone() {
                 hook(&self.messages, self.history_revision()).await;
             }
 
-            // Soft stage first (arXiv:2609.20804 T4): at 0.6 of the window,
-            // stale tool observations outside the verbatim recent window
-            // become citation stubs in place — no provider call, pairing and
-            // order intact. Most pressure is handled here, so the summary
-            // pass below fires far less often.
             if self.prefix_rewrite_ok
                 && needs_soft_elide(self.estimate_tokens(), self.context_window)
             {
@@ -466,21 +329,13 @@ impl Agent {
                     );
                 }
             }
-            // Pre-turn budget (pi `_compactBeforeNextAssistantResponse`):
-            // history is append-only (mini-swe-agent / pi), so each request
-            // extends the previous one and the provider prefix cache stays
-            // hot. Compaction is the only rewrite, and it runs only when the
-            // provider-anchored estimate reaches the window.
+
             if needs_pre_turn_compact(
                 self.estimate_tokens(),
                 self.context_window,
                 self.compact_reserve,
                 self.compact_ceiling,
             ) {
-                // False = nothing to gain (all tail): fall through; the provider's
-                // own overflow path remains the backstop. Success strictly shrinks
-                // history, so re-check without looping forever. Errors finalize
-                // the turn first: no silent exit without turn_end.
                 while needs_pre_turn_compact(
                     self.estimate_tokens(),
                     self.context_window,
@@ -509,15 +364,11 @@ impl Agent {
                     }
                 }
             }
-            // A compaction just above may have summarized away the notice
-            // that introduced a running job: name it again before the request.
+
             if std::mem::take(&mut jobs_note_due) {
                 self.surface_running_jobs(&ctx);
             }
-            // CCRM scrub (arXiv:2605.08563): contaminated partials stay in
-            // `self.messages` (and so in the persisted transcript) but never
-            // ride an outbound request — the retry starts from a clean
-            // context with a one-line marker where the failure was.
+
             let mut request_messages = self.scrubbed_messages();
             if request_messages
                 .last()
@@ -527,9 +378,7 @@ impl Agent {
                     "Continue the pending user request using the retained context and summary.",
                 ));
             }
-            // `context/build` (protocol 2.0): claimed hooks may replace the
-            // outbound list per request (pi `context`); `self.messages` —
-            // the persisted transcript — is never touched by it.
+
             for hook in &self.hooks {
                 if let Some(msgs) = hook.context_build(&request_messages).await {
                     request_messages = msgs;
@@ -553,21 +402,12 @@ impl Agent {
                     }
                 }
             }
-            // The exact request, kept for a cache refresh while this round's
-            // tools run (pi cache warming). Only cloned when warming is on.
-            // GC-3: `req` is already the scrubbed, hook-processed outbound list,
-            // so the refresh replays exactly what the main call sent, never a
-            // raw transcript. Keep it that way: build warm requests only from `req`.
+
             let warm_req = self.cache_warm.is_some().then(|| req.clone());
             let request_sent = tokio::time::Instant::now();
-            // Warming spans the whole round — stream AND tool phase (pi
-            // "streaming" mode): a generation that runs past the provider's
-            // cache TTL would let the entry die mid-turn and re-bill the
-            // next request. Dropping the guard on any exit aborts the task.
+
             let warm_spent = std::sync::Arc::new(std::sync::Mutex::new(Usage::default()));
-            // The request's own prompt size is unknown until its usage lands,
-            // so the warmer starts on the transcript estimate and is handed
-            // the provider's report as soon as the round has one.
+
             let warm_hint =
                 std::sync::Arc::new(std::sync::Mutex::new(crate::cache_warm::WarmHint {
                     prompt_tokens: self.estimate_tokens(),
@@ -587,14 +427,9 @@ impl Agent {
                 _ => None,
             };
 
-            // Accumulate streamed deltas: text chunks in order, tool calls
-            // keyed by their stream index (id/name arrive once, arguments
-            // may be split across many deltas).
             let mut text_parts: Vec<String> = Vec::new();
             let mut thinking_text = String::new();
-            // Leaked pipe specials are stripped before anything reaches the
-            // UI or history; a token split across deltas is held back until
-            // it resolves, and the hold is drained whenever the stream ends.
+
             let mut text_strip = SpecialStrip::default();
             let mut thinking_strip = SpecialStrip::default();
             macro_rules! drain_held {
@@ -611,9 +446,7 @@ impl Agent {
                     }
                 }};
             }
-            // (item_id, encrypted_content) of the latest Responses
-            // reasoning item — attached to the Thinking block at finalize so
-            // the next turn can replay it verbatim (cache warmth).
+
             let mut pending_reasoning: Option<(String, String)> = None;
             let mut pending: Vec<PendingToolCall> = Vec::new();
             let (stop_reason, usage) = {
@@ -636,12 +469,7 @@ impl Agent {
                             return Err(CoreError::Cancelled);
                         }
                     };
-                    // Absolute event-count backstop: a hostile/broken server
-                    // must not grow the retained turn without bound. Raised
-                    // from 100k after benchmark runs died here: deltas are
-                    // chunks, so ~100k events is only ~250-400k output tokens
-                    // — a long legitimate turn. 500k still bounds the Vec
-                    // (~40 MB) while leaving long runs headroom.
+
                     const MAX_EVENTS: usize = 500_000;
                     if events.len() >= MAX_EVENTS {
                         self.emit_turn_end(&billed).await;
@@ -674,8 +502,6 @@ impl Agent {
                             name,
                             arguments_delta,
                         })) => {
-                            // cap wire-controlled indices — a hostile/broken server
-                            // sending index = 2^40 would otherwise allocate gigabytes here.
                             const MAX_TOOL_CALL_INDEX: usize = 4096;
                             if index > MAX_TOOL_CALL_INDEX {
                                 self.emit_turn_end(&billed).await;
@@ -687,9 +513,7 @@ impl Agent {
                                 pending.push(PendingToolCall::default());
                             }
                             let slot = &mut pending[index];
-                            // Stream-identity hardening: id and name are
-                            // immutable once set (blank counts as unset). A
-                            // conflicting re-set is a provider protocol error.
+
                             if let Some(new_id) = id
                                 && !new_id.trim().is_empty()
                             {
@@ -719,9 +543,7 @@ impl Agent {
                                 }
                             }
                             slot.arguments.push_str(&arguments_delta);
-                            // Live emit: only once BOTH id and name are known
-                            // non-blank, so the start ID can never mutate.
-                            // Args arriving early stay buffered in `slot`.
+
                             if !slot.started
                                 && slot.id.as_ref().is_some_and(|s| !s.trim().is_empty())
                                 && slot.name.as_ref().is_some_and(|s| !s.trim().is_empty())
@@ -731,16 +553,8 @@ impl Agent {
                                 emit!(AgentEvent::tool_call_start(live_id, live_name));
                                 slot.started = true;
                             }
-                            // pi `updateArgs`: keep streaming partial args so the
-                            // TUI can render the tool call live instead of
-                            // popping it in only at ToolCallEnd/ToolResult.
-                            // Forward every update to the live sink, but retain
-                            // only the latest snapshot per call: retaining each
-                            // cumulative snapshot would grow quadratically
-                            // under per-byte deltas.
+
                             if slot.started && !arguments_delta.is_empty() {
-                                // Started implies both id and name are present
-                                // (start waits for both), so no fallback here.
                                 let live_id = slot.id.clone().unwrap();
                                 let live_name = slot.name.clone().unwrap();
                                 let ev = AgentEvent::tool_call_progress(
@@ -770,20 +584,11 @@ impl Agent {
                                 usage.unwrap_or_default(),
                             );
                         }
-                        // Codex steal: retry notices ride as Ok so the turn
-                        // keeps going; forward live so UI shows Reconnecting.
+
                         Some(Ok(StreamEvent::StreamError { message, details })) => {
                             emit!(AgentEvent::stream_error(message.clone(), details.clone()));
                         }
                         Some(Err(e)) => {
-                            // Whole-turn retry: the provider exhausted its own
-                            // 5-attempt budget on a retryable failure (bursts of
-                            // 503s do this in the wild) and nothing was streamed
-                            // yet, so replaying the request is invisible to the
-                            // user. A visible delta forbids the replay (the loop
-                            // has committed it to history; the provider's
-                            // partial-answer path owns that case) and so does a
-                            // cancelled token.
                             if e.retryable()
                                 && text_parts.is_empty()
                                 && !ctx.cancel.is_cancelled()
@@ -808,9 +613,7 @@ impl Agent {
                                 }
                                 continue 'turn;
                             }
-                            // Mid-stream failure after deltas already reached the
-                            // user's screen: salvage the partial assistant text
-                            // into history so the transcript matches what was seen.
+
                             drain_held!();
                             if !text_parts.is_empty() {
                                 salvage_partial_text(
@@ -820,16 +623,10 @@ impl Agent {
                                     &pending_reasoning,
                                     self.provider.model_id(),
                                 );
-                                // CCRM (arXiv:2605.08563): the salvaged
-                                // partial is a failed attempt; flag it so the
-                                // next request scrubs it (see request build).
-                                // A successful compaction below clears the
-                                // flag via the history rewrite.
+
                                 self.contaminated.insert(self.messages.len() - 1);
                             }
-                            // Context overflow: compact via the budgeted
-                            // compaction pipeline, then retry the turn;
-                            // otherwise surface the error.
+
                             if e.should_compress() {
                                 let before = (self.estimate_tokens(), self.messages.len());
                                 match self.try_compact_budgeted().await {
@@ -856,10 +653,6 @@ impl Agent {
                             return Err(err);
                         }
                         None => {
-                            // Provider closed without a completion event: never
-                            // treat that as success. Text-only partial output
-                            // is salvaged (marked interrupted); pending tool
-                            // calls are NOT executed from a truncated stream.
                             drain_held!();
                             if !text_parts.is_empty() {
                                 salvage_partial_text(
@@ -878,20 +671,14 @@ impl Agent {
                     }
                 }
             };
-            // Context gauge: latest report wins wholesale (opencode parity:
-            // its sidebar/footer read the last assistant message's usage,
-            // never a sum). A round with no usage signal keeps the previous
-            // gauge. Billing stays cumulative below.
+
             if usage.any() {
                 total_usage = usage;
                 total_usage.normalize();
             }
             billed.accumulate(&usage);
             usage.log_request("turn", self.session_id.as_deref());
-            // Stream-identity hardening: calls that never got a provider ID
-            // get a conversation-unique fallback now and emit their single
-            // start here, so every dispatched call already has its start and
-            // dispatch never consults positional side tables.
+
             {
                 let fallback_base = self.messages.len();
                 for (wire_index, slot) in pending.iter_mut().enumerate() {
@@ -911,14 +698,9 @@ impl Agent {
             }
             emit!(AgentEvent::StepUsage { usage: total_usage });
 
-            // Finalize the assistant message exactly as streamed.
-            // Reasoning precedes text, mirroring the provider's emission order
-            // (pi renders runs of thinking blocks ahead of prose).
             let mut content: Vec<ContentBlock> = Vec::new();
             let thinking = std::mem::take(&mut thinking_text);
-            // A captured reasoning item attaches even without thinking text:
-            // the encrypted carrier is what replays next turn, not the prose
-            // (a relay may send the item only, never the summary deltas).
+
             if !thinking.is_empty() || pending_reasoning.is_some() {
                 content.push(thinking_block(
                     thinking,
@@ -928,10 +710,7 @@ impl Agent {
             }
             let text = text_parts.concat();
             let text_is_empty = text.is_empty();
-            // Evaluated before `text` moves into the content block; used only
-            // on the no-tool end path below. A leaked tool-call envelope
-            // (funnel fence / native markup the provider left as text) means
-            // the model tried to call and the call never materialized.
+
             let leaked_markup = matches!(stop_reason, StopReason::EndTurn | StopReason::ToolUse)
                 && (leaked_call_markup(&text) || text_strip.leaked());
             if !text.is_empty() {
@@ -945,8 +724,7 @@ impl Agent {
                         continue;
                     }
                 };
-                // IDs are final here: provider IDs from the stream or the
-                // gray_call_* fallback assigned above — never a positional default.
+
                 let Some(id) = call.id.clone().filter(|s| !s.trim().is_empty()) else {
                     log::warn!(target: "gray_agent", "dropping tool call index {index} with empty id after fallback");
                     continue;
@@ -963,8 +741,7 @@ impl Agent {
                 content,
             };
             self.messages.push(assistant.clone());
-            // This round's report covers system + tools + history through the
-            // assistant message just pushed (pi `estimateContextTokens`).
+
             self.record_context_usage(&usage);
             self.warm_cache_reported = self.warm_cache_reported
                 || usage.cache_read_input_tokens
@@ -987,8 +764,6 @@ impl Agent {
                 })
                 .collect();
 
-            // Truncated turn with a usable fragment: ask to continue where it
-            // left off (capped); past the cap the stitched partial stands.
             if stop_reason == StopReason::MaxTokens
                 && !text_is_empty
                 && tool_uses.is_empty()
@@ -998,18 +773,10 @@ impl Agent {
                 self.messages.push(Message::user_injected(
                     "previous response truncated — continue exactly where you left off",
                 ));
-                // Still one message resuming mid-sentence: no
-                // `MessageBoundary`, or the stitched tail would start its
-                // own block and the seam would show.
+
                 continue 'turn;
             }
 
-            // Empty turn (no text, no tool calls): retry the provider call,
-            // then nudge once after tool results, else end on `(empty)`.
-            // A reasoning-only response cut by the output limit is NOT an
-            // empty turn: the identical retry would hit the same limit (up to
-            // 3x the max output cost, reasoning dropped). The MaxTokens branch
-            // above owns the turn; ending here keeps the thinking (#99).
             if text_is_empty && tool_uses.is_empty() && stop_reason != StopReason::MaxTokens {
                 self.messages.pop();
                 if empty_retries < MAX_EMPTY_RETRIES {
@@ -1034,9 +801,6 @@ impl Agent {
             }
 
             if tool_uses.is_empty() {
-                // A text-only ending that is really a tool call the provider
-                // left as raw markup: nothing ran, so ask for a real call.
-                // Ordinary text endings are never second-guessed.
                 if leaked_markup && leak_nudges < MAX_LEAK_NUDGES {
                     leak_nudges += 1;
                     log::info!(target: "gray_agent", "end turn leaked tool-call markup; nudging {leak_nudges}/{MAX_LEAK_NUDGES}");
@@ -1044,13 +808,11 @@ impl Agent {
                     self.messages.push(Message::user_injected(
                         "your last message contained raw tool-call markup instead of a real tool call, so nothing ran — send the call again, or reply without it",
                     ));
-                    // The reply is a new message, not a tail on the leaked
-                    // prose — without the boundary it glues on verbatim.
+
                     emit!(AgentEvent::MessageBoundary);
                     continue 'turn;
                 }
-                // A job that finished during inference gets a follow-up now;
-                // unfinished jobs never hold this turn open.
+
                 if self.collect_background_notifications(&ctx) {
                     emit!(AgentEvent::MessageBoundary);
                     continue 'turn;
@@ -1060,8 +822,7 @@ impl Agent {
                 } else {
                     0.0
                 };
-                // A stream-phase refresh (long generation, no tools after)
-                // bills its usage here — the post-tools drain never ran.
+
                 if let Ok(spent) = warm_spent.lock() {
                     billed.accumulate(&spent);
                 }
@@ -1071,18 +832,10 @@ impl Agent {
                 return Ok(events);
             }
 
-            // mini-swe-agent's streak semantics: a round with real calls
-            // clears the stall-nudge counter; placeholder-only rounds
-            // (`echo "working on it"`) do not.
             if tool_uses.iter().any(|(_, n, a)| productive_call(n, a)) {
                 leak_nudges = 0;
             }
 
-            // Loop guard: one reminder to change approach when the identical
-            // call keeps coming (arXiv:2609.20804 §2.4 stuck detection), then
-            // a hard stop if it still does. Deliberate job polls reset the
-            // streak below. The reminder is pushed after this round's
-            // results so the model sees it with the repeated output.
             const SIGNATURE_ABORT_REPEATS: usize = 6;
             const SIGNATURE_NUDGE_REPEATS: usize = 4;
             {
@@ -1106,17 +859,9 @@ impl Agent {
                 }
             }
 
-            // W3 dispatch validation: unknown tools and malformed args never
-            // reach the executor; each still gets one error tool result so the
-            // assistant/user alternation stays intact.
-            // Parallel batch lane: a maximal run of batchable-known-object
-            // calls executes concurrently via `join_ordered`; everything else
-            // keeps the sequential path below, verbatim. Kill-switch off (or
-            // any barrier) degrades to all-`Single` — today's loop exactly.
             let known: std::collections::HashSet<String> =
                 self.tools.iter().map(|t| t.name.clone()).collect();
-            // Everything pushed from here on is this round's tool results;
-            // the poll check below reads them back by index.
+
             let round_start = self.messages.len();
             let segments = if crate::parallel::parallel_enabled() {
                 crate::parallel::plan_segments(&tool_uses, &known)
@@ -1128,15 +873,6 @@ impl Agent {
                     .collect()
             };
             for segment in segments {
-                // Parallel run over `tool_uses` indices. Pre-pass (loop
-                // thread, in order): cancel check, validation, `tool_before`
-                // verdicts, `pre_tool` hooks. Only `executor.execute` runs
-                // concurrently — never `ApprovalGate::check`: batchable names
-                // are statically `Allow` in every mode. `tool_call_end` for
-                // every ready member fires before the run starts (`start`
-                // already emitted live/at-finalize with the final ID).
-                // Post-pass (loop thread, input order): `post_tool` hooks,
-                // `tool_result` events, history writes.
                 if let crate::parallel::Segment::Parallel(idxs) = segment {
                     let (Some(run_start), Some(run_end)) =
                         (idxs.first().copied(), idxs.last().map(|i| *i + 1))
@@ -1162,11 +898,6 @@ impl Agent {
                         }
                     }
                     if cancelled_at.is_some() {
-                        // Nothing in the run executed: the pre-pass only
-                        // validates into `ready`/`inline_errors` and emits
-                        // nothing, so no run index has a result yet — backfill
-                        // the whole run exactly once, then everything after
-                        // it, and bail. History must never hold an orphaned call.
                         crate::agent_tools::answer_pending_range(
                             self,
                             &tool_uses,
@@ -1178,10 +909,7 @@ impl Agent {
                         self.emit_turn_end(&billed).await;
                         return Err(CoreError::Cancelled);
                     }
-                    // GC-6: a `tool_before` rewrite can turn a screened call into
-                    // one that must not share the lane. Re-screen what will
-                    // actually execute and fail the offending calls closed
-                    // through the preflight-error path: hooks already ran once.
+
                     let demoted = {
                         let calls: Vec<(&str, &serde_json::Value)> =
                             ready.iter().map(|(_, n, a)| (n.as_str(), a)).collect();
@@ -1204,17 +932,12 @@ impl Agent {
                         }
                         ready = keep;
                     }
-                    // `tool_call_end` is the "args complete, executing" signal
-                    // (the REPL flips the card to running and the status off
-                    // "Preparing tool"): emit it for every member now, before
-                    // the run starts — not after the slowest one finishes.
+
                     for (idx, _, _) in &ready {
                         let (id, _, args) = &tool_uses[*idx];
                         emit!(AgentEvent::tool_call_end(id.clone(), args.clone()));
                     }
-                    // Spawn: one future per ready item. Everything the future
-                    // touches is owned (`'static`): no borrow of `self`
-                    // escapes the loop thread.
+
                     let timeout = self.tool_timeout;
                     let mut futs = Vec::with_capacity(ready.len());
                     for (idx, name, effective_args) in ready {
@@ -1247,18 +970,13 @@ impl Agent {
                         ));
                     }
                     let joined = crate::parallel::join_ordered(futs, &ctx.cancel).await;
-                    // Reconcile by real index (no sentinel exists: every
-                    // entry carries its input index; panics arrive as error
-                    // outputs). `None`/absent means cancelled
-                    // pre-completion → synthetic backfill, message only.
+
                     let by_idx: std::collections::HashMap<usize, Option<ToolOutput>> =
                         joined.into_iter().collect();
                     let mut shortfall = false;
                     for &idx in &idxs {
                         let (id, name, args) = &tool_uses[idx];
                         if let Some(err) = inline_errors.remove(&idx) {
-                            // `start` already emitted with the final ID (live
-                            // or at finalize); dispatch only ends the call.
                             emit!(AgentEvent::tool_call_end(id.clone(), args.clone()));
                             emit!(AgentEvent::tool_result(
                                 id.clone(),
@@ -1315,9 +1033,7 @@ impl Agent {
                     self.emit_turn_end(&billed).await;
                     return Err(CoreError::Cancelled);
                 }
-                // `start` already emitted with the final ID (live or at
-                // finalize); dispatch only ends the call — no positional side
-                // tables (wire vs filtered index spaces must never mix).
+
                 emit!(AgentEvent::tool_call_end(id.clone(), args.clone()));
 
                 let effective_args = match self.preflight(name, args).await {
@@ -1340,8 +1056,7 @@ impl Agent {
                         continue;
                     }
                 };
-                // Pin the tool future rather than moving it into the
-                // timeout: a cancel must be able to bound-wait on it.
+
                 let mut exec_fut: futures::future::BoxFuture<'_, ToolOutput> =
                     match self.tool_output_sink(id) {
                         Some(sink) => Box::pin(crate::agent::scope_tool_output(
@@ -1359,12 +1074,7 @@ impl Agent {
                         )),
                     },
                     _ = ctx.cancel.cancelled() => {
-                        // The tool shares `ctx`, so it is already signalled
-                        // and owns the cleanup that matters (kill its process
-                        // group, drain, report partial output). Wait out that
-                        // report instead of dropping the future and answering
-                        // with a bare synthetic string: a cancel must never be
-                        // the reason output is lost.
+
                         let report = match tokio::time::timeout(
                             crate::parallel::CANCEL_REPORT_GRACE,
                             &mut exec_fut,
@@ -1392,8 +1102,7 @@ impl Agent {
                                 is_error: report.is_error,
                             }],
                         });
-                        // This call now has a real result; only the calls
-                        // after it still need the synthetic backfill.
+
                         answer_pending_tools(self, &tool_uses, idx + 1, "cancelled by user");
                         self.emit_turn_end(&billed).await;
                         return Err(CoreError::Cancelled);
@@ -1416,18 +1125,11 @@ impl Agent {
                 });
             }
 
-            // Tools done: stop warming and bill what the refreshes cost.
             drop(warm_guard);
             if let Ok(spent) = warm_spent.lock() {
                 billed.accumulate(&spent);
             }
 
-            // A round whose every result is a "job still running" notice is a
-            // deliberate poll, not a stall: gray answers a repeated command
-            // with the live status of the job it already started, so the
-            // elapsed time moves and the model is waiting on real work. Clear
-            // the signature streak for those rounds — a genuinely stuck call
-            // returns ordinary output and still trips the guard.
             let poll_round = !self.messages[round_start..].is_empty()
                 && self.messages[round_start..].iter().all(|m| {
                     !m.content.is_empty()
@@ -1458,23 +1160,11 @@ impl Agent {
                 }
             }
 
-            // Tool calls ran, so the next round's answer is a new assistant
-            // message, not a tail on this round's text. Without the boundary
-            // its first delta glues onto the paragraph still open in the
-            // streaming renderer (`contain.I haven't`). The MaxTokens stitch
-            // continue path above deliberately never reaches this emit.
             emit!(AgentEvent::MessageBoundary);
         }
     }
 }
 
-/// Whether a call counts as real work for stall-streak purposes
-/// (mini-swe-agent's clean step): anything that is not bash, or a bash
-/// command that is not a whole-command no-op — `true`, `:` or a command
-/// starting `echo`/`printf`, the shapes `BashTool::noop_steer` refuses to
-/// run. Deliberately first-word only: `echo x > f` or `echo x | wc` do real
-/// work but count as non-productive here — a missed reset only keeps the
-/// streak alive, the bounded direction.
 fn productive_call(name: &str, args: &serde_json::Value) -> bool {
     if name != "bash" {
         return true;
@@ -1489,11 +1179,6 @@ fn productive_call(name: &str, args: &serde_json::Value) -> bool {
         && !cmd.starts_with("printf ")
 }
 
-/// True when a text-only ending carries raw tool-call/template markup the
-/// provider never turned into calls: a fenced `gray_calls` block (the
-/// text-funnel contract some providers front), native pipe-delimited call
-/// tokens, or hallucinated `[User]`/`[Assistant]` transcript turns. The
-/// model believed it called a tool; ending here looks like dying mid-task.
 fn leaked_call_markup(text: &str) -> bool {
     if text.contains("```gray_calls")
         || text.contains("\n[User]\n")
@@ -1501,9 +1186,7 @@ fn leaked_call_markup(text: &str) -> bool {
     {
         return true;
     }
-    // Two distinct specials outside column-0 fences = leaked markup (GC-1 —
-    // quoted inside code they're documentation). Scan the non-fence lines
-    // directly instead of copying them, and stop at the second kind.
+
     let mut in_fence = false;
     let mut seen = 0u16;
     for line in text.split_inclusive('\n') {
@@ -1523,8 +1206,6 @@ fn leaked_call_markup(text: &str) -> bool {
     false
 }
 
-/// `<|open|>` / `<|close|>` / `<|sep|>`-family specials, built without
-/// literal pipes so this file's own diff never carries the raw markup.
 const LEAKED_SPECIALS: &[&str] = &[
     "<\x7copen\x7c>",
     "<\x7cclose\x7c>",
@@ -1536,23 +1217,14 @@ const LEAKED_SPECIALS: &[&str] = &[
     "<\x7cend\x7c>",
 ];
 
-/// Streaming filter that drops [`LEAKED_SPECIALS`] from deltas. A trailing
-/// fragment that could still grow into a special (`<`, `<|clo`) is held
-/// until the next delta or [`flush`](Self::flush); anything else, a lone
-/// `<` included, passes through untouched. `seen` records which specials
-/// were dropped so the leaked-markup nudge still fires.
-///
-/// Specials inside a column-0 fenced code block pass through: quoting the
-/// markup in code is not a leak (GC-1). Fence state advances only over
-/// characters that were emitted, so a held fragment is re-read intact.
 #[derive(Default)]
 struct SpecialStrip {
     hold: String,
     seen: u16,
     in_fence: bool,
-    /// False at the start of a line; true once the line has real content.
+
     mid_line: bool,
-    /// Backticks read at the start of the current line (fence needs three).
+
     ticks: u8,
 }
 
@@ -1606,15 +1278,11 @@ impl SpecialStrip {
         std::mem::take(&mut self.hold)
     }
 
-    /// Same threshold as [`leaked_call_markup`]: two distinct specials.
     fn leaked(&self) -> bool {
         self.seen.count_ones() >= 2
     }
 }
 
-/// True when a tool result is gray's "the job is still going" notice: a
-/// command that reached its timeout and moved to a background job. A
-/// repeated call answered with one is real work moving, never a stall.
 fn is_job_progress(content: &str) -> bool {
     content.starts_with("still running · job ")
 }
@@ -1654,11 +1322,9 @@ mod leak_strip_tests {
 
     #[test]
     fn fence_state_survives_deltas_split_mid_fence_and_mid_special() {
-        // The fence opener and a special are both split across deltas.
         let (out, leaked) = run_stream(&["``", "`\n", &OPEN[..3], &OPEN[3..], "\n```\n", OPEN]);
         assert_eq!(out, format!("```\n{OPEN}\n```\n{}", ""));
-        // Only the special outside the fence was dropped, so one distinct
-        // special is not a leak on its own.
+
         assert!(!leaked);
     }
 

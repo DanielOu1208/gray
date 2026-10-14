@@ -1,18 +1,3 @@
-//! Parallel whole-disk enumeration for Linux: getdents64(2) + statx(2).
-//!
-//! getdents64 returns hundreds of entries per syscall with name and type
-//! already attached; statx then supplies size, mtime and device — Linux has
-//! no getattrlistbulk, so each entry costs one statx and there is no bulk
-//! alternative. Directories fan out over a rayon pool and children are
-//! opened with openat() relative to the parent's fd, so paths are never
-//! rebuilt and PATH_MAX never bites.
-//!
-//! Mount points are crossed, not stopped at: on Linux the interesting
-//! trees (/home, /tmp) are routinely separate mounts, while the ones to
-//! avoid (/proc, /sys, /dev, /run) are excluded by path via `walk::SKIP`.
-//! A device id that differs from the parent's still sets FLAG_MOUNT, for
-//! display.
-
 use rayon::Scope;
 use std::cell::RefCell;
 use std::ffi::CString;
@@ -21,24 +6,14 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 pub const NONE: u32 = u32::MAX;
 
-/// Folders never to open: on Linux `engine::gated` supplies the
-/// pseudo-filesystem set (/proc, /sys, /dev, /run, ...).
 pub static SKIP: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
 
-/// Folders a scan was refused (EACCES/EPERM). Recorded only while paths
-/// are tracked, i.e. while SKIP is set.
 pub static DENIED: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
-/// Entries the first run's whole-disk crawl has listed so far.
 pub static LISTED: AtomicUsize = AtomicUsize::new(0);
 
-/// Work a search is waiting on (listing or reading one folder): while any
-/// runs, background work (the whole-disk crawl, content builds) waits in
-/// `yield_to_searches`, so the search gets the cores and the kernel to
-/// itself (they are bound by the same per-file kernel costs).
 static HOLD: AtomicUsize = AtomicUsize::new(0);
 
-/// Holds background work off while it lives (see `HOLD`).
 pub struct Hold(());
 
 impl Hold {
@@ -55,8 +30,6 @@ impl Drop for Hold {
     }
 }
 
-/// Background work's turn: wait while a `Hold` lives, but at most 2 s, so
-/// searches back to back never stall it for good.
 pub fn yield_to_searches() {
     let t = std::time::Instant::now();
     while HOLD.load(Ordering::Relaxed) > 0 && t.elapsed() < std::time::Duration::from_secs(2) {
@@ -73,25 +46,21 @@ pub const KIND_DIR: u8 = 1;
 pub const KIND_LINK: u8 = 2;
 pub const KIND_OTHER: u8 = 3;
 
-/// Entry flag bit: the name starts with a dot (Linux's UF_HIDDEN).
 pub const FLAG_HIDDEN: u8 = 1 << 2;
-/// Directory on a different device than its parent. Noted for display;
-/// unlike macOS it does not stop the descent (see the module doc).
+
 pub const FLAG_MOUNT: u8 = 1 << 3;
-/// Only while a listing is parsed: a directory its parent reports empty.
-/// macOS's getattrlistbulk says so in the listing; getdents64 cannot (an
-/// entry count costs the open it would save), so nothing here carries it.
+
 const MAYBE_EMPTY: u8 = 1 << 7;
 
 #[derive(Clone, Copy)]
 pub struct RawEnt {
     pub name_off: u32,
     pub name_len: u16,
-    /// kind in the low 2 bits, FLAG_* above.
+
     pub kind: u8,
     pub size: u64,
     pub mtime: u32,
-    /// Temp id of the listing for this directory, or NONE.
+
     pub child: u32,
 }
 
@@ -105,7 +74,7 @@ pub struct Listing {
 struct Ctx {
     next_id: AtomicU32,
     out: Vec<Mutex<Vec<Listing>>>,
-    /// The whole-disk crawl: counts LISTED, yields to searches.
+
     disk: bool,
 }
 
@@ -113,12 +82,10 @@ thread_local! {
     static BUF: RefCell<Vec<u8>> = RefCell::new(vec![0u8; 256 * 1024]);
 }
 
-/// Scan `root` recursively. Listing id 0 is `root` itself.
 pub fn scan(root: &[u8], threads: usize) -> Vec<Listing> {
     scan_with(root, threads, false)
 }
 
-/// The first run's crawl of the whole disk (see `LISTED`, `HOLD`).
 pub fn scan_disk(threads: usize) -> Vec<Listing> {
     scan_with(b"/", threads, true)
 }
@@ -126,7 +93,7 @@ pub fn scan_disk(threads: usize) -> Vec<Listing> {
 fn scan_with(root: &[u8], threads: usize, disk: bool) -> Vec<Listing> {
     raise_fd_limit();
     let fd = if blocked(root) { -1 } else { CString::new(root).map_or(-1, |c| unsafe { libc::open(c.as_ptr(), OPEN_DIR) }) };
-    // Paths are only tracked when there is something to skip.
+
     let path = SKIP.get().is_some_and(|v| !v.is_empty()).then(|| root.to_vec());
     let mut l = Listing { id: 0, names: Vec::new(), ents: Vec::new() };
     if fd >= 0 {
@@ -135,10 +102,7 @@ fn scan_with(root: &[u8], threads: usize, disk: bool) -> Vec<Listing> {
         }
         list_fd(fd, &mut l);
     }
-    // A folder holding no folder (most new ones) needs no pool: its threads
-    // cost ~120 us of CPU a scan, most of what a burst of new folders costs.
-    // (The macOS check also skips mounts; here mounts are descended, so the
-    // test is "no directory at all".)
+
     if !l.ents.iter().any(|e| e.kind & 3 == KIND_DIR) {
         if fd >= 0 {
             unsafe { libc::close(fd) };
@@ -169,8 +133,6 @@ fn raise_fd_limit() {
     unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &r) };
 }
 
-/// List a single directory (no recursion). Subdirectories come back with
-/// `child == NONE`. Used by the live updater.
 pub fn list_one(path: &[u8]) -> Option<Listing> {
     if blocked(path) {
         return None;
@@ -185,13 +147,10 @@ pub fn list_one(path: &[u8]) -> Option<Listing> {
     Some(l)
 }
 
-// Linux has no O_NOFOLLOW_ANY: O_NOFOLLOW refuses only the last component
-// of a full path, which is what the directory opens here want anyway.
 pub(crate) const NOFOLLOW: i32 = libc::O_NOFOLLOW;
 
 const OPEN_DIR: i32 = libc::O_RDONLY | libc::O_DIRECTORY | NOFOLLOW | libc::O_CLOEXEC;
 
-/// Directory fd shared by the tasks that still need to openat() a child.
 struct Fd(i32);
 impl Drop for Fd {
     fn drop(&mut self) {
@@ -199,10 +158,6 @@ impl Drop for Fd {
     }
 }
 
-// Children are opened with openat() relative to the parent's fd, so paths
-// never get rebuilt. No Endpoint Security tax on Linux: open+close is ~2us,
-// and the macOS version's entrycount trick (skip opening empty dirs) has no
-// equivalent, so every child dir is opened.
 fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &'s Ctx) {
     let mut l = Listing { id, names: Vec::new(), ents: Vec::new() };
     if fd < 0 {
@@ -216,13 +171,12 @@ fn finish_dir<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, id: u32, ctx: &
     descend(s, fd, path, l, ctx);
 }
 
-/// Push `l`, the listing of `fd`, and scan its folders.
 fn descend<'s>(s: &Scope<'s>, fd: i32, path: Option<Vec<u8>>, mut l: Listing, ctx: &'s Ctx) {
     let me = std::sync::Arc::new(Fd(fd));
     let mut kids = Vec::new();
     for e in l.ents.iter_mut() {
         e.kind &= !MAYBE_EMPTY;
-        // No FLAG_MOUNT check: mounts are descended (see the module doc).
+
         if e.kind & 3 == KIND_DIR {
             let name = &l.names[e.name_off as usize..e.name_off as usize + e.name_len as usize];
             let child_path = path.as_ref().map(|p| crate::live::join(p, name));
@@ -259,7 +213,6 @@ fn push(l: Listing, ctx: &Ctx) {
     ctx.out[slot].lock().unwrap().push(l);
 }
 
-/// Returns false if the directory could not be opened.
 fn list_into(path: &[u8], l: &mut Listing) -> bool {
     let Ok(cpath) = CString::new(path) else {
         return false;
@@ -273,8 +226,6 @@ fn list_into(path: &[u8], l: &mut Listing) -> bool {
     true
 }
 
-/// The fields one walk needs from a stat, whichever libc call supplied
-/// them: musl has no statx, so it answers through fstatat/fstat.
 struct Stat {
     dev: u64,
     mode: u32,
@@ -282,8 +233,6 @@ struct Stat {
     mtime: i64,
 }
 
-/// The directory's own device id, for FLAG_MOUNT on children. 0 = unknown
-/// (stat refused): children then never flag.
 #[cfg(not(target_env = "musl"))]
 fn dev_of(fd: i32) -> u64 {
     let mut st: libc::statx = unsafe { std::mem::zeroed() };
@@ -320,7 +269,6 @@ fn stat_at(dir: i32, name: &CString) -> Option<Stat> {
     Some(Stat { dev: st.st_dev, mode: st.st_mode as u32, size: st.st_size as u64, mtime: st.st_mtime as i64 })
 }
 
-/// linux_dirent64: ino(8) off(8) reclen(2) type(1) name[].
 const DIRENT_HEADER: usize = 19;
 
 fn list_fd(fd: i32, l: &mut Listing) {
@@ -332,8 +280,7 @@ fn list_fd(fd: i32, l: &mut Listing) {
                 break;
             }
             let n = n as usize;
-            // Size the listing exactly once the dirents are in: names sit
-            // in each record's tail.
+
             l.ents.reserve(n / 48);
             l.names.reserve(n / 2);
             let mut p = 0usize;
@@ -353,7 +300,7 @@ fn parse_entry(dir: i32, name: &[u8], dev: u64, l: &mut Listing) {
         return;
     }
     let Ok(c) = CString::new(name) else { return };
-    // Vanished between the listing and the stat.
+
     let Some(st) = stat_at(dir, &c) else { return };
     let mut kind = match st.mode & libc::S_IFMT {
         libc::S_IFREG => KIND_FILE,
@@ -367,7 +314,7 @@ fn parse_entry(dir: i32, name: &[u8], dev: u64, l: &mut Listing) {
     if kind == KIND_DIR && dev != 0 && st.dev != dev {
         kind |= FLAG_MOUNT;
     }
-    // macOS's datalength covers files and links; directories report 0.
+
     let size = if kind & 3 == KIND_DIR { 0 } else { st.size };
     let mtime = st.mtime.clamp(0, u32::MAX as i64) as u32;
     l.ents.push(RawEnt { name_off: l.names.len() as u32, name_len: name.len() as u16, kind, size, mtime, child: NONE });

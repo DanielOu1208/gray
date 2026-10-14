@@ -1,20 +1,6 @@
-//! Image handling before send: [`normalize_image_bytes`] validates and
-//! tags the original bytes — no re-encode, no shrink. Provider hard caps
-//! are enforced at serialization in gray-provider's `image_fit`.
-//!
-//! Moved here from `gray::repl::attachments` so the `read` tool can attach
-//! vision blocks for image files (opencode `read` parity: "Image read
-//! successfully" + file attachment). Also the extension gates and MIME
-//! tables for video/pdf/audio, and PDF text extraction, so `cat` in bash and
-//! pasted attachments in `gray` agree on what a file is. `gray` re-exports.
-
 use std::io::Cursor;
 use std::path::Path;
 
-/// Sanity ceiling on the raw file: past ~20MB no vision provider takes a
-/// single image, so refuse loudly instead of handing a guaranteed-400
-/// payload to the wire. Provider-specific caps (Anthropic's 5MB/8000px)
-/// live in gray-provider's `image_fit`, applied at serialization.
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -36,10 +22,6 @@ impl std::fmt::Display for MediaError {
     }
 }
 
-/// Extension allowlist for attempted image reads. Mirrors the image arm of
-/// `gray::repl::attachments::attachment_kind` — keep in sync. Magic bytes
-/// still decide inside [`normalize_image_bytes`], so a mislabeled file
-/// falls back to the binary note instead of failing loudly.
 pub fn is_image_extension(path: &Path) -> bool {
     matches!(
         path.extension()
@@ -57,10 +39,6 @@ pub fn is_image_extension(path: &Path) -> bool {
     )
 }
 
-/// Extension allowlist for video the bash `cat` claim turns into a contact sheet.
-/// Widened only where a real clip lives; the sheet path shells out to ffmpeg,
-/// which is the thing that actually decodes these, so the list is a cheap
-/// first gate rather than a promise.
 pub fn is_video_extension(path: &Path) -> bool {
     matches!(
         path.extension()
@@ -92,7 +70,6 @@ pub fn is_audio_extension(path: &Path) -> bool {
     audio_media_type(path).is_some()
 }
 
-/// Wire MIME type for audio, by extension; `None` means not audio.
 pub fn audio_media_type(path: &Path) -> Option<&'static str> {
     Some(match lower_ext(path)?.as_str() {
         "mp3" => "audio/mpeg",
@@ -106,8 +83,6 @@ pub fn audio_media_type(path: &Path) -> Option<&'static str> {
     })
 }
 
-/// What a bash `cat` claim can show: an image as itself; video, pdf and
-/// audio natively where the model takes them, else as their fallback.
 pub fn is_viewable_extension(path: &Path) -> bool {
     is_image_extension(path)
         || is_video_extension(path)
@@ -115,11 +90,8 @@ pub fn is_viewable_extension(path: &Path) -> bool {
         || is_audio_extension(path)
 }
 
-/// PDF text cap per file (chars).
 pub const MAX_PDF_CHARS: usize = 60_000;
 
-/// PDF → text via poppler (`pdftotext -layout file -`), bounded at 30s.
-/// The fallback for a model that can't take a native PDF.
 pub fn pdf_text(path: &Path) -> Result<String, MediaError> {
     let arg_path = path.display().to_string();
     let out = crate::video_sheet::run(
@@ -144,9 +116,6 @@ pub fn pdf_text(path: &Path) -> Result<String, MediaError> {
     }
 }
 
-/// Wire MIME type for a video, by extension. A native video part has to name
-/// its type; the extension is the only signal we have, and the provider is
-/// what ultimately decides whether the model accepts it.
 pub fn video_media_type(path: &Path) -> &'static str {
     match path
         .extension()
@@ -164,13 +133,6 @@ pub fn video_media_type(path: &Path) -> &'static str {
     }
 }
 
-/// Validate-and-tag before send: sniff the format, decode the header, and
-/// return the ORIGINAL bytes with their real MIME — no re-encode, no
-/// resize, no rotation bake (animated GIFs stay animated, EXIF stays on
-/// the file for the provider to honor). Only a raw file past the 20MB
-/// sanity ceiling or an undecodable header fails loudly. Provider hard
-/// caps are enforced at serialization (`gray-provider::image_fit`).
-/// Returns `(media_type, bytes)`.
 pub fn normalize_image_bytes(bytes: &[u8]) -> Result<(String, Vec<u8>), MediaError> {
     use image::ImageFormat;
     if bytes.len() > MAX_IMAGE_BYTES {
@@ -182,7 +144,7 @@ pub fn normalize_image_bytes(bytes: &[u8]) -> Result<(String, Vec<u8>), MediaErr
         ImageFormat::Png => "image/png",
         ImageFormat::Gif => "image/gif",
         ImageFormat::WebP => "image/webp",
-        // bmp/heic/etc: not in our decoder set — loud, like opencode DecodeError.
+
         other => {
             return Err(MediaError::Decode(format!(
                 "{other:?} decoding not enabled"

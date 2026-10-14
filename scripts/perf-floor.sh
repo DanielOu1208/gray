@@ -1,43 +1,23 @@
 #!/usr/bin/env bash
-# Down-only performance floor: the numbers gray's README sells itself on
-# (one binary, a small dependency surface, a fast start) had no CI guard, so
-# they were one careless merge away from being marketing.
-#
-#   scripts/perf-floor.sh          # check against scripts/perf-baseline.json
-#   scripts/perf-floor.sh update   # rewrite the baseline (deliberate growth)
-#
-# Every metric is a ceiling that may only go down. A regression fails the job;
-# raising a number is a reviewable commit to the baseline, not a silent edit.
-#
-# Machine-specific by design: the dependency counts are identical on every
-# machine, the binary size is per-target and per-toolchain. Wall-clock startup
-# is measured and printed but never enforced — a time budget on a shared CI
-# runner fails on load, not on regressions — and the size gets a few percent of
-# documented slack for exactly the same reason (`binary_bytes_slack_pct`).
+
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 baseline_file="scripts/perf-baseline.json"
 mode="${1:-check}"
 
-# A release binary is only measured when one is already built, so this script
-# stays usable on a dev checkout and in a fast dependency-only check.
 binary="target/release/gray"
 [ -x "$binary" ] || binary=""
 
 metric() { printf '%s' "$2"; }
 
 unique_crates() {
-  # Every package the lockfile resolves, all targets. `cargo tree` was the
-  # first try, but its output moves with the host and toolchain (324 here,
-  # 413 on the runner, same lockfile); the lockfile is the same bytes
-  # everywhere.
+
   grep -c '^\[\[package\]\]' Cargo.lock
 }
 
 build_script_crates() {
-  # Crates with a C/C++ build step: whether building gray needs cc/cmake/
-  # pkg-config on a bare machine is a portability fact, not a style question.
+
   cargo metadata --format-version 1 2>/dev/null \
     | python3 -c '
 import json, sys
@@ -73,8 +53,7 @@ declare -A current=(
 )
 
 if [ "$mode" = "update" ]; then
-  # Policy, not a measurement: keep whatever slack the file already asked for,
-  # and never invent one on the user's behalf.
+
   slack=3
   if [ -f "$baseline_file" ]; then
     prev=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('binary_bytes_slack_pct', ''))" \
@@ -108,8 +87,6 @@ read_baseline() {
     "$baseline_file" "$1"
 }
 
-# The stripped size moves with the toolchain and the target, so it is the one
-# metric compared with slack. Everything else is exact.
 slack=$(read_baseline binary_bytes_slack_pct)
 slack="${slack:-3}"
 
@@ -126,7 +103,7 @@ for key in unique_crates build_script_crates workspace_members binary_bytes; do
     continue
   fi
   if [ "$key" = "binary_bytes" ]; then
-    # Ceiling including slack, so the printed limit is what was enforced.
+
     limit=$(( limit * (100 + slack) / 100 ))
     printf '  %-22s %-10s baseline %s (+%s%% slack)\n' "$key" "$value" "$limit" "$slack"
     if [ "$value" -gt "$limit" ]; then status=1; fi
@@ -140,7 +117,6 @@ for key in unique_crates build_script_crates workspace_members binary_bytes; do
   fi
 done
 
-# Reported, never enforced — see the header.
 if [ -n "$binary" ]; then
   start=$(date +%s%N)
   "$binary" --version > /dev/null

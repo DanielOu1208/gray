@@ -172,12 +172,10 @@ fn creds_roundtrip_store_then_undo_on_fingerprint() {
     assert_eq!(entry.target, "openrouter");
     assert_eq!(entry.detail, cred_fp("sk-test"));
 
-    // Undo removes while the fingerprint still matches.
     let (done, msg) = undo_cred("openrouter", &entry.detail, &store);
     assert!(done, "{msg}");
     assert!(!store.load().unwrap().contains_key("openrouter"));
 
-    // A value changed since import is left in place and retires the entry.
     let mut map = store.load().unwrap();
     map.insert("openrouter".into(), AuthEntry::Key("other".into()));
     store.replace(&map).unwrap();

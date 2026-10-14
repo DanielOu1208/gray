@@ -1,7 +1,3 @@
-//! End-to-end: a `-p --json` turn with `GRAY_STDIN_STEER=1` must exit once its
-//! terminal row is out while the caller keeps stdin open (the Discord gateway
-//! holds the pipe). The runtime drop used to wait on the stdin steer reader.
-//! The model is a local SSE stub, so no provider or key is needed.
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
@@ -21,7 +17,7 @@ async fn json_turn_exits_while_stdin_stays_open() {
 #[tokio::test]
 async fn json_failure_exits_one_while_stdin_stays_open() {
     let root = tempfile::tempdir().unwrap();
-    // A bogus session fails before any model request, so no stub is needed.
+
     let (status, stdout) = run_with_stdin_held_open(
         root.path(),
         "http://127.0.0.1:9/v1",
@@ -61,7 +57,7 @@ async fn run_with_stdin_held_open(
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    // The caller's end of the pipe stays open for the whole run, like the gateway.
+
     let _held_stdin = child.stdin.take();
     let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
         .await
@@ -73,7 +69,6 @@ async fn run_with_stdin_held_open(
     )
 }
 
-/// Accepts one streaming chat request and answers `ok`.
 async fn serve_one_reply() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());

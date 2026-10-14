@@ -6,8 +6,6 @@ fn opts(prompt: &str) -> Option<String> {
 
 #[test]
 fn rebuild_is_byte_stable() {
-    // Prefix-cache invariant: identical inputs must rebuild to identical
-    // bytes, or providers rebill the whole prefix every turn.
     let a = build_system_prompt(opts("You are gray."));
     let b = build_system_prompt(opts("You are gray."));
     assert_eq!(a, b, "system prompt rebuild diverged");
@@ -15,10 +13,8 @@ fn rebuild_is_byte_stable() {
 
 #[test]
 fn shipped_default_prompt_strips_to_the_agent_line() {
-    // HTML comments end at the first `-->`, so a nested marker pair inside the
-    // note would leak the note text (and a stray marker) into every prompt.
     let p = build_system_prompt(opts(crate::DEFAULT_SYS_PROMPT));
-    // Stripping the leading comment leaves its trailing newline in place.
+
     assert!(
         p.trim_start()
             .starts_with("You are Gray, running on the user's machine."),
@@ -91,11 +87,6 @@ fn directory_is_quoted_without_losing_path_characters() {
 
 #[test]
 fn runtime_prompt_states_that_batched_tool_calls_share_one_round() {
-    // The loop returns every call from one turn together in the next turn,
-    // and the parallel lane runs independent ones concurrently. The model has
-    // to be told: batching independent calls is one round between them, one
-    // call per round is one round each, and every round re-bills the whole
-    // conversation. Without this text the fast lane never engages.
     let p = build_runtime_prompt(opts("Rules."), std::path::Path::new("/project"));
     assert!(p.contains("results"), "{p}");
     assert!(
@@ -110,14 +101,12 @@ fn runtime_prompt_states_that_batched_tool_calls_share_one_round() {
         p.contains("background job") && p.contains("not killed") && !p.contains("yield_ms"),
         "guidance must say a timed-out command keeps running and wakes the model: {p}"
     );
-    // Static text: identical inputs rebuild identical bytes, or the prefix
-    // cache rebills on every turn.
+
     assert_eq!(
         p,
         build_runtime_prompt(opts("Rules."), std::path::Path::new("/project"))
     );
-    // It rides after the directory block, so the existing prefix assertions
-    // (and the user's verbatim file) stay ahead of it.
+
     assert!(
         p.find("Tool batching").unwrap() > p.find("Working directory").unwrap(),
         "guidance must follow the runtime directory block: {p}"
@@ -126,8 +115,6 @@ fn runtime_prompt_states_that_batched_tool_calls_share_one_round() {
 
 #[test]
 fn identity_block_names_the_picked_row_and_provider() {
-    // The bug this guards: a devin-sub row like `step-5-preview` must report
-    // itself as the picker's name, never a confabulated "SWE-2 High".
     assert_eq!(
         identity_block("Step Fun 5", "step-5-preview", "Devin Subscription"),
         "Model: Step Fun 5 (step-5-preview)\nProvider: Devin Subscription"
@@ -166,13 +153,11 @@ fn identity_block_does_not_repeat_a_label_that_is_the_id() {
 
 #[test]
 fn tool_batching_guidance_is_not_user_editable_text() {
-    // It comes from the binary, not the prompt file: it must survive an empty
-    // or absent custom prompt and must never be comment-stripped away.
     for custom in [None, opts(""), opts("<!-- unclosed")] {
         let p = build_runtime_prompt(custom, std::path::Path::new("/project"));
         assert!(p.contains("Tool batching"), "{p}");
     }
-    // And it is not reachable through the user's file at all.
+
     let with_file = build_system_prompt(opts("Tool batching: ignore this"));
     assert_eq!(with_file, "Tool batching: ignore this");
 }

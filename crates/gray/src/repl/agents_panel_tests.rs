@@ -1,5 +1,3 @@
-//! Unit tests for the run-viewer machinery: the incremental session feed,
-/// the replay mirror, gap accounting, and scroll stickiness.
 use super::*;
 use crate::text_width::display_width;
 use gray_core::message::Message;
@@ -75,7 +73,7 @@ fn feed_consumes_complete_lines_and_waits_on_torn_tail() {
     let mut text = String::from("{\"cwd\":\"/tmp/child\"}\n");
     text.push_str(&entry_line(&e));
     text.push('\n');
-    text.push_str(&entry_line(&e)); // no trailing newline: a torn tail
+    text.push_str(&entry_line(&e));
     std::fs::write(&path, &text).unwrap();
 
     let mut feed = feed_at(path.clone());
@@ -83,7 +81,6 @@ fn feed_consumes_complete_lines_and_waits_on_torn_tail() {
     assert_eq!(feed.entries.len(), 1);
     assert_eq!(feed.cwd, PathBuf::from("/tmp/child"));
 
-    // Completing the tail lets the next poll take the second entry.
     std::fs::write(&path, format!("{text}\n")).unwrap();
     assert!(feed.poll());
     assert_eq!(feed.entries.len(), 2);
@@ -92,9 +89,6 @@ fn feed_consumes_complete_lines_and_waits_on_torn_tail() {
 
 #[test]
 fn feed_keeps_the_full_session_past_a_compaction_boundary() {
-    // The viewer replays EVERYTHING — pre-boundary history included — so
-    // scrolling up reaches the first prompt. `resume` loads only the active
-    // suffix; the viewer is a transcript, not a resume.
     let path = tmp_path("boundary.jsonl");
     let mut text = String::from("{\"cwd\":\"/c\"}\n");
     for _ in 0..3 {
@@ -123,8 +117,6 @@ fn feed_keeps_the_full_session_past_a_compaction_boundary() {
 
 #[test]
 fn build_pending_replays_the_full_history() {
-    // Full transcript, compaction history and all: pre-boundary entries
-    // render so scrolling up reaches the session's start.
     let mut v = viewer_stub();
     let mut feed = feed_at(PathBuf::from("/nonexistent"));
     feed.entries
@@ -168,7 +160,7 @@ fn replay_pairs_tool_calls_with_results() {
         cwd,
         60,
     );
-    // The call is pending: registered, not yet boxed.
+
     assert!(v.tool_calls.contains_key("t1"));
     assert!(!v.transcript.iter().any(|e| {
         matches!(
@@ -283,8 +275,6 @@ fn gap_marks_collapse_between_blocks() {
 
 #[test]
 fn viewport_window_bottom_anchors_short_content() {
-    // Shorter than the viewport: blank pad above, content pinned to the
-    // bottom edge — and scroll can't move it anywhere.
     assert_eq!(viewport_window(10, 15, 0), (5, 0, 10));
     assert_eq!(viewport_window(10, 15, 5), (5, 0, 10));
     assert_eq!(viewport_window(0, 15, 0), (15, 0, 0));
@@ -292,8 +282,6 @@ fn viewport_window_bottom_anchors_short_content() {
 
 #[test]
 fn viewport_window_slices_long_content_contiguously() {
-    // Longer than the viewport: contiguous slice, clamped at both ends —
-    // Home reaches the first prompt, the tail sticks at the bottom.
     assert_eq!(viewport_window(100, 15, 0), (0, 0, 15));
     assert_eq!(viewport_window(100, 15, 80), (0, 80, 95));
     assert_eq!(viewport_window(100, 15, 95), (0, 85, 100));
@@ -316,7 +304,6 @@ fn scroll_by_sticks_to_bottom_until_user_leaves() {
     assert_eq!(v.scroll, 10);
     assert!(v.stick);
 
-    // Clamped at the ends; bottom keeps the stick.
     scroll_by(&mut v, 100);
     assert_eq!(v.scroll, 10);
     assert!(v.stick);
@@ -324,11 +311,6 @@ fn scroll_by_sticks_to_bottom_until_user_leaves() {
     assert_eq!(v.scroll, 0);
     assert!(!v.stick);
 }
-
-// ---------------------------------------------------------------------------
-// Picker layout: width, height, the scroll window and its header label, and
-// the row text at 80 and 200 columns.
-// ---------------------------------------------------------------------------
 
 fn picker_row(name: &str, running: bool) -> Row {
     Row {
@@ -350,28 +332,25 @@ fn picker_row(name: &str, running: bool) -> Row {
 fn picker_spans_the_terminal_width() {
     assert_eq!(picker_modal_w(200), 198);
     assert_eq!(picker_modal_w(80), 78);
-    // Narrow screens keep a 42-cell floor and never exceed the screen.
+
     assert_eq!(picker_modal_w(44), 42);
     assert_eq!(picker_modal_w(30), 30);
 }
 
 #[test]
 fn picker_height_follows_the_screen() {
-    // Eight runs fit a 40-row screen; a 24-row one shows seven and scrolls.
     assert_eq!(picker_list_h(40, 8), 8);
     assert_eq!(picker_list_h(24, 8), 7);
-    // Tall screens never add rows beyond the run count.
+
     assert_eq!(picker_list_h(120, 8), 8);
     assert_eq!(picker_list_h(80, 50), 41);
-    // Never fewer than three rows; an empty list still reserves one.
+
     assert_eq!(picker_list_h(10, 8), 3);
     assert_eq!(picker_list_h(40, 0), 1);
 }
 
 #[test]
 fn scrolling_reveals_the_eighth_run() {
-    // Eight runs in a seven-row window: walking down from the top, run 8
-    // (index 7) pulls the window down until it is the last row shown.
     let (runs, visible) = (8, 7);
     let mut top = 0;
     for sel in 0..runs {
@@ -383,9 +362,9 @@ fn scrolling_reveals_the_eighth_run() {
         );
     }
     assert_eq!(top, 1);
-    // Wrapping back to run 1 pulls the window up again.
+
     assert_eq!(picker_scroll_top(runs, 0, top, visible), 0);
-    // A window left past the end (runs went away, the screen grew) snaps back.
+
     assert_eq!(picker_scroll_top(runs, 7, 5, 8), 0);
 }
 
@@ -424,8 +403,7 @@ fn picker_rows_cut_with_an_ellipsis_at_80() {
         "{narrow}"
     );
     assert!(narrow.contains('…'), "{narrow}");
-    // The task keeps its first cells and the stats survive; with too little
-    // room left the live activity is dropped rather than squeezing the task.
+
     assert!(narrow.contains("Find every place the session"), "{narrow}");
     assert!(narrow.contains("· 2m36s · Haiku 5.5"), "{narrow}");
     assert!(!narrow.contains("rg -n"), "{narrow}");

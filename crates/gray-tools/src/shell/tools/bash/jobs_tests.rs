@@ -18,8 +18,6 @@ fn entry(done: bool, notified: bool) -> (Job, watch::Sender<Option<ToolOutput>>)
 
 #[tokio::test]
 async fn any_job_waiter_wakes_on_a_send_after_the_snapshot() {
-    // The turn-end wake: the waiter is handed out before the job settles,
-    // so it must still observe the send that lands after the snapshot.
     let tool = std::sync::Arc::new(BashTool::default());
     let ctx = ToolContext::default();
     assert!(
@@ -65,8 +63,7 @@ fn running_lists_only_this_sessions_jobs_and_cancels_them() {
         tool.running_jobs(ctx).into_iter().map(|j| j.id).collect()
     };
     assert_eq!(ids(&ctx), vec!["bg".to_string()]);
-    // Sessionless work predates the session id's minting: the live session
-    // adopts it — only another session's jobs stay invisible.
+
     assert_eq!(ids(&other), vec!["bg".to_string(), "theirs".to_string()]);
 
     assert!(!tool.cancel_job(&ctx, "theirs"), "another session's job");
@@ -86,7 +83,6 @@ fn register_evicts_only_delivered_history_and_never_refuses_a_live_child() {
     let jobs = Jobs::default();
     let ctx = ToolContext::default();
     for n in 0..MAX_RETAINED {
-        // Undelivered: nothing may be evicted to make room.
         jobs.0
             .lock()
             .unwrap()
@@ -168,8 +164,7 @@ fn the_outcome_word_is_grays_never_the_commands() {
 fn notifications_fire_once_for_finished_jobs_of_this_session() {
     let jobs = Jobs::default();
     let ctx = ToolContext::default();
-    // A live worker holds its sender; a dropped one means the worker died,
-    // which is reported (see the next assertion block).
+
     let (running, _running_tx) = entry(false, false);
     {
         let mut map = jobs.0.lock().unwrap();
@@ -190,7 +185,7 @@ fn notifications_fire_once_for_finished_jobs_of_this_session() {
     assert!(n[0].contains("log test.log"), "{}", n[0]);
     assert!(n[0].contains("`tail`"), "{}", n[0]);
     assert!(jobs.notifications(&ctx).is_empty(), "once only");
-    // A worker that died without a result is still reported, never silent.
+
     drop(_running_tx);
     let n = jobs.notifications(&ctx);
     assert_eq!(n.len(), 1, "{n:?}");
@@ -237,12 +232,11 @@ async fn the_advertised_stop_is_carried_out_here_not_by_the_shell() {
         .unwrap()
         .insert("bg".into(), entry(false, false).0);
 
-    // Anything that is not exactly a job's stop string runs as written.
     for command in [
-        "kill -- -9999",           // not a job's group
-        "kill 4242",               // a pid, not the stop string
-        "kill -9 -- -4242",        // a signal variant: close, but not ours
-        "kill -- -4242 && echo x", // a chain: the rest is the shell's
+        "kill -- -9999",
+        "kill 4242",
+        "kill -9 -- -4242",
+        "kill -- -4242 && echo x",
         "echo kill -- -4242",
         "cat <<E\nkill -- -4242\nE",
     ] {
@@ -252,8 +246,6 @@ async fn the_advertised_stop_is_carried_out_here_not_by_the_shell() {
         );
     }
 
-    // The exact advertised string (surrounding space ok) cancels the job
-    // and answers once the worker reports.
     let (mut job, tx) = entry(false, false);
     job.stop = "kill -- -4243".into();
     let cancelled = job.cancel.clone();

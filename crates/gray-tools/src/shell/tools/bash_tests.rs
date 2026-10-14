@@ -23,7 +23,6 @@ fn ctx_for(session: &str) -> ToolContext {
 
 #[test]
 fn shell_dir_respects_gray_home() {
-    // Isolated GRAY_HOME must own shell logs, not real HOME.
     let dir = tempfile::tempdir().expect("tempdir");
     let gray = dir.path().to_string_lossy().into_owned();
     let prev = std::env::var("GRAY_HOME").ok();
@@ -41,12 +40,10 @@ fn shell_dir_respects_gray_home() {
     assert_eq!(d.file_name().and_then(|s| s.to_str()), Some("shell"));
 }
 
-/// Run `pwd` and return the raw output, for the cwd tests.
 async fn tool_pwd(tool: &BashTool, ctx: &ToolContext) -> gray_core::agent::ToolOutput {
     tool.execute(ctx, json!({"command": "pwd"})).await
 }
 
-/// The command's own output, out of the fenced block the tool wraps it in.
 fn body(content: &str) -> String {
     content
         .lines()
@@ -124,9 +121,7 @@ fn truncated_log_has_executable_bounded_recovery() {
         assert!(out.status.success(), "{:?}", out.stderr);
         assert!(!out.stdout.is_empty());
         assert!(out.stdout.len() <= READ_CHUNK as usize);
-        // The marker in the body already names the byte window, so the extra
-        // hint only has to say where the next page starts — and only when
-        // there is more than one page left.
+
         let next = result
             .content
             .lines()
@@ -145,17 +140,6 @@ fn truncated_log_has_executable_bounded_recovery() {
                 vec![b'z'; (raw.len() - INLINE_BUDGET_BYTES).min(READ_CHUNK as usize)]
             );
         } else {
-            // Run 35229845737 captured the recovered bytes: Git Bash's sed
-            // pipes CRLF text to native readers through a text-mode MSYS
-            // pipe, folding CRLF to LF (`a\r\n` -> `a\n`). Whether that
-            // folding happens is a property of the local MSYS mount, not of
-            // gray: the same command returned raw CRLF on windows-runtime
-            // (run 35517869669). The disk log stays byte-verbatim either way
-            // (asserted in
-            // progress_is_line_safe_but_log_retains_carriage_returns), so
-            // the invariant that matters here is that recovery starts at the
-            // truncated marker byte and stays bounded — not which EOL the
-            // local pipe hands back. Emit the bytes in hex on failure.
             assert!(
                 out.stdout.starts_with(b"a\r\n") || out.stdout.starts_with(b"a\n"),
                 "expected 610d0a (or EOL-folded 610a) recovery, got {:02x?} (command: {command})",
@@ -218,8 +202,6 @@ fn not_found_subject_reads_every_shell_wording() {
 
 #[test]
 fn known_missing_binaries_get_their_real_substitute() {
-    // Telemetry-driven table: rg (84 misses) and xxd (30) dominated the
-    // campaign; unknown binaries keep the generic list.
     let rg = missing_command_hint("bash: line 1: rg: command not found").unwrap();
     assert!(rg.contains("`grep -r`"), "{rg}");
     let xxd = missing_command_hint("sh: 1: xxd: not found").unwrap();
@@ -257,7 +239,7 @@ async fn cat_shows_media_as_images() {
         assert!(!out.is_error, "{cmd}: {}", out.content);
         assert_eq!(out.images.len(), n, "{cmd}");
     }
-    // Anything that is not all bare media paths is `cat`'s own job.
+
     for cmd in [
         "cat -A a.png",
         "cat a.png notes.txt",
@@ -311,8 +293,6 @@ async fn cat_shows_every_image_it_names() {
 
 #[tokio::test]
 async fn cat_keeps_native_resolution() {
-    // No resolution cap anywhere: images pass through at native size; only
-    // the 5MB provider byte limit can still shrink them.
     use base64::Engine as _;
     use image::ImageDecoder;
     use std::io::Cursor;
@@ -339,8 +319,6 @@ async fn cat_keeps_native_resolution() {
     );
 }
 
-/// A real 2-frame clip, so the contact sheet has something to decode.
-/// `None` when ffmpeg is unavailable.
 fn tiny_mp4(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     let path = dir.join("real.mp4");
     let ok = std::process::Command::new("ffmpeg")
@@ -387,9 +365,6 @@ async fn cat_of_a_video_attaches_the_clip_with_its_sheet_as_fallback() {
 
 #[tokio::test]
 async fn cat_of_a_pdf_and_audio_attaches_them_with_text_fallbacks() {
-    // No decoder runs for audio, and a bogus PDF still claims: its fallback
-    // is the pdftotext error note, so the model is told rather than handed
-    // nothing.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("doc.pdf"), b"%PDF-1.4 not really").unwrap();
     std::fs::write(dir.path().join("talk.mp3"), b"ID3 fake").unwrap();
@@ -412,9 +387,6 @@ async fn cat_of_a_pdf_and_audio_attaches_them_with_text_fallbacks() {
 
 #[tokio::test]
 async fn cat_skips_a_missing_path_and_keeps_the_rest() {
-    // One typo among several paths must not sink the good images: that is the
-    // complaint the claim shape exists to avoid. A lone missing path still
-    // falls through, so the shell gives the error.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("good.png"), png_bytes()).unwrap();
     let out = image_command("cat good.png typo.png", dir.path())
@@ -432,7 +404,7 @@ async fn cat_skips_a_missing_path_and_keeps_the_rest() {
         "the skipped path is named: {}",
         out.content
     );
-    // Alone, a missing path is nothing usable, so the shell reports it.
+
     assert!(image_command("cat typo.png", dir.path()).is_none());
 }
 
@@ -463,7 +435,7 @@ async fn cat_caps_the_claim_at_eight_paths() {
 async fn gray_subcommands_are_not_claimed() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.png"), png_bytes()).unwrap();
-    // `cat` is the one way in; gray subcommands are ordinary shell commands.
+
     for cmd in [
         "gray plugin install a.png",
         "gray --version",
@@ -493,8 +465,6 @@ async fn cat_through_execute_shows_vision() {
 
 #[test]
 fn unattached_media_note_covers_every_shape_the_claim_refuses() {
-    // Shape refusals: the shell runs `cat` while nothing is attached — the
-    // note must say so and name the re-run.
     for cmd in [
         "cd /tmp && cat a.png",
         "cat a.png | wc -c",
@@ -506,8 +476,7 @@ fn unattached_media_note_covers_every_shape_the_claim_refuses() {
         assert!(note.contains("NOT attached"), "{cmd}: {note}");
         assert!(note.contains("cat "), "{cmd}: {note}");
     }
-    // The bare claim shapes: a miss is a missing/undecodable file the shell
-    // already reports, a non-media `cat`, or no media command at all.
+
     for cmd in [
         "gray plugin a.png",
         "cat a.png",
@@ -517,7 +486,7 @@ fn unattached_media_note_covers_every_shape_the_claim_refuses() {
     ] {
         assert!(unattached_media_note(cmd).is_none(), "spurious: {cmd}");
     }
-    // The advice names the paths it saw, so one turn is enough to recover.
+
     let note = unattached_media_note("cd /tmp && cat a.png").unwrap();
     assert!(note.contains("cat a.png"), "{note}");
 }
@@ -530,8 +499,7 @@ async fn compound_cat_says_the_image_was_not_attached() {
         cwd: dir.path().to_path_buf(),
         ..ToolContext::default()
     };
-    // cd fails, so `cat` never runs: the note is the tool's own, and the
-    // output must not read as a successful view.
+
     let out = BashTool::default()
         .execute(
             &ctx,
@@ -546,10 +514,7 @@ async fn compound_cat_says_the_image_was_not_attached() {
 #[tokio::test]
 async fn noop_stall_shapes_are_steered_not_spawned() {
     let ctx = ToolContext::default();
-    // Every shape a stalling model reaches for once `true` is refused:
-    // literal prints, dead function definitions, wrapped no-ops, dead
-    // shell state, comments, job-control builtins (which would answer
-    // with this shell's own — empty — job table).
+
     for cmd in [
         "echo stub",
         "echo 'a literal' && echo \"another\"",
@@ -587,8 +552,7 @@ async fn noop_stall_shapes_are_steered_not_spawned() {
 #[tokio::test]
 async fn real_commands_disguised_as_noops_still_run() {
     let ctx = ToolContext::default();
-    // Side effects or computed output hide inside near-noop shapes — all
-    // of these must reach the shell.
+
     let dir = tempfile::tempdir().unwrap();
     let ctx = ToolContext {
         cwd: dir.path().to_path_buf(),
@@ -602,22 +566,22 @@ async fn real_commands_disguised_as_noops_still_run() {
         std::fs::read_to_string(dir.path().join("s.txt")).unwrap(),
         "stub\n"
     );
-    // A bare `sleep` with no live jobs is a deliberate pause, not a stall.
+
     let out = BashTool::default()
         .execute(&ctx, json!({"command": "sleep 0.1 && echo woke"}))
         .await;
     assert!(out.content.contains("woke"), "{}", out.content);
-    // `echo` of an expansion reports real info.
+
     let out = BashTool::default()
         .execute(&ctx, json!({"command": "echo $((1 + 2))"}))
         .await;
     assert!(out.content.contains("3"), "{}", out.content);
-    // A definition that is actually called does work.
+
     let out = BashTool::default()
         .execute(&ctx, json!({"command": "f() { echo ran; }; f"}))
         .await;
     assert!(out.content.contains("ran"), "{}", out.content);
-    // `command -v` is a lookup, not a no-op.
+
     let out = BashTool::default()
         .execute(&ctx, json!({"command": "command -v echo"}))
         .await;
@@ -626,8 +590,6 @@ async fn real_commands_disguised_as_noops_still_run() {
 
 #[tokio::test]
 async fn cat_expands_a_tilde_the_shell_would_have() {
-    // The fast path runs before the shell, so `~` never gets expanded: without
-    // this, `cat ~/shot.png` streams binary garbage.
     let home = std::env::var("HOME").unwrap_or_default();
     if home.is_empty() {
         return;
@@ -642,7 +604,7 @@ async fn cat_expands_a_tilde_the_shell_would_have() {
     assert_eq!(expand_tilde("~/shot.png"), Some(format!("{home}/shot.png")));
     assert_eq!(expand_tilde("~"), Some(home.clone()));
     assert_eq!(expand_tilde("~/a/b.png"), Some(format!("{home}/a/b.png")));
-    // Not ours to expand.
+
     assert_eq!(expand_tilde("~other/shot.png"), None);
     assert_eq!(
         expand_tilde("~/shot.png ".trim()),
@@ -654,8 +616,6 @@ async fn cat_expands_a_tilde_the_shell_would_have() {
 
 #[tokio::test]
 async fn cat_resolves_a_tilde_path_only_when_the_file_is_there() {
-    // The pointer still needs the real file: a `cat ~/typo.png` must fall
-    // through to the shell so its own "no such file" is what the model reads.
     let home = std::env::var("HOME").unwrap_or_default();
     if home.is_empty() || !std::path::Path::new(&home).is_dir() {
         return;
@@ -665,8 +625,7 @@ async fn cat_resolves_a_tilde_path_only_when_the_file_is_there() {
         .suffix(".png")
         .tempfile_in(&home)
         .expect("unique probe file in $HOME");
-    // Create-new semantics: a random name that never overwrites user data.
-    // The handle deletes the file on drop, so no manual remove can race it.
+
     std::fs::write(at_home.path(), png_bytes()).unwrap();
     let name = at_home
         .path()
@@ -679,7 +638,6 @@ async fn cat_resolves_a_tilde_path_only_when_the_file_is_there() {
     assert_eq!(out.images.len(), 1, "{}", out.content);
     assert!(out.content.contains(&name), "{}", out.content);
 
-    // A `~` path that is not there falls through to the shell's own error.
     assert!(
         image_command("cat ~/definitely-not-here-9f2a.png", Path::new(".")).is_none(),
         "a missing path must fall through so the shell reports it"
@@ -688,10 +646,6 @@ async fn cat_resolves_a_tilde_path_only_when_the_file_is_there() {
 
 #[tokio::test]
 async fn a_cd_carries_carries_into_the_next_command_in_the_same_session() {
-    // A subdirectory of the session's own cwd, not an absolute path: Git Bash
-    // speaks MSYS paths, so handing it a Windows `C:/...` path is exactly the
-    // trap the windows-runtime job exists to catch. The behaviour under test
-    // is the same either way.
     let dir = tempfile::tempdir().expect("tempdir");
     let mut ctx = ctx_for(&sess("cd"));
     ctx.cwd = dir.path().to_path_buf();
@@ -716,15 +670,13 @@ async fn a_cd_carries_carries_into_the_next_command_in_the_same_session() {
 
 #[tokio::test]
 async fn the_cwd_report_never_leaks_into_the_output() {
-    // The report goes to a file, so stdout — and the durable log — are exactly
-    // what the command produced.
     let tool = BashTool::default();
     let ctx = ctx_for(&sess("leak"));
     let r = tool
         .execute(&ctx, json!({"command": "echo hello | cat"}))
         .await;
     assert!(!r.is_error, "{}", r.content);
-    // The only output is what the command produced: no sentinel, no path.
+
     assert!(!r.content.contains("GRAY_CWD_REPORT"), "{}", r.content);
     assert!(!r.content.contains("$PWD"), "{}", r.content);
     assert!(!r.content.contains("gray-cwd-"), "{}", r.content);
@@ -748,9 +700,8 @@ async fn a_deleted_directory_falls_back_to_the_context_cwd() {
         .execute(&ctx, json!({"command": "mkdir -p sub && cd sub"}))
         .await;
     assert!(!r.is_error, "{}", r.content);
-    drop(dir); // the directory vanishes under the recorded cwd
+    drop(dir);
 
-    // The session must still run, from whatever the caller now hands over.
     let mut fresh = ctx.clone();
     fresh.cwd = std::env::temp_dir();
     let out = tool_pwd(&tool, &fresh).await;
@@ -792,17 +743,13 @@ fn the_cwd_report_suffix_is_appended_not_substituted() {
     let wrapped = with_cwd_report("echo hi");
     assert!(wrapped.starts_with("echo hi"), "{wrapped}");
     assert!(wrapped.contains("$GRAY_CWD_REPORT"), "{wrapped}");
-    // A command ending in a comment swallows the suffix, so nothing is
-    // reported and the cwd simply stays put.
+
     let commented = with_cwd_report("echo hi # note");
     assert!(commented.starts_with("echo hi # note"), "{commented}");
 }
 
 #[test]
 fn the_cwd_report_keeps_a_trailing_heredoc_terminator_alone() {
-    // `cat > f <<EOF` must stay intact: joined with `; `, the terminator line
-    // read `EOF; __gray_rc=$?` and the whole suffix was written INTO the file
-    // (silent corruption; 33 of 47 DeepSWE runs in the 2026-09-29 retro).
     let wrapped = with_cwd_report("cat > f <<'EOF'\nbody\nEOF");
     assert!(
         wrapped.starts_with("cat > f <<'EOF'\nbody\nEOF\n"),
@@ -813,8 +760,6 @@ fn the_cwd_report_keeps_a_trailing_heredoc_terminator_alone() {
 
 #[test]
 fn the_cwd_report_asks_for_a_path_rust_can_resolve() {
-    // The report is read back with PathBuf::is_dir, so it must arrive in a form
-    // Rust can resolve on the platform that produced it.
     let wrapped = with_cwd_report("echo hi");
     #[cfg(windows)]
     assert!(
@@ -827,8 +772,6 @@ fn the_cwd_report_asks_for_a_path_rust_can_resolve() {
 
 #[tokio::test]
 async fn the_cwd_report_does_not_mask_the_commands_exit_code() {
-    // The suffix must re-raise the command's own status: ending on the
-    // report's `printf` would turn every failure into a success.
     let tool = BashTool::default();
     let ctx = ctx_for(&sess("exit"));
     let r = tool
@@ -851,7 +794,6 @@ async fn the_cwd_report_does_not_mask_the_commands_exit_code() {
         r.content
     );
 
-    // And a success still reports success.
     let r = tool
         .execute(&ctx, json!({"command": "printf '' | cat"}))
         .await;
@@ -861,11 +803,6 @@ async fn the_cwd_report_does_not_mask_the_commands_exit_code() {
         r.content
     );
 }
-
-// ---------------------------------------------------------------------------
-// `gray find` / `gray grep` are claimed like a media `cat`: without gray on the
-// child's PATH, the model still gets the index
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn search_command_answers_the_find_and_grep_verbs() {
@@ -953,36 +890,30 @@ async fn search_command_reads_flag_values_once() {
         }
     };
 
-    // A quoted pattern keeps its space and loses its quotes.
     let out = run("gray grep 'fn main' src").await;
     assert!(out.contains("a.rs:1: fn main"), "{out}");
 
-    // `--glob=VALUE` takes its own value, not the next word.
     let out = run("gray grep --glob=*.rs main src").await;
     assert!(out.contains("a.rs"), "{out}");
     assert!(!out.contains("b.txt"), "glob must hold: {out}");
 
-    // `--glob VALUE` consumes the next word, so it is not also the pattern.
     let out = run("gray grep --glob *.rs main src").await;
     assert!(out.contains("a.rs"), "{out}");
     assert!(!out.contains("b.txt"), "glob must hold: {out}");
 
-    // `--limit N` must not leave N behind as the pattern.
     let out = run("gray grep --limit 5 main src").await;
     assert!(out.contains("a.rs:1: fn main"), "{out}");
 }
 
-// ---------------------------------------------------------------------------
-// Bare `find` / `grep` claim the forms the lane answers exactly — the model
-// never needs to know the answer came from the index, not the binary.
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn bare_find_and_grep_are_not_claimed() {
-    // The shim serves bare `grep`/`rg`; the gray verb's answer is not theirs.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "needle one\n").unwrap();
-    for cmd in ["grep needle", "grep -i needle a.txt", "find . -name '*.txt'"] {
+    for cmd in [
+        "grep needle",
+        "grep -i needle a.txt",
+        "find . -name '*.txt'",
+    ] {
         assert!(
             search_command(cmd, dir.path(), &CancellationToken::new())
                 .await
@@ -996,31 +927,29 @@ async fn bare_find_and_grep_are_not_claimed() {
 async fn bare_find_and_grep_leave_the_shell_richer_forms() {
     let dir = tempfile::tempdir().unwrap();
     for cmd in [
-        // grep flags the lane cannot answer exactly.
         "grep -r needle .",
         "grep -v needle",
         "grep -E 'a|b'",
         "grep -A2 needle",
         "grep -l needle",
         "grep --include='*.rs' needle",
-        "grep needle a.txt b.txt", // more than one path
-        "grep needle *.txt",       // the shell would expand the glob
-        "grep needle ~/x",         // the shell would expand `~`
-        "grep needle -",           // `-` is stdin, not a path
-        "grep",                    // no pattern: the shell owns the usage error
+        "grep needle a.txt b.txt",
+        "grep needle *.txt",
+        "grep needle ~/x",
+        "grep needle -",
+        "grep",
         "egrep needle",
-        // find shapes the lane cannot answer exactly.
-        "find .", // no expression: a real find lists everything
+        "find .",
         "find . -type f",
         "find . -type d -name '*.rs'",
         "find . -iname '*.rs'",
         "find . -name '*.rs' -o -name '*.txt'",
         "find / -name x -exec rm {} \\;",
-        "find src docs -name x", // more than one path
+        "find src docs -name x",
         "find . -maxdepth 2 -name x",
         "find . ! -name x",
-        "find . -name 'a/b'", // a basename glob can never hold a `/`
-        "find . -name",       // missing value: the shell owns the error
+        "find . -name 'a/b'",
+        "find . -name",
     ] {
         assert!(
             search_command(cmd, dir.path(), &CancellationToken::new())
@@ -1031,21 +960,15 @@ async fn bare_find_and_grep_leave_the_shell_richer_forms() {
     }
 }
 
-/// Unix-only: the Windows runner resolves a temp path to a different
-/// spelling (8.3 short name) between calls, so the ledger key never
-/// matches and the repeat is not stubbed. The feature is Linux/macOS
-/// today; revisit when the Windows resolver spelling is stable.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_repeated_cat_is_stubbed_once_through_the_tool() {
-    // The wiring, not just the helper: the ledger lives on the tool, the stub
-    // replaces the whole result, and the arm is consumed.
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("a.txt");
     std::fs::write(&file, "alpha\nbeta\ngamma\n").expect("write");
     let ctx = ctx_for(&sess("dedup"));
     let tool = BashTool::default().with_ledger(Arc::new(crate::ledger::FileLedger::new()));
-    // Forward slashes: the command parser eats a bare Windows backslash path.
+
     let arg = file.display().to_string().replace('\\', "/");
     let cmd = json!({"command": format!("cat {arg}")});
 
@@ -1076,10 +999,6 @@ async fn a_repeated_cat_is_stubbed_once_through_the_tool() {
     );
 }
 
-/// Unix-only: the Windows runner resolves a temp path to a different
-/// spelling (8.3 short name) between calls, so the ledger key never
-/// matches and the repeat is not stubbed. The feature is Linux/macOS
-/// today; revisit when the Windows resolver spelling is stable.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_tool_without_a_ledger_never_stubs() {
@@ -1088,7 +1007,7 @@ async fn a_tool_without_a_ledger_never_stubs() {
     std::fs::write(&file, "alpha\n").expect("write");
     let ctx = ctx_for(&sess("noledger"));
     let tool = BashTool::default();
-    // Forward slashes: the command parser eats a bare Windows backslash path.
+
     let arg = file.display().to_string().replace('\\', "/");
     let cmd = json!({"command": format!("cat {arg}")});
     for _ in 0..2 {
@@ -1097,13 +1016,9 @@ async fn a_tool_without_a_ledger_never_stubs() {
     }
 }
 
-/// PATH and `$GRAY_HOME` are process-global; these tests change both.
 #[cfg(unix)]
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// A `cargo` on PATH that prints a build log instead of building: 400
-/// progress lines, one error, one summary — the shape the cargo rule exists
-/// for, without the cost of a real 400-crate build.
 #[cfg(unix)]
 fn fake_cargo(bin: &std::path::Path) {
     std::fs::create_dir_all(bin).expect("bin dir");
@@ -1125,15 +1040,10 @@ fn fake_cargo(bin: &std::path::Path) {
     }
 }
 
-/// Unix-only: the fake `cargo` is a `#!/bin/sh` script joined onto PATH
-/// with `:`, neither of which the Windows runner honors.
 #[cfg(unix)]
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn a_noisy_command_is_squeezed_and_its_log_keeps_everything() {
-    // The whole contract in one run: what enters the context shrinks and says
-    // so, and the raw log the shell already writes is untouched, so the
-    // squeeze costs the model nothing it cannot grep back.
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().expect("tempdir");
     let home = dir.path().join("home");
@@ -1179,11 +1089,10 @@ async fn a_noisy_command_is_squeezed_and_its_log_keeps_everything() {
         "400 lines must count as one: {}",
         r.content
     );
-    // The payload survives compression untouched.
+
     assert!(r.content.contains("error[E0308]"), "{}", r.content);
     assert!(r.content.contains("Finished dev"), "{}", r.content);
 
-    // …and the log still holds every line, so `grep` on it recovers the rest.
     let log_dir = home.join("shell").join(&session);
     let log: Vec<_> = std::fs::read_dir(&log_dir)
         .expect("session log dir")
@@ -1203,10 +1112,6 @@ async fn a_noisy_command_is_squeezed_and_its_log_keeps_everything() {
     assert!(text.contains("crate-399"), "including the last one");
 }
 
-// ---- timeout semantics: hand off on the jobs lane, kill in bare mode ----
-
-/// Spawn `command` and run it through [`run_command`] directly, so a test
-/// picks the lane (jobs or bare) without touching process-global env.
 #[cfg(unix)]
 async fn run_lane(
     tool: &BashTool,
@@ -1217,7 +1122,7 @@ async fn run_lane(
 ) -> (ToolOutput, i32, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().unwrap().keep();
     let log = dir.join("bash-lane.log");
-    // Exported like production: the command itself can write the report.
+
     let report = dir.join("cwd-report.txt");
     let spawned = spawn(
         command,
@@ -1253,9 +1158,6 @@ async fn wait_for_jobs(tool: &BashTool, ctx: &ToolContext) {
     panic!("job never settled");
 }
 
-/// The /tmp/gray-cwd-*.txt leak: a stalled command's trailing printf writes
-/// the report AFTER the foreground path already cleaned up — the job waiter
-/// owns its deletion now.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_stalled_commands_late_cwd_report_is_deleted_when_the_job_settles() {
@@ -1293,9 +1195,6 @@ async fn wait_group_gone(pgid: i32) -> bool {
 #[cfg(unix)]
 #[tokio::test]
 async fn bare_timeout_kills_and_says_how_to_rerun() {
-    // GRAY_NO_JOBS is mini-swe-agent proper: a timeout is a kill, the partial
-    // output survives, and the note says how to let it finish (the benchmark
-    // retro showed agents reading a kill as "the command failed").
     let tool = BashTool::default();
     let ctx = ctx_for(&sess("bare-timeout"));
     let t0 = Instant::now();
@@ -1319,9 +1218,6 @@ async fn bare_timeout_kills_and_says_how_to_rerun() {
 #[cfg(unix)]
 #[tokio::test]
 async fn timeout_hands_off_to_a_job_never_kills() {
-    // The jobs lane: reaching the timeout stops the CALL, not the command.
-    // The notice carries the job, pgid, log, the in-band stop command and the
-    // output so far; the group stays alive until someone stops it.
     let tool = BashTool::default();
     let ctx = ctx_for(&sess("handoff"));
     let t0 = Instant::now();
@@ -1357,7 +1253,6 @@ async fn timeout_hands_off_to_a_job_never_kills() {
     assert_eq!(tool.running_jobs(&ctx).len(), 1);
     assert!(tool.has_unfinished_jobs(&ctx), "the turn-end hold sees it");
 
-    // Cancellation (session cancel or /jobs) still reaps the whole group.
     let id = tool.running_jobs(&ctx)[0].id.clone();
     assert!(tool.cancel_job(&ctx, &id));
     assert!(
@@ -1390,9 +1285,6 @@ async fn wait_notices(tool: &BashTool, ctx: &ToolContext) -> Vec<String> {
 #[cfg(unix)]
 #[tokio::test]
 async fn the_advertised_stop_command_kills_the_whole_tree_in_band() {
-    // The model has no cancel action: it runs the `kill -- -<pgid>` the
-    // notice gave it through the tool itself. That must take the group, not
-    // just the `sh` wrapper (a bare `kill <pgid>` leaves the grandchild).
     let dir = tempfile::tempdir().unwrap();
     let ctx = ToolContext {
         cwd: dir.path().into(),
@@ -1421,8 +1313,7 @@ async fn the_advertised_stop_command_kills_the_whole_tree_in_band() {
         "the advertised stop is handled here, never by a (possibly remote) shell: {}",
         killed.content
     );
-    // A second run of the same command no longer matches a live job, so it
-    // is just a shell command again (and finds no such group).
+
     let again = tool.execute(&ctx, json!({"command": stop})).await;
     assert!(
         !again.content.starts_with("stopped job"),
@@ -1493,9 +1384,6 @@ async fn a_finished_command_inside_the_timeout_is_an_ordinary_result() {
 #[cfg(unix)]
 #[tokio::test]
 async fn running_jobs_ride_along_on_later_results() {
-    // The replacement for action:list: while a job runs, every later bash
-    // result names it with its log and stop command, so a model that lost
-    // the original notice (compaction, a long detour) can still find it.
     let tool = BashTool::default();
     let ctx = ctx_for(&sess("footer"));
     let (out, pgid, log, _report) = run_lane(&tool, &ctx, "sleep 60", Some(1), true).await;
@@ -1516,7 +1404,7 @@ async fn running_jobs_ride_along_on_later_results() {
     );
     assert!(tail.contains(&log.display().to_string()), "{tail}");
     assert!(tail.contains(&format!("stop: `kill -- -{pgid}`")), "{tail}");
-    // Another session never sees it.
+
     let other = ctx_for(&sess("footer-other"));
     let theirs = tool
         .execute(&other, json!({"command": "echo hi | cat"}))
@@ -1526,7 +1414,7 @@ async fn running_jobs_ride_along_on_later_results() {
         "{}",
         theirs.content
     );
-    // A no-op names it too, and says how to wait.
+
     let noop = tool.execute(&ctx, json!({"command": "true"})).await;
     assert!(noop.content.contains("no-op"), "{}", noop.content);
     assert!(noop.content.contains("end your turn"), "{}", noop.content);
@@ -1559,12 +1447,8 @@ async fn bare_noop_commands_are_steered_not_spawned() {
         "true",
         ":",
         " true ",
-        // A lone print is a placeholder too: the model "announces" work
-        // (echo "switching tools") and the real calls never arrive.
         "echo hi",
         "echo \"switching to harness tools\"",
-        // Compounds of literal prints and wrapper-peeled echoes are the same
-        // stall in another shape: nothing runs that the model didn't write.
         "true && echo ran",
         "echo a; echo b",
         "env echo ran",
@@ -1580,8 +1464,7 @@ async fn bare_noop_commands_are_steered_not_spawned() {
             out.content
         );
     }
-    // Side effects or computed output hide inside near-noop shapes — all of
-    // these still reach the shell.
+
     for cmd in [
         "echo ran > gray-noop-test-out",
         "echo x | wc -c",
@@ -1620,8 +1503,6 @@ async fn removed_arguments_fail_loudly_and_never_spawn() {
         json!({"command": "touch BAD", "from_offset": 3}),
         json!({"command": "touch BAD", "notify_on": "exit"}),
         json!({"command": "touch BAD", "run_in_background": true}),
-        // Wait/yield windows still fail when nothing is being run: there
-        // the window is the whole call, so the pointer text is worth it.
         json!({"wait_ms": 5000}),
         json!({"yield_ms": 1000}),
     ] {
@@ -1642,20 +1523,15 @@ async fn removed_arguments_fail_loudly_and_never_spawn() {
         !dir.path().join("BAD").exists(),
         "a rejected call never runs"
     );
-    // Values that carry no intent, and a stray job_id, are not worth a
-    // failed call (rejecting job_id looped real sessions, 2026-09-17).
+
     for args in [
         json!({"command": "echo fine | cat", "background": false}),
         json!({"command": "echo fine | cat", "action": "run"}),
         json!({"command": "echo fine | cat", "yield_ms": null}),
         json!({"command": "echo fine | cat", "job_id": "bash-bogus"}),
-        // Echoed wait/yield windows on a run drop silently: the call blocks
-        // to exit or timeout anyway, and rejecting them looped schema-filling
-        // models to death (gpt-6 fills every property on every call).
         json!({"command": "echo fine | cat", "wait_ms": 5000}),
         json!({"command": "echo fine | cat", "yield_ms": 1000}),
         json!({"command": "echo fine | cat", "yield_time_ms": 10000}),
-        // The exact full-schema blob gpt-6-sol sent.
         json!({"action":"run","background":false,"command":"echo fine | cat","job_id":"","timeout":10,"wait_ms":1000,"yield_ms":1000}),
     ] {
         let out = tool.execute(&ctx, args.clone()).await;
@@ -1717,8 +1593,6 @@ fn the_schema_is_command_and_timeout_only() {
 
 #[test]
 fn a_leading_sleep_stretches_the_default_bound() {
-    // `sleep 300 && tail log` is the in-band wait; with the 120s default it
-    // would itself turn into a job (the original bug). It blocks as written.
     let d = DEFAULT_TIMEOUT_SECS;
     let slack = SLEEP_SLACK_SECS;
     for (cmd, want) in [
@@ -1733,13 +1607,11 @@ fn a_leading_sleep_stretches_the_default_bound() {
         ("sleep 1.5m", 90 + slack),
         ("sleep 2h", MAX_TIMEOUT_SECS),
         ("sleep 99999", MAX_TIMEOUT_SECS),
-        // Not a foreground wait: the sleep is backgrounded or not a sleep.
         ("sleep 300 & cargo build", d),
         ("sleep 300 | cat", d),
         ("sleepy 300", d),
         ("sleep $N", d),
         ("echo x; sleep 300", d),
-        // Leading `cd` steps are not the wait; the sleep after them is.
         ("cd /repo && sleep 300 && tail log", 300 + slack),
         ("cd /repo; sleep 300; tail log", 300 + slack),
         ("cd ~/gray && cd crates\nsleep 200", 200 + slack),

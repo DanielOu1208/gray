@@ -104,7 +104,7 @@ fn coerce_null_dropped_only_when_optional() {
         out.get("limit").is_none(),
         "optional null must drop to None"
     );
-    // The literal string "null" is a value, not a null: it survives.
+
     let out2 = coerce_args(&scalar_def(), json!({"path": "/tmp/x", "limit": "null"}));
     assert_eq!(
         out2.get("limit"),
@@ -115,7 +115,6 @@ fn coerce_null_dropped_only_when_optional() {
 
 #[test]
 fn aliases_respect_schema_and_floats_stay_lossless() {
-    // Schema declaring only `text`: no rename to `content`.
     let text_def = ToolDef::new(
         "probe",
         "probe",
@@ -124,7 +123,7 @@ fn aliases_respect_schema_and_floats_stay_lossless() {
     let out = coerce_args(&text_def, json!({"text": "hi"}));
     assert_eq!(out.get("text"), Some(&json!("hi")));
     assert!(out.get("content").is_none());
-    // Fractional / overflowing / NaN integer strings stay strings.
+
     let out = coerce_args(&scalar_def(), json!({"path": "x", "limit": "2.5"}));
     assert_eq!(out.get("limit"), Some(&json!("2.5")));
     let out = coerce_args(
@@ -134,7 +133,7 @@ fn aliases_respect_schema_and_floats_stay_lossless() {
     assert_eq!(out.get("limit"), Some(&json!("99999999999999999999999")));
     let out = coerce_args(&scalar_def(), json!({"path": "x", "limit": "NaN"}));
     assert_eq!(out.get("limit"), Some(&json!("NaN")));
-    // Integral float strings still convert.
+
     let out = coerce_args(&scalar_def(), json!({"path": "x", "limit": "2.0"}));
     assert_eq!(out.get("limit"), Some(&json!(2)));
 }
@@ -222,9 +221,6 @@ async fn registry_execute_applies_aliases_and_coercion() {
 
 #[tokio::test]
 async fn session_tools_share_one_ledger() {
-    // Pointer-eq by behavior: the read tool records into the registry Arc
-    // and the write tool honors it — no force needed after a full read,
-    // and the second write rides on mark_written.
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("note.txt");
     std::fs::write(&p, "hello\n").unwrap();
@@ -272,23 +268,18 @@ fn coerce_multiple_stringified_edits_preserves_array() {
 #[test]
 fn meter_label_prefers_path_then_truncates_command() {
     assert_eq!(meter_label(&json!({"path": "src/lib.rs"})), "src/lib.rs");
-    // bash (the default surface) carries no path: its command is the label.
+
     assert_eq!(meter_label(&json!({"command": "echo hi"})), "echo hi");
     assert_eq!(meter_label(&json!({})), "");
-    // A heredoc or long pipeline must not bloat every record.
+
     let long = "x".repeat(200);
     assert_eq!(meter_label(&json!({"command": long})).chars().count(), 80);
 }
 
-/// Serial guard: the meter reads process-global env, so these tests cannot
-/// race each other (or the rest of the suite) for `GRAY_TOOL_STATS`/`GRAY_HOME`.
 static METER_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The Registry meters every non-self-reporting call with its class
-/// (arXiv:2608.13568 tokens-to-success accounting): one JSON record per
-/// call, gated on `GRAY_TOOL_STATS=1` so the gate stays a no-op when off.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // serial guard must cover the whole test (env + gray home)
+#[allow(clippy::await_holding_lock)]
 async fn registry_meter_records_class_per_call() {
     let _serial = METER_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().expect("tempdir");
@@ -299,8 +290,7 @@ async fn registry_meter_records_class_per_call() {
         std::env::set_var("GRAY_HOME", &home);
         std::env::set_var("GRAY_TOOL_STATS", "1");
     }
-    // "grep" classifies retrieval and is not self-reporting, so the
-    // Registry — not the tool — writes the record.
+
     let reg = Registry::new(vec![std::sync::Arc::new(StubTool {
         name: "grep",
         marker: "src/lib.rs:12:match\nsrc/lib.rs:30:match\n",
@@ -322,7 +312,7 @@ async fn registry_meter_records_class_per_call() {
     assert_eq!(rec["path"], "src/lib.rs");
     assert!(rec["bytes"].as_u64().expect("bytes") > 0, "{rec}");
     assert_eq!(rec["truncated_by"], "none");
-    // Restore before asserting so a failure cannot leak env into the suite.
+
     match prev_home {
         Some(v) => unsafe { std::env::set_var("GRAY_HOME", v) },
         None => unsafe { std::env::remove_var("GRAY_HOME") },
@@ -333,10 +323,8 @@ async fn registry_meter_records_class_per_call() {
     }
 }
 
-/// With the gate off the Registry meters nothing — the meter must never be
-/// a behavior change for the default configuration.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // serial guard must cover the whole test (env + gray home)
+#[allow(clippy::await_holding_lock)]
 async fn registry_meter_is_silent_when_gate_off() {
     let _serial = METER_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().expect("tempdir");

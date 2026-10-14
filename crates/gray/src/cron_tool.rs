@@ -1,11 +1,3 @@
-//! `schedule`: the model's own door into the cron store.
-//!
-//! One upsert-by-name call instead of an action menu: a new name creates,
-//! a known name replaces, `when: "off"|"on"|"delete"` pauses, resumes or
-//! drops, and every call answers with the current job list (no `list`
-//! action). A tool call is the model by construction, so jobs it creates or
-//! edits go live immediately.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -18,9 +10,6 @@ use crate::cron::schedule::{Schedule, next_run, parse_schedule};
 use crate::cron::store::{JobState, Origin};
 use crate::cron::{CronJob, CronStore, Deliver, Repeat, now_secs};
 
-/// Live plugin (protocol 1.3): the tool exists only while an interactive
-/// TUI is up — headless `--print` runs (bench arms, gateway turns) have
-/// nobody to receive a wake.
 #[derive(Default)]
 pub(crate) struct CronPlugin;
 
@@ -155,7 +144,7 @@ fn upsert(
                     completed: 0,
                 };
             }
-            // A paused/done job the model rewrites re-arms at once.
+
             (j.state, j.next_run_at) = (JobState::Active, next_run(now_secs(), &j.schedule));
             Ok(())
         })?;

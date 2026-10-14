@@ -76,10 +76,10 @@ fn rank_skips_user_disabled_skills() {
     let out = format_skills_for_prompt(&skills, true, &disabled);
     assert!(out.contains("<name>keep</name>"), "{out}");
     assert!(!out.contains("<name>off</name>"), "{out}");
-    // Empty set = everything on (default).
+
     let none = BTreeSet::new();
     assert_eq!(rank_skills_for_prompt(&skills, true, &none).len(), 2);
-    // Global off hides everything regardless of the per-skill set.
+
     assert!(rank_skills_for_prompt(&skills, false, &none).is_empty());
     assert!(format_skills_for_prompt(&skills, false, &none).is_empty());
     assert!(format_skills_for_prompt(&skills, false, &disabled).is_empty());
@@ -87,7 +87,6 @@ fn rank_skips_user_disabled_skills() {
 
 #[test]
 fn prompt_block_gives_proactive_skill_guidance() {
-    // Lean block (0.1.8): one paragraph, not the old six-line preamble.
     let s = test_skill("anything", &[]);
     let out = format_skills_for_prompt(&[s], true, &BTreeSet::new());
     assert!(
@@ -99,8 +98,6 @@ fn prompt_block_gives_proactive_skill_guidance() {
 
 #[test]
 fn prompt_block_caps_skill_list_and_says_so() {
-    // Lean cap (0.1.8): 12, not 40 — every listed skill costs its
-    // description in every turn.
     let skills: Vec<Skill> = (0..60)
         .map(|i| test_skill(&format!("skill-{i:02}"), &[]))
         .collect();
@@ -131,9 +128,6 @@ fn prompt_block_under_cap_lists_all_without_notice() {
 
 #[test]
 fn prompt_cap_counts_only_eligible_unique_skills() {
-    // 40 eligible (1 deduplicated + 39) against the lean cap of 12: the
-    // list shows 12 with the omission notice, while ranking itself still
-    // returns all 40 eligible.
     let mut skills = vec![test_skill("duplicate", &[]); 50];
     let mut disabled = test_skill("disabled", &[]);
     disabled.disable_model_invocation = true;

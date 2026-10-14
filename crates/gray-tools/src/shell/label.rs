@@ -1,33 +1,13 @@
-//! Human labels for shell commands: the command under the setup noise, and a
-//! short job name taken from it (`cargo-check`, `npm-test`).
-//!
-//! Only setup that cannot hide work is peeled: `cd <path>`, `export
-//! NAME=value`, `set -e…` segments joined by `&&`, `NAME=value` prefixes,
-//! and priority/lock/time wrappers (`nice`, `ionice`, `flock`, `timeout`,
-//! `env`, `time`, `nohup`, `stdbuf`). Anything with quotes, `$`, backticks
-//! or another operator in the peeled part stops the peel, so a label never
-//! hides a command that does something.
-
-/// Whole-command no-ops — `true`, `:`, lone literal `echo`/`printf`, dead
-/// function defs, job-control builtins that can only see the one-shot
-/// shell's empty table, and compounds of those. Their only effect is stdout
-/// (or nothing), so the `bash` tool answers them with a steer instead of
-/// spawning a shell, and the transcript labels them `Skipped`, not `Ran`.
-/// Delegates to the tool's own classifier so the label and the steer can
-/// never disagree.
 pub fn is_noop(full: &str) -> bool {
     crate::shell::tools::bash::noop_family(full.trim(), false).is_some()
 }
 
-/// The command a person would recognise, plus the directory a leading
-/// `cd` moved into (shown beside it, never dropped silently).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreCommand<'a> {
     pub command: &'a str,
     pub cwd: Option<&'a str>,
 }
 
-/// Peel safe setup off `full` (first line only).
 pub fn core_command(full: &str) -> CoreCommand<'_> {
     let mut rest = full.lines().next().unwrap_or("").trim();
     let mut cwd = None;
@@ -49,7 +29,6 @@ pub fn core_command(full: &str) -> CoreCommand<'_> {
     }
 }
 
-/// Words that never hide work: no quoting, expansion, or operators.
 fn plain(word: &str) -> bool {
     !word.is_empty()
         && !word.chars().any(|c| {
@@ -85,9 +64,6 @@ fn is_set(segment: &str) -> bool {
     })
 }
 
-/// Drop leading `NAME=value` words and wrapper commands (with their own
-/// options) from one simple command, returning the rest of the original
-/// text untouched.
 fn peel_wrappers(cmd: &str) -> &str {
     let mut rest = cmd;
     loop {
@@ -99,7 +75,6 @@ fn peel_wrappers(cmd: &str) -> &str {
             return trimmed;
         }
         let after = |n: usize| -> Option<&str> {
-            // Skip `n` words from `trimmed`; None when the command would vanish.
             let mut s = trimmed;
             for _ in 0..n {
                 let w = s.split_whitespace().next()?;
@@ -121,9 +96,9 @@ fn peel_wrappers(cmd: &str) -> &str {
                 "ionice" => 1 + opts(trimmed, &["-c", "-n", "-p"], 1),
                 "stdbuf" => 1 + opts(trimmed, &["-i", "-o", "-e"], 1),
                 "env" => 1 + env_words(trimmed),
-                // flock [opts] <lockfile> <command…>; `-c` runs a string: stop.
+
                 "flock" if !has_word(trimmed, "-c") => 2 + opts(trimmed, &["-w", "-E"], 1),
-                // timeout [opts] <duration> <command…>
+
                 "timeout" => 2 + opts(trimmed, &["-s", "-k"], 1),
                 _ => return trimmed,
             }
@@ -135,8 +110,6 @@ fn peel_wrappers(cmd: &str) -> &str {
     }
 }
 
-/// How many words after the wrapper (index `start`) are its options:
-/// `-x`, `--long`, `-xVALUE`, or `-x VALUE` for flags in `with_value`.
 fn opts(cmd: &str, with_value: &[&str], start: usize) -> usize {
     let words: Vec<&str> = cmd.split_whitespace().collect();
     let mut i = start;
@@ -160,7 +133,6 @@ fn has_word(cmd: &str, word: &str) -> bool {
     cmd.split_whitespace().any(|w| w == word)
 }
 
-/// Tools whose first argument names what they do (`cargo check`).
 const WITH_SUBCOMMAND: &[&str] = &[
     "cargo",
     "npm",
@@ -193,15 +165,11 @@ const WITH_SUBCOMMAND: &[&str] = &[
     "rustup",
 ];
 
-/// A short, readable job name from a command: `cargo-check`, `npm-test`,
-/// `pytest`, `deploy` (for `./scripts/deploy.sh`). Lowercase letters,
-/// digits and `-`, at most 24 chars; `job` when nothing usable is left.
 pub fn job_name(full: &str) -> String {
     let core = core_command(full).command;
     let mut words = core.split_whitespace();
     let first = words.next().unwrap_or("");
     if !plain(first) {
-        // `$(which cargo) build`: the program is computed, nothing to read.
         return "job".to_string();
     }
     let program = first.rsplit('/').next().unwrap_or(first);
@@ -212,7 +180,6 @@ pub fn job_name(full: &str) -> String {
     let mut parts = vec![program.to_string()];
     let rest: Vec<&str> = words.collect();
     if matches!(program, "python" | "python3") && rest.first() == Some(&"-m") {
-        // `python -m pytest` is pytest.
         parts = vec![rest.get(1).copied().unwrap_or(program).to_string()];
     } else if WITH_SUBCOMMAND.contains(&program)
         && let Some(sub) = rest
@@ -248,7 +215,6 @@ fn slug(raw: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
-/// `name`, or `name-2`, `name-3`… — the first one `taken` does not claim.
 pub fn unique_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(name) {
         return name.to_string();
@@ -259,37 +225,22 @@ pub fn unique_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
         .expect("an unbounded counter always finds a free name")
 }
 
-/// What a read-only command did, for a header that names it (`Read`,
-/// `Viewed`) instead of a bare `Ran`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Look {
-    /// Bare `cat <media…>`: the bash tool attaches the files to the turn.
     Viewed,
     Read,
     Listed,
     Searched,
 }
 
-/// A command recognised as read-only: its verb, what it looked at (files,
-/// a directory, or a search pattern), and an optional detail
-/// (`lines 10–40`, `src`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadOnly {
     pub look: Look,
-    /// Files or directories (`Viewed`/`Read`/`Listed`), or the pattern
-    /// (`Searched`), exactly as written in the command.
+
     pub targets: Vec<String>,
     pub detail: Option<String>,
 }
 
-/// Classify a command as a read, a listing, a search or a media view.
-///
-/// Conservative by design: a label must never make a write look like a
-/// read. Anything with operators (`;`, `&&`, `$(…)`, backticks), any
-/// redirect other than discarding stderr/stdout, a second line, a known
-/// writing flag (`sed -i`, `find -delete`, `sort -o`, `rg --pre`, …), or a
-/// pipe into something outside a short list of read-only filters is `None`,
-/// and the header stays `Ran`.
 pub fn read_only(full: &str) -> Option<ReadOnly> {
     let full = full.trim();
     if full.contains('\n') {
@@ -308,9 +259,7 @@ pub fn read_only(full: &str) -> Option<ReadOnly> {
             let media = args.iter().all(|a| {
                 !a.starts_with('-') && crate::images::is_viewable_extension(std::path::Path::new(a))
             });
-            // Only the exact shape the bash tool claims (`cat <media…>` as
-            // the whole command) attaches anything; `cd … && cat x.png` or
-            // `cat x.png | head` dumps bytes, so it is a plain read.
+
             let look = if media && rest.is_empty() && core.command == full {
                 Look::Viewed
             } else {
@@ -353,10 +302,6 @@ pub fn read_only(full: &str) -> Option<ReadOnly> {
     (!classified.targets.is_empty()).then_some(classified)
 }
 
-/// Split a single-line command into pipeline stages of shell words. `None`
-/// for anything a label cannot vouch for: unbalanced quotes, `$`/backticks
-/// (even inside double quotes), `;`, `&&`, `||`, subshells, comments, and
-/// redirects other than the harmless ones in [`SAFE_REDIRECTS`].
 fn pipeline(cmd: &str) -> Option<Vec<Vec<String>>> {
     let mut stages = vec![Vec::new()];
     let mut word = String::new();
@@ -437,7 +382,6 @@ fn pipeline(cmd: &str) -> Option<Vec<Vec<String>>> {
         .then_some(stages)
 }
 
-/// Redirects that only throw output away: they cannot write a file.
 const SAFE_REDIRECTS: &[&str] = &[
     "2>&1",
     "2>/dev/null",
@@ -450,8 +394,6 @@ fn program_name(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// Read-only filters a read may pipe into (`cat f | head -20`). Each is
-/// checked for its writing forms (`sort -o`, `uniq in out`, `rg --pre`).
 fn is_filter(stage: &[String]) -> bool {
     let Some(first) = stage.first() else {
         return false;
@@ -465,14 +407,12 @@ fn is_filter(stage: &[String]) -> bool {
         "sort" => !args
             .iter()
             .any(|a| a.starts_with("-o") || a.starts_with("--output")),
-        // `uniq [input [output]]`: only the flag-only form is a filter.
+
         "uniq" => args.iter().all(|a| a.starts_with('-')),
         _ => false,
     }
 }
 
-/// Positional words after the flags, skipping the values of `value_flags`
-/// (`-n 50`). Attached forms (`-n50`, `--lines=50`) are one word already.
 fn positionals(args: &[String], value_flags: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -541,8 +481,6 @@ const LS_VALUE_FLAGS: &[&str] = &[
     "--filelimit",
 ];
 
-/// `head -n 50` → `first 50 lines`; `tail -20` → `last 20 lines`;
-/// `tail -n +5` → `from line 5`; `tail -f` → `following`.
 fn head_tail_detail(program: &str, args: &[String]) -> Option<String> {
     if program == "tail"
         && args
@@ -583,9 +521,6 @@ fn head_tail_detail(program: &str, args: &[String]) -> Option<String> {
     })
 }
 
-/// `sed -n '<ranges>p' <files>`: only print-range scripts (digits, `,`,
-/// `$`, `p`, `;`) count. `-i`, `-e`/`-f`, and any other script (`w file`,
-/// `s///`) are not a read.
 fn sed_read(args: &[String]) -> Option<ReadOnly> {
     let mut quiet = false;
     let mut rest = Vec::new();
@@ -621,8 +556,6 @@ fn sed_read(args: &[String]) -> Option<ReadOnly> {
     })
 }
 
-/// `grep`/`rg`/`ag`: the pattern (first positional, or `-e`'s value) is the
-/// target; the remaining positionals become `<paths>`.
 fn search(program: &str, args: &[String]) -> Option<ReadOnly> {
     if args.iter().any(|a| a.starts_with("--pre")) {
         return None;
@@ -684,9 +617,6 @@ fn search(program: &str, args: &[String]) -> Option<ReadOnly> {
     })
 }
 
-/// `find <paths> [-name pat …]`: a pattern makes it a search, none a
-/// listing. Any action that writes or runs (`-exec`, `-delete`, `-fprint`)
-/// is not a read.
 fn find_read(args: &[String]) -> Option<ReadOnly> {
     const WRITES: &[&str] = &[
         "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls",

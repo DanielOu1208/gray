@@ -41,17 +41,12 @@ fn diff_success_is_plain() {
 
 #[test]
 fn masked_pipeline_note_is_posix_honest() {
-    // The executor is `sh -c` (dash on some systems): the note must
-    // never recommend `set -o pipefail` (a bashism dash rejects with
-    // exit 2). POSIX advice — rerun the first stage without the pipe —
-    // works in every shell.
     let r = exit_report(code(0), "false | tail -1");
     let note = r.note.as_deref().unwrap_or("");
     assert!(!note.contains("pipefail"), "{note}");
     assert!(note.contains("tail"), "{note}");
     assert!(note.contains("false"), "{note}");
-    // Wire-budget: the note must name the two stages, never echo the
-    // full pipeline (long commands would ride every header twice).
+
     assert!(
         !note.contains('|'),
         "header must not echo the pipeline: {note}"
@@ -60,25 +55,17 @@ fn masked_pipeline_note_is_posix_honest() {
 
 #[test]
 fn pipefail_mention_does_not_suppress_masked_note() {
-    // Leftover-word false negative: the note keys off the pipeline
-    // shape, not the command text. A command merely mentioning
-    // "pipefail" under `sh -c` still reports the tail's exit.
     let r = exit_report(code(0), "echo pipefail | tail -1");
     assert!(r.note.is_some());
 }
 
 #[test]
 fn failing_stage_behind_a_text_filter_is_flagged() {
-    // The real shape: a test/build command piped into a pager-ish filter.
-    // `sh -c` reports the filter's 0, so a failing suite would read as
-    // success — the note must say the earlier status is unknowable.
     for cmd in [
         "pytest -q | head -40",
         "cargo test | tail -5",
         "python3 -c 'raise SystemExit(3)' | head -5",
         "make check | cat",
-        // Filters that swallow the upstream status without being head-ish
-        // commands: `sh -c` still reports their 0.
         "pytest -q | awk '{print $1}'",
         "cargo test 2>&1 | sed -n '1,20p'",
         "make test | cut -d: -f1",
@@ -92,7 +79,7 @@ fn failing_stage_behind_a_text_filter_is_flagged() {
             note.contains("rerun"),
             "the note must say how to recover the status: {cmd} -> {note}"
         );
-        // Same wire-budget rule as the other arm: never echo the pipeline.
+
         assert!(!note.contains('|'), "{cmd} -> {note}");
     }
 }
@@ -106,19 +93,16 @@ fn multi_stage_filter_names_stages_generically() {
 
 #[test]
 fn text_filter_last_with_no_masking_risk_stays_silent() {
-    // `grep` is in the head-ish table too, so it keeps the stage-naming
-    // note (naming `cargo` is more useful than the generic warning).
     let r = exit_report(code(0), "cargo test | grep PASS");
     assert!(
         r.note.as_deref().unwrap_or("").contains("cargo"),
         "{:?}",
         r.note
     );
-    // A single command has no pipeline to mask anything: `cat f` alone
-    // reports `cat`'s own status, which is honest.
+
     let r = exit_report(code(0), "cat f");
     assert!(r.note.is_none(), "{:?}", r.note);
-    // Nor does a lone text filter with nothing upstream to mask.
+
     let r = exit_report(code(0), "head -5 f");
     assert!(r.note.is_none(), "{:?}", r.note);
 }

@@ -1,7 +1,3 @@
-//! `gray-pkg`: plugin package management — index client, fetch, verify.
-//!
-//! Networking lives here, never in `gray-plugin` (protocol only).
-
 pub mod errors;
 pub mod fetch;
 pub mod index;

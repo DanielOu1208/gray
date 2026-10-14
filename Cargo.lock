@@ -693,7 +693,6 @@ name = "fsearch"
 version = "0.1.0"
 dependencies = [
  "libc",
- "log",
  "memchr",
  "memmap2",
  "rayon",

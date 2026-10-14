@@ -2,7 +2,6 @@ use super::*;
 use std::sync::Arc;
 use tokio::process::Command;
 
-/// Inline POSIX script with both pipes captured; the caller takes what it needs.
 fn spawn_sh(
     script: &str,
 ) -> (
@@ -56,20 +55,17 @@ async fn pump_logs_both_streams_verbatim() {
             "log holds {marker:?}"
         );
     }
-    assert_eq!(s.head, file); // under budget: head is the whole stream
+    assert_eq!(s.head, file);
     let _ = std::fs::remove_file(&log);
 }
 
 #[tokio::test]
 async fn pump_redacts_secret_shaped_assignment() {
-    // `*_token=<value>` hits SECRET_NAME_MARKERS ("token"); the name is
-    // assembled at runtime so no secret-shaped literal sits in source.
     let name: String = [109u8, 121, 95, 116, 111, 107, 101, 110]
         .iter()
         .map(|b| *b as char)
         .collect();
-    // "value123": lowercase + digits, no shape of its own — only the
-    // secret-bearing name triggers redaction.
+
     let val = "value123";
     let script = format!("printf '\\n{name}={val}\\n'");
     let (mut child, out, err) = spawn_sh(&script);
@@ -85,7 +81,7 @@ async fn pump_redacts_secret_shaped_assignment() {
         text.contains(&name),
         "name is the useful half, kept: {text}"
     );
-    // Memory view and file agree (both sides see the redacted bytes).
+
     assert_eq!(s.total_bytes, file.len() as u64);
     let _ = std::fs::remove_file(&log);
 }
@@ -94,7 +90,7 @@ async fn pump_redacts_secret_shaped_assignment() {
 async fn pump_unwritable_log_sets_flag_without_panic() {
     let blocker = tmp_log("blocker");
     std::fs::write(&blocker, b"x").unwrap();
-    let bad = blocker.join("bash-test.log"); // parent is a file: mkdir + open both fail
+    let bad = blocker.join("bash-test.log");
     let (mut child, out, _err) = spawn_sh("printf 'still counted\\n'");
     let h = Pump::start(out, None, bad, Arc::new(AtomicU64::new(0)), None);
     assert!(child.wait().await.unwrap().success());
@@ -102,8 +98,6 @@ async fn pump_unwritable_log_sets_flag_without_panic() {
     let _ = std::fs::remove_file(&blocker);
 }
 
-/// Feeds fixed byte groups, one per `read()`, then EOF. Deterministic split
-/// points without a child process or a sleep.
 struct SplitReads(Vec<Vec<u8>>);
 
 impl tokio::io::AsyncRead for SplitReads {
@@ -121,12 +115,10 @@ impl tokio::io::AsyncRead for SplitReads {
     }
 }
 
-/// A read can end mid-token; the redactor's unit is the line. Redacting the
-/// pieces separately leaked the tail of any secret that straddled a boundary.
 #[tokio::test]
 async fn pump_holds_a_partial_line_until_its_terminator() {
     use gray_core::redaction::redact_bytes_for_log;
-    // The name assembles at runtime so no secret-shaped literal sits in source.
+
     let name: String = [109u8, 121, 95, 116, 111, 107, 101, 110]
         .iter()
         .map(|b| *b as char)

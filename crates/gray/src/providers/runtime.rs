@@ -1,5 +1,3 @@
-//! Agent/setup lifetime ownership for one provider sidecar.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -87,7 +85,6 @@ impl ProviderRpc for SidecarProviderRpc {
     }
 }
 
-/// Starts a sidecar for setup/model discovery and drops it when this value drops.
 pub struct ProviderRuntime {
     installed: InstalledProvider,
     rpc: Arc<SidecarProviderRpc>,
@@ -111,9 +108,5 @@ impl ProviderRuntime {
 }
 
 impl Drop for ProviderRuntime {
-    fn drop(&mut self) {
-        // `shutdown` is async; `spawn` owns a child kill-on-drop and the
-        // sidecar protocol has no synchronous exit. Killing here is the
-        // bounded, non-hanging behavior for agent teardown.
-    }
+    fn drop(&mut self) {}
 }

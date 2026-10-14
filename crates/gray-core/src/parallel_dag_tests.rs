@@ -53,7 +53,6 @@ fn dir_prefix_overlap_stays_sequential() {
 
 #[test]
 fn normalization_spellings_still_conflict() {
-    // `./a.txt` == `a.txt`, and `a//b` == `a/b` — same file, barrier.
     let u = vec![w("a", "./a.txt"), w("b", "a.txt")];
     assert_eq!(
         plan_segments(&u, &known_rw()),
@@ -68,8 +67,6 @@ fn normalization_spellings_still_conflict() {
 
 #[test]
 fn non_interfering_reads_and_writes_share_one_segment() {
-    // Disjoint paths never interfere: reads batch with a write of another
-    // file — the lane's rule is non-interference, not read-only-ness.
     let u = vec![
         ("a".into(), "read".into(), json!({"path": "a.txt"})),
         w("b", "b.txt"),
@@ -94,7 +91,6 @@ fn non_interfering_reads_and_writes_share_one_segment() {
 
 #[test]
 fn reading_a_written_path_stays_sequential() {
-    // Same file: read/write interference splits the run.
     let u = vec![
         ("a".into(), "read".into(), json!({"path": "a.txt"})),
         w("b", "a.txt"),
@@ -103,7 +99,7 @@ fn reading_a_written_path_stays_sequential() {
         plan_segments(&u, &known_rw()),
         vec![Segment::Single(0), Segment::Single(1)]
     );
-    // A directory read overlaps writes inside it.
+
     let u = vec![
         ("a".into(), "read".into(), json!({"path": "dir"})),
         w("b", "dir/file.txt"),
@@ -116,7 +112,6 @@ fn reading_a_written_path_stays_sequential() {
 
 #[test]
 fn missing_or_non_string_path_is_barrier() {
-    // Missing `path` demotes (fail-safe) and splits the surrounding run.
     let u = vec![
         w("a", "a.txt"),
         ("b".into(), "write".into(), json!({"content": "x"})),
@@ -126,7 +121,7 @@ fn missing_or_non_string_path_is_barrier() {
         plan_segments(&u, &known_rw()),
         vec![Segment::Single(0), Segment::Single(1), Segment::Single(2)]
     );
-    // Non-string `path` demotes the same way.
+
     let u = vec![
         w("a", "a.txt"),
         ("b".into(), "edit".into(), json!({"path": 42})),

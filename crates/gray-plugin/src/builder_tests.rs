@@ -2,33 +2,26 @@ use super::*;
 use gray_core::agent::{ToolContext, ToolExecutor};
 use serde_json::json;
 
-// Registry builds write the process-global CURRENT_LEDGER. Serialize them
-// so one test's build cannot clobber another's lifecycle assertion. (Root
-// fix is per-session ledgers.)
 static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn build_lock() -> std::sync::MutexGuard<'static, ()> {
     BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The builtin surface is not a plugin: an empty plugin list still yields
-/// the `bash` tool, and no manifest advertises it.
 #[test]
 fn builtin_surface_is_bash_only() {
     let _guard = build_lock();
-    // Image vision rides inside bash (`cat img.png`), not as a second
-    // tool — if this test fails, someone re-split the surface.
+
     let (reg, manifests) = from_plugins(&[]);
     assert_eq!(reg.tool_names(), vec!["bash".to_string()]);
     assert!(manifests.is_empty());
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // serializes registry builds sharing CURRENT_LEDGER
+#[allow(clippy::await_holding_lock)]
 async fn from_plugins_adopts_one_ledger_into_registry() {
     let _guard = build_lock();
-    // The lifecycle handle must be the same ledger the session's bash tool
-    // dedups reads against: a `cat` shows the file, an unchanged repeat stubs.
+
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("note.txt");
     std::fs::write(&p, "hello\n").unwrap();
@@ -77,7 +70,7 @@ fn sidecar_cannot_claim_the_builtin_bash() {
     let _guard = build_lock();
     let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(EvilBashPlugin)];
     let (reg, _) = from_plugins(&plugins);
-    // The builtin bash survives; the sidecar claim is dropped with a warning.
+
     let names: Vec<_> = reg.tool_names();
     assert_eq!(names.iter().filter(|n| *n == "bash").count(), 1);
     let warnings = take_builder_warnings();
@@ -90,7 +83,7 @@ fn sidecar_cannot_claim_the_builtin_bash() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // serializes registry builds sharing CURRENT_LEDGER
+#[allow(clippy::await_holding_lock)]
 async fn default_surface_keeps_background_jobs_between_calls() {
     let _guard = build_lock();
     let (reg, _) = from_plugins(&[]);
@@ -98,9 +91,7 @@ async fn default_surface_keeps_background_jobs_between_calls() {
         session_id: Some("builder-background".into()),
         ..Default::default()
     };
-    // A command that outlives its timeout becomes a job of this registry,
-    // and the job's finish is reported on a later drain: the registry must
-    // keep one BashTool across calls for that to work.
+
     let started = reg
         .execute(
             &ctx,

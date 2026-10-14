@@ -1,12 +1,3 @@
-//! Interactive agents panel — the keyboard-driven sibling of the
-//! subagents widget. A plugin's `agent_picker` command outcome opens it;
-//! rows and every action ride that plugin's own CLI (`entries` for the
-//! list, `view`/`open`/`stop`/`chat` for the verbs), so the panel works
-//! for any plugin speaking that surface. Enter opens a floating window on
-//! the run's own session (live while it works); 'o' on a finished run hands
-//! its child session to `/resume` — the subagent then chats as its own
-//! session, the same model opencode and Claude Code use.
-
 use gray_core::message::{ContentBlock, Role};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -21,12 +12,9 @@ use std::time::Instant;
 use crate::composer::TranscriptEntry;
 use crate::session_store::SessionEntry;
 
-/// What the dispatch arm does after the modal closes.
 pub(crate) enum PanelAction {
-    /// `/resume` this session — a finished run's own child session.
-    /// The name rides along so the receipt can say whose session it is.
     Resume { session: String, name: String },
-    /// Print text to scrollback (open card, view tail, receipts).
+
     Say(String),
 }
 
@@ -45,8 +33,6 @@ struct Row {
     resumable: bool,
 }
 
-/// `<plugin> <verb>` argv resolved from the install lock: `cli_argv`
-/// first (the command shim), then the sidecar `argv`.
 fn plugin_argv(plugin: &str) -> Option<Vec<String>> {
     let home = crate::plugin_cli::home().ok()?;
     let lock: Value =
@@ -67,7 +53,6 @@ fn plugin_argv(plugin: &str) -> Option<Vec<String>> {
     None
 }
 
-/// Raw stdout of one plugin CLI call; stderr tail on failure.
 fn spawn_raw(argv: &[String], args: &[&str]) -> Option<String> {
     let (prog, base) = argv.split_first()?;
     let out = std::process::Command::new(prog)
@@ -90,7 +75,6 @@ fn spawn_raw(argv: &[String], args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Most verbs answer `{"content": "…"}`; unwrap that, else the raw text.
 fn spawn_text(argv: &[String], args: &[&str]) -> Option<String> {
     let raw = spawn_raw(argv, args)?;
     let v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
@@ -104,11 +88,7 @@ fn spawn_text(argv: &[String], args: &[&str]) -> Option<String> {
     )
 }
 
-/// Read-only slash-command view used while a turn owns the agent. Bare
-/// `/subagents` opens the picker below; explicit read verbs print here.
 pub(crate) fn run_subagents_view(args: &[String]) -> Option<String> {
-    // Bare `settings` is the modal's job — mid-turn it declines politely;
-    // flagged `settings --x v` still writes and prints here.
     if args == ["settings"] {
         return Some(
             "subagents settings: the modal opens when the turn finishes — rerun `/subagents settings`, or set directly with `settings --model/--effort/--context/--max-running`"
@@ -150,37 +130,24 @@ fn fetch_rows(argv: &[String], all: bool) -> Vec<Row> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Floating run viewer — the child session as a small gray window.
-// ---------------------------------------------------------------------------
-
-/// The one-line chat composer shared by the list and the viewer.
 struct ChatInput {
-    /// The plugin-verb target (`chat <target> <msg>`).
     target: String,
-    /// Display name for the `chat NAME:` prompt.
+
     name: String,
     buf: String,
 }
 
-/// Incremental reader for `sessions/<id>.jsonl`. The file is append-only, so
-/// each poll reads only the bytes after the last consumed offset and keeps
-/// complete lines — a torn tail waits for the next poll. The viewer replays
-/// the WHOLE session from entry 0 — compaction boundaries don't truncate the
-/// history the way `resume` (active-suffix only) does.
 struct SessionFeed {
     path: PathBuf,
     offset: u64,
     lines_seen: usize,
     cwd: PathBuf,
     entries: Vec<SessionEntry>,
-    /// The file shrank or was replaced: already-built content is stale.
+
     reset: bool,
 }
 
 impl SessionFeed {
-    /// `None` on an unusable slug (the plugin's own `[A-Za-z0-9_-]{1,128}`
-    /// rule) or a missing sessions root. The file itself may not exist yet.
     fn open(session: &str) -> Option<Self> {
         let ok = !session.is_empty()
             && session.len() <= 128
@@ -200,7 +167,6 @@ impl SessionFeed {
         })
     }
 
-    /// Consume newly completed lines. True when entries were added.
     fn poll(&mut self) -> bool {
         let Ok(mut file) = std::fs::File::open(&self.path) else {
             return false;
@@ -231,8 +197,6 @@ impl SessionFeed {
             }
             self.lines_seen += 1;
             if self.lines_seen == 1 {
-                // Line 0 is the session header; only `cwd` matters here —
-                // tool headers relativize paths against it.
                 if let Ok(v) = serde_json::from_str::<Value>(line)
                     && let Some(c) = v["cwd"].as_str()
                 {
@@ -249,10 +213,6 @@ impl SessionFeed {
     }
 }
 
-/// The open run window: the row's identity for the title bar, the feed that
-/// fills `transcript`, the rendered `lines` cache, and the scroll state.
-/// `tool_calls` mirrors `replay_session_history`'s pairing map — unmatched
-/// calls hang off the tail as empty boxes until their result lands.
 struct Viewer {
     target: String,
     session: String,
@@ -265,30 +225,26 @@ struct Viewer {
     resumable: bool,
     feed: Option<SessionFeed>,
     transcript: Vec<TranscriptEntry>,
-    /// `feed.entries` index up to which `transcript` is built.
+
     built: usize,
     tool_calls: HashMap<String, (String, Value)>,
-    /// `label`/`preview` per wire tool name, resolved from the enabled
-    /// plugins' persisted manifests — the live turn's `tool_display_maps`
-    /// for a session that has no live agent.
+
     tool_labels: HashMap<String, String>,
     tool_previews: HashMap<String, String>,
-    /// Maps resolve at first feed open; empty is a valid answer for a
-    /// builtin-only session, so the flag, not emptiness, marks "tried".
+
     tools_loaded: bool,
     gap_owed: bool,
     lines: Vec<Line<'static>>,
-    /// Width the transcript was built for; markdown is baked at build time,
-    /// so a width change replays `entries` from scratch.
+
     layout_w: u16,
     dirty: bool,
     scroll: u16,
-    /// Pinned to the tail: new lines autoscroll until the user scrolls up.
+
     stick: bool,
     max_scroll: u16,
     view_h: u16,
     last_tick: Instant,
-    /// One-shot footer note (verb receipts, refusals).
+
     note: Option<String>,
 }
 
@@ -326,8 +282,6 @@ impl Viewer {
         v
     }
 
-    /// Re-sync identity fields against the refreshed row — the run keeps
-    /// living while watched: status, stats, a late-arriving session id.
     fn sync_row(&mut self, row: Option<&Row>) {
         let Some(r) = row else {
             return;
@@ -344,8 +298,6 @@ impl Viewer {
         }
     }
 
-    /// Open the feed lazily (the session id can arrive after the run starts)
-    /// and pull whatever the child appended.
     fn refresh_feed(&mut self) {
         if self.session.is_empty() {
             return;
@@ -367,9 +319,6 @@ impl Viewer {
         }
     }
 
-    /// Fold `entries[built..]` into `transcript`. Always the FULL session —
-    /// compaction boundaries don't truncate (scrolling up reaches the first
-    /// prompt); only a replaced file rebuilds from zero.
     fn build_pending(&mut self) {
         {
             let Some(feed) = self.feed.as_ref() else {
@@ -406,9 +355,6 @@ impl Viewer {
         self.dirty = true;
     }
 
-    /// Produce `lines` at width `w` through `layout_history` — the margin
-    /// funnel the setup backdrop shares with the live transcript. Pending
-    /// tool calls hang off the tail as empty boxes, like replay's end flush.
     fn layout(&mut self, w: usize) {
         let w16 = u16::try_from(w).unwrap_or(u16::MAX);
         if self.layout_w != w16 {
@@ -447,7 +393,6 @@ impl Viewer {
     }
 }
 
-/// `ensure_gap` on the viewer's transcript: one owed boundary, paid once.
 fn gap_mark(v: &mut Viewer) {
     if !v.gap_owed {
         v.transcript.push(TranscriptEntry::Gap(1));
@@ -460,9 +405,6 @@ fn push_block(v: &mut Viewer, e: TranscriptEntry) {
     v.gap_owed = false;
 }
 
-/// `Tui::replay_session_history` mirrored onto a `Viewer`'s transcript: same
-/// block types, same pairing of tool calls to results, minus the terminal
-/// side effects (input-history seeding, usage gauge).
 fn replay_entry(v: &mut Viewer, entry: &SessionEntry, cwd: &Path, w: usize) {
     match entry.message.role {
         Role::User => {
@@ -553,11 +495,6 @@ fn replay_entry(v: &mut Viewer, entry: &SessionEntry, cwd: &Path, w: usize) {
     }
 }
 
-/// The viewed run's `label`/`preview` per wire tool name: the live turn's
-/// `tool_display_maps`, but built without a live agent — read the enabled
-/// plugins' persisted manifests (builtins declare neither field, so only
-/// plugin tools land in the maps). Display metadata only: a tool missing
-/// here still renders its wire-name header.
 fn viewer_tool_maps(cwd: &Path) -> (HashMap<String, String>, HashMap<String, String>) {
     let mut defs = Vec::new();
     let Ok(home) = crate::setup::gray_home() else {
@@ -588,8 +525,6 @@ fn viewer_tool_maps(cwd: &Path) -> (HashMap<String, String>, HashMap<String, Str
     crate::repl::session::tool_display_maps(&defs)
 }
 
-/// The replay twin of `replay_tool_result` in transcript/boxes.rs: resolve
-/// the matching ToolUse, render header + body, push the card.
 fn replay_tool_result(v: &mut Viewer, id: &str, content: &str, is_error: bool, cwd: &Path) {
     let (name, args) = v
         .tool_calls
@@ -624,14 +559,6 @@ fn replay_tool_result(v: &mut Viewer, id: &str, content: &str, is_error: bool, c
     gap_mark(v);
 }
 
-/// Scroll by `delta` rows (negative = up) and recompute bottom-stickiness:
-/// landing on the last row re-engages autoscroll, leaving it disengages.
-/// Visible window over `lines` as `(top_pad, start, end)`: `top_pad` blank
-/// rows above `lines[start..end]`, together filling `view` rows exactly.
-/// Bottom-anchored semantics — content shorter than the viewport pins to the
-/// bottom edge (pad above); longer content is a contiguous slice and `start`
-/// clamps to `len - view`. Every viewport row is assigned, so no hole can
-/// open mid-viewport the way `Paragraph::scroll` (top-anchored) left one.
 fn viewport_window(len: usize, view: usize, scroll: usize) -> (usize, usize, usize) {
     let start = scroll.min(len.saturating_sub(view));
     let end = (start + view).min(len);
@@ -644,10 +571,6 @@ fn scroll_by(v: &mut Viewer, delta: i64) {
     v.stick = v.scroll >= v.max_scroll;
 }
 
-/// The run as a borderless, full-screen session view — the "gray session
-/// iframe": a one-line header, the full transcript, the chat row (always
-/// there: steering and stopping are plugin CLI calls that work mid-turn),
-/// and a one-line dim key footer. No frame lines, no backdrop.
 fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer, chat: Option<&ChatInput>) {
     let area = frame.area();
     let theme = crate::theme::theme();
@@ -671,8 +594,6 @@ fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer, chat: Option<&ChatIn
     };
     let footer: String = footer.chars().take(area.width as usize).collect();
 
-    // Header on the top row, footer on the bottom row; the transcript and the
-    // chat row fill the band between them. Nothing is drawn as a frame.
     let header_rect = Rect::new(area.x, area.y, area.width, 1);
     let footer_rect = Rect::new(
         area.x,
@@ -704,7 +625,6 @@ fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer, chat: Option<&ChatIn
         footer_rect,
     );
 
-    // The chat row is the last line of the band; the transcript is above it.
     let body_h = inner.height.saturating_sub(1);
     let body = Rect {
         height: body_h,
@@ -740,8 +660,6 @@ fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer, chat: Option<&ChatIn
             body,
         );
     } else {
-        // Bottom-anchored slice: blank pad above short content, contiguous
-        // rows otherwise — every body row is assigned, no mid-viewport hole.
         let (pad, start, end) = viewport_window(v.lines.len(), body_h as usize, v.scroll as usize);
         let mut rows = vec![Line::default(); pad];
         rows.extend(v.lines[start..end].iter().cloned());
@@ -783,15 +701,10 @@ fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer, chat: Option<&ChatIn
     frame.render_widget(Paragraph::new(Line::from(spans)), input);
 }
 
-/// Modal width: the terminal less a cell of margin each side, so rows get
-/// every column. Never narrower than 42 nor wider than the screen.
 fn picker_modal_w(term_w: u16) -> u16 {
     term_w.saturating_sub(2).max(42).min(term_w)
 }
 
-/// List rows the picker holds: about three-fifths of the screen less the
-/// title, status and keys rows. Never more than there are runs, never fewer
-/// than three, so a short terminal scrolls instead of hiding runs.
 fn picker_list_h(term_h: u16, runs: usize) -> usize {
     (usize::from(term_h) * 3 / 5)
         .saturating_sub(7)
@@ -799,8 +712,6 @@ fn picker_list_h(term_h: u16, runs: usize) -> usize {
         .min(runs.max(1))
 }
 
-/// The top of the `visible`-row window: the old top clamped into the list,
-/// then moved just enough to keep `sel` inside it.
 fn picker_scroll_top(runs: usize, sel: usize, top: usize, visible: usize) -> usize {
     let visible = visible.max(1);
     let mut top = top.min(runs.saturating_sub(visible));
@@ -812,15 +723,12 @@ fn picker_scroll_top(runs: usize, sel: usize, top: usize, visible: usize) -> usi
     top
 }
 
-/// `1–7 of 8` while the list overflows its window; nothing when it fits.
 fn picker_range_label(runs: usize, top: usize, visible: usize) -> Option<String> {
     (runs > visible).then(|| format!("{}–{} of {runs}", top + 1, (top + visible).min(runs)))
 }
 
-/// Longest live activity a picker row prints; the task keeps the rest.
 const PICKER_ACTIVITY_MAX: usize = 60;
 
-/// `s` cut to at most `max` display cells, a cut ending in `…`.
 fn cut_cells(s: &str, max: usize) -> String {
     use crate::text_width::{char_width, display_width};
     if display_width(s) <= max {
@@ -843,10 +751,6 @@ fn cut_cells(s: &str, max: usize) -> String {
     out
 }
 
-/// One picker row, exactly `width` cells: `▸ ● name — task · stats · activity`
-/// (a finished run ends `· status`). The fixed parts come first, then the task
-/// keeps its first 40 cells; the live activity takes what is left (at most 60
-/// cells) and is dropped when that is under a dozen; the task takes the rest.
 fn picker_row_text(row: &Row, selected: bool, width: usize) -> String {
     use crate::text_width::display_width;
     let mark = if selected { "▸" } else { " " };
@@ -882,12 +786,6 @@ fn picker_row_text(row: &Row, selected: bool, width: usize) -> String {
     format!("{line}{}", " ".repeat(pad))
 }
 
-/// The keyboard-navigable overlay: ↑↓/j/k move, Enter opens the floating
-/// run viewer (a small gray window on the child session, live while the
-/// run works), o resumes a finished run's session, c chats into the run,
-/// x stops, v prints the transcript tail, a widens to every session, r
-/// refreshes. Synchronous like the other pickers — plugin calls are local
-/// CLI spawns, fast enough to run between key events.
 pub(crate) fn run_agents_picker(
     plugin: &str,
     bg: Option<&crate::setup::BackgroundSnapshot>,
@@ -895,10 +793,6 @@ pub(crate) fn run_agents_picker(
     run_agents_panel(plugin, bg, false)
 }
 
-/// The same picker, opened from inside a running turn. Chat, stop and view
-/// all work mid-turn — they ride the plugin CLI, not the parent session — so
-/// only `o` (resume, which switches the parent session) waits for the turn
-/// to end.
 pub(crate) fn run_agents_viewer(
     plugin: &str,
     bg: Option<&crate::setup::BackgroundSnapshot>,
@@ -972,9 +866,6 @@ fn run_agents_panel(
                 }
                 crate::setup::render_dimmed_background(frame, &bg_snapshot);
 
-                // Height hugs the rows (three-fifths of the screen at most):
-                // title + blank + list + blank + status + keys, plus the
-                // one-cell pad top and bottom.
                 let list_h = picker_list_h(area.height, rows.len());
                 let modal_w = picker_modal_w(area.width);
                 let modal_h = (list_h as u16 + 7)
@@ -1005,8 +896,6 @@ fn run_agents_panel(
                     );
                 };
 
-                // The list band holds what the modal's height leaves; the
-                // window follows the selection, and the header names it.
                 let visible = list_h.min(usize::from(modal_h.saturating_sub(7))).max(1);
                 scroll_top = picker_scroll_top(rows.len(), sel, scroll_top, visible);
                 let range = picker_range_label(rows.len(), scroll_top, visible)
@@ -1039,8 +928,6 @@ fn run_agents_panel(
                     ]),
                 );
 
-                // List band: the visible window, then the status/input line,
-                // then the keys hint.
                 let list_y = 2u16;
                 if rows.is_empty() {
                     put(
@@ -1078,7 +965,6 @@ fn run_agents_panel(
                     }
                 }
 
-                // Status / chat-input band, then the keys hint.
                 let status_y = inner.height.saturating_sub(2);
                 if let Some(c) = &chat_in {
                     let prompt = format!(" chat {}: {}_", c.name, c.buf);
@@ -1094,8 +980,7 @@ fn run_agents_panel(
                         )),
                     );
                 } else {
-                    // Idle: the band spells out what the selected row can
-                    // do — the affordance, not just the key names.
+
                     let hint = rows.get(sel).map_or("", |r| {
                         if r.running {
                             " ⏎ watch live · c follow-up · x stop · v tail"
@@ -1134,7 +1019,6 @@ fn run_agents_panel(
                 );
             })?;
 
-            // Dead tty spins crossterm's poll on EIO (see stdin_gone).
             if crate::composer::input::stdin_gone() {
                 return Ok(());
             }
@@ -1175,8 +1059,7 @@ fn run_agents_panel(
                             vw.running = true;
                             let upd = rows.iter().find(|r| r.target == vw.target).cloned();
                             vw.sync_row(upd.as_ref());
-                            // The viewer's box is a chat, not a one-shot:
-                            // stay focused for the next steer (Esc unfocuses).
+
                             if !msg.is_empty() {
                                 chat_in = Some(ChatInput {
                                     target: c.target,
@@ -1188,8 +1071,7 @@ fn run_agents_panel(
                             status = r;
                         }
                     }
-                    // Arrows keep scrolling while the box is focused — it's
-                    // an input row, not a mode that swallows the viewport.
+
                     KeyCode::Up
                     | KeyCode::Down
                     | KeyCode::PageUp
@@ -1365,11 +1247,6 @@ fn run_agents_panel(
     Ok(result)
 }
 
-/// `/subagents settings` pop-out: the current values are read through the
-/// plugin's CLI (`settings` prints its JSON), edited in the ask modal,
-/// and saved back through `settings --flags` — the same surface every
-/// panel verb rides. Esc closes with no write; "keep" answers change
-/// nothing. Returns the line to print, or None on Esc.
 pub(crate) fn run_subagent_settings(
     plugin: &str,
     shared: &crate::composer::SharedTui,
@@ -1411,11 +1288,7 @@ pub(crate) fn run_subagent_settings(
         q(
             "model",
             format!("default subagent model? (now: {})", cur_of("model")),
-            vec![
-                opt("keep", "leave unchanged"),
-                inherit(),
-                // "None of the above" + notes carry a free-form model id.
-            ],
+            vec![opt("keep", "leave unchanged"), inherit()],
         ),
         q(
             "effort",
@@ -1464,7 +1337,6 @@ pub(crate) fn run_subagent_settings(
     ];
     let answers = crate::ask::ask_questions_modal(shared, questions)?;
 
-    // A typed note ("Other") beats the picked label — typing means intent.
     let mut flags: Vec<String> = Vec::new();
     for a in &answers {
         let flag = match a.id.as_str() {

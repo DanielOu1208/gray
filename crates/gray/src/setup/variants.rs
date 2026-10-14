@@ -1,19 +1,11 @@
-//! Structured model variants from plugin catalogs: one picker row owns the
-//! concrete wire ids behind its effort / fast / composite-part knobs
-//! (`ProviderModel::variants` + `slots`). Rows without variants keep the
-//! legacy path — the row id is the wire id, effort travels as a parameter
-//! and fast mode composes heuristically ([`super::compose_fast_model`]).
-
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use gray_plugin::{ModelSlot, ModelVariant};
 use serde::{Deserialize, Serialize};
 
-/// Slot key → option id for a composite row (`{"lead": …, "sidekick": …}`).
 pub(crate) type Parts = BTreeMap<String, String>;
 
-/// What a row declares beyond its id and name.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RowShape {
     #[serde(default)]
@@ -27,7 +19,6 @@ impl RowShape {
         !self.slots.is_empty()
     }
 
-    /// Display name of `option` in slot `key`, if declared.
     pub(crate) fn option_name(&self, key: &str, option: &str) -> Option<&str> {
         self.slots
             .iter()
@@ -38,13 +29,10 @@ impl RowShape {
             .map(|o| o.name.as_str())
     }
 
-    /// Whether some variant serves exactly `parts`.
     pub(crate) fn serves(&self, parts: &Parts) -> bool {
         self.variants.iter().any(|v| v.parts == *parts)
     }
 
-    /// The parts a fresh selection opens at: `want` when a variant serves
-    /// it, else the first variant's (the catalog's own default).
     pub(crate) fn settle_parts(&self, want: Option<&Parts>) -> Parts {
         match want {
             Some(p) if self.serves(p) => p.clone(),
@@ -56,10 +44,6 @@ impl RowShape {
         }
     }
 
-    /// `cur` with slot `key` picked to `option`, coerced to a combination
-    /// a variant serves: the pick wins, the slots before it hold their
-    /// current options, later slots take whatever the matching variant
-    /// declares. `None` when no variant serves `option` there.
     pub(crate) fn option_parts(&self, cur: &Parts, key: &str, option: &str) -> Option<Parts> {
         let slot = self.slots.iter().position(|s| s.key == key)?;
         let mut want = cur.clone();
@@ -80,8 +64,6 @@ impl RowShape {
 
 static SHAPES: OnceLock<RwLock<HashMap<String, Arc<RowShape>>>> = OnceLock::new();
 
-/// Record what a catalog declared for row `id`. A declaration with neither
-/// variants nor slots is authoritative too: it clears an older shape.
 pub(crate) fn cache_row_shape(id: &str, variants: Vec<ModelVariant>, slots: Vec<ModelSlot>) {
     let Ok(mut map) = SHAPES.get_or_init(Default::default).write() else {
         return;
@@ -93,13 +75,10 @@ pub(crate) fn cache_row_shape(id: &str, variants: Vec<ModelVariant>, slots: Vec<
     }
 }
 
-/// The declared shape of row `id`, when its catalog had variants or slots.
 pub(crate) fn row_shape(id: &str) -> Option<Arc<RowShape>> {
     SHAPES.get()?.read().ok()?.get(id).cloned()
 }
 
-/// `none` is the wire spelling of `off` in variant ids; both mean no
-/// thinking.
 fn norm_level(level: &str) -> &str {
     if level.eq_ignore_ascii_case("none") {
         "off"
@@ -108,18 +87,15 @@ fn norm_level(level: &str) -> &str {
     }
 }
 
-/// Position in `THINKING_LEVELS` (`off` = 0 … `max`).
 fn level_rank(level: &str) -> Option<usize> {
     let level = norm_level(level);
     super::THINKING_LEVELS.iter().position(|(l, _)| *l == level)
 }
 
-/// The `THINKING_LEVELS` spelling of `level` (`'static`, for picker state).
 pub(crate) fn static_level(level: &str) -> Option<&'static str> {
     level_rank(level).map(|i| super::THINKING_LEVELS[i].0)
 }
 
-/// The variants a selection may resolve to: same fast flag, same parts.
 fn candidates<'a>(
     variants: &'a [ModelVariant],
     fast: bool,
@@ -130,25 +106,14 @@ fn candidates<'a>(
         .filter(move |v| v.fast == fast && v.parts == *parts)
 }
 
-/// Whether any variant serves `parts` with this `fast` flag.
 pub(crate) fn has_variant(variants: &[ModelVariant], fast: bool, parts: &Parts) -> bool {
     candidates(variants, fast, parts).next().is_some()
 }
 
-/// The fast flag a selection actually runs at: fast only where a fast
-/// variant exists for `parts` (resolution falls back to standard serving).
 pub(crate) fn effective_fast(variants: &[ModelVariant], fast: bool, parts: &Parts) -> bool {
     fast && has_variant(variants, true, parts)
 }
 
-/// Resolve a row's selection to its concrete wire variant.
-///
-/// Candidates are the variants whose `fast` and `parts` match. Among them:
-/// an exact `effort` match wins; else one pinned to no effort (`None`, the
-/// provider default); else the nearest effort in `THINKING_LEVELS` order
-/// (ties go up — the clamp's direction). With no fast candidate the
-/// selection falls back to `fast = false`. `None` when nothing serves
-/// `parts` at all.
 pub(crate) fn resolve_variant<'a>(
     variants: &'a [ModelVariant],
     effort: Option<&str>,
@@ -184,9 +149,6 @@ pub(crate) fn resolve_variant<'a>(
     pick(fast).or_else(|| if fast { pick(false) } else { None })
 }
 
-/// Effort levels a selection can step through: the pinned efforts among
-/// its candidates, in `THINKING_LEVELS` order (fast falls back like
-/// [`resolve_variant`]). Empty = no effort knob.
 pub(crate) fn variant_levels(
     variants: &[ModelVariant],
     fast: bool,
@@ -201,8 +163,6 @@ pub(crate) fn variant_levels(
     levels
 }
 
-/// `want` if `levels` has it, else the nearest level (ties go up). `None`
-/// for an empty list.
 pub(crate) fn clamp_to_levels(levels: &[&'static str], want: &str) -> Option<&'static str> {
     if let Some(l) = levels.iter().find(|l| **l == norm_level(want)) {
         return Some(l);
@@ -215,17 +175,10 @@ pub(crate) fn clamp_to_levels(levels: &[&'static str], want: &str) -> Option<&'s
         .map(|(_, l)| l)
 }
 
-/// Drop a leading vendor word so labels stay short (`Claude Opus 5.5` →
-/// `Opus 5.5`).
 fn short_name(name: &str) -> &str {
     name.strip_prefix("Claude ").unwrap_or(name)
 }
 
-/// A composite label as paintable segments: `(text, slot)` where `slot` is
-/// the owning index in `shape.slots` (`None` on the `row ·` prefix and `×`
-/// joins). Surfaces that can color spans brighten the segment whose model
-/// is producing output; the flat label is the segments' concatenation.
-/// `None` for a non-composite row.
 pub(crate) fn composite_label_parts(
     shape: &RowShape,
     row_name: &str,
@@ -250,7 +203,6 @@ pub(crate) fn composite_label_parts(
     Some(segs)
 }
 
-/// `high` → `High`, `xhigh` → `XHigh`.
 pub(crate) fn effort_word(level: &str) -> String {
     if level == "xhigh" {
         return "XHigh".to_string();
@@ -262,8 +214,6 @@ pub(crate) fn effort_word(level: &str) -> String {
         .unwrap_or_default()
 }
 
-/// A `provider_models.json` row: the legacy `["id", "name"]` pair, or an
-/// object carrying the catalog metadata plugin rows declare.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum CachedRow {
@@ -271,7 +221,6 @@ pub(crate) enum CachedRow {
     Full(CachedModel),
 }
 
-/// The object form of a cached row (only written when there is metadata).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CachedModel {
     pub id: String,
@@ -283,12 +232,10 @@ pub(crate) struct CachedModel {
     pub variants: Vec<ModelVariant>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slots: Vec<ModelSlot>,
-    /// Plugin catalogs declare efforts authoritatively: an empty list means
-    /// "no effort knob", which a reload must restore too.
+
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub declared: bool,
-    /// Prompt tokens above which this model bills a higher price tier, from
-    /// the provider plugin's catalog (`price_cliff_tokens`). `None` = no cliff.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_cliff_tokens: Option<u32>,
 }
@@ -301,7 +248,6 @@ impl CachedRow {
         }
     }
 
-    /// The `(id, name)` pair every list consumer works with.
     pub(crate) fn pair(&self) -> (String, String) {
         match self {
             CachedRow::Pair(id, name) => (id.clone(), name.clone()),
@@ -316,8 +262,6 @@ impl CachedRow {
         }
     }
 
-    /// Feed a cached object's metadata to the in-memory caches the picker
-    /// and the request builder read (a pair carries none).
     pub(crate) fn register(&self) {
         let CachedRow::Full(m) = self else {
             return;

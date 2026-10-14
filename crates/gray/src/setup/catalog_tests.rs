@@ -41,8 +41,6 @@ fn normalize_custom_base_url_trims_suffixes() {
 
 #[test]
 fn saving_key_preserves_oauth_objects() {
-    // Mirror of the oauth-side clobber regression: key saves must not
-    // wipe OAuth entries sharing auth.json.
     let dir = tempfile::tempdir().expect("tmp");
     let path = dir.path().join("auth.json");
     let oauth = StoredAuth {
@@ -66,7 +64,7 @@ fn saving_key_preserves_oauth_objects() {
         matches!(reloaded.get("xai"), Some(AuthEntry::OAuth(_))),
         "{reloaded:?}"
     );
-    // And the key-only view exposes just the key.
+
     let keys: BTreeMap<String, String> = reloaded
         .into_iter()
         .filter_map(|(k, v)| match v {
@@ -78,7 +76,6 @@ fn saving_key_preserves_oauth_objects() {
     assert!(!keys.contains_key("xai"));
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn mistyped_field_preserves_known_fields() {
     let dir = tempfile::tempdir().expect("tmp");
@@ -94,7 +91,6 @@ fn mistyped_field_preserves_known_fields() {
     assert_eq!(cfg.context_window, None);
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn unknown_fields_are_ignored() {
     let dir = tempfile::tempdir().expect("tmp");
@@ -104,7 +100,6 @@ fn unknown_fields_are_ignored() {
     assert_eq!(cfg.model.as_deref(), Some("m"));
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn bad_json_falls_back_to_defaults() {
     let dir = tempfile::tempdir().expect("tmp");
@@ -214,7 +209,7 @@ fn disabled_skills_default_empty_and_roundtrip() {
     saved.disabled_skills.insert("foo".to_string());
     save_saved_config_at(&path, &saved).unwrap();
     assert!(load_saved_config_at(&path).disabled_skills.contains("foo"));
-    // Old files without the field load as enabled-everything.
+
     std::fs::write(&path, r#"{"model":"m"}"#).unwrap();
     let back = load_saved_config_at(&path);
     assert_eq!(back.model.as_deref(), Some("m"));
@@ -231,7 +226,7 @@ fn skills_auto_defaults_on_and_roundtrips_explicit_off() {
     saved.skills_auto = Some(false);
     save_saved_config_at(&path, &saved).unwrap();
     assert!(!skills_auto_enabled_at(&path));
-    // Old files without the key load as enabled.
+
     std::fs::write(&path, r#"{"model":"m"}"#).unwrap();
     assert!(skills_auto_enabled_at(&path));
 }
@@ -244,8 +239,6 @@ fn failed_save_reports_error() {
 
 #[test]
 fn removing_entry_keeps_every_other_credential() {
-    // A removed provider must not take its neighbours down with it: keys and
-    // OAuth objects share auth.json, so the delete is one map entry.
     let dir = tempfile::tempdir().expect("tmp");
     let path = dir.path().join("auth.json");
     let oauth = StoredAuth {
@@ -282,7 +275,7 @@ fn removing_entry_keeps_every_other_credential() {
         matches!(reloaded.get("xai"), Some(AuthEntry::OAuth(_))),
         "the OAuth entry must survive",
     );
-    // Removing what is not there is a successful no-op, not an error.
+
     remove_auth_entry_at(&path, "openrouter").expect("remove absent");
     assert!(load_mixed_store(&path).contains_key("commandcode"));
 }
@@ -304,14 +297,12 @@ fn subsystem_switches_default_on_and_only_explicit_false_turns_them_off() {
     crate::setup::save_saved_config_at(&cfg, &saved).unwrap();
     assert!(!crate::setup::cron_auto_enabled_at(&cfg));
     assert!(!crate::setup::gw_auto_enabled_at(&cfg));
-    // Round-trips through the tolerant parser (not just the struct). The
-    // legacy memory_auto key must survive host saves: the gray-memory plugin
-    // seeds its own toggle from it.
+
     let reloaded = crate::setup::load_saved_config_at(&cfg);
     assert_eq!(reloaded.memory_auto, Some(false));
     assert_eq!(reloaded.cron_auto, Some(false));
     assert_eq!(reloaded.gw_auto, Some(false));
-    // A mistyped value degrades to None instead of nuking the file.
+
     std::fs::write(&cfg, r#"{"cron_auto":"yes"}"#).unwrap();
     assert!(crate::setup::cron_auto_enabled_at(&cfg));
 }
@@ -322,13 +313,11 @@ fn a_corrupt_auth_store_is_refused_not_overwritten() {
     let path = tmp.path().join("auth.json");
     std::fs::write(&path, "{not json at all").unwrap();
 
-    // A save must fail and leave the original bytes untouched.
     let err = crate::setup::catalog::save_auth_key_at(&path, "openrouter", "sk-new")
         .expect_err("a corrupt store must not be written over");
     assert!(err.to_string().contains("not valid JSON"), "{err}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json at all");
 
-    // Removal likewise refuses.
     assert!(crate::setup::catalog::remove_auth_entry_at(&path, "openrouter").is_err());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json at all");
 }
@@ -337,7 +326,7 @@ fn a_corrupt_auth_store_is_refused_not_overwritten() {
 fn a_valid_store_still_round_trips_through_the_strict_loader() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("auth.json");
-    // Missing file reads as empty, not an error.
+
     assert!(
         crate::setup::catalog::load_mixed_store_strict(&path)
             .unwrap()
@@ -350,7 +339,7 @@ fn a_valid_store_still_round_trips_through_the_strict_loader() {
         .unwrap();
     let store = crate::setup::catalog::load_mixed_store_strict(&path).unwrap();
     assert_eq!(store.len(), 2);
-    // The lenient reader keeps its old meaning for display paths.
+
     assert_eq!(crate::setup::catalog::load_mixed_store(&path).len(), 2);
 }
 
@@ -361,8 +350,7 @@ fn the_config_lock_serializes_writers_then_releases() {
     let first = super::lock_saved_config_at(&path).unwrap();
     let lock_path = path.with_extension("lock");
     assert!(lock_path.exists(), "the lock file is the lock itself");
-    // A second transaction waits for the holder, then succeeds: a wedged
-    // holder never locks everyone out forever.
+
     let waiter = {
         std::thread::spawn(move || {
             let t = std::time::Instant::now();
@@ -387,8 +375,6 @@ fn the_config_lock_serializes_writers_then_releases() {
 
 #[test]
 fn effort_memory_scopes_by_connection_and_model() {
-    // Two models on the same plugin provider keep separate levels, and the
-    // shared `*-sub` placeholder base never collides with a URL connection.
     let mut saved = SavedConfig::default();
     let devin = "devin-sub:devin-subscription";
     let loopback = "https://127.0.0.1:1/";
@@ -427,9 +413,9 @@ fn effort_memory_scopes_by_connection_and_model() {
             .as_deref(),
         Some("low")
     );
-    // The flat live field tracks the last effort written.
+
     assert_eq!(saved.thinking_effort.as_deref(), Some("low"));
-    // A model-less key is the bare connection scope.
+
     assert_eq!(
         effort_memory_key(devin, loopback, ""),
         format!("plugin:{devin}")
@@ -457,7 +443,7 @@ fn effort_memory_round_trips_and_survives_partial_parse() {
             .as_deref(),
         Some("xhigh")
     );
-    // A mistyped field next door loses itself, not the memory map.
+
     std::fs::write(
         &path,
         r#"{"effort_memory":{"plugin:devin-sub:devin-subscription|m":"low"},"model":7}"#,
@@ -472,9 +458,6 @@ fn effort_memory_round_trips_and_survives_partial_parse() {
         Some("low")
     );
 }
-
-// ── env-key detection + connect ordering ──
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 
 #[test]
 fn env_key_detection_picks_the_first_non_empty_candidate() {
@@ -538,10 +521,10 @@ fn connect_sort_is_connected_detected_popular_custom_rest() {
         lean: true,
         compact_at: None,
     };
-    // xai holds a stored key: the connected row, wherever it started.
+
     let mut auth = BTreeMap::new();
     auth.insert("xai".to_string(), AuthEntry::Key("k".to_string()));
-    // anthropic is env-detected.
+
     let detected = detect_connect_candidates(false, |k| {
         (k == "ANTHROPIC_API_KEY").then(|| "ak".to_string())
     });
@@ -616,8 +599,7 @@ fn custom_slug_scopes_by_host_port_and_path() {
         custom_key_id("https://api.example.com/v1"),
         "custom:api.example.com"
     );
-    // Two endpoints on one host with different API roots must not share
-    // a key slot.
+
     assert_eq!(
         custom_key_id("https://api.example.com/openai/v1"),
         "custom:api.example.com/openai-v1"
@@ -663,7 +645,6 @@ fn custom_endpoint_store_round_trips() {
     let eps = load_custom_endpoints_at(&path);
     assert_eq!(eps.len(), 2);
 
-    // Upsert refreshes flags instead of duplicating.
     upsert_custom_endpoint_at(&path, "http://localhost:1234/v1", false).unwrap();
     let eps = load_custom_endpoints_at(&path);
     assert_eq!(eps.len(), 2);
@@ -673,7 +654,6 @@ fn custom_endpoint_store_round_trips() {
     assert!(!remove_custom_endpoint_at(&path, "http://localhost:1234/v1").unwrap());
     assert_eq!(load_custom_endpoints_at(&path).len(), 1);
 
-    // A corrupt file reads as empty, never kills the connect list.
     std::fs::write(&path, "{ not json").unwrap();
     assert!(load_custom_endpoints_at(&path).is_empty());
 }
@@ -707,7 +687,7 @@ fn saved_customs_become_connect_rows() {
         .expect("acme row");
     assert!(!acme.no_auth);
     assert!(matches!(acme.auth, ConnectAuth::ApiKey));
-    // The add-row itself is untouched.
+
     assert!(items.iter().any(|i| i.id == "custom"));
 }
 
@@ -752,6 +732,6 @@ fn saved_customs_sort_with_the_popular_block() {
         .iter()
         .position(|i| i.id == "custom:api.acme.dev")
         .unwrap();
-    // Saved rows sit above the add-row separator anchor.
+
     assert!(saved_pos < custom_pos);
 }

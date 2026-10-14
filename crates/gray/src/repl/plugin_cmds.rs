@@ -1,8 +1,3 @@
-//! Plugin manager slash-command: `/plugin <list|install|…>`.
-//!
-//! Thin REPL shell over `gray-pkg::ops`, mirroring the `gray plugin` CLI
-//! messages through [`say`](super::say).
-
 use super::*;
 
 #[derive(Debug, PartialEq)]
@@ -18,11 +13,9 @@ pub(crate) enum PluginAction {
 
 const USAGE: &str = "usage: /plugin <list|install|remove|update|enable|disable|check>";
 
-/// Strips the leading `/plugin` (or `/plugins`), splits the first token as
-/// the subcommand (default `list` when bare), rest as a single arg.
 pub(crate) fn parse_plugin_args(raw: &str) -> anyhow::Result<PluginAction> {
     let mut toks = raw.split_whitespace();
-    toks.next(); // strip /plugin or /plugins
+    toks.next();
     let sub = toks.next().map(|t| t.to_ascii_lowercase());
     let arg = toks.collect::<Vec<_>>().join(" ");
     let need = |what: &str| {
@@ -46,9 +39,6 @@ pub(crate) fn parse_plugin_args(raw: &str) -> anyhow::Result<PluginAction> {
     }
 }
 
-/// Bare `/plugin` or `/plugins` (no args, case-insensitive): a single
-/// whitespace-delimited token naming the command. Trailing spaces still
-/// count as bare; anything else (explicit subcommand) does not.
 pub(crate) fn is_bare_plugin_cmd(raw: &str) -> bool {
     let toks: Vec<&str> = raw.split_whitespace().collect();
     if toks.len() != 1 {
@@ -61,8 +51,6 @@ pub(crate) fn is_bare_plugin_cmd(raw: &str) -> bool {
 }
 
 pub(crate) async fn handle_plugin_command(raw: &str, tui: Option<&crate::composer::SharedTui>) {
-    // Bare `/plugin` or `/plugins` with a TTY opens the interactive picker;
-    // explicit subcommands and headless runs keep the text output below.
     if is_bare_plugin_cmd(raw) && tui.is_some() {
         let bg = tui.map(|s| s.lock().expect("tui lock").snapshot());
         let result = with_modal_sync(tui, || crate::setup::run_plugins_modal(bg.as_ref()));
@@ -79,8 +67,7 @@ pub(crate) async fn handle_plugin_command(raw: &str, tui: Option<&crate::compose
                 if let Some(shared) = tui {
                     let mut t = shared.lock().expect("tui lock");
                     t.clear_draft();
-                    // Dismissed picker leaves the slash card with no feedback:
-                    // restore the trailing gap so it doesn't jam the input box.
+
                     t.ensure_gap();
                     let _ = t.draw();
                 }
@@ -120,25 +107,17 @@ pub(crate) async fn handle_plugin_command(raw: &str, tui: Option<&crate::compose
             }
             Err(e) => say(tui, &format!("plugin list failed: {e:#}")),
         },
-        PluginAction::Install(spec) => {
-            // Same resolution as the CLI: skill specs, GRAY_PLUGIN_PATH,
-            // existing paths, gray-<name> on PATH, then index/URL — plus the
-            // commands.json migration. Output lines come back for `say`
-            // instead of printing to stdout under the live TUI.
-            match crate::plugin_cli::home() {
-                Ok(home) => {
-                    match crate::plugin_cli::install_spec_lines(&home, &spec, false).await {
-                        Ok(lines) => {
-                            for line in lines {
-                                say(tui, &line);
-                            }
-                        }
-                        Err(e) => say(tui, &format!("install failed: {e:#}")),
+        PluginAction::Install(spec) => match crate::plugin_cli::home() {
+            Ok(home) => match crate::plugin_cli::install_spec_lines(&home, &spec, false).await {
+                Ok(lines) => {
+                    for line in lines {
+                        say(tui, &line);
                     }
                 }
                 Err(e) => say(tui, &format!("install failed: {e:#}")),
-            }
-        }
+            },
+            Err(e) => say(tui, &format!("install failed: {e:#}")),
+        },
         PluginAction::Remove(name) => match crate::plugin_cli::remove_managed(&name) {
             Ok(()) => say(tui, &format!("removed {name}")),
             Err(e) => say(tui, &format!("remove failed: {e:#}")),
@@ -200,10 +179,6 @@ pub(crate) async fn handle_plugin_command(raw: &str, tui: Option<&crate::compose
 #[cfg(test)]
 mod tests;
 
-/// Ask a provider plugin's sidecar to run one of its declared commands
-/// (`command/run`). Provider plugins are not agent hooks, so this spawns
-/// the sidecar for the one request. `None` = the plugin doesn't answer
-/// `cmd` (its login shortcut) or could not be reached.
 pub(crate) async fn provider_command_outcome(
     provider_id: &str,
     cmd: &str,

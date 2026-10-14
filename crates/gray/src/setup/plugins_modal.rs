@@ -1,10 +1,3 @@
-//! `/plugins` — the interactive plugin manager: every installed plugin
-//! with its load status (from the session's startup probe), a live
-//! type-to-filter query, Tab enable/disable, `ctrl+u` updates through
-//! `gray plugin update`, and an Enter detail pane (commands, tools,
-//! hooks, capabilities, source, last error, build log) where space/u/U
-//! act on the viewed plugin.
-
 use super::*;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -13,25 +6,23 @@ struct Row {
     name: String,
     version: String,
     enabled: bool,
-    /// `local build` | `index` | `executable` — where the plugin came from.
+
     kind: String,
-    /// Executable or install source shown in the detail pane.
+
     source: String,
-    /// Session startup result: loaded / failed reason / still probing.
+
     start: Option<Result<(), String>>,
-    /// `gray plugin update --check` verdict, filled when the pass lands.
+
     stale: Option<String>,
     commands: Vec<String>,
     tools: Vec<String>,
     hooks: Vec<String>,
     capabilities: Vec<String>,
-    /// Last recorded error for this plugin (probe or `~/.gray/errors.json`).
+
     error: Option<String>,
     build_log: Option<PathBuf>,
 }
 
-/// `local build` (a `.../target/{release,debug}` executable), `index`
-/// (an index/URL install), or `executable` (a registered binary).
 fn exe_kind(entry: &gray_plugin::lock::LockEntry, cli: bool) -> String {
     let exe = entry
         .cli_argv
@@ -87,7 +78,6 @@ fn manifest_lists(home: &Path, name: &str) -> (Vec<String>, Vec<String>, Vec<Str
     )
 }
 
-/// Latest `~/.gray/errors.json` entry whose item is this plugin.
 fn last_recorded_error(name: &str) -> Option<String> {
     gray_pkg::errors::list()
         .into_iter()
@@ -161,8 +151,6 @@ fn status_text(row: &Row) -> String {
     }
 }
 
-/// Run `update_managed` on a background thread (it is async; the modal
-/// loop is sync) and send back one summary line per plugin.
 fn spawn_update(tx: Sender<(String, Result<Vec<String>, String>)>, target: String) {
     std::thread::spawn(move || {
         let out = tokio::runtime::Builder::new_current_thread()
@@ -182,8 +170,6 @@ fn spawn_update(tx: Sender<(String, Result<Vec<String>, String>)>, target: Strin
     });
 }
 
-/// `gray plugin update --check all` on a background thread; sends
-/// `(name, why)` for every stale row.
 fn spawn_stale_check(tx: Sender<Vec<(String, String)>>) {
     std::thread::spawn(move || {
         let anns = tokio::runtime::Builder::new_current_thread()
@@ -518,22 +504,18 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                     modifiers,
                     kind: KeyEventKind::Press,
                     ..
-                }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    match code {
-                        KeyCode::Char('c') => return Ok(changed),
-                        // ctrl+u is the list-mode update: every printable
-                        // letter now types into the filter, so shortcuts
-                        // moved off the alphabet.
-                        KeyCode::Char('u') if updating.is_none() => {
-                            if let Some(&ri) = filtered.get(sel) {
-                                let target = rows[ri].name.clone();
-                                updating = Some(target.clone());
-                                spawn_update(upd_tx.clone(), target);
-                            }
+                }) if modifiers.contains(KeyModifiers::CONTROL) => match code {
+                    KeyCode::Char('c') => return Ok(changed),
+
+                    KeyCode::Char('u') if updating.is_none() => {
+                        if let Some(&ri) = filtered.get(sel) {
+                            let target = rows[ri].name.clone();
+                            updating = Some(target.clone());
+                            spawn_update(upd_tx.clone(), target);
                         }
-                        _ => {}
                     }
-                }
+                    _ => {}
+                },
                 Event::Key(KeyEvent {
                     code,
                     kind: KeyEventKind::Press,
@@ -541,8 +523,6 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                     ..
                 }) => {
                     if detail {
-                        // The detail pane owns the printable action keys so
-                        // the list can give every letter to the filter.
                         match code {
                             KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace => detail = false,
                             KeyCode::Char(' ') => {
@@ -632,9 +612,7 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                                 (sel + 8).min(last)
                             };
                         }
-                        // Type-to-filter like /models: every printable key
-                        // edits the query. `/` is swallowed so the old habit
-                        // of pressing it first still works.
+
                         KeyCode::Char(c) if !modifiers.contains(KeyModifiers::ALT) && c != '/' => {
                             query.push(c);
                             sel = 0;

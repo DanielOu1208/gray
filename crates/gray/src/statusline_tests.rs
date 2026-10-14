@@ -72,7 +72,7 @@ fn unknown_names_are_literal_and_templates_expand() {
         SEP,
         TXT,
     );
-    // "{nope}" renders empty and drops out.
+
     assert_eq!(texts(&segs), "hello \u{2387} main");
     assert_eq!(segs[2].color, TXT);
 }

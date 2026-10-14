@@ -1,6 +1,3 @@
-//! The `grep` tool: content search via ripgrep (plain `--vimgrep` fast
-//! path for match-only searches, `rg --json` when context lines are needed).
-
 use std::path::Path;
 use std::process::Stdio;
 
@@ -16,15 +13,8 @@ use crate::{MAX_BYTES, Tool, fail, finish, get_opt_bool, get_opt_u64, get_str, r
 const DEFAULT_LIMIT: usize = 100;
 const GREP_MAX_LINE_LENGTH: usize = 500;
 
-/// Search file contents with ripgrep. Respects .gitignore.
-///
-/// The resident index answers first when it can reproduce `rg`'s contract
-/// exactly (match-only searches over an indexed directory); anything else
-/// declines to the rg/builtin lanes below.
 pub struct GrepTool;
 
-/// `format_matches` as text, for the `gray grep` command's index lane: the
-/// same rendering the tool does, so both lanes are byte-identical.
 pub fn render_matches(
     search_path: &Path,
     matches: &[(String, usize, Option<String>, bool)],
@@ -41,15 +31,7 @@ pub fn render_matches(
     .content
 }
 
-/// `path:line:col:text` — split off the first three fields; the text keeps
-/// any further colons. A leading Windows drive letter ("C:") belongs to the
-/// path, not a field separator: peel it off, split the rest, restore it, or
-/// every native match is silently dropped (CI: fast_path_parity `left: []`).
-/// Returns `(path, line_number_text, text)`; the path is owned because a
-/// drive prefix makes it non-contiguous with the input.
 fn parse_vimgrep(line: &str) -> Option<(String, &str, &str)> {
-    // The peel fires only when byte 2 is a separator, so a bare Unix path
-    // like `a:3:12:x` still splits as path/line/col/text.
     let is_drive = line.len() >= 3
         && line.as_bytes()[1] == b':'
         && line.as_bytes()[0].is_ascii_alphabetic()
@@ -71,13 +53,6 @@ fn parse_vimgrep(line: &str) -> Option<(String, &str, &str)> {
 }
 
 impl GrepTool {
-    /// Match-only fast path over `rg --vimgrep` (`path:line:col:text`).
-    ///
-    /// Returns `None` when the fast path declines (rg missing → caller falls
-    /// through to `--json`, which owns the "not installed" error; any other
-    /// spawn failure fails loudly here). Output contract is identical to the
-    /// `--json` path for match-only searches: same `rel:line: text` lines,
-    /// same limit notice, same truncation behavior.
     #[allow(clippy::too_many_arguments)]
     async fn execute_vimgrep(
         &self,
@@ -90,10 +65,6 @@ impl GrepTool {
         literal: bool,
         effective_limit: usize,
     ) -> Option<ToolOutput> {
-        // Windows CreateProcess finds "rg" only via PATH-with-.exe; the
-        // documented surface is a ripgrep on PATH (CI installs it). A miss
-        // must fall through to the `--json` lane's clear "not installed"
-        // error, not fabricate matches — so no shell layer is added here.
         let mut cmd = Command::new("rg");
         cmd.arg("--vimgrep").arg("--color=never").arg("--hidden");
         if ignore_case {
@@ -115,7 +86,7 @@ impl GrepTool {
             Ok(c) => c,
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    return None; // `--json` path reports "not installed".
+                    return None;
                 }
                 return Some(fail(format!("Failed to run ripgrep: {e}")));
             }
@@ -148,8 +119,7 @@ impl GrepTool {
                     if line.trim().is_empty() {
                         continue;
                     }
-                    // `path:line:col:text` — see parse_vimgrep for the
-                    // Windows drive-letter contract and its unit tests.
+
                     let Some((fp, no, text)) = parse_vimgrep(&line) else {
                         continue;
                     };
@@ -160,13 +130,9 @@ impl GrepTool {
                     if fp.is_empty() {
                         continue;
                     }
-                    // Mirror the --json lane exactly: count and emit the
-                    // match first, then enforce the limit (a missing
-                    // increment here silently returns every match).
+
                     match_count += 1;
-                    // Native vimgrep prints backslash paths; the --json
-                    // lane reports forward slashes (relativize() maps both,
-                    // but the raw parity comparison must agree).
+
                     matches.push((fp.replace('\\', "/"), line_number, text.to_string()));
                     if match_count >= effective_limit {
                         match_limit_reached = true;
@@ -195,8 +161,7 @@ impl GrepTool {
         if cancelled {
             return Some(finish("cancelled by user".to_string()));
         }
-        // rg exit codes: 0 = matches, 1 = no matches, 2+ = error. A limit
-        // kill reads as terminated: fine, same as the `--json` path.
+
         if !match_limit_reached
             && let Some(code) = status.code()
             && code != 0
@@ -209,8 +174,6 @@ impl GrepTool {
             return Some(fail(msg.to_string()));
         }
 
-        // Same assembly as every other lane: one helper, or the lane
-        // doesn't ship (see `fast_path_parity` test).
         Some(assemble_matches(
             search_path,
             is_dir,
@@ -221,9 +184,6 @@ impl GrepTool {
     }
 }
 
-/// Match assembly for the `--vimgrep` match-only fast path:
-/// `rel:line: text` + limit/truncation notices. Identical output or the
-/// lane doesn't ship (see `fast_path_parity` test).
 #[allow(clippy::too_many_arguments)]
 fn assemble_matches(
     search_path: &Path,
@@ -245,8 +205,7 @@ fn assemble_matches(
             .trim_end_matches('\n')
             .to_string();
         let (text, was_truncated) = truncate_line(&sanitized);
-        // Redaction parity with read/shell pump: matched secret lines must
-        // not flow raw into the transcript.
+
         let text = gray_core::redaction::redact_for_disclosure(&text).into_text();
         if was_truncated {
             lines_truncated = true;
@@ -278,8 +237,6 @@ fn assemble_matches(
     finish(output)
 }
 
-/// Render matches the way both lanes must: `file:line: text` for matches,
-/// `file-line- text` for context lines, with limit/truncation notices.
 #[allow(clippy::too_many_arguments)]
 fn format_matches(
     search_path: &Path,
@@ -288,7 +245,6 @@ fn format_matches(
     effective_limit: usize,
     match_limit_reached: bool,
 ) -> ToolOutput {
-    // Format matches: `file:line: text`, context lines `file-line- text`.
     let mut output_lines: Vec<String> = Vec::new();
     let mut lines_truncated = false;
 
@@ -353,9 +309,6 @@ fn truncate_line(line: &str) -> (String, bool) {
 
 use crate::truncate::{append_notices, truncate_head};
 
-/// The index lane: `rg`'s match-only contract off the resident engine,
-/// behind the same `GRAY_SEARCH_INDEX` switch `gray grep` honors. `None` =
-/// the rg/builtin lanes answer.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 async fn indexed_grep(
@@ -370,14 +323,19 @@ async fn indexed_grep(
     let crate::search_cmd::IndexBackend::Fs(pool) = crate::search_cmd::global_index() else {
         return None;
     };
-    let (dir, pat, g) = (
-        search_path.to_path_buf(),
-        pattern.to_string(),
-        glob.clone(),
-    );
+    let (dir, pat, g) = (search_path.to_path_buf(), pattern.to_string(), glob.clone());
     crate::search_cmd::spawn_index(move || {
         let cancel = tokio_util::sync::CancellationToken::new();
-        pool.indexed_grep(&dir, &pat, g.as_deref(), ignore_case, literal, effective_limit, context, &cancel)
+        pool.indexed_grep(
+            &dir,
+            &pat,
+            g.as_deref(),
+            ignore_case,
+            literal,
+            effective_limit,
+            context,
+            &cancel,
+        )
     })
     .await
 }
@@ -443,11 +401,6 @@ impl Tool for GrepTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: Value) -> ToolOutput {
-        // A token that is already cancelled answers before anything is
-        // spawned. Without this the cancel branch races the child's first
-        // line in the drain `select!`, so a pre-cancelled call could come
-        // back *finished* instead of cancelled — the same query, two
-        // answers, decided by scheduling.
         if ctx.cancel.is_cancelled() {
             return finish("cancelled by user".to_string());
         }
@@ -490,11 +443,6 @@ impl Tool for GrepTool {
             Err(e) => return fail(format!("Path not found: {}: {e}", search_path.display())),
         };
 
-        // The resident index answers a match-only search on an indexed
-        // directory without spawning rg: `Found` renders through the same
-        // `format_matches` every lane shares. Context searches, file
-        // operands, cold indexes, and unprovable truncations all decline to
-        // the lanes below.
         if is_dir
             && let Some(found) = indexed_grep(
                 &search_path,
@@ -516,9 +464,6 @@ impl Tool for GrepTool {
             );
         }
 
-        // No ripgrep on PATH: use the built-in search rather than failing the
-        // tool. Same output contract, so callers cannot tell the difference
-        // beyond `.gitignore`-equivalent filtering.
         if !crate::grep_builtin::rg_present() {
             let found = match crate::grep_builtin::search(
                 &pattern,
@@ -542,10 +487,6 @@ impl Tool for GrepTool {
             );
         }
 
-        // Fast path (match-only searches): plain `--vimgrep` output parses
-        // with one split per line instead of one JSON document per match.
-        // Byte-identical output or this lane doesn't ship (see
-        // `fast_path_parity` test). Context searches keep `--json` below.
         if context == 0
             && let Some(output) = self
                 .execute_vimgrep(
@@ -601,7 +542,6 @@ impl Tool for GrepTool {
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
 
-        // Collect stderr concurrently
         let stderr_handle = tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let mut buf = Vec::new();
@@ -617,7 +557,7 @@ impl Tool for GrepTool {
         });
 
         let mut reader = tokio::io::BufReader::new(stdout).lines();
-        // (path, line_number, text, is_match)
+
         let mut matches: Vec<(String, usize, Option<String>, bool)> = Vec::new();
         let mut match_count: usize = 0;
         let mut match_limit_reached = false;
@@ -639,7 +579,7 @@ impl Tool for GrepTool {
                     };
                     let kind = event.get("type").and_then(|t| t.as_str());
                     let is_match = kind == Some("match");
-                    // Context events only exist when `--context` was passed.
+
                     if !is_match && !(context > 0 && kind == Some("context")) {
                         continue;
                     }
@@ -679,12 +619,11 @@ impl Tool for GrepTool {
             }
         }
 
-        // Always reap: normal EOF, limit kill, and cancel kill all land here.
         let status = match child.wait().await {
             Ok(s) => s,
             Err(e) => return fail(format!("ripgrep wait failed: {e}")),
         };
-        // Cancel must not hang on a grandchild-held stderr pipe.
+
         let stderr_str = if cancelled {
             stderr_handle.abort();
             String::new()
@@ -695,7 +634,6 @@ impl Tool for GrepTool {
             return finish("cancelled by user".to_string());
         }
 
-        // rg exit codes: 0 = matches found, 1 = no matches, 2+ = error
         if !match_limit_reached {
             if let Some(code) = status.code() {
                 if code != 0 && code != 1 {
@@ -706,11 +644,8 @@ impl Tool for GrepTool {
                         return fail(msg.to_string());
                     }
                 }
-            } else if !status.success() {
-                // killed due to limit is ok; otherwise treat as abort
-                if !match_limit_reached {
-                    return fail("ripgrep was terminated".to_string());
-                }
+            } else if !status.success() && !match_limit_reached {
+                return fail("ripgrep was terminated".to_string());
             }
         }
 
@@ -758,7 +693,6 @@ mod vimgrep_tests {
 
     #[test]
     fn single_letter_unix_path_is_not_a_drive() {
-        // A bare one-letter relative path must split normally, not as "a:".
         let (fp, no, text) = parse_vimgrep("a:3:12:content").unwrap();
         assert_eq!(fp, "a");
         assert_eq!(no, "3");

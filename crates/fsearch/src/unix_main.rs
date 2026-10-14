@@ -5,7 +5,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
-/// See `fsearch::alloc`.
 #[global_allocator]
 static GLOBAL: fsearch::alloc::Alloc = fsearch::alloc::Alloc;
 
@@ -38,30 +37,7 @@ unsafe extern "C" {
     fn setiopolicy_np(iotype: i32, scope: i32, policy: i32) -> i32;
 }
 
-/// Standalone fsearch has no host logger: engine diagnostics (log::) go to
-/// stderr exactly as they did when the sites were `eprintln!`.
-struct StderrLog;
-
-impl log::Log for StderrLog {
-    fn enabled(&self, m: &log::Metadata) -> bool {
-        m.level() <= log::LevelFilter::Info
-    }
-    fn log(&self, r: &log::Record) {
-        if self.enabled(r.metadata()) {
-            eprintln!("{} {}", query::now_secs(), r.args());
-        }
-    }
-    fn flush(&self) {}
-}
-
-static STDERR_LOG: StderrLog = StderrLog;
-
 pub fn main() {
-    let _ = log::set_logger(&STDERR_LOG);
-    log::set_max_level(log::LevelFilter::Info);
-    // Never let a search download iCloud placeholders: opening or listing a
-    // dataless file/dir fails fast instead of materializing it.
-    // (IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS, OFF)
     #[cfg(target_os = "macos")]
     unsafe {
         setiopolicy_np(3, 0, 1)
@@ -82,19 +58,13 @@ pub fn main() {
         Some(_) => {
             let json = args.iter().any(|a| a == "--json");
             let q: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a != "--json").collect();
-            // The folder `git:` filters and globs are about, unless `in:` says.
+
             let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
             print_one(&serde_json::json!({"q": q.join(" "), "cwd": cwd}), json);
         }
     }
 }
 
-/// macOS's malloc (27, xzone) keeps freed small blocks dirty and its
-/// pressure relief does nothing, so after the first run or a compaction the
-/// daemon held 150-290 MB it no longer used, until restarted. In
-/// space-efficient mode, read only at launch, it hands them back: the daemon
-/// idles at 5-15 MB on the M6, for searches ~8% slower. So `serve` restarts
-/// itself in it.
 #[cfg(target_os = "macos")]
 fn space_efficient() {
     if std::env::var_os("MallocSpaceEfficient").is_none()
@@ -106,14 +76,13 @@ fn space_efficient() {
     }
 }
 
-/// The allocator env knob is Apple's; nothing to set elsewhere.
 #[cfg(not(target_os = "macos"))]
 fn space_efficient() {}
 
 fn print_one(req: &serde_json::Value, raw: bool) {
     let mut s = server::connect(&data_dir()).unwrap_or_else(|e| die(&format!("cannot reach daemon: {e}")));
     s.write_all(format!("{req}\n").as_bytes()).unwrap();
-    // One request only: the daemon needn't keep the cores warm for a next one.
+
     let _ = s.shutdown(std::net::Shutdown::Write);
     let mut line = String::new();
     BufReader::new(&s).read_line(&mut line).unwrap();
@@ -164,8 +133,7 @@ fn bench(qs: &str) {
     let live = live::Live::new(idx);
     let home = home();
     let mut q = query::Query::parse(qs, &home).unwrap_or_else(|e| die(&e));
-    // Like the daemon: a content search when the query has a pattern, on
-    // user-interactive threads, paths included.
+
     let grep = q.grep.take().map(|p| fsearch::Grep::new(&p, q.grep_mode).unwrap_or_else(|e| die(&e)));
     let content = grep.as_ref().map(|_| fsearch::content::Content::open_shared(dir.join("content")));
     let pool = rayon::ThreadPoolBuilder::new()
@@ -199,8 +167,7 @@ fn bench(qs: &str) {
         let first = |f: &fsearch::FileMatches| f.lines.first().map_or(String::new(), |(n, t)| format!("{n}: {}", t.trim()));
         r.files.iter().map(|f| format!("{}:{}", String::from_utf8_lossy(&f.path), first(f))).collect()
     };
-    // Between runs, another name search: a repeat would be answered from
-    // the names cache, which only a repeat of the last query hits.
+
     let other = query::Query::parse("zzzzzz", &home).unwrap();
     let mut times = Vec::new();
     let mut out = Vec::new();
@@ -235,21 +202,16 @@ fn domain() -> String {
 
 #[cfg(target_os = "macos")]
 fn install(login: bool) {
-    // A plain reinstall keeps an existing login agent.
     let login = login || plist_path().exists();
     let bin = PathBuf::from(home()).join(".local/bin/fsearch");
     let agents =
         format!("for coding agents: claude mcp add -s user fsearch -- {0} mcp\n                   codex mcp add fsearch -- {0} mcp", bin.display());
 
-    // Stop the old daemon so the next one runs the new binary. Unload the
-    // login agent first, or KeepAlive would restart it straight away.
     let target = format!("{}/{LABEL}", domain());
     launchctl(&["bootout", &target]);
     server::stop(&data_dir()).unwrap_or_else(|e| die(&e));
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    // Replace, never overwrite in place: a rewritten signed binary at the same
-    // path can be SIGKILLed by the code-signing cache. Copy then rename, so
-    // reinstalling from the installed copy works too.
+
     let tmp = bin.with_extension("new");
     std::fs::copy(std::env::current_exe().unwrap(), &tmp).and_then(|_| std::fs::rename(&tmp, &bin)).unwrap_or_else(|e| die(&format!("copy: {e}")));
     if !login {
@@ -276,8 +238,7 @@ fn install(login: bool) {
         log.display()
     );
     std::fs::write(plist_path(), plist).unwrap();
-    // bootout returns before the old job is fully gone; bootstrap fails
-    // until it is.
+
     let bootstrap = || launchctl(&["bootstrap", &domain(), plist_path().to_str().unwrap()]);
     let retry = || {
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -303,15 +264,14 @@ fn install(login: bool) {
         format!("for coding agents: claude mcp add -s user fsearch -- {0} mcp\n                   codex mcp add fsearch -- {0} mcp", bin.display());
     server::stop(&data_dir()).unwrap_or_else(|e| die(&e));
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    // Replace, never overwrite in place: a running daemon holds its text
-    // file, and ETXTBSY is the price of writing it.
+
     let tmp = bin.with_extension("new");
     std::fs::copy(std::env::current_exe().unwrap(), &tmp).and_then(|_| std::fs::rename(&tmp, &bin)).unwrap_or_else(|e| die(&format!("copy: {e}")));
     if !login {
         println!("installed {}; the daemon starts on first use\n{agents}", bin.display());
         return;
     }
-    // `systemd --user` is the login-item equivalent on a desktop Linux.
+
     let dir = PathBuf::from(home()).join(".config/systemd/user");
     let unit = dir.join("fsearch.service");
     let log = data_dir().join("daemon.log");

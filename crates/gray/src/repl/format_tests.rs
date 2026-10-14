@@ -2,8 +2,6 @@ use super::*;
 
 #[test]
 fn codex_style_server_error_extracts_message_not_raw_json() {
-    // Screenshot case: opencode/zen 503 with {"model":..,"error":{...}} blob.
-    // Codex-style: show Status/Code/Type/Message, never the raw JSON dump.
     let detail = r#"server error: status 503 Service Unavailable: {"model":"muse-spark-1.3-contributor","error":{"param":null,"type":"server_error","message":"Error from provider (Console Go): Upstream request failed: [service_overloaded] The backend is temporarily overloaded. Please retry."}}, cf-ray: a35cf09b5c1b7537-SEA"#;
     let out = format_core_error(
         &CoreError::Provider(detail.to_string()),
@@ -31,8 +29,7 @@ fn nested_devin_limit_is_actionable_without_retry_logs() {
         serde_json::json!({"error": {"message": message}})
     );
     let out = format_core_error(&CoreError::ServerError(detail), "https://127.0.0.1:1/");
-    // The clock time is rendered in the machine's local zone, so only the
-    // surrounding text is stable across environments.
+
     assert!(
         out.starts_with("✗ Model limit reached\n  Resets in 6 hours 9 minutes ("),
         "{out}"
@@ -131,7 +128,6 @@ fn formats_minutes() {
 
 #[test]
 fn typed_image_link_becomes_vision_block() {
-    // End-to-end: typed link -> extract -> build -> image block (no paste).
     let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]));
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("typed.png");
@@ -152,9 +148,6 @@ fn typed_image_link_becomes_vision_block() {
 
 #[test]
 fn typed_auth_error_names_connect_not_agent_error() {
-    // Screenshot case: subscription relay 403 arrives as CoreError::Auth
-    // (no HTTP status — native classified inside the sidecar). It must
-    // read as an auth failure with a next command, never "agent error".
     let out = format_core_error(
         &CoreError::Auth(
             "status 403 Forbidden: Authentication failed. Please check your credentials.".into(),
@@ -208,7 +201,7 @@ fn localize_utc_time_converts_to_offset() {
         super::localize_utc_time_with("08:01 UTC", now, wib).as_deref(),
         Some("15:01")
     );
-    // Providers also send month+day ("Oct 11 00:01 UTC") — keep the date.
+
     assert_eq!(
         super::localize_utc_time_with("Oct 11 00:01 UTC", now, wib).as_deref(),
         Some("Oct 11 07:01")
@@ -217,7 +210,7 @@ fn localize_utc_time_converts_to_offset() {
         super::localize_utc_time_with("October 11, 00:01 UTC", now, wib).as_deref(),
         Some("Oct 11 07:01")
     );
-    // Same-year date already passed -> next year.
+
     assert_eq!(
         super::localize_utc_time_with("Oct 09 00:01 UTC", now, wib).as_deref(),
         Some("Oct 09 07:01")
@@ -227,8 +220,6 @@ fn localize_utc_time_converts_to_offset() {
 
 #[test]
 fn detailed_provider_error_classifies_by_variant_and_fields_not_text() {
-    // A 429 whose vendor message never says "rate limit": the class and the
-    // structured fields drive the render — no substring scraping.
     let err = CoreError::Detailed {
         class: Box::new(CoreError::RateLimited("status 429: slow down".into())),
         detail: ProviderDetail {

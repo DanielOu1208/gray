@@ -1,7 +1,3 @@
-//! The engine: owns the live name index, follows FSEvents, keeps the content
-//! index current, and answers searches. The daemon runs one; so can any app
-//! that links this crate.
-
 use crate::content::{self, Content, Grep, GrepResult};
 use crate::fsevents::{self, HISTORY_DONE, KERNEL_DROPPED, MUST_SCAN_SUBDIRS, USER_DROPPED};
 use crate::index::Index;
@@ -11,47 +7,38 @@ use crate::walk::{self, KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
-// Every search scans the whole overlay (~1 ms per 100k entries), and a
-// follower starting up replays everything since the save, so fold it into
-// the base once it grows: ~1 s of CPU and a ~280 MB write, about hourly on a
-// busy disk. Otherwise only twice a day; restart replays FSEvents anyway.
 const COMPACT_PENDING: usize = 50_000;
 const COMPACT_EVERY: Duration = Duration::from_secs(12 * 3600);
 const SCAN_THREADS: usize = 8;
-/// Matches a pruning query may return before its answer is called partial.
+
 const MATCH_CAP: usize = 1 << 20;
 const CONTENT_QUIET: Duration = Duration::from_secs(2);
 const CONTENT_MAX_WAIT: Duration = Duration::from_secs(300);
-/// How often a follower checks whether it can take over or reload.
+
 const FOLLOW_EVERY: Duration = Duration::from_secs(10);
-/// Seconds before the last known-good moment that a relist also covers.
+
 const SYNC_MARGIN: u32 = 120;
-/// How long FSEvents must go without dropping events before the gap is
-/// replayed: restarting mid-burst only drops more.
+
 const REPLAY_QUIET: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct Options {
-    /// Where the index lives (`index.bin`, `content/`).
     pub dir: PathBuf,
     pub home: String,
-    /// The tree to index; `None` scans `/`. `in:` scopes narrow inside it.
+
     pub root: Option<PathBuf>,
-    /// Folders never to open. `None` decides from Full Disk Access: without
-    /// it, the consent-gated folders are skipped, since opening one pops a
-    /// privacy prompt and blocks until someone answers it.
+
     pub skip: Option<Vec<PathBuf>>,
 }
 
-/// One name-search result.
 pub struct Found {
     pub path: PathBuf,
-    /// `walk::KIND_*` in the low 2 bits, `walk::FLAG_*` above.
+
     pub kind: u8,
     pub size: u64,
     pub mtime: u32,
@@ -72,19 +59,17 @@ pub struct Status {
     pub content_segments: usize,
     pub content_bytes: usize,
     pub content_pending: usize,
-    /// The scanned root is gone (unmounted): the tree is held offline until
-    /// it reappears, which triggers a rescan.
+
     pub root_missing: bool,
     pub full_disk_access: bool,
-    /// Writes the index files (false: following another process's).
+
     pub owner: bool,
 }
 
-/// A folder listed on its own on the first run (see `Shared::with_names`).
 struct Early {
     dir: Vec<u8>,
     live: Live,
-    /// Its files' content build was asked for.
+
     indexing: AtomicBool,
 }
 
@@ -95,105 +80,82 @@ pub struct Engine {
 
 struct Shared {
     live: RwLock<Option<Live>>,
-    /// A saved index is still being read in: searches wait for it rather
-    /// than answer "indexing".
+
     loading: (Mutex<bool>, Condvar),
     content: RwLock<Content>,
     home: String,
-    /// The directory the index hangs under (`/` unless `Options.root`
-    /// narrowed it). Absolute; listings join names onto it.
+
     root: Vec<u8>,
     dir: PathBuf,
-    /// Wakes the apply loop; an empty batch is a no-op wake-up.
+
     wake: Sender<Vec<fsevents::Event>>,
     save_requested: AtomicBool,
     content_tx: Sender<Resync>,
     content_rx: Mutex<Option<Receiver<Resync>>>,
     content_pending: AtomicUsize,
-    /// Files changed since their folder's last content sync.
+
     dirty: content::Dirty,
-    /// Holding `lock`: this engine writes the index files. Another process
-    /// may own them (the daemon, an app); then this one follows: it reads
-    /// the saved index, keeps it live in memory, and takes over when the
-    /// owner goes away.
+
     owner: AtomicBool,
     lock: std::fs::File,
     stream: Mutex<Option<fsevents::Stream>>,
-    /// Number of the current stream (events carry the one they came from)
-    /// and the event id it started from.
+
     streams: std::sync::atomic::AtomicU32,
     since: AtomicU64,
-    /// The stream is still replaying history (until HISTORY_DONE).
+
     replaying: AtomicBool,
-    /// Follower: content dir mtime when its segments were last opened.
+
     content_seen: Mutex<Option<std::time::SystemTime>>,
-    /// First run, until the whole disk is listed: indexes of just the
-    /// folders searches asked about (see `with_names`).
+
     early: Mutex<Vec<Arc<Early>>>,
-    /// The content index holds every file it should: false while its first
-    /// build runs, when greps read the files directly instead...
+
     content_ready: AtomicBool,
-    /// ...except in these folders, built first from their early indexes.
+
     content_early: Mutex<Vec<Vec<u8>>>,
-    /// Told the folders of each batch of disk changes (`Engine::on_change`).
+
     #[allow(clippy::type_complexity)]
     on_change: RwLock<Vec<Box<dyn Fn(&[(&[u8], bool)]) + Send + Sync>>>,
-    /// Scopes someone searched lately: the minute tick keeps just these
-    /// fresh (one lstat per folder under them, not per folder on the
-    /// disk), while the tail gets a full sweep every FULL_SWEEP_SECS.
+
     hot: Mutex<std::collections::BTreeMap<Vec<u8>, HotScope>>,
-    /// `now_secs()` when the whole tree last passed a sweep — starts as
-    /// "at startup", which is when the index itself was listed or loaded.
+
     verified_all: AtomicU32,
 }
 
-/// A scope the tick keeps fresh.
 #[derive(Clone, Copy)]
 struct HotScope {
-    /// Last search touching it; older than HOT_RETAIN it drops.
     seen: Instant,
-    /// `now_secs()` when a sweep last covered it.
+
     verified: u32,
 }
 
-/// The apply loop's cadence: the freshness bound a query can rely on.
 const TICK_SECS: u32 = 60;
-/// How often the cold tail (folders nobody searched) is swept.
+
 const FULL_SWEEP_SECS: u32 = 30 * 60;
-/// How long a searched scope stays hot.
+
 const HOT_RETAIN: Duration = Duration::from_secs(2 * 3600);
-/// Most scopes kept hot; least-recently-seen drops past it.
+
 const HOT_MAX: usize = 64;
 
 fn try_lock(f: &std::fs::File) -> bool {
     unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(f), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
-/// Engine diagnostics go to the host's logger (gray.log under gray, the
-/// stderr logger `unix_main` installs standalone) — never raw stderr, which
-/// a UI host renders in its text area.
-pub fn diag(msg: impl AsRef<str>) {
-    log::info!("{}", msg.as_ref());
+fn log(msg: impl AsRef<str>) {
+    crate::diag::line(msg);
 }
 
-/// Never let indexing download iCloud placeholders: on the calling thread,
-/// opening or listing a dataless file fails fast instead of materializing it.
 #[cfg(target_os = "macos")]
 pub fn no_materialize() {
     unsafe extern "C" {
         fn setiopolicy_np(iotype: i32, scope: i32, policy: i32) -> i32;
     }
-    // IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, OFF
+
     unsafe { setiopolicy_np(3, 1, 1) };
 }
 
-/// No dataless files to dodge elsewhere.
 #[cfg(not(target_os = "macos"))]
 pub fn no_materialize() {}
 
-/// Thread QoS classes: macOS only. Linux has no per-thread QoS worth
-/// spending a syscall on — nice levels want privileges — so calls are
-/// no-ops there.
 #[cfg(target_os = "macos")]
 type Qos = libc::qos_class_t;
 #[cfg(not(target_os = "macos"))]
@@ -218,16 +180,11 @@ fn set_qos(#[cfg_attr(not(target_os = "macos"), allow(unused))] qos: Qos) {
     }
 }
 
-/// Searches run here, at user-interactive QoS: an app's background executor
-/// (or any low-QoS caller) would otherwise put the scan on efficiency cores.
-/// Each search gets it here, which notes when (`LAST_SEARCH`).
 fn search_pool() -> &'static rayon::ThreadPool {
     LAST_SEARCH.store(now_ns(), Ordering::Relaxed);
     pool()
 }
 
-/// When a search last started (`now_ns`): a minute on, the search threads'
-/// kept blocks go back (`alloc::drain`) if the warmer didn't send them.
 static LAST_SEARCH: AtomicU64 = AtomicU64::new(0);
 
 fn pool() -> &'static rayon::ThreadPool {
@@ -244,10 +201,9 @@ fn pool() -> &'static rayon::ThreadPool {
     })
 }
 
-/// The keep-warm window: spin from `WARM_FROM` to `WARM_UNTIL` (`now_ns`).
 static WARM_FROM: AtomicU64 = AtomicU64::new(0);
 static WARM_UNTIL: AtomicU64 = AtomicU64::new(0);
-/// The warmer is parked until the next `keep_warm`.
+
 static WARM_IDLE: AtomicBool = AtomicBool::new(false);
 
 fn now_ns() -> u64 {
@@ -265,8 +221,6 @@ fn warmer() -> &'static std::thread::Thread {
                 if now >= until {
                     WARM_IDLE.store(true, Ordering::SeqCst);
                     if now_ns() >= WARM_UNTIL.load(Ordering::SeqCst) {
-                        // Searching stopped: the blocks the search threads
-                        // kept go back (`alloc`).
                         if crate::alloc::kept() {
                             pool().spawn_broadcast(|_| crate::alloc::drain());
                         }
@@ -295,27 +249,21 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
 }
 
 impl Engine {
-    /// Start indexing in the background and return at once. Searches wait
-    /// while a saved index loads, and answer `Err` while the very first run
-    /// builds one.
     pub fn start(opts: Options) -> Result<Engine, String> {
         std::fs::create_dir_all(&opts.dir).map_err(|e| e.to_string())?;
-        // `home` meets canonical indexed paths in in_scope/wants, so it
-        // needs the same canonicalization `root` gets below (/var →
-        // /private/var on macOS).
+
         let mut opts = opts;
         if let Ok(c) = std::fs::canonicalize(&opts.home) {
             opts.home = c.to_string_lossy().into_owned();
         }
-        // One writer per index: a second one would race index writes. The
-        // lock dies with the process.
+
         let lock = std::fs::File::create(opts.dir.join("daemon.lock")).map_err(|e| e.to_string())?;
         let owner = try_lock(&lock);
         let skip: Vec<Vec<u8>> = match opts.skip {
             Some(v) => v.into_iter().map(|p| p.as_os_str().as_bytes().to_vec()).collect(),
             None if has_full_disk_access() && std::env::var_os("FSEARCH_RESTRICT").is_none() => Vec::new(),
             None => {
-                diag(if cfg!(target_os = "macos") {
+                log(if cfg!(target_os = "macos") {
                     "no Full Disk Access: skipping consent-gated folders (grant it to fsearch to index everything)"
                 } else {
                     "skipping pseudo-filesystems (/proc, /sys, /dev, /run, ...)"
@@ -326,14 +274,13 @@ impl Engine {
         if !skip.is_empty() {
             let _ = walk::SKIP.set(skip);
         }
-        // A trailing slash would double every path joined onto the root.
+
         let root = {
             let mut r = opts.root.unwrap_or_else(|| PathBuf::from("/")).as_os_str().as_bytes().to_vec();
             while r.len() > 1 && r.ends_with(b"/") {
                 r.pop();
             }
-            // Canonical form, so `in:` scopes (resolved with real_path) and
-            // indexed paths agree on symlinked roots like /tmp -> /private/tmp.
+
             match std::fs::canonicalize(std::ffi::OsStr::from_bytes(&r)) {
                 Ok(c) => c.as_os_str().as_bytes().to_vec(),
                 Err(_) => r,
@@ -376,29 +323,22 @@ impl Engine {
             start_content(&shared);
         }
         let s = shared.clone();
-        // Starting the stream (loading CoreServices) and faulting a saved
-        // index in take ms each: done once searches run on the index as
-        // mapped, so a restart's first answer needn't wait (`fsearch <query>`
-        // with no daemon running: 33 -> 27 ms on the M6).
+
         spawn("fsearch-apply", move || {
             #[cfg(target_os = "linux")]
             let was_loaded = loading.is_some();
             let (live, replay) = match loading {
                 Some(b) => {
-                    diag(format!("loaded {} entries, replaying events since {}", b.n, b.event_id));
+                    log(format!("loaded {} entries, replaying events since {}", b.n, b.event_id));
                     let from = b.event_id;
                     (Live::lazy(b).rooted(&s.root), Some(from))
                 }
                 None if owner => {
-                    // Watch before scanning so nothing that changes mid-scan
-                    // is missed; replaying it afterwards is harmless (diffs
-                    // are idempotent).
                     let since = fsevents::current_id();
                     s.watch(since);
                     (Live::lazy(full_build(&s, since)).rooted(&s.root), None)
                 }
                 None => {
-                    // The owner is building it; follow once it exists.
                     let b = wait_for_index(&s.dir);
                     s.watch(b.event_id);
                     (Live::lazy(b).rooted(&s.root), None)
@@ -409,7 +349,6 @@ impl Engine {
             *s.loading.0.lock().unwrap() = false;
             s.loading.1.notify_all();
             if let Some(from) = replay {
-                // (A save from before event ids were stamped: from now.)
                 s.watch(if owner && from == 0 { fsevents::current_id() } else { from });
             }
             if let Some(l) = s.live.read().unwrap().as_ref() {
@@ -418,8 +357,7 @@ impl Engine {
             if owner {
                 rescan_unskipped(&s);
             }
-            // A saved index is already stale (no event replay on Linux):
-            // catch up what changed while the process was off.
+
             #[cfg(target_os = "linux")]
             if was_loaded {
                 relist_changed(&s, "restart without an event log", 0);
@@ -433,15 +371,10 @@ impl Engine {
         &self.s.home
     }
 
-    /// Keep the cores clocked up for `d` from now. After ~20 ms idle macOS
-    /// slows them down, and a search then runs 3-6x slower while they ramp
-    /// back up; one spinning thread keeps them up, so the next keystroke's
-    /// search starts fast. The spinning stops when a search starts (the
-    /// search keeps the cores busy itself) and when `d` runs out.
     pub fn keep_warm(&self, d: Duration) {
         let w = warmer();
         let now = now_ns();
-        // They stay up for the first few ms anyway.
+
         WARM_FROM.store(now + 2_000_000, Ordering::SeqCst);
         WARM_UNTIL.store(now + d.as_nanos() as u64, Ordering::SeqCst);
         if WARM_IDLE.load(Ordering::SeqCst) {
@@ -449,10 +382,6 @@ impl Engine {
         }
     }
 
-    /// A query touched `scope`: keep it in the tick's sweep set, and if
-    /// it has not been verified inside the tick bound sweep it inline now
-    /// (a cold scope answers with the same staleness the tick gives the
-    /// hot ones — never lazier). Root is the cold tail's job.
     fn saw_scope(&self, scope: Option<&[u8]>) {
         let Some(scope) = scope.filter(|s| s.len() > 1) else { return };
         {
@@ -472,12 +401,7 @@ impl Engine {
         let bound = now.saturating_sub(TICK_SECS);
         let stale = {
             let h = self.s.hot.lock().unwrap();
-            let cover = h
-                .iter()
-                .filter(|(p, _)| under(scope, p))
-                .map(|(_, s)| s.verified)
-                .max()
-                .unwrap_or(0);
+            let cover = h.iter().filter(|(p, _)| under(scope, p)).map(|(_, s)| s.verified).max().unwrap_or(0);
             cover.max(self.s.verified_all.load(Ordering::Relaxed))
         };
         if stale >= bound {
@@ -499,11 +423,10 @@ impl Engine {
             r.verified = now;
         }
         if n > 0 {
-            diag(format!("cold scope {}: relisted {n} folders in {t:.2?}", String::from_utf8_lossy(scope)));
+            log(format!("cold scope {}: relisted {n} folders in {t:.2?}", String::from_utf8_lossy(scope)));
         }
     }
 
-    /// Name search.
     pub fn search(&self, q: &Query) -> Result<Vec<Found>, String> {
         self.saw_scope(q.scope.as_deref());
         WARM_UNTIL.store(0, Ordering::Relaxed);
@@ -533,19 +456,12 @@ impl Engine {
         Ok(found)
     }
 
-    /// Is `path` an indexed directory — usable as an `in:` scope? A scope
-    /// that resolves to nothing answers empty rather than an error, which an
-    /// embedder cannot tell from a genuinely empty scope (and a dir added
-    /// since the last compaction lives in the overlay, invisible to it).
     pub fn covers(&self, path: &[u8]) -> bool {
         let g = self.s.live();
         let Some(live) = g.as_ref() else { return false };
         live.base.lookup(path).and_then(|e| live.base.dir_of(e)).is_some()
     }
 
-    /// Content search: `g` is the pattern, `q` narrows which files are read.
-    /// The bool says whether the content index answered (false: files were
-    /// picked from the name index and read, for folders it doesn't cover).
     pub fn grep(&self, q: &Query, g: &Grep) -> Result<(GrepResult, bool), String> {
         self.saw_scope(q.scope.as_deref());
         WARM_UNTIL.store(0, Ordering::Relaxed);
@@ -555,21 +471,14 @@ impl Engine {
         if built {
             let fresh = self.s.dirty.files(q);
             let c = self.s.content.read().unwrap();
-            // A folder the index holds nothing in (one its .gitignore leaves
-            // out, say) is read directly, below.
+
             if q.scope.as_ref().is_none_or(|s| c.holds(s)) {
-                // Content search brings its own reader threads; running it
-                // here skips waking a pool thread just to hand the work over.
                 return Ok((c.search_with(g, q, &fresh), true));
             }
         }
-        // Pick files under the lock, read them after releasing it: reading can
-        // be slow and a waiting writer would stall every other query.
+
         let scope = q.scope.as_deref();
         if indexed && !built {
-            // The content index's first build is running: read the files it
-            // will hold instead, so the answer is complete (and the same).
-            // None there: read the folder directly, below, as once built.
             let (docs, early) = self.s.with_names(scope, |live| content::wanted(live, home, scope.unwrap_or(home), true))?;
             if !docs.is_empty() {
                 let hold = walk::Hold::new();
@@ -585,37 +494,31 @@ impl Engine {
         Ok((content::verify(g, &paths, q.limit), false))
     }
 
-    /// Regular files under `scope` the content index does not hold as they
-    /// are now (size and mtime from the name index): every grep must read
-    /// these directly, whatever its pattern. `None` until the content index
-    /// holds `scope`. Only an answer once `status().content_pending == 0`.
     pub fn unheld_files(&self, scope: &[u8]) -> Option<Vec<Vec<u8>>> {
         self.saw_scope(Some(scope));
         if !self.s.content_holds(Some(scope)) {
             return None;
         }
         let home = self.s.home.as_bytes();
-        let (out, early) = self.s.with_names(Some(scope), |live| {
-            let mut want = content::wanted(live, home, scope, true);
-            want.sort();
-            let c = self.s.content.read().unwrap();
-            let mut out: Vec<Vec<u8>> = c.unheld(scope, true, &want).into_iter().map(|k| want.path(k).to_vec()).collect();
-            out.extend(c.not_text(scope, true));
-            drop(c);
-            out.extend(files_under(live, scope).into_iter().filter(|p| want.find(p).is_none()));
-            out.sort_unstable();
-            out.dedup();
-            out
-        }).ok()?;
+        let (out, early) = self
+            .s
+            .with_names(Some(scope), |live| {
+                let mut want = content::wanted(live, home, scope, true);
+                want.sort();
+                let c = self.s.content.read().unwrap();
+                let mut out: Vec<Vec<u8>> = c.unheld(scope, true, &want).into_iter().map(|k| want.path(k).to_vec()).collect();
+                out.extend(c.not_text(scope, true));
+                drop(c);
+                out.extend(files_under(live, scope).into_iter().filter(|p| want.find(p).is_none()));
+                out.sort_unstable();
+                out.dedup();
+                out
+            })
+            .ok()?;
         self.s.index_first(early);
         Some(out)
     }
 
-    /// Held files under `scope` whose content has one of `pats` (each taken
-    /// literally; `ignore_case` folds Unicode case). A superset of what a
-    /// grep for the same literals finds in the files the index holds as they
-    /// are. `None` when the answer may be incomplete or the index does not
-    /// hold `scope`.
     pub fn held_matches(&self, scope: &[u8], pats: &[String], ignore_case: bool) -> Option<Vec<Vec<u8>>> {
         self.saw_scope(Some(scope));
         if !self.s.content_holds(Some(scope)) {
@@ -647,8 +550,7 @@ impl Engine {
             content_docs: c.docs(),
             content_segments: c.segs.len(),
             content_bytes: c.bytes(),
-            // Until the first sync finishes there is pending work its
-            // counter doesn't hold yet: report it so `pending == 0` means settled.
+
             content_pending: self.s.content_pending.load(Ordering::Relaxed) + usize::from(!self.s.content_ready.load(Ordering::Acquire)),
             root_missing: l.as_ref().is_some_and(|l| l.root_missing.load(Ordering::Relaxed)),
             full_disk_access: walk::SKIP.get().is_none(),
@@ -656,29 +558,22 @@ impl Engine {
         }
     }
 
-    /// The answer while the first index builds, with its progress.
     pub fn indexing(&self) -> String {
         indexing()
     }
 
-    /// Compact and save the name index soon (on the background thread).
     pub fn save(&self) {
         self.s.save_requested.store(true, Ordering::Relaxed);
         let _ = self.s.wake.send(Vec::new());
     }
 
-    /// Have `f` told the folders each batch of disk changes touched (true:
-    /// and maybe anything below them), as the batch is applied (on the
-    /// thread applying it: keep `f` quick).
     pub fn on_change(&self, f: impl Fn(&[(&[u8], bool)]) + Send + Sync + 'static) {
         self.s.on_change.write().unwrap().push(Box::new(f));
     }
 }
 
-/// (dirs, trees) for the content worker to re-sync.
 type Resync = (Vec<Vec<u8>>, Vec<Vec<u8>>);
 
-/// The answer while the first index builds, with its progress.
 fn indexing() -> String {
     let n = walk::LISTED.load(Ordering::Relaxed);
     format!("indexing: {:.1}M entries so far (the first run lists the whole disk, ~25s)", n as f64 / 1e6)
@@ -695,11 +590,6 @@ impl Shared {
         self.owner.load(Ordering::Relaxed)
     }
 
-    /// Run `f` on the name index. On the first run, before the whole disk
-    /// is listed (~25 s), a search in a folder runs on an index of just
-    /// that folder, listed for it: as fast as a tool that only ever scans
-    /// that folder, and the same answer the whole index will give. That
-    /// index comes back too (see `index_first`).
     fn with_names<R>(&self, scope: Option<&[u8]>, f: impl FnOnce(&Live) -> R) -> Result<(R, Option<Arc<Early>>), String> {
         loop {
             if let Some(live) = self.live().as_ref() {
@@ -712,8 +602,6 @@ impl Shared {
         }
     }
 
-    /// The early index of a folder holding `dir`, listing `dir` if none
-    /// does; None once the whole disk is in.
     fn early(&self, dir: &[u8]) -> Option<Arc<Early>> {
         let mut early = self.early.lock().unwrap();
         if self.live.read().unwrap().is_some() {
@@ -727,16 +615,12 @@ impl Shared {
         let ls = folder_listings(dir);
         drop(hold);
         let live = Live::new(Index::build(ls, 0, 0, self.home.as_bytes()));
-        diag(format!("listed {} first: {} entries in {:.2?}", String::from_utf8_lossy(dir), live.base.n, t.elapsed()));
+        log(format!("listed {} first: {} entries in {:.2?}", String::from_utf8_lossy(dir), live.base.n, t.elapsed()));
         let e = Arc::new(Early { dir: dir.to_vec(), live, indexing: AtomicBool::new(false) });
         early.push(e.clone());
         Some(e)
     }
 
-    /// Once a search answered from an early index: index the contents of
-    /// its folder first (from that index), so its next greps use the index
-    /// within seconds instead of reading every file. Not sooner: that
-    /// build reads the same files as the answer's direct scan.
     fn index_first(&self, early: Option<Arc<Early>>) {
         if let Some(e) = early
             && self.owner()
@@ -747,26 +631,19 @@ impl Shared {
         }
     }
 
-    /// Does the content index hold every file under `scope` (all it should
-    /// hold, without one)?
     fn content_holds(&self, scope: Option<&[u8]>) -> bool {
         self.content_ready.load(Ordering::Acquire) || scope.is_some_and(|s| self.content_early.lock().unwrap().iter().any(|f| under(s, f)))
     }
 
-    /// (Re)start the FSEvents stream from `since`, replacing any old one.
     fn watch(&self, since: u64) {
         self.replaying.store(true, Ordering::Relaxed);
         self.since.store(since, Ordering::Relaxed);
         let n = self.streams.fetch_add(1, Ordering::Relaxed) + 1;
-        // 10 ms: a change shows in ~12 ms (fseventsd's own delay); at 0.1 s,
-        // one made within 0.1 s of another (save then rename) took ~100 ms.
-        // `Pace` keeps a busy folder from being listed that often.
+
         let new = fsevents::watch(since, 0.01, self.wake.clone(), n);
         *self.stream.lock().unwrap() = Some(new);
     }
 
-    /// A follower picks up what the owner wrote: a newer name-index save
-    /// (replaying FSEvents from it) and content segment changes.
     fn follow(&self) {
         let path = self.dir.join("index.bin");
         let saved = Index::saved_event_id(&path).unwrap_or(0);
@@ -774,7 +651,7 @@ impl Shared {
         if saved > ours
             && let Some(base) = Index::load(&path)
         {
-            diag(format!("following the owner's save: {} entries, replaying since {}", base.n, base.event_id));
+            log(format!("following the owner's save: {} entries, replaying since {}", base.n, base.event_id));
             self.watch(base.event_id);
             *self.live.write().unwrap() = Some(Live::new(base).rooted(&self.root));
         }
@@ -796,7 +673,6 @@ fn start_content(s: &Arc<Shared>) {
     spawn("fsearch-content", move || content_loop(&s, rx));
 }
 
-/// A follower takes over the index files once their owner is gone.
 fn try_upgrade(s: &Arc<Shared>) -> bool {
     if s.owner() {
         return true;
@@ -805,20 +681,18 @@ fn try_upgrade(s: &Arc<Shared>) -> bool {
         return false;
     }
     s.owner.store(true, Ordering::Relaxed);
-    diag("took over the index from a previous owner");
+    log("took over the index from a previous owner");
     *s.content.write().unwrap() = Content::open(s.dir.join("content"));
     rescan_unskipped(s);
     start_content(s);
     true
 }
 
-/// Next to index.bin: the folders it lacks for want of access, one per
-/// line (skipped, or refused by macOS).
 const SKIPPED: &str = "skipped";
 
 fn note_skipped(dir: &Path) {
     let denied = walk::DENIED.lock().unwrap();
-    // (A folder listed early is listed again by the whole-disk crawl.)
+
     let mut all: Vec<&Vec<u8>> = walk::SKIP.get().into_iter().flatten().chain(denied.iter()).collect();
     all.sort();
     all.dedup();
@@ -828,14 +702,10 @@ fn note_skipped(dir: &Path) {
         out.push(b'\n');
     }
     if let Err(e) = std::fs::write(dir.join(SKIPPED), out) {
-        diag(format!("save failed: {e}"));
+        log(format!("save failed: {e}"));
     }
 }
 
-/// Full Disk Access granted since the save: the folders it lacked stay
-/// missing, since no FSEvents replay brings them back. Rescan them like a
-/// must-scan-subdirs event would; ones still refused carry over to the next
-/// save. (A save from before this was recorded rescans the gated folders.)
 fn rescan_unskipped(shared: &Shared) {
     let was: Vec<Vec<u8>> = match std::fs::read(shared.dir.join(SKIPPED)) {
         Ok(b) => b.split(|&c| c == b'\n').filter(|l| !l.is_empty()).map(<[u8]>::to_vec).collect(),
@@ -856,15 +726,12 @@ fn rescan_unskipped(shared: &Shared) {
     if now.is_empty() {
         return;
     }
-    diag(format!("rescanning {} folders the saved index lacked", now.len()));
+    log(format!("rescanning {} folders the saved index lacked", now.len()));
     let _ = shared.wake.send(now);
-    // Saved soon, so the next start doesn't rescan them again.
+
     shared.save_requested.store(true, Ordering::Relaxed);
 }
 
-/// Is `path` `dir` or inside it?
-/// Regular files under `scope` in the name index, base and overlay, by path
-/// (unsorted, may repeat where the overlay shadows the base).
 fn files_under(live: &Live, scope: &[u8]) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     let mut p = Vec::new();
@@ -886,7 +753,9 @@ fn files_under(live: &Live, scope: &[u8]) -> Vec<Vec<u8>> {
             }
         }
     }
-    out.extend(live.over.range(scope.to_vec()..).take_while(|(p, _)| under(p, scope)).filter(|(_, o)| o.kind & 3 == KIND_FILE).map(|(p, _)| p.clone()));
+    out.extend(
+        live.over.range(scope.to_vec()..).take_while(|(p, _)| under(p, scope)).filter(|(_, o)| o.kind & 3 == KIND_FILE).map(|(p, _)| p.clone()),
+    );
     out
 }
 
@@ -894,16 +763,8 @@ pub(crate) fn under(path: &[u8], dir: &[u8]) -> bool {
     path.starts_with(dir) && (path.len() == dir.len() || path[dir.len()] == b'/')
 }
 
-/// Threads for listing one folder a search waits on (the whole-disk crawl
-/// pauses meanwhile): on the M6, Linux's 102k entries list in 131 ms on 8,
-/// 106 on 12, 95 on 16.
 const EARLY_THREADS: usize = 16;
 
-/// Listings for an index of just `dir`: a level from "/" down to it, each
-/// with the one entry its parent's listing has for the next, then `dir`'s
-/// whole subtree. Where the whole-disk crawl would not descend (a mount
-/// point, a file, a missing or skipped folder) the chain stops, and the
-/// index has nothing under `dir` either.
 fn folder_listings(dir: &[u8]) -> Vec<Listing> {
     let comps: Vec<&[u8]> = dir.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
     let (mut out, mut path) = (Vec::new(), b"/".to_vec());
@@ -945,29 +806,21 @@ const GATED_IN_HOME: &[&str] = &[
     "Library/CloudStorage", "Pictures/Photos Library.photoslibrary", "Music/Music", "Movies/TV",
 ];
 
-/// Folders macOS guards with a consent prompt (or that hold other volumes).
 #[cfg(target_os = "macos")]
 pub fn gated(home: &str) -> Vec<Vec<u8>> {
     GATED_IN_HOME.iter().map(|d| format!("{home}/{d}").into_bytes()).chain([b"/Volumes".to_vec()]).collect()
 }
 
-/// Linux's "gated" set is not consent but pseudo-filesystems and system
-/// trees: nothing under them is a file to find, and /proc & friends fight
-/// readers with contents that mutate while read.
 #[cfg(target_os = "linux")]
 pub fn gated(_home: &str) -> Vec<Vec<u8>> {
     ["/proc", "/sys", "/dev", "/run", "/boot/efi", "/var/lib/docker", "/var/lib/containers", "/snap"].iter().map(|s| s.as_bytes().to_vec()).collect()
 }
 
-/// The system TCC database is readable only with Full Disk Access, and
-/// trying without it fails immediately (no prompt).
 #[cfg(target_os = "macos")]
 pub fn has_full_disk_access() -> bool {
     std::fs::File::open("/Library/Application Support/com.apple.TCC/TCC.db").is_ok()
 }
 
-/// No TCC on Linux: every engine runs "restricted", meaning the
-/// pseudo-filesystem skip list applies (see `gated`).
 #[cfg(not(target_os = "macos"))]
 pub fn has_full_disk_access() -> bool {
     false
@@ -985,14 +838,10 @@ fn content_pool(threads: usize, qos: Qos) -> rayon::ThreadPool {
 }
 
 fn content_loop(shared: &Shared, rx: Receiver<Resync>) {
-    // Indexing file contents is background work: utility QoS keeps it off
-    // the user's way (lower CPU priority and IO tier).
     set_qos(QOS_UTILITY);
     let pool = content_pool(4, QOS_UTILITY);
     let home = shared.home.as_bytes().to_vec();
-    // First run, while the whole disk is listed: index the folders searches
-    // ask about from their early indexes. (A request that comes as the
-    // whole index lands is dropped: the sync of all of home covers it.)
+
     while shared.live.read().unwrap().is_none() {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok((_, dirs)) => {
@@ -1006,14 +855,10 @@ fn content_loop(shared: &Shared, rx: Receiver<Resync>) {
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
-    // Reconcile all of home once, right away (cheap when nothing changed),
-    // then follow along with the name index's changes.
+
     sync(shared, &pool, &home, &[], std::slice::from_ref(&home));
     shared.content_ready.store(true, Ordering::Release);
-    // Per-folder debounce: a folder is processed 2s after its last change,
-    // or 5 min after its first pending one if it never goes quiet. A file you
-    // save lands in ~2s; files apps rewrite every second (state, logs) cost
-    // one reindex per 5 min instead of one per event batch.
+
     let mut pending: HashMap<(Vec<u8>, bool), (Instant, Instant)> = HashMap::new();
     loop {
         let wait = if pending.is_empty() { Duration::from_secs(3600) } else { Duration::from_millis(250) };
@@ -1023,14 +868,13 @@ fn content_loop(shared: &Shared, rx: Receiver<Resync>) {
                 let mut changed = Vec::new();
                 for (d, t) in std::iter::once(first).chain(rx.try_iter()) {
                     for key in d.into_iter().map(|p| (p, false)).chain(t.into_iter().map(|p| (p, true))) {
-                        // Most of the disk's churn (Library, caches) is outside the indexed area.
                         if content::in_scope(&key.0, &home) || (key.1 && home.starts_with(&key.0)) {
                             pending.entry(key.clone()).and_modify(|e| e.1 = now).or_insert((now, now));
                             changed.push(key);
                         }
                     }
                 }
-                // Until they are synced, searches read their changed files.
+
                 changed.sort();
                 changed.dedup();
                 let wants = shared.live.read().unwrap().as_ref().map(|l| content::wanted_now(l, &home, &changed));
@@ -1059,8 +903,6 @@ fn content_loop(shared: &Shared, rx: Receiver<Resync>) {
     }
 }
 
-/// Bring the content index in line with the name index for these folders
-/// (direct children) and trees.
 fn sync(shared: &Shared, pool: &rayon::ThreadPool, home: &[u8], dirs: &[Vec<u8>], trees: &[Vec<u8>]) {
     let wants = {
         let g = shared.live.read().unwrap();
@@ -1070,10 +912,9 @@ fn sync(shared: &Shared, pool: &rayon::ThreadPool, home: &[u8], dirs: &[Vec<u8>]
     sync_wants(shared, pool, wants);
 }
 
-/// `sync`, given what the name index wants.
 fn sync_wants(shared: &Shared, pool: &rayon::ThreadPool, wants: Vec<(Vec<u8>, bool, content::Docs)>) {
     let t = Instant::now();
-    // (A folder built early leaves segments behind; the build is still the first.)
+
     let first = !shared.content_ready.load(Ordering::Acquire);
     let todo = shared.content.write().unwrap().diff(wants);
     if todo.is_empty() {
@@ -1081,13 +922,7 @@ fn sync_wants(shared: &Shared, pool: &rayon::ThreadPool, wants: Vec<(Vec<u8>, bo
     }
     let n = todo.len();
     shared.content_pending.store(n, Ordering::Relaxed);
-    // A first build (fresh install, format change) is a one-time wait the
-    // user is watching: 8 threads at user-initiated QoS. Each thread keeps
-    // its next files opened ahead, and past 8 threads those opens only
-    // contend in the kernel. Measured on HOME (730k files, M4 Max, with
-    // speed-content's open-ahead build): 99-155 s on the 4 utility threads;
-    // 8 threads 17.2-17.5 s (61 s system CPU), 12 threads 22.0-24.3 s, 16
-    // threads 27.2-30.1 s (250-300 s system CPU).
+
     let fast;
     let pool = if first {
         let threads = std::thread::available_parallelism().map_or(8, |n| n.get()).min(8);
@@ -1098,7 +933,7 @@ fn sync_wants(shared: &Shared, pool: &rayon::ThreadPool, wants: Vec<(Vec<u8>, bo
     };
     build_batches(shared, pool, &todo);
     drop(todo);
-    // Keep the segment count small: merge size tiers of 8.
+
     loop {
         let plan = shared.content.read().unwrap().merge_plan();
         let Some(ids) = plan else { break };
@@ -1116,15 +951,11 @@ fn sync_wants(shared: &Shared, pool: &rayon::ThreadPool, wants: Vec<(Vec<u8>, bo
         }
     }
     if n > 100 {
-        diag(format!("content: indexed {n} files in {:.2?}", t.elapsed()));
+        log(format!("content: indexed {n} files in {:.2?}", t.elapsed()));
     }
     release_memory();
 }
 
-/// Build `todo` into segments one batch (`Docs::batches`) at a time, each
-/// pushed when done. Two in flight overlapped one's single-threaded tail
-/// with the next one's reads: on the M6 (Linux, ABBA n=10) 3.07 s instead
-/// of 3.33, but a first-run peak of 616 MB instead of 375.
 fn build_batches(shared: &Shared, pool: &rayon::ThreadPool, todo: &content::Docs) {
     let dir = shared.content.read().unwrap().dir.clone();
     for range in todo.batches() {
@@ -1137,20 +968,13 @@ fn build_batches(shared: &Shared, pool: &rayon::ThreadPool, todo: &content::Docs
     }
 }
 
-/// `walk::scan`, with the ancestors of a non-"/" root grafted on as
-/// one-entry listings: `Index` requires listing 0 to be "/" and builds paths
-/// from it, so a scan of /a/b gets synthetic `/` (holding `a`) and `/a`
-/// (holding `b`) above it and every indexed path stays absolute.
-/// `Live::fetch` never descends into them (they're outside the root).
 fn scan_rooted(root: &[u8], threads: usize) -> Vec<walk::Listing> {
-    // The whole disk is the disk crawl (LISTED, `yield_to_searches`).
     let mut ls = if root == b"/" { walk::scan_disk(threads) } else { walk::scan(root, threads) };
     let comps: Vec<&[u8]> = root.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
     if comps.is_empty() {
         return ls;
     }
-    // Fresh ids for the synthetics; the scanned root listing moves off 0 so
-    // the synthetic "/" can take it (Index::build starts DFS at listing 0).
+
     let mut next = ls.iter().map(|l| l.id).max().unwrap_or(0) + 1;
     let real_root = next;
     next += 1;
@@ -1159,7 +983,7 @@ fn scan_rooted(root: &[u8], threads: usize) -> Vec<walk::Listing> {
             l.id = real_root;
         }
     }
-    // ids[d] = the listing id for "/"+comps[..d]; ids[k] is the real root's.
+
     let mut ids = vec![0u32; comps.len() + 1];
     ids[comps.len()] = real_root;
     for d in ids.iter_mut().take(comps.len()).skip(1) {
@@ -1188,13 +1012,12 @@ fn full_build(shared: &Shared, event_id: u64) -> Index {
     let idx = Index::build(ls, event_id, started, shared.home.as_bytes());
     let path = shared.dir.join("index.bin");
     if let Err(e) = idx.save(&path) {
-        diag(format!("save failed: {e}"));
+        log(format!("save failed: {e}"));
     }
     note_skipped(&shared.dir);
-    diag(format!("indexed {} entries in {:.2?}", idx.n, t.elapsed()));
+    log(format!("indexed {} entries in {:.2?}", idx.n, t.elapsed()));
     release_memory();
-    // Re-map from the file so the index is clean, evictable page cache
-    // rather than anonymous memory.
+
     Index::load(&path).unwrap_or(idx)
 }
 
@@ -1203,8 +1026,6 @@ unsafe extern "C" {
     fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
 }
 
-/// Hand freed allocator memory back to the OS after big transient work
-/// (index builds, content batches) instead of letting malloc cache it.
 fn release_memory() {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -1223,24 +1044,21 @@ fn compact(shared: &Shared) {
         let live = g.as_ref().unwrap();
         (live.to_listings(), live.event_id, live.synced_at)
     };
-    // Linux event ids are a clock, not a history position: stamp each
-    // save fresh so followers see `saved > ours` and reload.
+
     let eid = if cfg!(target_os = "linux") { fsevents::current_id() } else { eid };
     let idx = Index::build(ls, eid, synced, shared.home.as_bytes());
     let path = shared.dir.join("index.bin");
     if let Err(e) = idx.save(&path) {
-        diag(format!("save failed: {e}"));
+        log(format!("save failed: {e}"));
     }
     note_skipped(&shared.dir);
     let idx = Index::load(&path).unwrap_or(idx);
     let n = idx.n;
     *shared.live.write().unwrap() = Some(Live::new(idx).rooted(&shared.root));
     release_memory();
-    diag(format!("compacted to {n} entries in {:.2?}", t.elapsed()));
+    log(format!("compacted to {n} entries in {:.2?}", t.elapsed()));
 }
 
-/// Where a sweep starts from: `synced_at` back a safety margin, or 0 —
-/// a full crawl in place — when the root is missing or just returned.
 fn sweep_from(shared: &Shared) -> u32 {
     let g = shared.live.read().unwrap();
     let live = g.as_ref().unwrap();
@@ -1249,8 +1067,6 @@ fn sweep_from(shared: &Shared) -> u32 {
     if missing || was { 0 } else { live.synced_at.saturating_sub(SYNC_MARGIN) }
 }
 
-/// The folders `dirs` changed, relisted one write at a time so searches
-/// keep answering; the content index is told after.
 fn apply_dirs(shared: &Shared, dirs: Vec<Vec<u8>>) {
     for d in &dirs {
         let f = shared.live.read().unwrap().as_ref().unwrap().fetch(d, false);
@@ -1266,10 +1082,6 @@ fn apply_dirs(shared: &Shared, dirs: Vec<Vec<u8>>) {
     shared.on_change.read().unwrap().iter().for_each(|f| f(&[(&b"/"[..], true)]));
 }
 
-/// FSEvents lost track of / (dropped events, or no history back to our
-/// save): relist every folder modified since we were last in sync, plus the
-/// folders of indexed text files edited since (an edit in place doesn't
-/// touch its folder). Seconds, instead of recrawling the whole disk.
 fn relist_changed(shared: &Arc<Shared>, why: &str, flags: u32) {
     let t = Instant::now();
     let from = sweep_from(shared);
@@ -1283,16 +1095,12 @@ fn relist_changed(shared: &Arc<Shared>, why: &str, flags: u32) {
     let stat_time = t.elapsed();
     let n = dirs.len();
     apply_dirs(shared, dirs);
-    log::warn!(
+    log(format!(
         "FSEvents lost track of / ({why}, flags {flags:#x}): relisted {n} folders changed since {from} in {:.2?} ({stat_time:.2?} checking)",
         t.elapsed()
-    );
+    ));
 }
 
-/// The Linux minute tick: folders under scopes someone searched lately
-/// get the sweep (a few lstats where freshness is wanted), and every
-/// FULL_SWEEP_SECS the whole tree gets it so the cold tail stays honest.
-/// Nothing searched → the tick costs nothing.
 fn tick_reconcile(shared: &Arc<Shared>) {
     let t = Instant::now();
     let now = crate::query::now_secs();
@@ -1330,8 +1138,6 @@ fn tick_reconcile(shared: &Arc<Shared>) {
         shared.verified_all.store(now, Ordering::Relaxed);
     }
     {
-        // Only scopes in this tick's snapshot were swept; one inserted
-        // while it ran stays unverified until a query sweeps it inline.
         let mut h = shared.hot.lock().unwrap();
         for k in &hot {
             if let Some(s) = h.get_mut(k) {
@@ -1341,38 +1147,27 @@ fn tick_reconcile(shared: &Arc<Shared>) {
     }
     if n > 0 || full_due {
         let what = if full_due { "full reconcile" } else { "reconcile" };
-        diag(format!("index {what}: relisted {n} folders changed since {from} in {:.2?} ({stat_time:.2?} checking)", t.elapsed()));
+        log(format!("index {what}: relisted {n} folders changed since {from} in {:.2?} ({stat_time:.2?} checking)", t.elapsed()));
     }
 }
 
-/// Folders are listed again as their events come, but a folder may spend
-/// at most 1/RELIST_SHARE of the time being listed, running at most
-/// RELIST_AHEAD ahead of that: a folder changed a few times in a row
-/// (save, rename, delete) is listed each time, while a hot one of 5000
-/// entries (2.2 ms a listing) settles at ~9 listings a second.
 const RELIST_SHARE: u32 = 50;
 const RELIST_AHEAD: Duration = Duration::from_millis(2500);
 
-/// Folders whose events wait because they were listed a lot lately.
 #[derive(Default)]
 struct Pace {
-    /// Per folder: when the time its listings may take is paid for (listing
-    /// time x RELIST_SHARE, from when it was listed).
     paid: HashMap<Vec<u8>, Instant>,
-    /// Folders waiting for that: (recursive, oldest event id).
+
     held: HashMap<Vec<u8>, (bool, u64)>,
-    /// `paid`'s size after it was last pruned of folders paid up.
+
     kept: usize,
 }
 
 impl Pace {
-    /// May `dir` be listed now?
     fn free(&self, dir: &[u8], now: Instant) -> bool {
         self.paid.get(dir).is_none_or(|&t| t <= now + RELIST_AHEAD)
     }
 
-    /// Hold back the folders of `dirs` that ran too far ahead; add the held
-    /// ones now free.
     fn sort(&mut self, dirs: &mut HashMap<Vec<u8>, (bool, u64)>, now: Instant) {
         let early: Vec<Vec<u8>> = dirs.keys().filter(|d| !self.free(d, now)).cloned().collect();
         for d in early {
@@ -1393,26 +1188,21 @@ impl Pace {
             self.paid.retain(|_, t| *t > now);
             self.kept = self.paid.len();
         }
-        // (A listing that also scanned a big new subfolder holds it 1 s at most.)
+
         let from = self.paid.get(dir).map_or(now, |&t| t.max(now));
         self.paid.insert(dir.to_vec(), (from + took * RELIST_SHARE).min(now + RELIST_AHEAD + Duration::from_secs(1)));
     }
 
-    /// Until the first held folder is free.
     fn wait(&self, now: Instant) -> Option<Duration> {
         let free_at = |d: &Vec<u8>| self.paid.get(d).map_or(now, |&t| t.checked_sub(RELIST_AHEAD).unwrap_or(now));
         self.held.keys().map(free_at).min().map(|t| t.saturating_duration_since(now))
     }
 
-    /// Event ids from this one on are not all applied yet.
     fn floor(&self) -> u64 {
         self.held.values().map(|h| h.1).min().unwrap_or(u64::MAX)
     }
 }
 
-/// Events a stream replaced since still had queued (their `stream` number
-/// is no longer current): dropped, the new stream replays what they saw.
-/// Stream 0 is synthetic (see `rescan_unskipped`), never a real stream's.
 fn drop_stale_events(events: &mut Vec<fsevents::Event>, current: u32) -> usize {
     let was = events.len();
     events.retain(|e| e.stream == 0 || e.stream == current);
@@ -1423,9 +1213,9 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
     let mut last_save = Instant::now();
     let mut last_follow = Instant::now();
     let ours = shared.dir.as_os_str().as_bytes();
-    // Events fseventsd dropped before we read them: (replay from, last drop).
+
     let mut gap: Option<(u64, Instant)> = None;
-    // Replays in a row that dropped again; the third falls back to a relist.
+
     let mut replays = 0;
     let mut pace = Pace::default();
     loop {
@@ -1434,9 +1224,6 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
         let mut events = match rx.recv_timeout(wait) {
             Ok(b) => b,
             Err(RecvTimeoutError::Timeout) => {
-                // Linux has no event stream to follow, so the minute tick
-                // is the watcher — scoped to what is searched, sweeping the
-                // cold tail on a slow cadence.
                 #[cfg(target_os = "linux")]
                 if shared.owner() && shared.live.read().unwrap().is_some() {
                     tick_reconcile(shared);
@@ -1446,15 +1233,12 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
             Err(RecvTimeoutError::Disconnected) => return,
         };
         events.extend(rx.try_iter().flatten());
-        // A replaced stream can still have batches in flight; the stream
-        // that took over replays what they carried, so they are dropped —
-        // an old stream's HISTORY_DONE must not end the new one's replay.
+
         let stale = drop_stale_events(&mut events, shared.streams.load(Ordering::Relaxed));
         if stale > 0 {
-            diag(format!("dropped {stale} events from a replaced stream"));
+            log(format!("dropped {stale} events from a replaced stream"));
         }
-        // The owner wrote the index files: a follower picks that up now
-        // rather than at its next periodic check.
+
         let owner_wrote = events.iter().any(|e| e.path.starts_with(ours));
         let (mut rebuild, mut root_flags, had_events) = (false, 0, !events.is_empty());
         let (mut dirs, mut max_id): (HashMap<Vec<u8>, (bool, u64)>, u64) = (HashMap::new(), 0);
@@ -1463,11 +1247,6 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
             let current = shared.streams.load(Ordering::Relaxed);
             for e in events {
                 if e.path == b"/" && e.flags & MUST_SCAN_SUBDIRS != 0 {
-                    // fseventsd still logged what it dropped for us (a kernel
-                    // drop never reached it): replay from the last event we
-                    // did get, once the drops stop; a drop during a replay
-                    // starts that replay over. A replaced stream's drop is
-                    // covered by the stream that replaced it.
                     if e.flags & (USER_DROPPED | KERNEL_DROPPED) == USER_DROPPED {
                         if e.stream == current {
                             let from = if shared.replaying.load(Ordering::Relaxed) { shared.since.load(Ordering::Relaxed) } else { last_good };
@@ -1482,7 +1261,7 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
                     last_good = last_good.max(e.id);
                 }
                 if e.flags & HISTORY_DONE != 0 {
-                    diag("replay done");
+                    log("replay done");
                     shared.replaying.store(false, Ordering::Relaxed);
                     if gap.is_none() {
                         replays = 0;
@@ -1496,7 +1275,6 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
         let now = Instant::now();
         pace.sort(&mut dirs, now);
         if !dirs.is_empty() {
-            // The folders listed now (a held one is told when it is due).
             let hooks = shared.on_change.read().unwrap();
             if !hooks.is_empty() {
                 let changed: Vec<(&[u8], bool)> = dirs.iter().map(|(p, &(r, _))| (p.as_slice(), r)).collect();
@@ -1504,8 +1282,7 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
             }
             drop(hooks);
             let mut trees = Vec::new();
-            // Read the disk under the read lock, then apply in memory: a
-            // search never waits on a folder listing or a new subtree's scan.
+
             let fetched: Vec<_> = {
                 let g = shared.live.read().unwrap();
                 let live = g.as_ref().unwrap();
@@ -1526,8 +1303,7 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
                         rebuild = true;
                     }
                 }
-                // With a gap, everything is applied only up to its start;
-                // with folders held back, only up to their first event.
+
                 live.event_id = match gap {
                     Some((from, _)) => live.event_id.min(from),
                     None => live.event_id.max(max_id.min(pace.floor().saturating_sub(1))),
@@ -1548,12 +1324,10 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
             relist_changed(shared, why, root_flags);
             (gap, replays) = (None, 0);
         } else if let Some(from) = replay {
-            diag(format!("FSEvents dropped events before we read them: replaying from {from}"));
+            log(format!("FSEvents dropped events before we read them: replaying from {from}"));
             shared.watch(from);
             (gap, replays) = (None, replays + 1);
         } else if had_events && gap.is_none() && pace.held.is_empty() && !shared.replaying.load(Ordering::Relaxed) {
-            // Everything up to this batch is applied (a change's event can
-            // trail it by the stream latency; relisting keeps a margin).
             shared.live.write().unwrap().as_mut().unwrap().synced_at = crate::query::now_secs();
         }
         if let Some(l) = shared.live.read().unwrap().as_ref() {
@@ -1584,13 +1358,11 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
     }
 }
 
-/// Default data dir: `~/Library/Application Support/FSearch`.
 #[cfg(target_os = "macos")]
 pub fn default_dir(home: &str) -> PathBuf {
     Path::new(home).join("Library/Application Support/FSearch")
 }
 
-/// Default data dir: `$XDG_DATA_HOME/fsearch`, else `~/.local/share/fsearch`.
 #[cfg(target_os = "linux")]
 pub fn default_dir(home: &str) -> PathBuf {
     std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| Path::new(home).join(".local/share")).join("fsearch")
@@ -1603,7 +1375,7 @@ mod tests {
     #[test]
     fn drops_replaced_stream_events() {
         let ev = |stream: u32| fsevents::Event { path: b"/x".to_vec(), flags: 0, id: 0, stream };
-        // Stream 1 was replaced by 2; its queued events die. 0 is synthetic.
+
         let mut v = vec![ev(1), ev(0), ev(2), ev(1)];
         assert_eq!(drop_stale_events(&mut v, 2), 2);
         assert_eq!(v.iter().map(|e| e.stream).collect::<Vec<_>>(), [0, 2]);

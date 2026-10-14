@@ -1,15 +1,3 @@
-//! Vertical key/value fallback for markdown tables that no longer scan well
-//! as grids. Port of codex-rs `tui/src/markdown_render/table_key_value.rs`
-//! (decision heuristics + record layout), adapted to gray's plain-string
-//! table model.
-//!
-//! Differences vs the codex original:
-//! - cell values render as plain text (codex keeps per-span styles via
-//!   HyperlinkLine remapping) — inline code/links inside record values lose
-//!   their styling;
-//! - no hyperlink remapping (gray's table fallback already pushes empty
-//!   hyperlinks).
-
 use crate::buffers::{StyledCell, unicode_display_width};
 use crate::parse::wrap_cell_text;
 use ratatui::text::{Line, Span};
@@ -32,8 +20,6 @@ enum ColumnKind {
     Narrative,
 }
 
-/// Per-column classification, port of codex `collect_table_column_metrics`
-/// trimmed to the fields the decision heuristics actually read.
 fn collect_metrics(
     header: &[StyledCell],
     rows: &[Vec<StyledCell>],
@@ -89,8 +75,6 @@ fn wrapped_cell_height(cell: &StyledCell, width: usize) -> usize {
     wrap_cell_text(&cell.plain_text(), width.max(1)).len()
 }
 
-/// Switch to record layout once enough rows contain values the grid can no
-/// longer present in useful chunks. Port of codex `should_render_records`.
 pub(crate) fn should_render_records(
     header: &[StyledCell],
     rows: &[Vec<StyledCell>],
@@ -168,9 +152,6 @@ fn expansive_cells_are_starved(
         })
 }
 
-/// Rendered record layout: parallel plain/styled lines plus best-effort
-/// source-line offsets (labels → header line 0, separators → line 1,
-/// values → body row offset `2 + row_index`).
 pub(crate) struct RecordTable {
     pub lines: Vec<String>,
     pub styled_lines: Vec<Line<'static>>,
@@ -184,9 +165,6 @@ fn push_line(out: &mut RecordTable, spans: Vec<Span<'static>>, offset: usize) {
     out.line_source_offsets.push(offset);
 }
 
-/// Port of codex `table_key_value::render_records`: aligned `label  value`
-/// fields when the width allows, stacked label-over-value blocks otherwise,
-/// with a separator line between records.
 pub(crate) fn render_records(
     header: &[StyledCell],
     rows: &[Vec<StyledCell>],

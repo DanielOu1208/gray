@@ -1,16 +1,3 @@
-//! Gateway control socket: `$GRAY_HOME/gateway.sock`.
-//!
-//! Wire contract (hermes v1, ported): ONE request per connection — one JSON
-//! line in, one JSON line out, then the server closes. Read verbs are
-//! `identify`/`status` plus read-only `metrics`/`logs_tail`; chat adapters
-//! drain the outbox with `pull {platform, limit}` → `{intents}` then
-//! `ack {ids}` → `{acked}`. Answers are
-//! `{"ok": true, "protocol": 1, "result": {...}}`; misses are
-//! `{"ok": false, "error": ..., "supported_verbs": [...]}`. A connectable
-//! socket with a well-formed `identify` answer IS liveness — the pid file is
-//! only the fallback. Never a TCP port: the filesystem (0600, inside the
-//! user's home) is the auth boundary.
-
 #[cfg(unix)]
 use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -19,11 +6,11 @@ use std::time::Duration;
 pub const PROTOCOL: u32 = 1;
 pub const SUPPORTED_VERBS: [&str; 6] =
     ["identify", "status", "metrics", "logs_tail", "pull", "ack"];
-/// `logs_tail` shape: last lines of `logs/gray.log`, newest last.
+
 pub const LOGS_TAIL_LINES: usize = 200;
-/// Byte cap on the tail read; the tail is kept, the head is dropped.
+
 const LOGS_TAIL_MAX_BYTES: u64 = 64 * 1024;
-/// sun_path is 104..108 bytes; keep margin (same margin hermes uses).
+
 #[cfg(unix)]
 const MAX_SOCK_PATH: usize = 100;
 #[cfg(unix)]
@@ -36,7 +23,6 @@ pub fn sock_path(home: &Path) -> PathBuf {
     home.join("gateway.sock")
 }
 
-/// `identify`: who is answering (per-process truth, not the file's claim).
 pub fn identify_payload(home: &Path) -> serde_json::Value {
     let me = std::process::id();
     let started_at = super::pid::read(home)
@@ -54,7 +40,6 @@ pub fn identify_payload(home: &Path) -> serde_json::Value {
     })
 }
 
-/// `status`: identify + runtime state + cron liveness, answered live.
 pub fn status_payload(home: &Path, now: i64) -> serde_json::Value {
     let mut out = identify_payload(home);
     let state = super::state::read(home);
@@ -91,8 +76,6 @@ fn cron_payload(home: &Path, now: i64) -> serde_json::Value {
     }
 }
 
-/// Read-only telemetry reusing the shapes `status` already reports.
-/// No new I/O beyond what `status_payload` reads today.
 pub fn metrics_payload(home: &Path, now: i64) -> serde_json::Value {
     let mut out = identify_payload(home);
     out["cron"] = cron_payload(home, now);
@@ -101,9 +84,6 @@ pub fn metrics_payload(home: &Path, now: i64) -> serde_json::Value {
     out
 }
 
-/// Last `LOGS_TAIL_LINES` lines of `logs/gray.log` (newest last) plus the
-/// total line count. Best-effort: a missing/unreadable file reads as empty,
-/// never an error (same fail-soft rule as every socket path).
 pub fn tail_gray_log(home: &Path) -> (Vec<String>, usize) {
     let body = std::fs::read(home.join("logs").join("gray.log")).unwrap_or_default();
     let capped = body.len() as u64 > LOGS_TAIL_MAX_BYTES;
@@ -113,15 +93,12 @@ pub fn tail_gray_log(home: &Path) -> (Vec<String>, usize) {
         &body
     };
     let text = String::from_utf8_lossy(tail);
-    // A mid-line cut from the byte cap must not fabricate a first line.
+
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     if capped && !lines.is_empty() {
         lines.remove(0);
     }
-    // Audit #21: the byte cap reads only the tail, so counting its lines
-    // reports the tail length under the field's name. Count the whole file
-    // (a separate scan of the full bytes) and return the last
-    // LOGS_TAIL_LINES of the tail lines as the retained window.
+
     let total = std::str::from_utf8(&body)
         .map(|s| s.lines().count())
         .unwrap_or(lines.len());
@@ -134,8 +111,6 @@ pub fn tail_gray_log(home: &Path) -> (Vec<String>, usize) {
     (kept, total)
 }
 
-/// One request line -> one response line (trailing newline). Never panics;
-/// a malformed request is answered, not dropped (hermes shape).
 pub fn handle_request_line(home: &Path, raw: &[u8], now: i64) -> Vec<u8> {
     let parsed = serde_json::from_slice::<serde_json::Value>(raw);
     let request_id = parsed.as_ref().ok().and_then(|v| v.get("id").cloned());
@@ -207,12 +182,6 @@ pub fn handle_request_line(home: &Path, raw: &[u8], now: i64) -> Vec<u8> {
     out
 }
 
-/// Serve the control socket until `stop` flips. A bind failure is the
-/// caller's to judge — non-fatal by design: cron ticking must not depend on
-/// this socket, and consumers fall back to the pid file.
-///
-/// Unix-only: Windows has no unix-domain sockets in this path, so the
-/// daemon runs socketless there (pid file + state file still work).
 #[cfg(unix)]
 pub async fn serve(
     home: PathBuf,
@@ -226,14 +195,9 @@ pub async fn serve(
             path.display()
         );
     }
-    // We hold the pid claim, so any file at this path is stale or ours.
+
     let _ = std::fs::remove_file(&path);
-    /// Bind the control socket without ever touching the process-wide umask
-    /// (audit #20): the dance `umask(0077) -> bind -> umask(old)` makes every
-    /// *other* thread's mkdir/write in that window fail closed. Instead the
-    /// socket is created inside a fresh 0700 staging directory and renamed
-    /// into place (same parent, so one filesystem): it never exists in a
-    /// traversable directory with default permissions.
+
     #[cfg(unix)]
     fn bind_gateway_socket(path: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -262,8 +226,6 @@ pub async fn serve(
         Ok(listener)
     }
 
-    // Prefer the staging-directory bind (no process-wide umask change);
-    // fall back to the old dance only where staging is not possible.
     let listener = match bind_gateway_socket(&path) {
         Ok(l) => l,
         Err(e) => {
@@ -280,7 +242,7 @@ pub async fn serve(
         tokio::select! {
             _ = stop.changed() => break,
             accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else { continue }; // EMFILE etc: keep serving
+                let Ok((stream, _)) = accepted else { continue };
                 tokio::spawn(serve_connection(home.clone(), stream));
             }
         }
@@ -311,9 +273,6 @@ async fn serve_connection(home: PathBuf, stream: tokio::net::UnixStream) {
     let _ = wr.shutdown().await;
 }
 
-/// Ask the gateway serving `home` a control verb. `None` on any failure — no
-/// socket, stale socket, timeout, malformed answer, `ok: false` — so callers
-/// fall back to the pid file. Never raises.
 pub fn query(home: &Path, verb: &str) -> Option<serde_json::Value> {
     query_within(home, verb, CLIENT_TIMEOUT)
 }
@@ -334,8 +293,7 @@ pub fn query_within(home: &Path, verb: &str, timeout: Duration) -> Option<serde_
 fn unix_query_within(home: &Path, verb: &str, timeout: Duration) -> Option<serde_json::Value> {
     use std::os::unix::fs::FileTypeExt;
     let path = sock_path(home);
-    // Only a real socket counts. `symlink_metadata` does not follow links, so a
-    // symlink or plain file planted at this path is refused before connect.
+
     let is_socket = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_socket());
     if !is_socket {
         return None;

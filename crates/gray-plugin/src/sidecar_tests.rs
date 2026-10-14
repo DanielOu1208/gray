@@ -29,8 +29,6 @@ async fn empty_manifest_name_bails() {
 
 #[tokio::test]
 async fn notify_sends_no_id_and_needs_no_reply() {
-    // hang fixture never replies to event/notify; if on_event waited for a
-    // reply it would hit the 5s timeout. True notification returns fast.
     let p = SidecarPlugin::spawn(vec!["testdata/hang_plugin.sh".into()])
         .await
         .unwrap();
@@ -44,10 +42,6 @@ async fn notify_sends_no_id_and_needs_no_reply() {
 
 #[tokio::test]
 async fn a_child_that_stopped_reading_fails_the_request_not_the_protocol() {
-    // The wedged stub answers the handshake, then never reads stdin again.
-    // The request frame is far larger than the pipe buffer, so its write
-    // cannot complete: the call must fail within WRITE_TIMEOUT instead of
-    // tearing the frame and desyncing every later request.
     let p = SidecarPlugin::spawn(vec!["testdata/wedged_stdin_plugin.sh".into()])
         .await
         .unwrap();
@@ -160,9 +154,6 @@ async fn provider_rpc_requires_the_sensitive_capability() {
     p.shutdown(std::time::Duration::from_secs(2)).await;
 }
 
-/// `session.id` rides `prompt/context`: anonymous until the builder pins the
-/// agent's session, then pinned — the freeze-per-session contract a
-/// session-scoped plugin (memory) builds on.
 #[tokio::test]
 async fn prompt_context_carries_the_agent_session_id() {
     let dir = tempfile::tempdir().unwrap();
@@ -255,8 +246,7 @@ async fn dynamic_plugin_refreshes_tools_on_tools_changed() {
             .map(|t| t.def().name.clone())
             .collect::<Vec<_>>()
     };
-    // The spawn-path `plugin/tools` refresh is detached — dyn_a lands a
-    // tick after spawn returns, not inline with it.
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while names(&p).is_empty() && std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -277,10 +267,6 @@ async fn dynamic_plugin_refreshes_tools_on_tools_changed() {
 
 #[tokio::test]
 async fn tools_changed_during_initial_refresh_is_not_lost() {
-    // The fixture answers the first `plugin/tools` with [early_a] and
-    // immediately emits `host/tools_changed` — inside spawn's initial
-    // refresh window. The handler is installed before that refresh, so
-    // the notification must still land and trigger a second refresh.
     let p = SidecarPlugin::spawn(vec!["testdata/early_tools_changed_plugin.sh".into()])
         .await
         .unwrap();
@@ -345,9 +331,6 @@ async fn tool_call_reply_images_and_media_are_attached() {
 
 #[test]
 fn context_build_text_scrub_fits_frame_and_restores() {
-    // A long session pushed context/build past MAX_FRAME and disabled
-    // every claiming plugin for the rest of it. The scrub must fit the
-    // frame and restore must return the originals on a pass-through reply.
     let big_a = "a".repeat(300 * 1024);
     let big_b = "b".repeat(300 * 1024);
     let mut wire = vec![
@@ -369,14 +352,13 @@ fn context_build_text_scrub_fits_frame_and_restores() {
         frame_len + 128 <= MAX_FRAME,
         "frame still over cap: {frame_len}"
     );
-    // Largest-first: both oversized blocks stubbed, the small one untouched.
+
     assert_eq!(pulled[0].len(), 1);
     assert_eq!(pulled[1].len(), 1);
     assert!(pulled[2].is_empty());
     let stub0 = &pulled[0][0].2;
     assert!(stub0.contains("bytes elided"), "stub: {stub0}");
 
-    // Pass-through reply: originals come back byte-for-byte.
     let restored = restore_text(wire.clone(), &pulled);
     assert_eq!(
         restored[0].content[0],
@@ -391,7 +373,6 @@ fn context_build_text_scrub_fits_frame_and_restores() {
         }
     );
 
-    // A plugin-edited stub keeps the plugin's version — the edit wins.
     let mut edited = wire.clone();
     if let gray_core::message::ContentBlock::Text { text } = &mut edited[0].content[0] {
         *text = "plugin rewrote this".into();
@@ -403,7 +384,7 @@ fn context_build_text_scrub_fits_frame_and_restores() {
             text: "plugin rewrote this".into()
         }
     );
-    // Restructured replies (different length) skip grafting entirely.
+
     let short = vec![Message::user("x")];
     assert_eq!(restore_text(short, &pulled).len(), 1);
 }

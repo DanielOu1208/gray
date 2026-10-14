@@ -1,35 +1,19 @@
-//! Built-in content search: the fallback used when `rg` is not on PATH.
-//!
-//! Mirrors the `grep` tool's `--json` lane contract: matches render as
-//! `file:line: text`, context lines as `file-line- text`, `.gitignore` is
-//! honored through the `ignore` crate (same walker as `find`'s fd fallback),
-//! and the caller's limit counts *matches*, not context lines. A machine
-//! without ripgrep therefore keeps a working `grep` tool instead of an
-//! "rg is not installed" dead end.
-
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use globset::GlobSet;
 use regex::Regex;
 
-/// Cap on the size of a file we are willing to read for a line search. rg
-/// streams; we read into memory, so a bound keeps a stray multi-GB log from
-/// stalling the tool. Larger files are skipped, never silently truncated.
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
-/// One hit: `(file, 1-based line, line text, is_match)`. A context line has
-/// `is_match == false`.
 pub type Hit = (String, usize, Option<String>, bool);
 
-/// Search result: the hits plus whether the match limit stopped the walk.
 #[derive(Debug)]
 pub struct Found {
     pub hits: Vec<Hit>,
     pub limit_reached: bool,
 }
 
-/// Is ripgrep on PATH? Probed once per process.
 pub fn rg_present() -> bool {
     static PRESENT: OnceLock<bool> = OnceLock::new();
     *PRESENT.get_or_init(|| {
@@ -44,8 +28,6 @@ pub fn rg_present() -> bool {
     })
 }
 
-/// Compile the caller's pattern the way rg would: regex or literal, with
-/// optional case folding.
 fn compile(pattern: &str, literal: bool, ignore_case: bool) -> Result<Regex, String> {
     let body = if literal {
         regex::escape(pattern)
@@ -60,8 +42,6 @@ fn compile(pattern: &str, literal: bool, ignore_case: bool) -> Result<Regex, Str
     Regex::new(&body).map_err(|e| format!("invalid pattern: {e}"))
 }
 
-/// `--glob` semantics: a pattern without `/` matches the basename anywhere,
-/// a path pattern matches the path relative to the search root.
 fn glob_set(glob: &Option<String>) -> Result<Option<GlobSet>, String> {
     let Some(g) = glob else { return Ok(None) };
     let pat = if g.contains('/') {
@@ -81,7 +61,6 @@ fn glob_set(glob: &Option<String>) -> Result<Option<GlobSet>, String> {
     ))
 }
 
-/// Search `path` (a file or a directory) for `pattern`.
 #[allow(clippy::too_many_arguments)]
 pub fn search(
     pattern: &str,
@@ -111,12 +90,12 @@ pub fn search(
         {
             continue;
         }
-        // read_to_string also rejects binary payloads, which rg skips too.
+
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
         let lines: Vec<&str> = text.lines().collect();
-        let mut emitted: Option<usize> = None; // last line index already emitted
+        let mut emitted: Option<usize> = None;
         for (i, line) in lines.iter().enumerate() {
             if !re.is_match(line) {
                 continue;
@@ -149,12 +128,11 @@ pub fn search(
     })
 }
 
-/// Walk `root` the way `rg --hidden` does, minus VCS/dependency trees.
 fn walk(root: &Path, globs: Option<&GlobSet>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     let walker = ignore::WalkBuilder::new(root)
-        .hidden(false) // rg --hidden parity: include dotfiles
-        .require_git(false) // honor .gitignore outside repos
+        .hidden(false)
+        .require_git(false)
         .filter_entry(|e| {
             !(e.file_type().is_some_and(|t| t.is_dir())
                 && (e.file_name() == ".git" || e.file_name() == "node_modules"))

@@ -1,32 +1,14 @@
-"""Name-search quality: sample files under a git checkout, make the queries
-people type for them, and score where a build ranks the file meant.
-
-  quality.py gen <root> <n> <out.json>               queries (fixed seed)
-  quality.py report <queries.json> <name=ranks.json>...
-  quality.py diff <queries.json> <a.json> <b.json> [kinds] [n] [worse|better]   rank changes
-  quality.py fails <queries.json> <ranks.json> [kinds] [n]        queries not ranked first
-  quality.py rig <out.json> <queries.json>...         whole-disk speed corpus for examples/rig.rs
-
-Targets are tracked files whose name is unique there;
-`dup` targets share their name but not their folder/name. A query wants the
-target, and for stem queries any file with the same stem (foo.c, foo.h).
-fsearch's ranks come from examples/quality.rs.
-"""
-
 import json, os, random, re, subprocess, sys
 from collections import defaultdict
 
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
 
-
 def base(f):
     return f.rsplit("/", 1)[-1]
-
 
 def stem(name):
     dot = name.rfind(".")
     return name[:dot] if dot > 0 else name
-
 
 def words(s):
     out = []
@@ -34,9 +16,8 @@ def words(s):
         out += re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", p)
     return out
 
-
 def edit(s, p, kind, rng):
-    """One edit at position p: wrong letter, extra letter, missing letter, or swapped with the next."""
+
     c = s[p].lower()
     if kind == "subst":
         return s[:p] + rng.choice([x for x in LETTERS if x != c]) + s[p + 1 :]
@@ -46,11 +27,9 @@ def edit(s, p, kind, rng):
         return s[:p] + s[p + 1 :]
     return s[:p] + s[p + 1] + s[p] + s[p + 2 :]
 
-
 def typo(s, p, rng):
     kinds = ["subst", "extra", "drop"] + (["swap"] if p + 1 < len(s) and s[p + 1].isalpha() and s[p + 1].lower() != s[p].lower() else [])
     return edit(s, p, rng.choice(kinds), rng)
-
 
 def gen(root, n, out):
     rng = random.Random(7)
@@ -123,7 +102,6 @@ def gen(root, n, out):
         kinds[q["kind"]] += 1
     print(len(files), "files,", len(qs), "queries:", dict(kinds))
 
-
 def report(queries, runs):
     qs = json.load(open(queries))
     named = [(r.split("=", 1)[0], json.load(open(r.split("=", 1)[1]))) for r in runs]
@@ -141,9 +119,8 @@ def report(queries, runs):
             line += f"  {t1 * 100:11.1f} {t5 * 100:5.1f} {mrr:5.3f}"
         print(line)
 
-
 def fails(queries, a, kinds=None, n=20):
-    """Queries a run did not rank first, with what it ranked first."""
+
     qs, a = json.load(open(queries)), json.load(open(a))
     kinds = kinds.split(",") if kinds else None
     shown = 0
@@ -152,9 +129,8 @@ def fails(queries, a, kinds=None, n=20):
             shown += 1
             print(f"{q['kind']:10} {q['q']!r:34} {x['rank']:>3}  want={q['target']}  top={x['top'][:2]}")
 
-
 def diff(queries, a, b, kinds=None, n=20, only=None):
-    """Queries whose rank changed (only "worse" or "better" ones if asked)."""
+
     qs, a, b = json.load(open(queries)), json.load(open(a)), json.load(open(b))
     kinds = kinds.split(",") if kinds else None
     better = worse = shown = 0
@@ -168,11 +144,8 @@ def diff(queries, a, b, kinds=None, n=20, only=None):
             print(f"{q['kind']:10} {q['q']!r:34} {x['rank']:>3} -> {y['rank']:>3}  want={base(q['target'])}  top={[base(t) for t in y['top'][:2]]}")
     print(f"better {better} worse {worse}")
 
-
 def rig(out, sets):
-    """Each kind's first 12 queries per set, and typing runs: 8 stems per
-    set keystroke by keystroke, every other one with a typo. A set given as
-    <queries.json>=<root> is scoped to root (in:root)."""
+
     rng = random.Random(3)
     names, typing = [], []
     for f in sets:
@@ -192,7 +165,6 @@ def rig(out, sets):
             typing.append([scope + s[:n] for n in range(1, len(s) + 1)])
     json.dump({"names": names, "typing": typing, "grep": []}, open(out, "w"), indent=0)
     print(len(names), "name queries,", len(typing), "typing runs")
-
 
 if __name__ == "__main__":
     cmd, args = sys.argv[1], sys.argv[2:]

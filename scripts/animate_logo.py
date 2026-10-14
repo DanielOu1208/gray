@@ -1,35 +1,3 @@
-#!/usr/bin/env python3
-"""Generate assets/logo-animated.svg from assets/logo-dark.svg.
-
-The dark logo is one path under the nonzero fill rule: the gem silhouette plus
-subpaths whose winding cancels it, which is where the facet lines come from.
-Where two of those subpaths overlap the winding is nonzero again, so that part of
-the line is white -- a line is "inside the gem and covered by exactly one
-subpath", not a union.
-
-So the animation cannot simply repaint each subpath: two growing lines would also
-paint their overlap. Instead the original path is reused verbatim as a luminance
-mask (white exactly where the finished logo is black) and every facet line grows
-inside that mask. A line is convex, so scaling it up about its own origin vertex
-keeps it inside its final shape: the mark only ever grows into the finished logo,
-never tears, and the last frame is the original logo.
-
-The epicentre is the mark's centre -- the inverted triangle the facets are cut
-around. The gem blooms out from there and every facet line grows out of whichever
-of its vertices lies nearest the centre, so the mesh assembles from the middle
-outwards instead of fading in. Lines closest to the centre draw first.
-
-`--lines` drops the black squircle and puts the mark's own white stroke art on a
-transparent background, growing out from its centre: the logo's lines, not the
-gaps between them. Use it on dark surfaces only.
-
-Usage:
-    scripts/animate_logo.py                       # write assets/logo-animated.svg
-    scripts/animate_logo.py --lines               # write assets/logo-animated-lines.svg
-    scripts/animate_logo.py --frames 45 /tmp/fr   # static SVG frames, for previews
-    scripts/animate_logo.py --lines --frames 45 /tmp/fr
-"""
-
 from __future__ import annotations
 
 import math
@@ -41,16 +9,14 @@ SRC = "assets/logo-dark.svg"
 DST = "assets/logo-animated.svg"
 DST_LINES = "assets/logo-animated-lines.svg"
 
-# Timing. The gem blooms first; the facet lines follow it outwards from the centre.
-GEM_FROM, GEM_DUR, GEM_EASE = 0.55, 0.50, (0.16, 1.0, 0.30, 1.0)  # expo-out
+GEM_FROM, GEM_DUR, GEM_EASE = 0.55, 0.50, (0.16, 1.0, 0.30, 1.0)
 LINE_DELAY, LINE_SPREAD, LINE_DUR = 0.10, 0.85, 0.42
-LINE_EASE = (0.34, 1.25, 0.50, 1.0)  # back-out: a small settle past full size
+LINE_EASE = (0.34, 1.25, 0.50, 1.0)
 
 W, H = 970, 970
 
-
 def parse_path(d: str, tx: float, ty: float, s: float):
-    """Absolute-coordinate subpaths of a M/L/l/z-only path, after translate+scale."""
+
     toks = re.findall(r"[MmLlZz]|-?\d*\.?\d+(?:[eE][-+]?\d+)?", d)
     subs, cur, x, y, cmd, i = [], [], 0.0, 0.0, None, 0
 
@@ -61,7 +27,7 @@ def parse_path(d: str, tx: float, ty: float, s: float):
         t = toks[i]
         if t in "MmLlZz":
             if t in "Zz" and cur:
-                # z closes the subpath: the current point jumps back to its start.
+
                 x, y = cur[0]
             cmd, i = t, i + 1
             continue
@@ -78,7 +44,7 @@ def parse_path(d: str, tx: float, ty: float, s: float):
         elif cmd == "L":
             x, y, i = num(0), num(1), i + 2
             cur.append((x, y))
-        else:  # implicit 'l'
+        else:
             x, y, i = x + num(0), y + num(1), i + 2
             cur.append((x, y))
     if cur:
@@ -93,7 +59,6 @@ def parse_path(d: str, tx: float, ty: float, s: float):
             out.append(pts)
     return out
 
-
 def signed_area(p):
     a = 0.0
     for k in range(len(p)):
@@ -102,30 +67,24 @@ def signed_area(p):
         a += x1 * y2 - x2 * y1
     return a / 2
 
-
 def centroid(p):
     n = len(p)
     return (sum(q[0] for q in p) / n, sum(q[1] for q in p) / n)
-
 
 def bbox(p):
     xs = [q[0] for q in p]
     ys = [q[1] for q in p]
     return min(xs), min(ys), max(xs), max(ys)
 
-
 def overlaps(a, b):
     return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
-
 
 def dist(a, b):
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
-
 def origin(p, center):
-    """Vertex nearest the mark's centre: every line grows outwards from here."""
-    return min(p, key=lambda q: dist(q, center))
 
+    return min(p, key=lambda q: dist(q, center))
 
 def path_d(p, ox, oy):
     body = " ".join(
@@ -134,9 +93,8 @@ def path_d(p, ox, oy):
     )
     return body + " Z"
 
-
 def cubic_bezier_ease(x1, y1, x2, y2):
-    """CSS cubic-bezier() progress solver (unit x in, unit y out)."""
+
     cx = 3 * x1
     bx = 3 * (x2 - x1) - cx
     ax = 1 - cx - bx
@@ -178,64 +136,42 @@ def cubic_bezier_ease(x1, y1, x2, y2):
 
     return ease
 
-
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
-
 
 def load():
     svg = open(SRC).read()
     d = re.search(r'\bd="([^"]+)"', svg).group(1)
     m = re.search(r'transform="translate\(([-.\d.]+) ([.\d-]+)\) scale\(([\d.]+)\)"', svg)
     tx, ty, s = (float(g) for g in m.groups())
-    # The source path, verbatim: the mask confining the growing lines to the
-    # finished logo's black pixels (nonzero winding: black == winding number 0).
+
     mask_d = d
     mask_tf = m.group(0).split('"')[1]
     subs = parse_path(d, tx, ty, s)
     gem = max(subs, key=lambda p: abs(signed_area(p)))
-    center = centroid(gem)  # the inverted triangle's middle: the growth epicentre
+    center = centroid(gem)
     holes = [p for p in subs if p is not gem]
     gb = bbox(gem)
-    # Holes entirely off the gem are invisible; animating them would only add nodes.
+
     holes = [p for p in holes if overlaps(bbox(p), gb)]
-    holes.sort(key=lambda p: dist(origin(p, center), center))  # centre -> outwards
-    # The whole source path recentred on the growth epicentre: with the
-    # nonzero fill rule intact this is the mark's own stroke art, gaps cut
-    # out -- the transparent variant's artwork, with nothing repainted.
+    holes.sort(key=lambda p: dist(origin(p, center), center))
+
     line_art_d = " ".join(path_d(p, *center) for p in subs)
     return gem, holes, center, line_art_d, mask_d, mask_tf
-
 
 def scale_at(t, delay, dur, ease):
     return ease(clamp((t - delay) / dur, 0.0, 1.0))
 
-
 def gem_scale(t):
     return GEM_FROM + (1.0 - GEM_FROM) * scale_at(t, 0.0, GEM_DUR, cubic_bezier_ease(*GEM_EASE))
-
 
 def delay_of(rank, n):
     return LINE_DELAY + (LINE_SPREAD * rank / max(1, n - 1))
 
-
 def line_scale(t, delay):
     return scale_at(t, delay, LINE_DUR, cubic_bezier_ease(*LINE_EASE))
 
-
 def svg(gem, holes, center, line_art_d, mask_d, mask_tf, lines_only=False, t=None):
-    """The animated asset; with t set, the same composition frozen at time t.
-
-    Dark variant: a black squircle, the gem blooming out of the centre, then each
-    facet line painting itself in on top through the mask.
-
-    `lines_only` (transparent): no squircle and no bloom -- the mark's own white
-    stroke art is what grows. The holes cut a mask instead of painting, so the
-    gaps between the strokes open one by one out of the centre and the line art
-    assembles. Both variants share one guarantee: the source path's own white is
-    painted back over the cuts, so a growing line can only ever touch gap pixels
-    the finished logo already has as gap. The last frame is the logo.
-    """
 
     def emit_holes(pad):
         out = []
@@ -272,18 +208,13 @@ def svg(gem, holes, center, line_art_d, mask_d, mask_tf, lines_only=False, t=Non
         '      <rect width="%d" height="%d" fill="#ffffff" />' % (W, H),
     ]
     if lines_only:
-        # The growing gaps cut the mask; the logo's own white is painted back
-        # on top, so what stays black is exactly the logo's gap pixels.
+
         parts.append("      <g>")
         parts += emit_holes("        ")
         parts.append("      </g>")
         parts.append('      <path fill="#ffffff" transform="%s" d="%s" />' % (mask_tf, mask_d))
         parts += ["    </mask>", "  </defs>"]
-        # The artwork carries no transform: a mask is resolved in the user space
-        # of the element referencing it, so wrapping the path in the growth
-        # origin's translate would sample the mask shifted by that translate and
-        # leave only the quadrant that still overlaps. The silhouette is static
-        # here (the lines are the animation), so its own coordinates suffice.
+
         parts.append(
             '  <path fill="#ffffff" mask="url(#lines)" d="%s" />' % path_d(gem, 0, 0)
         )
@@ -329,7 +260,6 @@ def svg(gem, holes, center, line_art_d, mask_d, mask_tf, lines_only=False, t=Non
     parts.append("</svg>")
     return "\n".join(parts) + "\n"
 
-
 def main():
     argv = sys.argv[1:]
     lines_only = "--lines" in argv
@@ -349,7 +279,6 @@ def main():
     with open(dst, "w") as fh:
         fh.write(svg(gem, holes, center, line_art_d, mask_d, mask_tf, lines_only))
     print("wrote %s (%d facet lines%s)" % (dst, len(holes), ", transparent" if lines_only else ""))
-
 
 if __name__ == "__main__":
     main()

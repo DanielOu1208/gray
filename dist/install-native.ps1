@@ -1,13 +1,9 @@
-# Native Windows installer, and the default route of install.ps1. No WSL, no
-# Linux distro, no elevation, no execution-policy change. Pass -Wsl to
-# install.ps1 for the compatibility route that installs the Linux build in WSL.
-# Download and inspect this script before running it.
 [CmdletBinding()]
 param(
     [ValidateSet('stable', 'beta')][string]$Channel = 'stable',
     [string]$InstallDir = $env:GRAY_INSTALL_DIR,
     [switch]$NoPath,
-    # Offline artifacts let CI test the real installer without a live release.
+
     [string]$ArchivePath,
     [string]$Sha256,
     [uri]$BaseUri = 'https://gray.alignment.id/dl/'
@@ -26,7 +22,7 @@ function Add-GrayPath([string]$Current, [string]$Directory) {
 }
 
 function Get-GrayDigest([string[]]$Lines, [string]$Name) {
-    # Exactly one well-formed line for this archive, or nothing is trusted.
+
     $pattern = '^([0-9a-fA-F]{64})\s+\*?' + [regex]::Escape($Name) + '$'
     $found = @($Lines | ForEach-Object { $_.Trim() } | Where-Object { $_ -match $pattern })
     if ($found.Count -ne 1) { throw 'Missing or invalid archive checksum' }
@@ -35,7 +31,7 @@ function Get-GrayDigest([string[]]$Lines, [string]$Name) {
 }
 
 function Assert-GrayVersion([string]$Executable) {
-    # Bound the probe, including corrupt binaries that start but never finish.
+
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = $Executable
     $info.Arguments = '--version'
@@ -87,12 +83,11 @@ function Install-NativeGray {
             Copy-Item -LiteralPath $ArchivePath -Destination $archive
         } else {
             if ($BaseUri.Scheme -ne 'https') { throw 'Downloads require HTTPS; use -ArchivePath for offline tests' }
-            # PS 5.1 may otherwise negotiate old TLS. Never disable validation.
+
             [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
             $base = $BaseUri.AbsoluteUri.TrimEnd('/') + '/'
             Invoke-WebRequest -UseBasicParsing -Uri ($base + $name) -OutFile $archive -TimeoutSec 60
-            # The release publishes one sums file per channel covering every
-            # platform (the same file install.sh verifies against).
+
             $sumFile = Join-Path $temp 'checksum'
             Invoke-WebRequest -UseBasicParsing -Uri ($base + "SHA256SUMS-$Channel") -OutFile $sumFile -TimeoutSec 60
             $Sha256 = Get-GrayDigest @(Get-Content -LiteralPath $sumFile) $name
@@ -100,9 +95,7 @@ function Install-NativeGray {
         if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $Sha256) {
             throw 'Archive checksum mismatch; installation unchanged'
         }
-        # A checksum detects corruption, not independent publisher authenticity.
-        # Strict flat allowlist prevents ZIP traversal, links, alternate streams,
-        # duplicate case-insensitive names, and unbounded extraction.
+
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $zip = [IO.Compression.ZipFile]::OpenRead($archive)
         try {
@@ -125,8 +118,7 @@ function Install-NativeGray {
         } finally { $zip.Dispose() }
         $version = Assert-GrayVersion (Join-Path $temp 'gray.exe')
         [IO.Directory]::CreateDirectory($destination) | Out-Null
-        # Serialize installers in this destination, not in a possibly different
-        # GRAY_HOME. Leave the lock file behind; deleting it races another opener.
+
         try { $lock = [IO.File]::Open((Join-Path $destination '.install.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
         catch { throw 'Another install is active or the destination is not writable' }
         $stage = Join-Path $destination ('.gray-' + [guid]::NewGuid().ToString('N') + '.exe')
@@ -137,8 +129,7 @@ function Install-NativeGray {
         $backup = Join-Path $destination ('.gray-backup-' + [guid]::NewGuid().ToString('N') + '.exe')
         $hadBinary = [IO.File]::Exists($binary)
         try {
-            # Same-volume replacement: preserve the original on sharing errors.
-            # Do not try to replace the running gray.exe by elevation/reboot.
+
             if ($hadBinary) { [IO.File]::Replace($stage, $binary, $backup) }
             else { [IO.File]::Move($stage, $binary) }
         } catch { throw 'Cannot replace gray.exe. Close all Gray sessions and retry; check destination permissions.' }
@@ -162,11 +153,10 @@ function Install-NativeGray {
     } finally {
         if ($stage -and [IO.File]::Exists($stage)) { [IO.File]::Delete($stage) }
         if ($lock) { $lock.Dispose() }
-        # Never delete an unrecovered backup: retain it for manual recovery.
+
         if ($backup -and [IO.File]::Exists($backup)) { Write-Warning "Previous binary retained at $backup" }
         if ([IO.Directory]::Exists($temp)) { Remove-Item -LiteralPath $temp -Recurse -Force }
     }
 }
 
-# Dot-source exposes pure helpers to tests without performing an installation.
 if ($MyInvocation.InvocationName -ne '.') { Install-NativeGray }

@@ -85,7 +85,7 @@ fn gitignore_is_respected() {
 fn literal_and_ignore_case_flags() {
     let d = tempfile::tempdir().unwrap();
     write(d.path(), "f.txt", "Value: a.b\nvalue: A-B\n");
-    // regex a.b matches "a.b" only; literal treats "." as a dot (still one hit here)
+
     let re = search("a.b", d.path(), true, &None, false, false, 100, 0).unwrap();
     assert_eq!(re.hits.len(), 1);
     let lit = search("a.b", d.path(), true, &None, false, true, 100, 0).unwrap();

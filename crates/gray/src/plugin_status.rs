@@ -67,11 +67,6 @@ pub(crate) fn drop_boot() {
     }
 }
 
-/// Tool defs the lazy agent will carry once built: the shared boot's
-/// plugins plus the always-on surface extras, merged through the same
-/// registry `build_agent` uses. Startup resume replays its transcript
-/// before that agent exists, so its card labels/previews come from here
-/// instead of `agent.tool_defs()`.
 pub(crate) async fn booted_tool_defs(
     handler: Option<gray_plugin::HostHandler>,
     extra: Vec<Arc<dyn Plugin>>,

@@ -1,46 +1,17 @@
-//! `host/ask` — blocking user questions from sidecar plugins (`questions`,
-//! `permissions`). One [`AskService`] per process, installed by [`install`]
-//! at REPL boot; [`default_handler`] routes `host/ask` to it.
-//!
-//! Surfaces (same question, different I/O):
-//! - interactive TTY: inline TUI modal (digits pick, Tab = notes, Enter =
-//!   submit; Esc resolves empty = decline/skip, never a hang). Rendered
-//!   through the composer's `ask_modal` slot above the input box — no
-//!   alternate screen, no stdin fight (the turn key watcher is stopped
-//!   while the modal owns the keys).
-//! - piped stdin: number-or-free-text per question (the deleted
-//!   `StdinQuestionAsker` semantics, verbatim).
-//! - `--json` with `GRAY_JSON_ASK=1`: the question goes out as an `ask`
-//!   progress row on stdout and the answer comes back as one JSON line on
-//!   stdin (`{"ask_id":N,"answers":{"<id>":["<label>"]}}`). A chat bridge
-//!   driving gray this way (the Discord plugin) shows the question in its
-//!   own UI. Only a questions plugin calling `host/ask` ever asks: gray
-//!   itself has no question tool.
-//! - headless (no TTY, no stdin): empty immediately. Approvals fail closed
-//!   downstream; `request_user_input` reports "no user reachable".
-//!
-//! Timeouts: the plugin enforces its own TTL (300s); the handler TTL here
-//! is 300s too (mirrors `ASK_HANDLER_TTL` in `gray-plugin`). The service
-//! never outlives the turn: [`shutdown`] (cancel token) resolves every
-//! pending ask empty so a replaced agent can't strand a sidecar past 330s.
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-/// One selectable option (mirrors the `gray-questions` contract).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskOption {
     pub label: String,
     pub description: String,
-    /// Multi-select only: starts unchecked even under `default_all`
-    /// (secrets and other explicit opt-ins).
+
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub opt_in: bool,
 }
 
-/// One question (mirrors the `gray-questions` contract).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskQuestion {
     pub id: String,
@@ -48,10 +19,10 @@ pub struct AskQuestion {
     pub question: String,
     #[serde(default)]
     pub options: Vec<AskOption>,
-    /// Checkbox question: the answer lists every checked label.
+
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub multi: bool,
-    /// Multi-select only: every option starts checked.
+
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default_all: bool,
 }
@@ -62,16 +33,12 @@ impl AskQuestion {
     }
 }
 
-/// Answers for one question.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AskAnswer {
     pub id: String,
     pub answers: Vec<String>,
 }
 
-/// Parse `host/ask` params. Strict on shape (a confused plugin must not
-/// become a prompt), lenient on content (empty question list resolves
-/// empty — the deleted zero-question guard, verbatim).
 fn parse_params(v: &serde_json::Value) -> anyhow::Result<(Vec<AskQuestion>, bool)> {
     let questions: Vec<AskQuestion> =
         serde_json::from_value(v.get("questions").cloned().unwrap_or(serde_json::json!([])))
@@ -91,7 +58,6 @@ fn answers_json(answers: &[AskAnswer]) -> serde_json::Value {
     serde_json::json!({ "answers": map })
 }
 
-/// Pending ask state, shared between the handler future and the UI driver.
 struct PendingAsk {
     questions: Vec<AskQuestion>,
     tx: tokio::sync::oneshot::Sender<Vec<AskAnswer>>,
@@ -103,31 +69,22 @@ struct Service {
     pending: Mutex<HashMap<u64, PendingAsk>>,
     next: Mutex<u64>,
     cancel: tokio_util::sync::CancellationToken,
-    /// `Some(turn_id)` when asks go over the `--json` wire (see
-    /// [`install_json`]).
+
     json_turn: Option<String>,
-    /// The GRAY_STDIN_STEER demux owns stdin: asks emit their row and
-    /// answers arrive through [`deliver_json_answer`] instead of a
-    /// per-ask stdin reader.
+
     demux: std::sync::atomic::AtomicBool,
 }
 
 static SERVICE: Mutex<Option<Arc<Service>>> = Mutex::new(None);
 
-/// Install the process ask service. Called once at REPL boot (before the
-/// first turn) and in `-p`/headless paths with `tui: None`.
 pub fn install(tui: Option<crate::composer::SharedTui>, interactive: bool) {
     install_service(tui, interactive, None);
 }
 
-/// Install the `--json` wire surface for turn `turn_id`: asks become `ask`
-/// rows on stdout, answers come back on stdin.
 pub fn install_json(turn_id: String) {
     install_service(None, false, Some(turn_id));
 }
 
-/// `GRAY_JSON_ASK` truthy check (same spelling rules as
-/// `GRAY_SHOW_REASONING`).
 pub fn json_enabled() -> bool {
     std::env::var("GRAY_JSON_ASK").is_ok_and(|v| {
         matches!(
@@ -154,30 +111,34 @@ fn install_service(
     *SERVICE.lock().expect("ask service") = Some(svc);
 }
 
-/// Mark stdin as owned by the GRAY_STDIN_STEER demux: per-ask drivers must
-/// not read it (answers come through [`deliver_json_answer`]).
 pub fn set_demux() {
     if let Some(svc) = SERVICE.lock().expect("ask service").as_ref() {
         svc.demux.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
-/// The demux's half of `drive_json`: route one stdin answer line to its
-/// pending ask. Lines for unknown/closed ids are dropped.
 pub fn deliver_json_answer(ask_id: u64, line: &str) {
+    let excerpt = crate::repl::format::truncate_chars(line.trim(), 120);
     let svc = SERVICE.lock().expect("ask service").clone();
-    let Some(svc) = svc else { return };
+    let Some(svc) = svc else {
+        log::warn!("ask answer dropped: no ask service (ask_id {ask_id}): {excerpt}");
+        return;
+    };
     let mut pending = svc.pending.lock().expect("ask pending");
-    if let Some(p) = pending.get(&ask_id)
-        && let Some(answers) = parse_json_answer(line, ask_id, &p.questions)
-        && let Some(p) = pending.remove(&ask_id)
-    {
-        let _ = p.tx.send(answers);
+    let Some(p) = pending.get(&ask_id) else {
+        log::warn!("ask answer dropped: unknown or closed ask_id {ask_id}: {excerpt}");
+        return;
+    };
+    match parse_json_answer(line, ask_id, &p.questions) {
+        Some(answers) => {
+            if let Some(p) = pending.remove(&ask_id) {
+                let _ = p.tx.send(answers);
+            }
+        }
+        None => log::warn!("ask answer dropped: unparsable line for ask_id {ask_id}: {excerpt}"),
     }
 }
 
-/// True while an ask modal owns the viewport keys (the turn key watcher
-/// must not consume them — see `key_watcher.rs`).
 pub(crate) fn is_ask_live() -> bool {
     SERVICE
         .lock()
@@ -190,7 +151,6 @@ pub(crate) fn is_ask_live() -> bool {
         })
 }
 
-/// Resolve every in-flight ask empty (turn replaced / process exiting).
 pub fn shutdown() {
     let mut guard = SERVICE.lock().expect("ask service");
     if let Some(svc) = guard.take() {
@@ -202,10 +162,7 @@ pub fn shutdown() {
     }
 }
 
-/// Route one `host/ask` call: parse, surface, await answers (300s TTL).
 pub async fn handle_ask(params: serde_json::Value) -> serde_json::Value {
-    // Service check first: a missing install is a host bug, always loud —
-    // even for empty/nonblocking params (which otherwise short-circuit).
     let svc = SERVICE.lock().expect("ask service").clone();
     let Some(svc) = svc else {
         return serde_json::json!({"error": "host/ask: ask service not installed"});
@@ -218,8 +175,6 @@ pub async fn handle_ask(params: serde_json::Value) -> serde_json::Value {
         return serde_json::json!({ "answers": {} });
     }
     if !blocking {
-        // v1: non-blocking resolves empty immediately (no follow-up
-        // message injection — documented in docs/plugins.md).
         return serde_json::json!({ "answers": {} });
     }
     if svc.cancel.is_cancelled() {
@@ -240,17 +195,12 @@ pub async fn handle_ask(params: serde_json::Value) -> serde_json::Value {
         .lock()
         .expect("ask pending")
         .insert(id, PendingAsk { questions, tx });
-    // Drive the UI on its own task so the TTL and the cancel token are
-    // already armed while it runs (audit #2): awaiting the driver *before*
-    // the select meant a blocked stdin read or a TUI that never answers
-    // suspended the 300s timeout and the cancellation branch entirely.
+
     let drive_svc = svc.clone();
     let drive = tokio::spawn(async move {
         if drive_svc.demux.load(std::sync::atomic::Ordering::Relaxed)
             && drive_svc.json_turn.is_some()
         {
-            // The stdin demux owns the pipe: emit the ask row, then park —
-            // answers land via `deliver_json_answer`, TTL/cancel still win.
             let turn = drive_svc.json_turn.clone().expect("json_turn checked");
             let questions = {
                 let pending = drive_svc.pending.lock().expect("ask pending");
@@ -281,9 +231,7 @@ pub async fn handle_ask(params: serde_json::Value) -> serde_json::Value {
         _ = svc.cancel.cancelled() => Vec::new(),
         _ = drive => Vec::new(),
     };
-    // The driver may still be alive (a TUI waiting on a human after the
-    // TTL): drop the pending entry so its send finds nothing and it exits
-    // instead of holding the question open.
+
     svc.pending.lock().expect("ask pending").remove(&id);
     let mut out = answers_json(&answers);
     if let Some(map) = out.get_mut("answers").and_then(|m| m.as_object_mut()) {
@@ -306,9 +254,6 @@ pub async fn handle_ask(params: serde_json::Value) -> serde_json::Value {
     out
 }
 
-/// `--json` surface: one `ask` row out, one answer line back. Answer lines
-/// for another ask id are skipped; EOF resolves empty (the bridge went
-/// away). Runs on a blocking thread, so the 300s TTL still applies.
 async fn drive_json(svc: &Arc<Service>, id: u64, turn: String) {
     let svc = svc.clone();
     tokio::task::spawn_blocking(move || {
@@ -347,7 +292,6 @@ async fn drive_json(svc: &Arc<Service>, id: u64, turn: String) {
     .ok();
 }
 
-/// The `ask` progress row for the `--json` wire.
 fn json_ask_row(turn: &str, id: u64, questions: &[AskQuestion]) -> serde_json::Value {
     serde_json::json!({
         "protocol": 1, "turn_id": turn, "type": "progress", "phase": "ask",
@@ -355,8 +299,6 @@ fn json_ask_row(turn: &str, id: u64, questions: &[AskQuestion]) -> serde_json::V
     })
 }
 
-/// One answer line from the bridge, if it answers ask `id`: answers by
-/// question id, in question order; unknown ids are ignored.
 fn parse_json_answer(line: &str, id: u64, questions: &[AskQuestion]) -> Option<Vec<AskAnswer>> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if v.get("ask_id").and_then(|a| a.as_u64()) != Some(id) {
@@ -382,12 +324,6 @@ fn parse_json_answer(line: &str, id: u64, questions: &[AskQuestion]) -> Option<V
     )
 }
 
-/// Piped/headless surface: one stdin line per question (number picks an
-/// option, free text becomes a note, EOF/blank → skip). Runs on a blocking
-/// thread — never on the turn's async runtime. Headless (stdin without data
-/// and not a TTY) resolves empty immediately. The pending entry stays in
-/// the map until `handle_ask` removes it after the race, so the 300s
-/// timeout still applies while stdin blocks.
 async fn drive_stdin(svc: &Arc<Service>, id: u64) {
     let svc = svc.clone();
     tokio::task::spawn_blocking(move || {
@@ -410,10 +346,7 @@ async fn drive_stdin(svc: &Arc<Service>, id: u64) {
 
 fn ask_stdin(questions: &[AskQuestion]) -> Vec<AskAnswer> {
     use std::io::{BufRead, Write};
-    // Headless fast path: stdin is not a TTY and has no data ready — do
-    // not block a daemon turn on a human that will never arrive. A
-    // best-effort poll: readable stdin (pipe with data, TTY user) proceeds
-    // to the per-question prompts below.
+
     if !stdin_has_data() {
         return Vec::new();
     }
@@ -506,8 +439,6 @@ fn ask_stdin_multi(stdin: &std::io::Stdin, q: &AskQuestion) -> AskAnswer {
     }
 }
 
-/// True when stdin is worth blocking on: a TTY (a human may type), or a
-/// pipe with bytes already available. Non-blocking poll only — never waits.
 fn stdin_has_data() -> bool {
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
@@ -518,13 +449,13 @@ fn stdin_has_data() -> bool {
         use std::os::fd::AsFd;
         let stdin = std::io::stdin();
         let fd = stdin.as_fd();
-        // poll(0): data (or HUP) ready → proceed; nothing → empty now.
+
         let mut pfd = libc::pollfd {
             fd: std::os::fd::AsRawFd::as_raw_fd(&fd),
             events: libc::POLLIN | libc::POLLHUP,
             revents: 0,
         };
-        // `libc` is already a workspace dependency (gray-tools).
+
         let r = unsafe { libc::poll(&mut pfd, 1, 0) };
         r > 0
     }
@@ -538,9 +469,6 @@ fn t_lock(tui: &crate::composer::SharedTui) -> std::sync::MutexGuard<'_, crate::
     tui.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Interactive surface: inline TUI modal owning the viewport until submit.
-/// Runs on a blocking thread with short TUI locks (same discipline as the
-/// turn key watcher it replaces for the duration).
 async fn drive_tui(svc: &Arc<Service>, id: u64) {
     let svc = svc.clone();
     tokio::task::spawn_blocking(move || {
@@ -554,19 +482,18 @@ async fn drive_tui(svc: &Arc<Service>, id: u64) {
                 return;
             }
         }
-        // Park the live turn status; restore it on exit.
+
         let saved_status = t_lock(&tui).take_status();
         t_lock(&tui).set_status(Some("Question"));
         let answers = run_ask_modal(&tui, &mut state, &svc.cancel).unwrap_or_default();
         {
             let mut t = t_lock(&tui);
-            // Transcript summary (the deleted stacked Q&A replay, verbatim shape).
+
             push_ask_summary(&mut t, &state.questions, &answers);
             t.restore_status(saved_status);
             let _ = t.draw();
         }
-        // Resolve the handler future (timeout arm may have fired first —
-        // second send is a silent no-op).
+
         let mut pending = svc.pending.lock().expect("ask pending");
         if let Some(p) = pending.remove(&id) {
             let _ = p.tx.send(answers);
@@ -576,10 +503,6 @@ async fn drive_tui(svc: &Arc<Service>, id: u64) {
     .ok();
 }
 
-/// Modal state: one cursor per question, sequential flow (answer q1,
-/// advance; Backspace skips). Option 1 preselected AND committed (the
-/// deleted overlay's semantics: Enter submits with zero moves, highlight
-/// can never silently come back empty).
 pub(crate) struct AskModalState {
     id: u64,
     pub(crate) questions: Vec<AskQuestion>,
@@ -632,7 +555,7 @@ impl AskModalState {
         if self.multi() {
             return self.questions[self.idx].options.len();
         }
-        self.questions[self.idx].options.len() + 1 // + Other
+        self.questions[self.idx].options.len() + 1
     }
 
     fn option_label(&self, q: usize, i: usize) -> &str {
@@ -673,7 +596,6 @@ impl AskModalState {
     }
 }
 
-/// One rendered modal row: (glyph, label, description).
 pub(crate) fn ask_rows(state: &AskModalState) -> Vec<(String, String, String)> {
     let mut rows: Vec<(String, String, String)> = Vec::new();
     if state.questions.is_empty() {
@@ -726,7 +648,7 @@ fn draw_ask_modal(tui: &crate::composer::SharedTui, state: &AskModalState) {
     let mut t = t_lock(tui);
     t.ask_modal = Some(crate::composer::AskModal {
         rows: ask_rows(state),
-        cursor: state.cursor[state.idx] + 1, // +1 past the header row
+        cursor: state.cursor[state.idx] + 1,
     });
     let _ = t.draw();
 }
@@ -764,7 +686,7 @@ fn run_ask_modal(
         }
         if key.code == KeyCode::Esc {
             clear_ask_modal(tui);
-            return None; // Esc always cancels (decline/skip downstream)
+            return None;
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             clear_ask_modal(tui);
@@ -815,7 +737,6 @@ fn run_ask_modal(
                     if state.notes_open[i] && !state.notes[i].is_empty() {
                         state.notes[i].pop();
                     } else {
-                        // Skip explicitly (the deleted Backspace-skips semantic).
                         state.committed[i] = false;
                         state.notes[i].clear();
                         state.checked[i].iter_mut().for_each(|c| *c = false);
@@ -837,9 +758,6 @@ fn run_ask_modal(
                     if !key.modifiers.contains(KeyModifiers::CONTROL)
                         && !key.modifiers.contains(KeyModifiers::ALT) =>
                 {
-                    // Digits pick directly; other text goes to notes
-                    // (opening them implicitly, like the deleted overlay's
-                    // "typing jumps into notes").
                     if let Some(d) = c.to_digit(10)
                         && !state.notes_open[i]
                         && (1..=9).contains(&d)
@@ -887,7 +805,6 @@ pub(crate) fn ask_questions_modal(
     answers
 }
 
-/// Stacked Q&A replay (`? question` / `→ answer`, verbatim shape).
 fn push_ask_summary(
     t: &mut crate::composer::Tui,
     questions: &[AskQuestion],

@@ -1,18 +1,3 @@
-//! `gray send <session> "text"`: message a running gray session directly.
-//!
-//! A send is one entry in the session's inbox (`<home>/cron/inbox/<session>`,
-//! the spool cron deliveries already use), marked `"kind":"send"`. The
-//! session's REPL claims it one of two ways:
-//! - mid-turn: [`claim_steerable`] at a tool boundary, through the same steer
-//!   hook as the TUI's own queued input (text-only; attachments wait);
-//! - idle: [`claim_all`] from `repl::cron::idle_wake`, which starts a turn
-//!   with the origin line and the attachments. If no turn runs, [`hold_back`]
-//!   puts the sends back as queued.
-//!
-//! Receipts live in `<home>/cron/send-receipts/<id>.json` and `gray send
-//! --wait` polls them. They sit outside the inbox so the REPL's poll never
-//! mistakes a receipt for a delivery.
-
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -20,17 +5,15 @@ use anyhow::Context;
 use crate::cron_serve;
 use crate::session_store::{JsonlSessionStore, SessionId};
 
-/// Inbox entry `kind` for a direct send (cron entries carry no kind).
 pub const KIND: &str = "send";
-/// Receipt states. A receipt file appears only once a session owns the message.
+
 pub const STATE_QUEUED: &str = "queued";
 pub const STATE_NOT_LIVE: &str = "queued (session not live)";
 pub const STATE_STEERED: &str = "steered";
 pub const STATE_DELIVERED: &str = "delivered";
-/// A send put back because no turn ran waits this long before it is offered again.
+
 const RETRY_MS: u64 = 60_000;
 
-/// One claimed direct send.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SendMsg {
     pub session: String,
@@ -40,18 +23,14 @@ pub struct SendMsg {
     pub attachments: Vec<PathBuf>,
 }
 
-/// The line the transcript and the model both see before a sent message, so
-/// it is never mistaken for something the user typed.
 pub fn prompt_for(from: &str, text: &str) -> String {
     format!("↳ from {from}\n{text}")
 }
 
-/// Origin label when `--from` is not given: the sending gray session, else `cli`.
 pub fn default_label() -> String {
     std::env::var("GRAY_SESSION_ID").unwrap_or_default()
 }
 
-/// Strips control characters and caps the label; an empty label is `cli`.
 pub fn clean_label(raw: &str) -> String {
     let s: String = raw.chars().filter(|c| !c.is_control()).take(64).collect();
     let s = s.trim();
@@ -62,14 +41,12 @@ pub fn clean_label(raw: &str) -> String {
     }
 }
 
-/// True for an inbox entry that is a direct send (cron drains skip these).
 pub fn is_send_entry(text: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(text)
         .ok()
         .is_some_and(|v| v.get("kind").and_then(|k| k.as_str()) == Some(KIND))
 }
 
-/// True for a send put back after no turn ran, until its retry time.
 pub fn is_held(text: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(text)
         .ok()
@@ -84,7 +61,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Parses a send entry; `None` when a required field is missing.
 fn parse_send(text: &str, session: &str) -> Option<SendMsg> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     if v.get("kind")?.as_str()? != KIND {
@@ -106,18 +82,14 @@ fn parse_send(text: &str, session: &str) -> Option<SendMsg> {
     })
 }
 
-/// Receipt ids come from inbox files another same-user process can write, so
-/// they must not be able to name a path outside the receipts dir.
 fn safe_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// `<home>/cron/send-receipts`.
 pub fn receipt_dir(home: &Path) -> PathBuf {
     home.join("cron").join("send-receipts")
 }
 
-/// Creates a directory that only the owner can read (0700 on unix).
 fn private_dir(dir: &Path) -> std::io::Result<()> {
     if dir.is_dir() {
         return Ok(());
@@ -129,7 +101,6 @@ fn private_dir(dir: &Path) -> std::io::Result<()> {
     b.create(dir)
 }
 
-/// Atomic 0600 write: temp file, then rename.
 fn write_private_file(dir: &Path, name: &str, body: &str) -> anyhow::Result<()> {
     private_dir(dir)?;
     let tmp = dir.join(format!(".{name}.tmp"));
@@ -143,7 +114,6 @@ fn write_private_file(dir: &Path, name: &str, body: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// The inbox entry body for one send.
 fn entry_json(
     id: &str,
     from: &str,
@@ -165,7 +135,6 @@ fn entry_json(
     v.to_string()
 }
 
-/// Queues one send for `session`; returns its id. Errors on an unsafe id.
 pub fn enqueue(
     home: &Path,
     session: &str,
@@ -181,7 +150,6 @@ pub fn enqueue(
     Ok(id)
 }
 
-/// Writes the receipt for send `id` addressed to `session`.
 pub fn write_receipt(home: &Path, session: &str, id: &str, state: &str) -> anyhow::Result<()> {
     if !safe_id(id) {
         anyhow::bail!("unsafe send id {id:?}");
@@ -191,14 +159,12 @@ pub fn write_receipt(home: &Path, session: &str, id: &str, state: &str) -> anyho
         .context("write send receipt")
 }
 
-/// Removes a receipt: the message is back in the inbox, so it is queued again.
 fn remove_receipt(home: &Path, id: &str) {
     if safe_id(id) {
         let _ = std::fs::remove_file(receipt_dir(home).join(format!("{id}.json")));
     }
 }
 
-/// The receipt state for send `id`, once a session has consumed it.
 pub fn read_receipt_state(home: &Path, id: &str) -> Option<String> {
     if !safe_id(id) {
         return None;
@@ -208,7 +174,6 @@ pub fn read_receipt_state(home: &Path, id: &str) -> Option<String> {
     v.get("state")?.as_str().map(str::to_string)
 }
 
-/// Non-dot files in the session's inbox, oldest first.
 fn pending_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -222,10 +187,6 @@ fn pending_files(dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Claims every ready send for `session` (idle path). A file is claimed by
-/// removing it, so two readers never both deliver one message. Cron entries
-/// and held sends stay where they are. No receipt is written here: the caller
-/// marks the sends delivered once a turn owns them ([`mark_delivered`]).
 pub fn claim_all(home: &Path, session: &str) -> Vec<SendMsg> {
     let Some(dir) = cron_serve::session_inbox(home, session) else {
         return Vec::new();
@@ -251,8 +212,25 @@ pub fn claim_all(home: &Path, session: &str) -> Vec<SendMsg> {
     out
 }
 
-/// Claims the oldest ready text-only send for `session` to steer a running
-/// turn. Sends with attachments stay queued for the idle turn that can carry them.
+pub fn peek_sends(home: &Path, session: &str) -> Vec<SendMsg> {
+    let Some(dir) = cron_serve::session_inbox(home, session) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for path in pending_files(&dir) {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !is_send_entry(&text) || is_held(&text) {
+            continue;
+        }
+        if let Some(msg) = parse_send(&text, session) {
+            out.push(msg);
+        }
+    }
+    out
+}
+
 pub fn claim_steerable(home: &Path, session: &str) -> Option<SendMsg> {
     let dir = cron_serve::session_inbox(home, session)?;
     for path in pending_files(&dir) {
@@ -281,8 +259,6 @@ pub fn claim_steerable(home: &Path, session: &str) -> Option<SendMsg> {
     None
 }
 
-/// Receipts say `delivered` once a turn owns the messages; called right before
-/// the turn starts. [`hold_back`] reverts it if the turn never runs.
 pub fn mark_delivered(msgs: &[SendMsg]) {
     let Ok(home) = crate::setup::gray_home() else {
         return;
@@ -294,9 +270,6 @@ pub fn mark_delivered(msgs: &[SendMsg]) {
     }
 }
 
-/// Puts claimed sends back in the inbox as queued because no turn ran for them.
-/// Same id, so the sender's receipt follows the message; offered again after
-/// [`RETRY_MS`]. A send is never dropped here: a failed put-back is logged loudly.
 pub fn hold_back(msgs: &[SendMsg]) {
     let Ok(home) = crate::setup::gray_home() else {
         log::error!("send hold-back: no gray home; {} send(s) lost", msgs.len());
@@ -325,7 +298,6 @@ fn hold_back_one(home: &Path, m: &SendMsg) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolves `--attach` paths against the sender's cwd; each must be a file.
 fn resolve_attachments(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     paths
         .iter()
@@ -341,14 +313,11 @@ fn resolve_attachments(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         .collect()
 }
 
-/// Exit 2 with a message: the caller's mistake, not a runtime failure.
 fn usage(msg: String) -> ! {
     eprintln!("gray send: {msg}");
     std::process::exit(2)
 }
 
-/// `gray send`: queue the message, print the receipt JSON, and with `wait`
-/// block until the session consumes it or the time runs out.
 pub async fn run_cli(
     session: &str,
     text: &str,

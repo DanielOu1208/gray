@@ -1,31 +1,9 @@
-//! Named editor/app actions and the keys bound to them.
-//!
-//! Both composer input loops (the idle prompt and the mid-turn key
-//! watcher) resolve a key press to actions here, so the bindings cannot
-//! drift between the two. Users rebind in `~/.gray/keybindings.json` using
-//! pi's action ids and key syntax, so a pi `keybindings.json` carries over:
-//!
-//! ```json
-//! { "tui.editor.cursorWordLeft": ["alt+left", "ctrl+b"],
-//!   "app.exit": [],
-//!   "/compact": "ctrl+shift+k" }
-//! ```
-//!
-//! A configured value replaces the action's defaults; `[]` unbinds it. A
-//! key starting with `/` binds a slash command (submitted as if typed).
-//! Ctrl+C always cancels/clears regardless of config: it is the escape
-//! hatch out of raw mode and cannot be unbound.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// An action a key can trigger. Order of [`ALL`] is resolution priority:
-/// when one key is bound to several actions, the first that applies in
-/// the current context wins (popup selection before editing, Ctrl+D exits
-/// on an empty draft before it deletes forward).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Action {
     SelectUp,
@@ -56,7 +34,6 @@ pub enum Action {
     DeleteToLineEnd,
 }
 
-/// Every action in resolution-priority order.
 pub const ALL: &[Action] = &[
     Action::SelectUp,
     Action::SelectDown,
@@ -87,7 +64,6 @@ pub const ALL: &[Action] = &[
 ];
 
 impl Action {
-    /// pi's id for this action (`keybindings.json` key).
     pub fn id(self) -> &'static str {
         match self {
             Action::SelectUp => "tui.select.up",
@@ -185,7 +161,6 @@ impl Action {
     }
 }
 
-/// A normalized key chord: modifiers (ctrl/alt/shift/super) plus a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Chord {
     pub code: ChordKey,
@@ -216,8 +191,6 @@ pub enum ChordKey {
 }
 
 impl Chord {
-    /// Normalizes a terminal key event so `shift+a`, `A` and Shift-reported
-    /// symbols compare equal to what a user writes.
     pub fn from_event(ev: &KeyEvent) -> Option<Chord> {
         let m = ev.modifiers;
         let mut shift = m.contains(KeyModifiers::SHIFT);
@@ -227,7 +200,6 @@ impl Chord {
                     shift = true;
                     ChordKey::Char(c.to_ascii_lowercase())
                 } else {
-                    // A shifted symbol (`?`, `{`) already encodes Shift.
                     if !c.is_ascii_alphabetic() {
                         shift = false;
                     }
@@ -264,13 +236,12 @@ impl Chord {
         })
     }
 
-    /// Parses pi's syntax: `ctrl+shift+x`, `alt+enter`, `pageUp`, `f5`, `?`.
     pub fn parse(s: &str) -> Result<Chord, String> {
         let s = s.trim();
         if s.is_empty() {
             return Err("empty key".into());
         }
-        // `ctrl++` / a bare `+`: the key itself is the last segment.
+
         let (mods, key) = match s.strip_suffix("++") {
             Some(rest) => (rest, "+"),
             None if s == "+" => ("", "+"),
@@ -330,7 +301,6 @@ impl Chord {
                             c.shift = true;
                         }
                         if !ch.is_ascii_alphabetic() {
-                            // Shifted symbols are written as the symbol.
                             c.shift = false;
                         }
                         ChordKey::Char(ch.to_ascii_lowercase())
@@ -342,7 +312,6 @@ impl Chord {
         Ok(c)
     }
 
-    /// Canonical display form (`ctrl+shift+x`).
     pub fn display(&self) -> String {
         let mut out = String::new();
         if self.ctrl {
@@ -380,22 +349,20 @@ impl Chord {
     }
 }
 
-/// What a key resolves to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Binding {
     Action(Action),
-    /// Submit this slash command as if typed (`/compact`).
+
     Command(String),
 }
 
-/// The active key table plus problems found loading it.
 #[derive(Debug, Clone, Default)]
 pub struct Keymap {
     by_action: BTreeMap<Action, Vec<Chord>>,
     commands: Vec<(Chord, String)>,
-    /// `keybindings.json` problems: unknown ids, bad keys.
+
     pub warnings: Vec<String>,
-    /// Ids that were overridden by the user file.
+
     pub overridden: Vec<String>,
     pub source: Option<PathBuf>,
 }
@@ -414,7 +381,6 @@ impl Keymap {
         km
     }
 
-    /// Defaults overlaid with a `keybindings.json` body.
     pub fn from_json(body: &str) -> Keymap {
         let mut km = Keymap::defaults();
         let value: serde_json::Value = match serde_json::from_str(body) {
@@ -468,7 +434,7 @@ impl Keymap {
                 km.warnings.push(format!("unknown action `{id}`"));
             }
         }
-        // Ctrl+C is the raw-mode escape hatch: always clears/cancels.
+
         let ctrl_c = Chord::parse("ctrl+c").expect("ctrl+c parses");
         let clear = km.by_action.entry(Action::Clear).or_default();
         if !clear.contains(&ctrl_c) {
@@ -477,8 +443,6 @@ impl Keymap {
         km
     }
 
-    /// Everything bound to `chord`, slash commands first (they are the
-    /// user's explicit choice), then actions in priority order.
     pub fn resolve(&self, chord: &Chord) -> Vec<Binding> {
         let mut out: Vec<Binding> = self
             .commands
@@ -503,15 +467,12 @@ impl Keymap {
     }
 }
 
-/// pi ids gray has no equivalent for yet: accepted silently so a pi
-/// `keybindings.json` loads without a wall of warnings.
 fn is_known_pi_only(id: &str) -> bool {
     id.starts_with("app.") || id.starts_with("tui.")
 }
 
 static ACTIVE: RwLock<Option<Keymap>> = RwLock::new(None);
 
-/// The active keymap (defaults until [`load_into_active`] runs).
 pub fn active() -> Keymap {
     ACTIVE
         .read()
@@ -526,7 +487,6 @@ pub fn set_active(km: Keymap) {
     }
 }
 
-/// Resolves a live key event against the active keymap.
 pub fn resolve_event(ev: &KeyEvent) -> Vec<Binding> {
     let Some(chord) = Chord::from_event(ev) else {
         return Vec::new();
@@ -548,7 +508,6 @@ pub fn path_in(gray_home: &Path) -> PathBuf {
     gray_home.join("keybindings.json")
 }
 
-/// Reads `<gray_home>/keybindings.json` (defaults when absent).
 pub fn load_in(gray_home: &Path) -> Keymap {
     let path = path_in(gray_home);
     match std::fs::read_to_string(&path) {
@@ -566,7 +525,6 @@ pub fn load_in(gray_home: &Path) -> Keymap {
     }
 }
 
-/// Loads the user's file into the active keymap; returns its warnings.
 pub fn load_into_active(gray_home: &Path) -> Vec<String> {
     let km = load_in(gray_home);
     let warnings = km.warnings.clone();

@@ -18,7 +18,6 @@ fn empty_note_is_contract_exact() {
 
 #[test]
 fn eof_note_suggests_tail() {
-    // long.txt shape: 3000 lines, offset=9999 → suggest 2951.
     assert_eq!(
         offset_past_eof("long.txt", 9999, 3000),
         "[read: offset 9999 is beyond the end of long.txt (3000 lines). \
@@ -122,6 +121,6 @@ fn dedup_stub_is_contract_exact_and_small() {
              content omitted. If that result is no longer visible (compacted), \
              call read again and it will be returned in full.]"
     );
-    // T3.3 accept: stub < 60 tokens (bytes/4).
+
     assert!((s.len() as u64) / 4 < 60, "{s}");
 }

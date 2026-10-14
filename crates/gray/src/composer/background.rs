@@ -1,4 +1,3 @@
-//! Host-owned Kitty placement. The plugin supplies an already-prepared PNG.
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -36,7 +35,7 @@ impl Background {
         limits.max_alloc = Some(64 * 1024 * 1024);
         reader.limits(limits);
         reader.decode()?;
-        // Two adjacent IDs: wallpaper and transparent layering sentinel.
+
         let id = ((uuid::Uuid::new_v4().as_u128() as u32) & 0x7fff_fffe) + 1;
         Ok(Self {
             png: base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -55,7 +54,6 @@ impl Background {
             return Ok(());
         }
         if !self.uploaded {
-            // Mark before writing so a partial upload is cleaned up too.
             self.uploaded = true;
             for (index, chunk) in self.png.as_bytes().chunks(4096).enumerate() {
                 let more = usize::from((index + 1) * 4096 < self.png.len());
@@ -69,8 +67,7 @@ impl Background {
             }
         }
         write!(out, "\x1b7\x1b[H")?;
-        // Ghostty 1.1.3 partitions negative-z-only images incorrectly. A transparent
-        // nonnegative placement supplies the boundary; no visible overlay or timer.
+
         write!(
             out,
             "\x1b_Ga=T,f=32,s=1,v=1,i={},p=1,z=0,C=1,q=2;AAAAAA==\x1b\\",

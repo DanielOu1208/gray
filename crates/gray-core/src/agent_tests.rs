@@ -4,18 +4,16 @@ use crate::parallel::ENV_LOCK;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-/// Provider whose responses are scripted up front, one event list per
-/// expected request.
 struct FakeProvider {
     scripted: Mutex<VecDeque<Vec<StreamEvent>>>,
     failures: Mutex<VecDeque<ProviderError>>,
-    /// Scripts that stream their events and then fail mid-turn.
+
     partial_failures: Mutex<VecDeque<(Vec<StreamEvent>, ProviderError)>>,
     seen_systems: std::sync::Arc<Mutex<Vec<Option<String>>>>,
-    /// (system, messages) of every request served so far, in order.
+
     #[allow(clippy::type_complexity)]
     seen_requests: std::sync::Arc<Mutex<Vec<(Option<String>, Vec<Message>)>>>,
-    /// Tool names advertised in every request served so far, in order.
+
     seen_tools: std::sync::Arc<Mutex<Vec<Vec<String>>>>,
 }
 
@@ -41,18 +39,15 @@ impl FakeProvider {
         self
     }
 
-    /// System prompts of every request served so far, in order.
     fn seen_systems(&self) -> std::sync::Arc<Mutex<Vec<Option<String>>>> {
         self.seen_systems.clone()
     }
 
-    /// Full (system, messages) shape of every request served so far.
     #[allow(clippy::type_complexity)]
     fn seen_requests(&self) -> std::sync::Arc<Mutex<Vec<(Option<String>, Vec<Message>)>>> {
         self.seen_requests.clone()
     }
 
-    /// Tool names of every request served so far.
     fn seen_tools(&self) -> std::sync::Arc<Mutex<Vec<Vec<String>>>> {
         self.seen_tools.clone()
     }
@@ -104,8 +99,6 @@ impl Provider for FakeProvider {
     }
 }
 
-/// Executor that records every call and answers from a canned table,
-/// falling back to a default output for unknown tools.
 struct FakeExecutor {
     calls: std::sync::Arc<Mutex<Vec<String>>>,
     call_args: std::sync::Arc<Mutex<Vec<(String, serde_json::Value)>>>,
@@ -129,7 +122,6 @@ impl FakeExecutor {
         }
     }
 
-    /// This session has jobs: every turn opens by re-listing them.
     fn with_jobs_note(mut self, note: &str) -> Self {
         self.jobs_note = Some(note.to_string());
         self
@@ -183,8 +175,6 @@ impl ToolExecutor for FakeExecutor {
 
 const TOOL_NAME: &str = "lookup";
 
-/// Concurrency probe: records peak in-flight executions (Task 4: proves
-/// the parallel lane actually overlaps batchable calls).
 struct PeakExecutor {
     cur: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -215,7 +205,6 @@ fn read_tool() -> ToolDef {
     ToolDef::new("read", "r", serde_json::json!({"type": "object"}))
 }
 
-/// One turn issuing two `read` calls (stream indices 0 and 1).
 fn two_read_script() -> Vec<StreamEvent> {
     vec![
         StreamEvent::tool_call_delta(0, Some("c1".into()), Some("read".into()), r#"{"path":"a"}"#),
@@ -278,7 +267,6 @@ async fn reasoning_deltas_stream_and_persist_into_history() {
         .await
         .unwrap();
 
-    // Thinking deltas surface in the event stream, before the text.
     assert!(events.contains(&AgentEvent::thinking_delta("hmm ")));
     assert!(events.contains(&AgentEvent::thinking_delta("let me think")));
     let text_pos = events
@@ -291,7 +279,6 @@ async fn reasoning_deltas_stream_and_persist_into_history() {
         .unwrap();
     assert!(think_pos < text_pos, "reasoning should precede prose");
 
-    // ...and land in the transcript as a thinking block ahead of the text.
     let assistant = &agent.messages()[1];
     assert_eq!(
         assistant.content,
@@ -340,17 +327,11 @@ async fn happy_path_single_tool_round_trip() {
             },
             AgentEvent::tool_call_end("call_1", serde_json::json!({"q": "x"})),
             AgentEvent::tool_result("call_1", "result payload", false),
-            // Round 2's text is a new assistant message: the boundary
-            // separates it from round 1's still-open paragraph.
             AgentEvent::MessageBoundary,
             AgentEvent::text_delta("all done"),
             AgentEvent::StepUsage {
                 usage: Usage::new(20, 10)
             },
-            // turn_end carries billed sums across rounds (10+20 in,
-            // 5+10 out), not the latest report (the StepUsage gauge
-            // above is latest-only: round 2's input already contains
-            // round 1's history).
             AgentEvent::turn_end(
                 StopReason::EndTurn,
                 Usage {
@@ -399,7 +380,6 @@ async fn tool_error_is_fed_back_and_model_recovers() {
         .await
         .expect("run should succeed despite tool error");
 
-    // Error surfaced as data in the event stream...
     assert_eq!(
         events,
         vec![
@@ -417,12 +397,10 @@ async fn tool_error_is_fed_back_and_model_recovers() {
             AgentEvent::StepUsage {
                 usage: Usage::new(10, 5)
             },
-            // Billed across both rounds; the second reports no usage,
-            // so only round one counts.
             AgentEvent::turn_end(StopReason::EndTurn, Usage::new(10, 5)),
         ]
     );
-    // ...and in the transcript handed back to the model.
+
     let feedback = &agent.messages()[2];
     assert_eq!(
         feedback.content,
@@ -433,8 +411,6 @@ async fn tool_error_is_fed_back_and_model_recovers() {
 
 #[tokio::test]
 async fn loop_guard_nudges_once_at_four_then_aborts_at_six() {
-    // Same tool+args 6× in a row → one injected reminder after the 4th
-    // round (arXiv:2609.20804 stuck detection), then the abort at 6.
     let scripts: Vec<Vec<StreamEvent>> = (0..6).map(|i| tool_script(&format!("c{i}"))).collect();
     let provider = FakeProvider::new(scripts);
     let executor = FakeExecutor::new(ToolOutput::ok("ok"));
@@ -454,14 +430,12 @@ async fn loop_guard_nudges_once_at_four_then_aborts_at_six() {
         .map(|(i, _)| i)
         .collect();
     assert_eq!(nudges.len(), 1, "exactly one stall reminder: {nudges:?}");
-    // Reminder lands after the 4th round's result: user prompt, then four
-    // (assistant, result) pairs = index 8, so the reminder is index 9.
+
     assert_eq!(nudges[0], 9, "reminder follows the 4th identical round");
 }
 
 #[tokio::test]
 async fn loop_guard_lets_the_model_recover() {
-    // Three identical rounds → one different call → clean end.
     let mut scripts: Vec<Vec<StreamEvent>> =
         (0..3).map(|i| tool_script(&format!("c{i}"))).collect();
     scripts.push(read_script("r1", "/tmp/other.rs"));
@@ -484,10 +458,6 @@ async fn loop_guard_lets_the_model_recover() {
 
 #[tokio::test]
 async fn loop_guard_exempts_job_polls() {
-    // A repeated command that gray answers with "still running as a job" is
-    // real work moving, so the signature streak must not accumulate. Real
-    // transcript case: pebble's 58/59 run was aborted after three identical
-    // calls while a test job ran.
     let mut scripts: Vec<Vec<StreamEvent>> =
         (0..10).map(|i| tool_script(&format!("c{i}"))).collect();
     scripts.push(end_script());
@@ -511,9 +481,6 @@ async fn loop_guard_exempts_job_polls() {
 
 #[tokio::test]
 async fn running_jobs_are_relisted_at_turn_start() {
-    // A job outlives the timeout notice that introduced it — and any later
-    // compaction — so each turn opens by naming what still runs, with its
-    // log and stop command, right in the request the provider sees.
     let provider = FakeProvider::new(vec![end_script()]);
     let seen = provider.seen_requests();
     let executor = FakeExecutor::new(ToolOutput::ok("unused")).with_jobs_note(
@@ -536,7 +503,7 @@ async fn running_jobs_are_relisted_at_turn_start() {
         }),
         "the first request lists the running job: {first:?}"
     );
-    // And it rides the transcript, so compaction cannot silently drop it.
+
     assert!(
         agent.messages().iter().any(|m| m.role == Role::User
             && m.text_content().contains("[Background jobs still running]")),
@@ -546,8 +513,6 @@ async fn running_jobs_are_relisted_at_turn_start() {
 
 #[tokio::test]
 async fn retryable_failure_with_no_output_retries_whole_turn_and_recovers() {
-    // The provider's in-request budget (5 attempts) dies to a 503 burst; the
-    // agent retries the whole turn instead of killing the run the user waits on.
     let provider = FakeProvider::new(vec![end_script()]).with_failures(vec![
         ProviderError::ServerError("provider-side status 503".into()),
         ProviderError::ServerError("provider-side status 503".into()),
@@ -575,7 +540,6 @@ async fn retryable_failure_with_no_output_retries_whole_turn_and_recovers() {
 
 #[tokio::test]
 async fn retryable_failure_budget_exhausts_and_surfaces() {
-    // Past MAX_TURN_RETRIES the error must surface (never loop forever).
     let provider = FakeProvider::new(vec![]).with_failures(vec![
         ProviderError::ServerError("503".into()),
         ProviderError::ServerError("503".into()),
@@ -598,7 +562,6 @@ async fn retryable_failure_budget_exhausts_and_surfaces() {
 
 #[tokio::test]
 async fn non_retryable_failure_never_retries_whole_turn() {
-    // Auth is terminal: exactly one request, error surfaced.
     let provider = FakeProvider::new(vec![end_script()])
         .with_failures(vec![ProviderError::Auth("401".into())]);
     let seen = provider.seen_requests();
@@ -617,7 +580,6 @@ async fn non_retryable_failure_never_retries_whole_turn() {
 
 #[tokio::test]
 async fn mid_stream_failure_after_visible_delta_does_not_replay() {
-    // Once a delta reached the user, a whole-turn replay would duplicate it.
     let provider = FakeProvider::new(vec![end_script()]).with_partial_failures(vec![(
         vec![StreamEvent::text_delta("visible half")],
         ProviderError::ServerError("503".into()),
@@ -641,8 +603,6 @@ async fn mid_stream_failure_after_visible_delta_does_not_replay() {
 
 #[tokio::test]
 async fn stream_error_notices_forward_live_without_ending_turn() {
-    // Codex steal: provider `Reconnecting...` notices ride as Ok events
-    // so the turn continues; agent must forward them verbatim.
     let provider = FakeProvider::new(vec![vec![
         StreamEvent::stream_error("Reconnecting... 1/3", "status 503: boom"),
         StreamEvent::text_delta("still here"),
@@ -698,15 +658,14 @@ async fn text_deltas_forwarded_in_stream_order() {
         })
         .collect();
     assert_eq!(deltas, vec!["alpha ", "beta ", "gamma"]);
-    // Reassembled text lands in the assistant message verbatim.
+
     assert_eq!(agent.messages()[1], Message::assistant("alpha beta gamma"));
 }
 
 #[tokio::test]
 async fn cancel_between_turns_aborts_gracefully() {
     let provider = FakeProvider::new(vec![tool_script("c1"), tool_script("never_reached")]);
-    // The tool cancels the shared token mid-execution: the current turn
-    // finishes cleanly, the *next* round observes cancellation.
+
     let cancel_token = CancellationToken::new();
     let mut executor = FakeExecutor::new(ToolOutput::ok("ok"));
     let token = cancel_token.clone();
@@ -733,8 +692,6 @@ async fn cancel_between_turns_aborts_gracefully() {
     );
 }
 
-/// Blank input is admitted nowhere: no provider request, no history
-/// write, no events. Replaces the old queue's EmptyInput rejection.
 #[tokio::test]
 async fn blank_input_never_reaches_provider_or_history() {
     let provider = FakeProvider::new(vec![]);
@@ -861,7 +818,7 @@ async fn unknown_tool_name_skips_executor_with_error_result() {
         output.contains("does not exist") && output.contains("nope") && !output.contains(TOOL_NAME),
         "a far miss stays terse — no inventory dump: {output}"
     );
-    // A near-miss name earns a `did you mean` pointing at the real tool.
+
     let hint = crate::tool_out::unknown_tool("lookpu", &[TOOL_NAME.to_string()]);
     assert!(hint.contains("'lookup'"), "got {hint}");
     assert_eq!(agent.messages()[1].role, Role::Assistant);
@@ -946,8 +903,6 @@ async fn malformed_string_args_skips_executor_with_error_result() {
     assert!(output.contains("valid JSON object"), "got {output}");
 }
 
-// --- workstream A-core ---
-
 fn empty_script() -> Vec<StreamEvent> {
     vec![StreamEvent::message_complete(
         Some(StopReason::EndTurn),
@@ -981,11 +936,6 @@ async fn context_overflow_compacts_once_then_continues() {
         Box::new(provider),
         Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
     )
-    // Compaction retains the newest history within min(64k,
-    // window−reserve) behind a leading summary (pi order): seed more than
-    // the 64k retained budget (unknown window) so the oldest messages drop
-    // and the replacement strictly shrinks (a fully-retained history
-    // correctly reports "nothing to gain" and surfaces the error).
     .with_messages(
         (0..80)
             .map(|i| Message::user(format!("bulk{i}:{}", "x".repeat(3990))))
@@ -1002,9 +952,7 @@ async fn context_overflow_compacts_once_then_continues() {
             .iter()
             .any(|e| *e == AgentEvent::text_delta("continued"))
     );
-    // Compaction is observable, not silent: one Compacted record whose
-    // after-counts are strictly smaller (arXiv:2512.22087 / 2601.16746
-    // accounting: token spend per task, not just the final score).
+
     let compacted: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
@@ -1071,9 +1019,6 @@ async fn context_overflow_compacts_once_then_continues() {
     );
 }
 
-/// History is append-only (mini-swe-agent / pi): the model keeps every tool
-/// result it observed verbatim, so each request extends the previous one
-/// and the provider prefix cache stays hot.
 #[tokio::test]
 async fn tool_observations_survive_without_context_pressure() {
     let body = format!("payload-keepme {}", "x".repeat(200));
@@ -1201,9 +1146,6 @@ fn tool_script_with_args(id: &str, args: &str) -> Vec<StreamEvent> {
 
 #[tokio::test]
 async fn alternating_tool_empty_stays_bounded_and_nudges_once() {
-    // tool -> empty x3 (nudge) -> tool(varied) -> empty x3 -> end.
-    // Without a once-per-run nudge gate the second empty burst would nudge
-    // again and the alternation could continue unbounded.
     let provider = FakeProvider::new(vec![
         tool_script_with_args("c1", r#"{"q":"a"}"#),
         empty_script(),
@@ -1239,8 +1181,6 @@ async fn alternating_tool_empty_stays_bounded_and_nudges_once() {
     assert_eq!(nudges, 1, "post-tool empty nudge must fire once per run");
 }
 
-/// Text ending on EndTurn — distinct from `end_script` so the tail says what
-/// the case needs.
 fn text_end_script(text: &str) -> Vec<StreamEvent> {
     vec![
         StreamEvent::text_delta(text.to_string()),
@@ -1250,10 +1190,6 @@ fn text_end_script(text: &str) -> Vec<StreamEvent> {
 
 #[tokio::test]
 async fn leaked_call_markup_ending_nudges() {
-    // swe-2 via the devin-sub funnel writes its calls as a fenced block
-    // terminated by native markup instead of the close fence, then
-    // hallucinates the next [User]/[Assistant] turns — the reply is
-    // text-only on the wire, so the run used to die.
     let leaked = concat!(
         "Before writing code, let me grab the middle of `mod`.\n\n```gray_calls\n",
         "[{\"name\": \"bash\", \"arguments\": {\"command\": \"sed -n '167,355p' mod\"}}]",
@@ -1283,8 +1219,6 @@ async fn leaked_call_markup_ending_nudges() {
 
 #[tokio::test]
 async fn nudge_continue_marks_a_message_boundary() {
-    // The reply to an injected nudge is a new assistant message: the loop
-    // emits the boundary that keeps it from gluing onto the leaked prose.
     let provider = FakeProvider::new(vec![text_end_script("```gray_calls\n[]"), end_script()]);
     let mut agent = Agent::new(
         Box::new(provider),
@@ -1436,15 +1370,13 @@ fn summary_message_envelope_is_byte_stable() {
         m.text_content(),
         "The conversation history before this point was compacted into the following summary:\n\n<summary>\nhello world\n</summary>"
     );
-    // Byte-equality: trimming + envelope must never drift.
+
     let m2 = super::summary_message("hello world");
     assert_eq!(m.text_content().as_bytes(), m2.text_content().as_bytes());
 }
 
 #[test]
 fn context_estimate_anchors_on_provider_usage() {
-    // pi `estimateContextTokens`: the provider's report already counts the
-    // system prompt and tools; only messages appended after it are guessed.
     let mut agent = Agent::new(
         Box::new(FakeProvider::new(vec![])),
         Arc::new(FakeExecutor::new(ToolOutput::ok(""))),
@@ -1470,10 +1402,6 @@ fn context_estimate_anchors_on_provider_usage() {
 
 #[tokio::test]
 async fn soft_elision_stubs_stale_results_without_a_summary_call() {
-    // 30 rounds of (call, 8 KiB result) ≈ 62k tokens on a 100k window: past
-    // the 0.6 soft threshold, under the hard one (window − 16k). The T4
-    // soft stage must stub the stale bodies in place and the provider must
-    // see exactly one request — no compaction call, no summary envelope.
     let provider = FakeProvider::new(vec![end_script()]);
     let mut history = vec![Message::user("fix the bug")];
     for i in 0..30 {
@@ -1534,19 +1462,15 @@ async fn soft_elision_stubs_stale_results_without_a_summary_call() {
         .iter()
         .filter(|b| b.starts_with("[tool output elided"))
         .count();
-    // 30k-token verbatim window ≈ 14 rounds kept, so roughly half are stubbed.
+
     assert!((10..=20).contains(&stubbed), "stubbed {stubbed} of 30");
     assert!(
         agent.estimate_tokens() < 60_000,
         "estimate re-anchored after the rewrite"
     );
 
-    // Hysteresis: the pass that just ran disarms the stage until the
-    // estimate grows by a tenth of the window, so appending one more big
-    // round and re-running the soft stage changes nothing — one cache
-    // break per batch, not per round.
     let after = agent.estimate_tokens();
-    // Set at the post-elision estimate + 10k; `after` also counts the reply.
+
     assert!(
         agent.soft_elide_rearm > after + 9_000,
         "re-arm point set well past the current estimate"
@@ -1576,9 +1500,6 @@ async fn soft_elision_stubs_stale_results_without_a_summary_call() {
 
 #[tokio::test]
 async fn provider_usage_triggers_pre_turn_compaction() {
-    // 70 × ~1k-token messages: bytes/4 (~70k) + reserve stays under the
-    // 200k window, so the old message-only estimate never compacted even
-    // when the provider reported a nearly full context.
     let provider = FakeProvider::new(vec![
         vec![
             StreamEvent::tool_call_delta(
@@ -1630,8 +1551,6 @@ async fn provider_usage_triggers_pre_turn_compaction() {
     );
 }
 
-/// Stub `prompt/context` hook: returns fixed text like a sidecar's
-/// `{"result":{"text":"…"}}` reply.
 struct CtxHook {
     text: Option<String>,
 }
@@ -1688,7 +1607,6 @@ async fn prompt_context_replies_concatenate_into_context_note() {
     assert!(a.unwrap() < b.unwrap(), "hook order kept, got: {note}");
 }
 
-/// Counting `prompt/context` hook: proves the turn fetches once.
 struct CountingCtxHook {
     text: String,
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -1704,8 +1622,6 @@ impl PluginHooks for CountingCtxHook {
 
 #[tokio::test]
 async fn prompt_context_fetched_once_per_turn() {
-    // Prefix-cache invariant: hook context is turn-scoped, so a
-    // multi-round turn reuses one fetch across all its requests.
     let provider = FakeProvider::new(vec![tool_script("c1"), end_script()]);
     let seen = provider.seen_requests();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1742,8 +1658,6 @@ async fn prompt_context_fetched_once_per_turn() {
     }
 }
 
-/// Stub `tool/before` hook: denies or rewrites every call, like a
-/// sidecar's `{"decision":"deny"|"modify",…}` reply.
 struct VetoHook {
     deny: Option<String>,
     rewrite: Option<serde_json::Value>,
@@ -1797,7 +1711,7 @@ async fn tool_before_deny_skips_executor_with_error_result() {
         output.contains("DENIED-XYZ"),
         "reason surfaced, got {output:?}"
     );
-    // History carries the same error result so alternation stays intact.
+
     let stored = agent
         .messages()
         .iter()
@@ -1859,8 +1773,6 @@ async fn tool_before_absent_leaves_args_untouched() {
     assert_eq!(logged[0].1, serde_json::json!({"q": "x"}), "got {logged:?}");
 }
 
-/// Counting hook for lifecycle emission: records pre/post order and
-/// counts turn_end calls.
 struct LifecycleHook {
     turn_ends: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     calls: std::sync::Arc<Mutex<Vec<String>>>,
@@ -1888,7 +1800,6 @@ impl PluginHooks for LifecycleHook {
 
 #[tokio::test]
 async fn turn_end_hook_called_once_on_end_and_on_error() {
-    // Success path: exactly once.
     let ends = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
     let mut agent = Agent::new(
@@ -1909,7 +1820,6 @@ async fn turn_end_hook_called_once_on_end_and_on_error() {
         "turn_end once on success"
     );
 
-    // Error path (identical-tool loop → LoopDetected): still exactly once.
     let ends_err = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls_err = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
     let scripts: Vec<Vec<StreamEvent>> = (0..6).map(|i| tool_script(&format!("c{i}"))).collect();
@@ -1959,12 +1869,10 @@ async fn pre_post_hooks_emit_around_tool_execution() {
         vec![format!("pre:{TOOL_NAME}"), format!("post:{TOOL_NAME}")],
         "order pre→post, got {logged:?}"
     );
-    // Sidecar-provided tools run through the same executor call site as
-    // builtin tools, so this emission covers both by construction.
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // ENV_LOCK is test-only env serialization; holding it across await is its job
+#[allow(clippy::await_holding_lock)]
 async fn parallel_batch_overlaps_reads_with_ordered_results() {
     let _g = ENV_LOCK.lock().unwrap();
     let prev = std::env::var("GRAY_PARALLEL_READS").ok();
@@ -2005,8 +1913,7 @@ async fn parallel_batch_overlaps_reads_with_ordered_results() {
         ],
         "results stay in input order, {events:?}"
     );
-    // Every member is marked executing (`ToolCallEnd`) before any result:
-    // a batch never sits in "Preparing tool" while it actually runs.
+
     let last_end = events
         .iter()
         .rposition(|e| matches!(e, AgentEvent::ToolCallEnd { .. }));
@@ -2020,7 +1927,7 @@ async fn parallel_batch_overlaps_reads_with_ordered_results() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // ENV_LOCK is test-only env serialization; holding it across await is its job
+#[allow(clippy::await_holding_lock)]
 async fn lane_off_matches_sequential_events() {
     let _g = ENV_LOCK.lock().unwrap();
     let prev = std::env::var("GRAY_PARALLEL_READS").ok();
@@ -2046,8 +1953,7 @@ async fn lane_off_matches_sequential_events() {
         None => unsafe { std::env::remove_var("GRAY_PARALLEL_READS") },
     }
     assert_eq!(runs.len(), 2);
-    // The lane emits every `ToolCallEnd` before the run starts, so the two
-    // runs interleave differently; per-call event streams must still match.
+
     let call_events = |evs: &[AgentEvent], want: &str| -> Vec<AgentEvent> {
         evs.iter()
             .filter(|e| match e {
@@ -2069,9 +1975,6 @@ async fn lane_off_matches_sequential_events() {
     }
 }
 
-/// Cancels the run's token inside the first `tool_before` verdict, so the
-/// parallel pre-pass observes cancellation at the SECOND index — past the
-/// first ready item.
 struct CancelOnFirstBefore {
     token: tokio_util::sync::CancellationToken,
     calls: std::sync::atomic::AtomicUsize,
@@ -2088,7 +1991,7 @@ impl PluginHooks for CancelOnFirstBefore {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // ENV_LOCK is test-only env serialization; holding it across await is its job
+#[allow(clippy::await_holding_lock)]
 async fn parallel_prepass_cancel_backfills_whole_run_exactly_once() {
     let _g = ENV_LOCK.lock().unwrap();
     let prev = std::env::var("GRAY_PARALLEL_READS").ok();
@@ -2133,8 +2036,6 @@ async fn parallel_prepass_cancel_backfills_whole_run_exactly_once() {
 
 #[tokio::test]
 async fn name_before_id_emits_no_start_until_id_arrives() {
-    // Name-only delta buffers args without any start/progress; the ID
-    // arriving later emits the single start with the provider ID.
     let provider = FakeProvider::new(vec![
         vec![
             StreamEvent::tool_call_delta(0, None, Some(TOOL_NAME.into()), r#"{"q":"#),
@@ -2251,7 +2152,7 @@ async fn no_id_call_gets_single_fallback_used_everywhere() {
                 AgentEvent::ToolCallStart { id, .. } if id == "call_0")),
         "positional call_{{index}} fallback must be gone: {events:?}"
     );
-    // History agrees: ToolUse and ToolResult share the fallback.
+
     let use_id = agent.messages().iter().find_map(|m| {
         m.content.iter().find_map(|b| match b {
             ContentBlock::ToolUse { id, .. } => Some(id.clone()),
@@ -2270,8 +2171,6 @@ async fn no_id_call_gets_single_fallback_used_everywhere() {
 
 #[tokio::test]
 async fn eof_with_tool_pending_executes_nothing() {
-    // Stream ends without MessageComplete after a tool delta: the
-    // pending call must never execute and the turn errors.
     let provider = FakeProvider::new(vec![vec![StreamEvent::tool_call_delta(
         0,
         Some("c-eof".into()),
@@ -2324,7 +2223,7 @@ fn tool_output_image_blocks_thread_after_text_result() {
         ContentBlock::Image { media_type, data }
         if media_type == "image/png" && data == "AAA"
     ));
-    // Plain results carry no vision blocks.
+
     assert_eq!(ToolOutput::ok("hi").message_blocks("c").len(), 1);
 }
 
@@ -2352,12 +2251,12 @@ fn tool_output_media_goes_native_or_as_its_fallback() {
     assert_eq!(sheet.len(), 3);
     assert!(matches!(&sheet[1], ContentBlock::Text { text } if text.contains("contact sheet")));
     assert!(matches!(&sheet[2], ContentBlock::Image { data, .. } if data == "SHEET"));
-    // No fallback → a note, never a hard error.
+
     let bare = resolve_media(vec![ContentBlock::media("audio/wav", "A", vec![])], |_| {
         false
     });
     assert!(matches!(&bare[0], ContentBlock::Text { text } if text.contains("audio/wav")));
-    // Over the native cap → fallback even when the type is accepted.
+
     let big = "A".repeat(crate::message::MAX_NATIVE_MEDIA_BYTES / 3 * 4 + 8);
     let over = resolve_media(vec![ContentBlock::media("video/mp4", big, vec![])], |_| {
         true
@@ -2374,8 +2273,6 @@ fn old_session_video_block_still_parses() {
 
 #[tokio::test]
 async fn eof_with_text_and_tool_pending_salvages_visible_text() {
-    // The user already saw "hello" on screen; dropping it because a tool
-    // delta was also pending rewrites history to something never shown.
     let provider = FakeProvider::new(vec![vec![
         StreamEvent::text_delta("hello"),
         StreamEvent::tool_call_delta(
@@ -2421,10 +2318,6 @@ async fn eof_with_text_and_tool_pending_salvages_visible_text() {
 
 #[tokio::test]
 async fn reasoning_only_maxtokens_is_not_retried_as_empty() {
-    // A reasoning model that stops with finish_reason=length after producing
-    // only thinking must NOT fall into the empty-turn retry (same request,
-    // same limit, up to 3x the output cost with the reasoning dropped): the
-    // MaxTokens branch owns the turn and keeps the thinking.
     let provider = FakeProvider::new(vec![vec![
         StreamEvent::thinking_delta("deep reasoning..."),
         StreamEvent::message_complete(Some(StopReason::MaxTokens), None),
@@ -2458,10 +2351,6 @@ async fn reasoning_only_maxtokens_is_not_retried_as_empty() {
     );
 }
 
-/// A reasoning item that arrives with no summary text still attaches its
-/// encrypted carrier to history (claude-sub relays the item alone —
-/// thinking prose is never forwarded). The empty-text block replays the
-/// same: the wire item carries the blob, not the text.
 #[tokio::test]
 async fn reasoning_item_without_summary_attaches_carrier() {
     struct Modeled {
@@ -2544,8 +2433,6 @@ fn image_budget_is_bounded_and_rewrites_notify_session() {
     assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
-/// Notices may arrive during inference or tool execution, but must not split
-/// an assistant tool-call batch from its results or hold an idle turn open.
 #[tokio::test]
 async fn background_notices_land_at_safe_boundaries_without_waiting() {
     struct Notices {
@@ -2571,9 +2458,7 @@ async fn background_notices_land_at_safe_boundaries_without_waiting() {
             }
         }
     }
-    // Poll 0: before inference. Poll 1: next round after all tool results.
-    // Poll 2: just before returning a final answer (job finished mid-inference).
-    // Never: an unfinished job must not keep the turn open.
+
     for at in [0, 1, 2, usize::MAX] {
         let provider = FakeProvider::new(vec![tool_script("bg-call"), end_script(), end_script()]);
         let executor = Arc::new(Notices {
@@ -2625,9 +2510,6 @@ async fn background_notices_land_at_safe_boundaries_without_waiting() {
     }
 }
 
-// --- arXiv-driven harness hardening (2026-09 sweep) -------------------------
-
-/// Hook serving a constant per-turn context block.
 struct StaticHook;
 
 #[async_trait]
@@ -2637,11 +2519,6 @@ impl PluginHooks for StaticHook {
     }
 }
 
-/// arXiv:2601.06007 ("Don't Break the Cache"): provider prefix caching pays
-/// only when the request prefix is byte-stable — every round of a turn must
-/// send the identical system prompt (the base prompt alone; hook context
-/// rides a deduped transcript note) and a strictly prefix-extending message
-/// list (append-only history between compactions).
 #[tokio::test]
 async fn request_prefix_is_byte_stable_across_tool_rounds() {
     let provider = FakeProvider::new(vec![tool_script("c1"), tool_script("c2"), end_script()]);
@@ -2679,10 +2556,6 @@ async fn request_prefix_is_byte_stable_across_tool_rounds() {
     }
 }
 
-/// arXiv:2605.08563 (CCRM): a mid-stream failure salvages the partial into
-/// history (the transcript must match what the user saw), but the next
-/// turn's request must not carry it — a failed attempt left in context
-/// contaminates the retry.
 #[tokio::test]
 async fn mid_stream_error_partial_is_scrubbed_from_the_next_request() {
     let provider = FakeProvider::new(vec![end_script()]).with_partial_failures(vec![(
@@ -2699,8 +2572,7 @@ async fn mid_stream_error_partial_is_scrubbed_from_the_next_request() {
         .run(Message::user("go"), ToolContext::default())
         .await
         .expect_err("mid-stream error surfaces");
-    // In-memory history (and so the persisted transcript) keeps the partial:
-    // it matches what the user saw on screen.
+
     assert!(
         agent
             .messages()
@@ -2730,9 +2602,6 @@ async fn mid_stream_error_partial_is_scrubbed_from_the_next_request() {
     );
 }
 
-/// Mid-turn steer: text typed while the turn runs joins that turn, at the
-/// boundary before the next model request -- not after the turn, and never
-/// between a tool call and its result.
 #[tokio::test]
 async fn steer_hook_text_reaches_the_running_turn() {
     let provider = FakeProvider::new(vec![
@@ -2744,7 +2613,7 @@ async fn steer_hook_text_reaches_the_running_turn() {
     ]);
     let executor = FakeExecutor::new(ToolOutput::ok("result payload"));
     let seen = provider.seen_requests();
-    // One injection, then silence: the hook is polled before every request.
+
     let pending = std::sync::Arc::new(std::sync::Mutex::new(Some(
         "actually, use the other flag".to_string(),
     )));
@@ -2769,7 +2638,7 @@ async fn steer_hook_text_reaches_the_running_turn() {
             .any(|text| text.contains("actually, use the other flag")),
         "steer text must ride the next request: {second:?}"
     );
-    // It is a real user message, so the persisted transcript keeps it too.
+
     assert!(
         agent
             .messages()
@@ -2779,8 +2648,6 @@ async fn steer_hook_text_reaches_the_running_turn() {
     );
 }
 
-/// No hook (or a hook that returns `None`) must leave a turn byte-identical:
-/// steering is additive, never a rewrite.
 #[tokio::test]
 async fn a_silent_steer_hook_changes_nothing() {
     let provider = FakeProvider::new(vec![
@@ -2802,8 +2669,7 @@ async fn a_silent_steer_hook_changes_nothing() {
 
     let requests = seen.lock().expect("seen lock").clone();
     assert_eq!(requests.len(), 2);
-    // Exactly the unsteered shape: the prompt, the assistant tool call and its
-    // result. A silent hook must not add a message of its own.
+
     let roles: Vec<Role> = requests[1].1.iter().map(|m| m.role).collect();
     assert_eq!(
         roles,
@@ -2812,8 +2678,6 @@ async fn a_silent_steer_hook_changes_nothing() {
     );
 }
 
-/// One tool round: assistant `ToolUse` + the paired `ToolResult` carrying
-/// `bytes` of output. Tool results are what the stale mask claims.
 fn big_tool_round(id: &str, bytes: usize) -> Vec<Message> {
     vec![
         Message {
@@ -2833,7 +2697,6 @@ fn big_tool_round(id: &str, bytes: usize) -> Vec<Message> {
     ]
 }
 
-/// The outbound view's tool-result bodies, in order.
 fn tool_result_bodies(msgs: &[Message]) -> Vec<&str> {
     msgs.iter()
         .flat_map(|m| m.content.iter())
@@ -2852,9 +2715,7 @@ fn stale_tool_output_masks_with_citations_and_keeps_history_intact() {
         Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
     );
     agent.session_id = Some("sess-mask".into());
-    // 16 groups (opening user turn + 14 tool rounds + closing user turn) put
-    // the six oldest out of reach of the model, and one of those six is the
-    // opening turn.
+
     let mut msgs = vec![Message::user("go")];
     for i in 0..14 {
         msgs.extend(big_tool_round(&format!("call_{i}"), bytes));
@@ -2878,8 +2739,7 @@ fn stale_tool_output_masks_with_citations_and_keeps_history_intact() {
             assert!(!body.contains("elided"), "fresh round {i} stays whole");
         }
     }
-    // The transcript is untouched: the user saw these bytes, and the stub
-    // says where to get them back.
+
     assert!(
         agent.messages().iter().flat_map(|m| m.content.iter()).all(
             |b| !matches!(b, ContentBlock::ToolResult { content, .. } if content.contains("elided"))
@@ -2888,8 +2748,6 @@ fn stale_tool_output_masks_with_citations_and_keeps_history_intact() {
     );
 }
 
-/// The mask never moves mid-turn: rewriting an old result into a stub
-/// changes the cached prefix, and the next request re-bills all of it.
 #[tokio::test]
 async fn a_long_turn_never_rewrites_its_own_prefix() {
     let big = "y".repeat(crate::compact::ARC_STUB_MIN_BYTES + 1);
@@ -2938,9 +2796,7 @@ fn a_cold_cache_masks_every_stale_result_now() {
     agent.mask_stale_tool_output();
     let view = agent.scrubbed_messages();
     let bodies = tool_result_bodies(&view);
-    // 14 groups (opening user turn + 12 tool rounds + closing user turn), so
-    // the four oldest hold the first three rounds: every one of them goes at
-    // once, not one batch at a time.
+
     assert_eq!(
         bodies
             .iter()
@@ -2962,8 +2818,7 @@ fn small_results_and_recent_rounds_are_never_masked() {
         Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
     );
     let mut msgs = vec![Message::user("go")];
-    // 12 stale rounds, but every result is small: below the threshold there
-    // is nothing worth citing and nothing worth losing.
+
     for i in 0..14 {
         msgs.extend(big_tool_round(&format!("call_{i}"), 10));
     }
@@ -2977,7 +2832,6 @@ fn small_results_and_recent_rounds_are_never_masked() {
         "a small result is cheaper to keep than to cite"
     );
 
-    // 10 rounds exactly: nothing has aged out yet.
     let mut msgs = vec![Message::user("go")];
     for i in 0..10 {
         msgs.extend(big_tool_round(
@@ -2998,12 +2852,11 @@ fn small_results_and_recent_rounds_are_never_masked() {
 #[tokio::test]
 async fn checkpoint_fires_once_per_step_with_consistent_prefix() {
     use std::sync::Arc;
-    // First script ends with a tool call, second ends the turn.
+
     let provider = FakeProvider::new(vec![tool_script("call_1"), end_script()]);
     let executor = FakeExecutor::new(ToolOutput::ok("result payload"));
     let mut agent = Agent::new(Box::new(provider), Arc::new(executor)).with_tools(vec![tool_def()]);
 
-    // One atomic group per step: assistant tool-use + its result travel together.
     let seen: Arc<Mutex<Vec<Vec<Message>>>> = Arc::new(Mutex::new(Vec::new()));
     let seen_hook = seen.clone();
     agent.set_checkpoint(Some(Arc::new(move |msgs: &[Message], _rev: u64| {
@@ -3020,9 +2873,7 @@ async fn checkpoint_fires_once_per_step_with_consistent_prefix() {
         .expect("run should succeed");
 
     let seen = seen.lock().expect("seen lock poisoned");
-    // Once before the (slow, killable) prompt hooks, then once per round
-    // boundary after notifications/steer: [user], [user] again, then
-    // [user, assistant, result] before round 2.
+
     assert_eq!(seen.len(), 3, "hook must fire before each killable span");
     assert_eq!(seen[0].len(), 1, "first fire sees only the user message");
     assert_eq!(seen[1], seen[0], "round 1 boundary repeats the prefix");
@@ -3031,7 +2882,7 @@ async fn checkpoint_fires_once_per_step_with_consistent_prefix() {
         agent.messages()[..3],
         "second round sees full prefix"
     );
-    // Every snapshot is answerable: each ToolUse has its ToolResult.
+
     for snap in seen.iter() {
         let uses: Vec<&str> = snap
             .iter()
@@ -3056,8 +2907,6 @@ async fn checkpoint_fires_once_per_step_with_consistent_prefix() {
     }
 }
 
-/// Executor whose tool set is live: `live_defs` answers from a shared
-/// slot the test can rewrite between turns.
 struct LiveExecutor(std::sync::Arc<Mutex<Vec<ToolDef>>>);
 
 #[async_trait]
@@ -3114,7 +2963,6 @@ async fn run_refreshes_tool_defs_from_live_executor() {
         vec!["live_a"]
     );
 
-    // The set changes between turns; the next run picks it up.
     live.lock().expect("live lock").push(ToolDef::new(
         "live_b",
         "live",
@@ -3146,9 +2994,6 @@ async fn static_executor_keeps_with_tools_defs() {
     assert_eq!(seen.lock().expect("seen lock")[0], vec![TOOL_NAME]);
 }
 
-/// Protocol 2.0 `input/submit` stub: records the text it was shown and
-/// returns a scripted verdict, like a sidecar's `{text}`/`{handled}`
-/// reply.
 struct InputHook {
     verdict: InputSubmit,
     seen: std::sync::Arc<Mutex<Vec<String>>>,
@@ -3241,8 +3086,6 @@ async fn input_submit_hooks_chain_on_each_prior_rewrite() {
     assert_eq!(*hook_seen.lock().unwrap(), vec!["first", "SECOND"]);
 }
 
-/// Protocol 2.0 `agent/before_start` stub: returns text like a sidecar's
-/// `{"result":{"text":"…"}}` reply.
 struct BeforeStartHook {
     text: Option<String>,
 }
@@ -3281,8 +3124,6 @@ async fn agent_before_start_text_lands_in_history_for_the_request() {
     );
 }
 
-/// Protocol 2.0 `context/build` stub: drops messages whose text contains
-/// the marker — a sidecar filtering stale context out of the request.
 struct DropMarkedHook;
 
 #[async_trait]
@@ -3335,8 +3176,6 @@ async fn context_build_filters_outbound_but_history_is_untouched() {
     );
 }
 
-/// Protocol 2.0 `tool/after` stub: appends a note to every tool result,
-/// like a sidecar annotating dangerous-pattern file writes.
 struct AnnotateToolHook;
 
 #[async_trait]

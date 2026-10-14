@@ -11,7 +11,7 @@ use crate::setup::catalog::{self, AuthEntry};
 struct SetupItem {
     label: String,
     desc: String,
-    /// Starts unchecked in the modal — secrets need explicit opt-in.
+
     opt_in: bool,
     apply: SetupApply,
 }
@@ -34,23 +34,17 @@ enum SetupApply {
     },
 }
 
-/// One importable credential: where it lands in `auth.json` and how to
-/// re-read the secret at apply time. Holds no secret material itself.
 struct CredItem {
     target: String,
     src: PathBuf,
     extract: CredExtract,
 }
 
-/// Locator for a secret inside a source file, resolved lazily in
-/// [`CredExtract::read`] so listings never carry values.
 enum CredExtract {
-    /// Hermes `auth.json`: `credential_pool[provider][*].agent_key`,
-    /// falling back to `providers[provider].agent_key`.
     PoolAgentKey { provider: String },
-    /// `NAME=value` line in a dotenv file.
+
     DotEnv { name: String },
-    /// OpenClaw `models.json` `providers[provider].apiKey`.
+
     ProviderApiKey { provider: String },
 }
 
@@ -331,8 +325,6 @@ fn non_empty_str(v: Option<&serde_json::Value>) -> bool {
     v.and_then(|s| s.as_str()).is_some_and(|s| !s.is_empty())
 }
 
-/// Source-provider id → gray auth-store key. Only the mappings that
-/// differ from a lowercased id get named here.
 fn map_provider(raw: &str) -> String {
     match raw {
         "qwen-portal" | "qwen-oauth" => "qwen".to_string(),
@@ -340,7 +332,6 @@ fn map_provider(raw: &str) -> String {
     }
 }
 
-/// Allowlisted dotenv secret names → auth-store key, else `None`.
 fn env_cred_target(name: &str) -> Option<String> {
     for suf in ["_API_KEY", "_TOKEN", "_SECRET"] {
         if let Some(base) = name.strip_suffix(suf)
@@ -352,7 +343,6 @@ fn env_cred_target(name: &str) -> Option<String> {
     None
 }
 
-/// All `NAME=value` pairs in a dotenv body (comments and blanks skipped).
 fn dotenv_pairs(body: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in body.lines() {
@@ -398,9 +388,6 @@ fn push_cred(
     }
 }
 
-/// What a tool's creds sources offer: `(items, skipped-notes)`. Items
-/// name provider ids only; OAuth profiles and fingerprint-only pool
-/// entries are reported as skipped rather than imported (v1: keys only).
 fn cred_candidates(d: &ToolDef, home: &Path) -> (Vec<CredItem>, Vec<String>) {
     let mut items = Vec::new();
     let mut seen = BTreeSet::new();
@@ -501,8 +488,6 @@ fn cred_candidates(d: &ToolDef, home: &Path) -> (Vec<CredItem>, Vec<String>) {
     (items, skipped)
 }
 
-/// Provider ids / env names a creds source would yield — for
-/// `scanned_report` display. Never returns values.
 pub(crate) fn cred_source_ids(src: &CredSource, path: &Path) -> Vec<String> {
     let mut ids = match src {
         CredSource::HermesAuth(_) => read_json(path)
@@ -682,7 +667,7 @@ async fn items_for(def: &ToolDef) -> Vec<SetupItem> {
     let (mut cred_items, cred_skipped) = cred_candidates(def, &home);
     match cred_store().and_then(|s| s.load()) {
         Ok(map) => cred_items.retain(|c| !map.contains_key(&c.target)),
-        // Strict-load failure: offer nothing rather than risk clobbering.
+
         Err(_) => cred_items.clear(),
     }
     if !cred_items.is_empty() {
@@ -887,8 +872,6 @@ fn apply_creds(
     apply_creds_at(&cred_store()?, d, entries, state, run)
 }
 
-/// Writes go through `CredentialStore` only: lock → strict load → insert
-/// missing keys → `replace_locked`. Existing keys are never overwritten.
 fn apply_creds_at(
     store: &CredentialStore,
     d: &ToolDef,
@@ -1014,9 +997,6 @@ fn undo_entry(entry: &super::ImportEntry) -> (bool, String) {
     }
 }
 
-/// Removes an imported credential only while the stored value still
-/// matches the sha256 fingerprint logged at import time; a changed or
-/// absent entry is a no-op that retires the log line either way.
 fn undo_cred(target: &str, detail: &str, store: &CredentialStore) -> (bool, String) {
     let _lock = match store.lock() {
         Ok(l) => l,

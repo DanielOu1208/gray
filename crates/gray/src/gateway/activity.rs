@@ -1,7 +1,3 @@
-//! `activity.jsonl`: what the agent did, decided not to say, and deferred.
-//! Append-only, one JSON object per line, rotated to `activity.jsonl.1` past
-//! a size cap. Best-effort: a write failure never stops the gateway.
-
 use std::io::Write as _;
 use std::path::Path;
 
@@ -26,7 +22,6 @@ pub fn log(dir: &Path, what: &str, detail: serde_json::Value) {
     }
 }
 
-/// Last `n` rows, oldest first.
 pub fn tail(dir: &Path, n: usize) -> Vec<serde_json::Value> {
     let body = std::fs::read_to_string(dir.join("activity.jsonl")).unwrap_or_default();
     let rows: Vec<serde_json::Value> = body
@@ -37,7 +32,6 @@ pub fn tail(dir: &Path, n: usize) -> Vec<serde_json::Value> {
     rows[from..].to_vec()
 }
 
-/// One human line for `gray gateway activity`.
 pub fn render(row: &serde_json::Value) -> String {
     let at = row.get("at").and_then(|v| v.as_i64()).unwrap_or(0);
     let when = chrono::DateTime::from_timestamp(at, 0)

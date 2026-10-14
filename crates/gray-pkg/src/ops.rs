@@ -1,14 +1,8 @@
-//! Install/list/remove/update over the plugin lockfile.
-//!
-//! Two sources: the gray index (verified gray-native tarballs) and bare
-//! https tarball URLs (unverified, warned).
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-// TODO(2.4): switch to gray_plugin::lock
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LockFile {
     pub schema: u32,
@@ -20,7 +14,6 @@ fn default_true() -> bool {
     true
 }
 
-// TODO(2.4): switch to gray_plugin::lock
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockEntry {
     #[serde(default)]
@@ -41,17 +34,13 @@ pub struct LockEntry {
     pub scope: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// argv for `gray <name> …` forwarding; `None` = sidecar-only. Round-tripped
-    /// so `set_enabled`/`remove`/`update` never drop it.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_argv: Option<Vec<String>>,
-    /// Boots in every GRAY_HOME (`gray plugin enable <name> --global`).
+
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub global: bool,
-    /// Fields this crate does not own (`granted_capabilities`,
-    /// `capabilities_hash`, `runtime_role`, …) — gray_plugin writes them, and a
-    /// gray-pkg rewrite that dropped them would silently re-grant capabilities
-    /// or re-boot a provider-only entry as a normal sidecar.
+
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -75,7 +64,6 @@ impl Default for LockEntry {
     }
 }
 
-/// Install target: a gray index name or an https tarball URL.
 #[derive(Debug, Clone)]
 pub enum NameOrUrl {
     Name(String),
@@ -116,23 +104,14 @@ fn read_lock() -> anyhow::Result<Option<LockFile>> {
     }
 }
 
-/// How long a registry write waits for another process's read-modify-write
-/// before failing loudly (the same doctrine as the session store's locks).
 const REGISTRY_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Exclusive cross-process guard for the whole read-modify-write on
-/// `lock.json`: the file is kept (it is the lock itself), `WouldBlock` is
-/// retried until `timeout`, and only a *contended* lock fails the op. A
-/// filesystem without flock degrades to unlocked-with-warning, so an exotic
-/// filesystem never breaks `install`/`remove`.
 pub fn hold_registry_lock_timeout(
     timeout: std::time::Duration,
 ) -> anyhow::Result<Option<std::fs::File>> {
     hold_registry_lock_timeout_in(&crate::plugins_dir(), timeout)
 }
 
-/// Same guard against an explicit plugins dir, so callers carrying their
-/// own home (tests, `plugin_cli`) never touch the real `~/.gray`.
 pub fn hold_registry_lock_in(plugins_dir: &Path) -> anyhow::Result<Option<std::fs::File>> {
     hold_registry_lock_timeout_in(plugins_dir, REGISTRY_LOCK_TIMEOUT)
 }
@@ -198,8 +177,6 @@ fn write_lock(lock: &LockFile) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Record one install in the lockfile, preserving any existing `enabled`
-/// flag (a reinstall must not silently re-enable a disabled plugin).
 fn record_install(
     name: &str,
     ecosystem: &str,
@@ -212,9 +189,7 @@ fn record_install(
     let _guard = hold_registry_lock()?;
     let mut lock = read_lock()?.unwrap_or_default();
     let enabled = lock.plugins.get(name).map(|e| e.enabled).unwrap_or(true);
-    // A CLI registration's `cli_argv` survives a reinstall/update the same
-    // way `enabled` does — as do fields owned by gray_plugin::lock (grants,
-    // consent hash, runtime role), which this rewrite must not drop.
+
     let cli_argv = lock.plugins.get(name).and_then(|e| e.cli_argv.clone());
     let extra = lock
         .plugins
@@ -241,16 +216,10 @@ fn record_install(
     write_lock(&lock)
 }
 
-/// A lock row that belongs to a user-registered executable (a `plugin add`
-/// or a PATH registration): it has a `cli_argv` but no index hash. Index
-/// installs carry the tarball's hash even after adopting a `cli_argv`, so
-/// this is the test that keeps `update` from clobbering user registrations.
 pub fn is_registered_executable(e: &LockEntry) -> bool {
     e.cli_argv.is_some() && e.hash.is_empty()
 }
 
-/// Index entries gray installs by name: curated gray-native tarballs.
-/// Anything else bails with the honest reason.
 fn supported_index_entry(entry: &crate::index::Entry) -> bool {
     matches!(
         (entry.ecosystem.as_str(), entry.source.type_.as_str()),
@@ -258,7 +227,6 @@ fn supported_index_entry(entry: &crate::index::Entry) -> bool {
     )
 }
 
-/// Derive a plugin name from a URL's last path segment.
 fn name_from_url(url: &str) -> String {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     let last = path.rsplit('/').next().unwrap_or(path);
@@ -268,8 +236,6 @@ fn name_from_url(url: &str) -> String {
         .to_string()
 }
 
-/// Reject install keys that would escape the plugins dir: empty, `.`,
-/// `..`, or anything holding `/` or `\`.
 pub(crate) fn validate_install_key(key: &str) -> anyhow::Result<()> {
     if key.is_empty() || key == "." || key == ".." || key.contains('/') || key.contains('\\') {
         anyhow::bail!("cannot derive a safe plugin name from package (got {key:?})");
@@ -277,9 +243,6 @@ pub(crate) fn validate_install_key(key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Shallow-clone `url` (under the plugins tmp dir) via the shared
-/// `sources::clone_into_tmp` helper and return the keeper tempdir, the clone
-/// dir, and the cloned HEAD commit sha. `--branch` only when pinned.
 pub(crate) fn clone_git_repo(
     url: &str,
     git_ref: Option<&str>,
@@ -313,8 +276,6 @@ pub(crate) fn clone_git_repo(
     Ok((staging, clone_dir, sha))
 }
 
-/// `(source, item)` identity for install failures, from the spec kind —
-/// the honest attribution when the ecosystem isn't known yet.
 fn install_identity(spec: &NameOrUrl) -> (String, String) {
     match spec {
         NameOrUrl::Name(n) => ("index".to_string(), n.clone()),
@@ -322,9 +283,6 @@ fn install_identity(spec: &NameOrUrl) -> (String, String) {
     }
 }
 
-/// Best-effort ecosystem attribution for the error registry: the lock
-/// entry's ecosystem when known, `"plugin"` otherwise (misses,
-/// unreadable lock).
 fn ecosystem_of(name: &str) -> String {
     read_lock()
         .ok()
@@ -350,7 +308,6 @@ async fn install_inner(spec: NameOrUrl, opts: InstallOpts) -> anyhow::Result<Rep
     }
 }
 
-/// Install a fully staged tree, rolling back the directory if lock recording fails.
 fn replace_archive(
     archive: &Path,
     name: &str,
@@ -409,10 +366,7 @@ async fn install_index(
     opts: InstallOpts,
 ) -> anyhow::Result<Report> {
     validate_install_key(name)?;
-    // The hub index is the superset: kind routes the install — plugin rows
-    // keep the verified-tarball path below, skills dispatch to skills_ops,
-    // anything else is list-only for now. If the hub endpoint is down we
-    // degrade to the legacy plugin index rather than refusing to install.
+
     let index = match crate::index::fetch_hub_index(client).await {
         Ok(index) => index,
         Err(_) => crate::index::fetch_index(client).await?,
@@ -512,9 +466,7 @@ fn remove_inner(name: &str) -> anyhow::Result<()> {
     if lock.plugins.remove(name).is_none() {
         anyhow::bail!("not installed: {name}");
     }
-    // Commit the registry first: a failed write must leave the files on disk
-    // (a stale entry the user can re-remove), never the reverse, where the
-    // registry would claim a plugin whose files are gone.
+
     write_lock(&lock)?;
     let dir = crate::plugins_dir().join(name);
     if dir.exists() {
@@ -523,8 +475,6 @@ fn remove_inner(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Flip a plugin's `enabled` flag (boot skips disabled entries).
-/// Miss message matches `remove`.
 pub fn set_enabled(name: &str, on: bool) -> anyhow::Result<()> {
     set_enabled_inner(name, on).map_err(|e| {
         crate::errors::record(&ecosystem_of(name), name, format!("{e:#}"));
@@ -546,7 +496,6 @@ fn set_enabled_inner(name: &str, on: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Flip a plugin's `global` flag (boots in every GRAY_HOME via the user lock).
 pub fn set_global(name: &str, global: bool) -> anyhow::Result<()> {
     set_global_inner(name, global).map_err(|e| {
         crate::errors::record(&ecosystem_of(name), name, format!("{e:#}"));
