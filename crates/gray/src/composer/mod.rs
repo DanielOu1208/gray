@@ -625,18 +625,10 @@ fn intro_settle_frames(from: &[String]) -> Vec<(Vec<String>, Vec<String>)> {
 }
 
 fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<Line<'static>> {
-    let (x, col_w) = home_column(w);
-    welcome_body_lines_at(x, col_w, progress, intro)
-}
-
-pub(crate) fn welcome_body_lines_at(
-    x: usize,
-    col_w: usize,
-    progress: f32,
-    intro: Option<Duration>,
-) -> Vec<Line<'static>> {
     let theme = crate::theme::theme();
     let version = env!("CARGO_PKG_VERSION").to_string();
+
+    let (x, col_w) = home_column(w);
 
     let centered = |segs: Vec<Span<'static>>, text_w: usize| -> Line<'static> {
         let pad = x + col_w.saturating_sub(text_w) / 2;
