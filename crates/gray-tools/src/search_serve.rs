@@ -23,7 +23,6 @@ use crate::search_plan::{self, GrepPlan};
 #[cfg(target_os = "linux")]
 use crate::search_watch::Watch;
 #[cfg(target_os = "linux")]
-
 struct Server {
     root: PathBuf,
     engine: fsearch::Engine,
