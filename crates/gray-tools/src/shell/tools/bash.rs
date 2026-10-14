@@ -178,11 +178,16 @@ impl Tool for BashTool {
 
         let cwd_report =
             std::env::temp_dir().join(format!("gray-cwd-{}.txt", uuid::Uuid::new_v4()));
+        let capture_ps =
+            crate::shell::exit::masks_pipeline(&command) && crate::shell::spawn::pipestatus_shell();
+        let ps_report = capture_ps
+            .then(|| std::env::temp_dir().join(format!("gray-ps-{}", uuid::Uuid::new_v4())));
         let spawned = match spawn(
-            &with_cwd_report(&command),
+            &with_cwd_report(&command, capture_ps),
             &cwd,
             ctx.session_id.as_deref(),
             Some(&cwd_report),
+            ps_report.as_deref(),
         ) {
             Ok(s) => s,
             Err(e) => return fail(format!("failed to spawn `sh -c`: {e}")),
@@ -200,6 +205,7 @@ impl Tool for BashTool {
             guard,
             detach.then_some(&*self.jobs),
             cwd_report.clone(),
+            ps_report,
         )
         .await;
 
@@ -382,14 +388,32 @@ fn leading_sleep(command: &str) -> Option<u64> {
     (secs.is_finite() && secs >= 0.0).then(|| (secs * unit).ceil().min(u64::MAX as f64) as u64)
 }
 
-fn with_cwd_report(command: &str) -> String {
+fn with_cwd_report(command: &str, pipestatus: bool) -> String {
     #[cfg(windows)]
     let reported = "$(pwd -W)";
     #[cfg(not(windows))]
     let reported = "\"$PWD\"";
+    let (capture, write) = if pipestatus {
+        (
+            " __gray_ps=\"${PIPESTATUS[*]-}\"",
+            "printf '%s' \"$__gray_ps\" > \"$GRAY_PS_REPORT\" 2>/dev/null\n",
+        )
+    } else {
+        ("", "")
+    };
     format!(
-        "{command}\n__gray_rc=$?\nprintf '%s' {reported} > \"$GRAY_CWD_REPORT\" 2>/dev/null\nexit $__gray_rc"
+        "{command}\n__gray_rc=$?{capture}\n{write}printf '%s' {reported} > \"$GRAY_CWD_REPORT\" 2>/dev/null\nexit $__gray_rc"
     )
+}
+
+fn read_pipestatus(path: Option<&std::path::Path>) -> Option<Vec<i32>> {
+    let text = std::fs::read_to_string(path?).ok()?;
+    let _ = std::fs::remove_file(path?);
+    let stages: Vec<i32> = text
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    (!stages.is_empty()).then_some(stages)
 }
 
 fn jobs_enabled() -> bool {
@@ -974,6 +998,7 @@ async fn settle_command(
     #[cfg(not(windows))] mut guard: crate::shell::kill::GroupGuard,
     pump: tokio::task::JoinHandle<crate::shell::contract::PumpSummary>,
     handoff: bool,
+    ps_report: Option<&std::path::Path>,
 ) -> Settled {
     #[cfg(not(windows))]
     let target = spawned.pgid;
@@ -1062,6 +1087,7 @@ async fn settle_command(
     #[cfg(not(windows))]
     guard.disarm();
     let status = exited.expect("every cause resolves a status");
+    let pipe_stages = read_pipestatus(ps_report);
     let (summary, drain_truncated) = match drain_pump(pump, log_path).await {
         Ok(v) => v,
         Err(e) => return Settled::Done(fail(format!("output pump failed: {e}"))),
@@ -1085,7 +1111,13 @@ async fn settle_command(
         });
     }
     Settled::Done(finish_inline(
-        command, log_path, status, &summary, start, first,
+        command,
+        log_path,
+        status,
+        &summary,
+        start,
+        first,
+        pipe_stages,
     ))
 }
 
@@ -1102,6 +1134,7 @@ async fn run_command(
     adopt: Option<&jobs::Jobs>,
 
     cwd_report: PathBuf,
+    ps_report: Option<PathBuf>,
 ) -> ToolOutput {
     let mut spawned = spawned;
     let last = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(now_grindmill()));
@@ -1127,6 +1160,7 @@ async fn run_command(
         guard,
         pump,
         adopt.is_some(),
+        ps_report.as_deref(),
     )
     .await
     {
@@ -1165,6 +1199,7 @@ async fn run_command(
                     guard,
                     pump,
                     false,
+                    ps_report.as_deref(),
                 )
                 .await
                 {
@@ -1276,9 +1311,10 @@ fn finish_inline(
     summary: &PumpSummary,
     start: Instant,
     first_line: Option<String>,
+    pipe_stages: Option<Vec<i32>>,
 ) -> ToolOutput {
     let elapsed = start.elapsed();
-    let report = exit_report(status, command);
+    let report = exit_report(status, command, pipe_stages.as_deref());
     let mut view = build_view(log_path, summary);
 
     view.body = squeeze_view(&view.body);

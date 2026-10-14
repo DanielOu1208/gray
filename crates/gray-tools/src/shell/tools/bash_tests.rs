@@ -108,7 +108,7 @@ fn truncated_log_has_executable_bounded_recovery() {
             .args(["-c", "exit 0"])
             .status()
             .unwrap();
-        let result = finish_inline("probe", &path, status, &summary, Instant::now(), None);
+        let result = finish_inline("probe", &path, status, &summary, Instant::now(), None, None);
         let command = result
             .content
             .lines()
@@ -740,17 +740,17 @@ async fn two_sessions_do_not_share_a_working_directory() {
 
 #[test]
 fn the_cwd_report_suffix_is_appended_not_substituted() {
-    let wrapped = with_cwd_report("echo hi");
+    let wrapped = with_cwd_report("echo hi", false);
     assert!(wrapped.starts_with("echo hi"), "{wrapped}");
     assert!(wrapped.contains("$GRAY_CWD_REPORT"), "{wrapped}");
 
-    let commented = with_cwd_report("echo hi # note");
+    let commented = with_cwd_report("echo hi # note", false);
     assert!(commented.starts_with("echo hi # note"), "{commented}");
 }
 
 #[test]
 fn the_cwd_report_keeps_a_trailing_heredoc_terminator_alone() {
-    let wrapped = with_cwd_report("cat > f <<'EOF'\nbody\nEOF");
+    let wrapped = with_cwd_report("cat > f <<'EOF'\nbody\nEOF", false);
     assert!(
         wrapped.starts_with("cat > f <<'EOF'\nbody\nEOF\n"),
         "{wrapped}"
@@ -760,7 +760,7 @@ fn the_cwd_report_keeps_a_trailing_heredoc_terminator_alone() {
 
 #[test]
 fn the_cwd_report_asks_for_a_path_rust_can_resolve() {
-    let wrapped = with_cwd_report("echo hi");
+    let wrapped = with_cwd_report("echo hi", false);
     #[cfg(windows)]
     assert!(
         wrapped.contains("pwd -W"),
@@ -1129,6 +1129,7 @@ async fn run_lane(
         Path::new("/"),
         ctx.session_id.as_deref(),
         Some(&report),
+        None,
     )
     .expect("spawn");
     let pgid = spawned.pgid;
@@ -1142,6 +1143,7 @@ async fn run_lane(
         crate::shell::kill::GroupGuard::new(pgid),
         jobs_lane.then_some(&*tool.jobs),
         report.clone(),
+        None,
     )
     .await;
     (out, pgid, log, report)
