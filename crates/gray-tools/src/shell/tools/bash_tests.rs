@@ -108,7 +108,16 @@ fn truncated_log_has_executable_bounded_recovery() {
             .args(["-c", "exit 0"])
             .status()
             .unwrap();
-        let result = finish_inline("probe", &path, status, &summary, Instant::now(), None, None);
+        let result = finish_inline(
+            "probe",
+            &path,
+            status,
+            &summary,
+            Instant::now(),
+            None,
+            None,
+            dir.path(),
+        );
         let command = result
             .content
             .lines()
@@ -212,6 +221,44 @@ fn known_missing_binaries_get_their_real_substitute() {
         "{unknown}"
     );
     assert!(unknown.contains("command -v goyacc"), "{unknown}");
+}
+
+#[test]
+fn missing_path_gets_a_sibling_suggestion() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src/repl")).unwrap();
+    std::fs::write(dir.path().join("src/repl/mod.rs"), "x").unwrap();
+    std::fs::write(dir.path().join("README.md"), "x").unwrap();
+
+    let hint = missing_path_hint(
+        "cat: src/repl/mode.rs: No such file or directory",
+        dir.path(),
+    )
+    .unwrap();
+    assert!(hint.contains("src/repl/mod.rs"), "{hint}");
+
+    let hint = missing_path_hint(
+        &format!(
+            "ls: cannot access '{}': No such file or directory",
+            dir.path().join("READM.md").display()
+        ),
+        dir.path(),
+    )
+    .unwrap();
+    assert!(hint.contains("README.md"), "{hint}");
+
+    let hint =
+        missing_path_hint("bash: cd: src/repp: No such file or directory", dir.path()).unwrap();
+    assert!(hint.contains("src/repl"), "{hint}");
+
+    assert!(missing_path_hint("exit 0\nall good", dir.path()).is_none());
+    assert!(
+        missing_path_hint(
+            "cat: totallyalien.zzz: No such file or directory",
+            dir.path()
+        )
+        .is_none()
+    );
 }
 
 fn png_bytes() -> Vec<u8> {

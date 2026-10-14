@@ -1011,6 +1011,7 @@ dependencies = [
  "log",
  "regex",
  "serde_json",
+ "strsim",
  "tempfile",
  "tokio",
  "tokio-util",

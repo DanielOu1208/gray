@@ -1202,6 +1202,7 @@ async fn settle_command(
         start,
         first,
         pipe_stages,
+        &ctx.cwd,
     ))
 }
 
@@ -1388,6 +1389,7 @@ fn truncated_summary_from_disk(log_path: &std::path::Path) -> PumpSummary {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_inline(
     command: &str,
     log_path: &std::path::Path,
@@ -1396,6 +1398,7 @@ fn finish_inline(
     start: Instant,
     first_line: Option<String>,
     pipe_stages: Option<Vec<i32>>,
+    cwd: &std::path::Path,
 ) -> ToolOutput {
     let elapsed = start.elapsed();
     let report = exit_report(status, command, pipe_stages.as_deref());
@@ -1460,7 +1463,57 @@ fn finish_inline(
         out.push('\n');
         out.push_str(&hint);
     }
+    if let Some(hint) = missing_path_hint(&out, cwd) {
+        out.push('\n');
+        out.push_str(&hint);
+    }
     ToolOutput::ok(out)
+}
+
+fn missing_path_hint(text: &str, cwd: &std::path::Path) -> Option<String> {
+    const MARK: &str = "No such file or directory";
+    let line = text.lines().find(|l| l.contains(MARK))?;
+    let left = &line[..line.find(MARK)?];
+    let path = left
+        .rsplit_once('\'')
+        .and_then(|(a, _)| a.rsplit_once('\'').map(|(_, p)| p.to_string()))
+        .or_else(|| {
+            left.rsplit(':')
+                .map(str::trim)
+                .find(|t| !t.is_empty())
+                .map(str::to_string)
+        })?;
+    let path = path.trim_matches('\'').trim_matches('"');
+    if path.is_empty() || path.len() > 512 {
+        return None;
+    }
+    let (dir, base) = match std::path::Path::new(path).parent() {
+        Some(p) if !p.as_os_str().is_empty() => (
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                cwd.join(p)
+            },
+            std::path::Path::new(path)
+                .file_name()
+                .map(|b| b.to_string_lossy().to_string())?,
+        ),
+        _ => (cwd.to_path_buf(), path.to_string()),
+    };
+    let mut best: Option<(String, f64)> = None;
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let s = strsim::jaro_winkler(&base, &name);
+        if s >= 0.85 && best.as_ref().is_none_or(|(_, b)| s > *b) {
+            best = Some((name, s));
+        }
+    }
+    let (name, _) = best?;
+    let suggested = match std::path::Path::new(path).parent() {
+        Some(p) if !p.as_os_str().is_empty() => format!("{}/{name}", p.display()),
+        _ => name,
+    };
+    Some(format!("`{path}` not found · did you mean `{suggested}`?"))
 }
 
 fn missing_command_hint(text: &str) -> Option<String> {
