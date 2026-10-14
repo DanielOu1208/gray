@@ -359,6 +359,30 @@ fn first_gray_on_path() -> Option<PathBuf> {
     first_gray_in(&entries)
 }
 
+/// A `~/.cargo/bin/gray` stray: it can only be an old `cargo install` —
+/// gray's installers never write there, so it is not a user-managed binary
+/// and every guard that finds one removes it instead of warning.
+fn cargo_shadow(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    path == PathBuf::from(home).join(".cargo/bin/gray")
+}
+
+/// Remove `resolved` when it is a cargo-install shadow of `other`, then
+/// re-resolve PATH. Returns the path now first on PATH when the stray went
+/// away, None to keep the given one.
+fn drop_cargo_shadow(resolved: PathBuf, other: &Path) -> PathBuf {
+    if cargo_shadow(&resolved) && !same_binary(&resolved, other) && std::fs::remove_file(&resolved).is_ok() {
+        log::info!("removed stale cargo-install shadow {}", resolved.display());
+        if let Some(next) = first_gray_on_path() {
+            return next;
+        }
+        return resolved;
+    }
+    resolved
+}
+
 /// Same binary under two paths (`~/.local/bin` is often a symlink farm).
 fn same_binary(a: &Path, b: &Path) -> bool {
     if a == b {
@@ -393,7 +417,7 @@ fn post_update_shadow_warning() -> Option<String> {
     // The installed build is the one the installer just wrote, so asking it
     // for its version is the same trust the update itself already carries.
     let installed_version = binary_version(&installed)?;
-    let resolved = first_gray_on_path()?;
+    let resolved = drop_cargo_shadow(first_gray_on_path()?, &installed);
     shadow_warning(&installed, &installed_version, &resolved)
 }
 
@@ -423,7 +447,7 @@ fn divergence_warning(current: &Path, running: &str, resolved: &Path) -> Option<
 /// silently lands on a different gray than the one already open.
 fn path_divergence_warning() -> Option<String> {
     let current = std::env::current_exe().ok()?;
-    let resolved = first_gray_on_path()?;
+    let resolved = drop_cargo_shadow(first_gray_on_path()?, &current);
     divergence_warning(&current, env!("CARGO_PKG_VERSION"), &resolved)
 }
 

@@ -76,6 +76,14 @@ fi
 mv "${TMP}/gray" "${DEST}/gray"
 chmod +x "${DEST}/gray"
 
+# One gray only: a `cargo install` stray at ~/.cargo/bin/gray shadows the
+# install dir whenever it sits earlier on PATH.
+shadow="$HOME/.cargo/bin/gray"
+if [ -e "$shadow" ]; then
+    rm -f "$shadow"
+    echo "removed stale $shadow (cargo-install shadow)"
+fi
+
 echo "→ installed to ${DEST}/gray ($(${DEST}/gray --version 2>/dev/null || echo '?'), ${CHANNEL})"
 
 case ":$PATH:" in

@@ -477,3 +477,37 @@ fn a_pin_mismatch_leaves_no_scratch_dir() {
         "installer scratch left behind: {leftovers:?}"
     );
 }
+
+#[test]
+#[cfg(unix)] // removes a real file; fakes are `#!/bin/sh` scripts
+fn cargo_shadow_is_removed_not_warned_about() {
+    // A root process installs to /usr/local/bin and never consults HOME.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let fresh = home.join(".local/bin");
+    let stale = home.join(".cargo/bin");
+    std::fs::create_dir_all(&fresh).unwrap();
+    std::fs::create_dir_all(&stale).unwrap();
+    write_fake_gray(&fresh.join("gray"), "0.1.1");
+    write_fake_gray(&stale.join("gray"), "0.1.0");
+
+    let path = std::env::join_paths([&stale, &fresh]).unwrap();
+    with_update_env(
+        &[
+            ("GRAY_INSTALL_DIR", None),
+            ("HOME", Some(home.as_path())),
+            ("PATH", Some(path.as_os_str().as_ref())),
+        ],
+        || {
+            assert!(
+                post_update_shadow_warning().is_none(),
+                "the cargo-install shadow is deleted, leaving the updated build first on PATH"
+            );
+            assert!(!stale.join("gray").exists(), "the stray must be gone");
+            assert!(fresh.join("gray").exists(), "the real install is untouched");
+        },
+    );
+}
