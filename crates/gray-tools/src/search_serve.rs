@@ -173,12 +173,14 @@ enum Op {
     Pass(String),
 }
 
+type Unheld = Mutex<Option<Arc<BTreeSet<Vec<u8>>>>>;
+
 struct Src<'a> {
     engine: &'a fsearch::Engine,
 
     root: &'a Path,
     watch: Option<&'a Watch>,
-    unheld: Option<&'a Mutex<Option<Arc<BTreeSet<Vec<u8>>>>>>,
+    unheld: Option<&'a Unheld>,
 }
 
 fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static str> {
@@ -562,7 +564,7 @@ fn print_answer(
             .engine
             .search(&fsearch::Query {
                 scope: Some(scope_bytes.to_vec()),
-                name_re: Some(regex::bytes::Regex::new(".*").map_err(|_| "re")?),
+                name_re: None,
                 size: (0, u64::MAX),
                 mtime: (0, u32::MAX),
                 limit: 1 << 24,
@@ -926,7 +928,6 @@ fn read_block(g: &fsearch::Grep, path: &Path, plan: &GrepPlan) -> ReadBlock {
 }
 
 fn emit(plan: &GrepPlan, mut blocks: Vec<(usize, Block)>) -> Result<Option<Answer>, &'static str> {
-    let _ = &mut blocks;
     if plan.ignore_binary {
         blocks.retain(|(_, b)| !b.binary);
     }
@@ -992,6 +993,7 @@ fn emit(plan: &GrepPlan, mut blocks: Vec<(usize, Block)>) -> Result<Option<Answe
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_block(
     out: &mut Vec<u8>,
     err: &mut String,
@@ -1360,10 +1362,10 @@ fn rg_walk(scope: &Path, plan: &RgPlan) -> Result<Vec<WalkItem>, &'static str> {
                 if !ft.is_file() || ft.is_symlink() {
                     continue;
                 }
-                if let Some(max) = plan.max_filesize {
-                    if dent.metadata().map(|m| m.len()).unwrap_or(0) > max {
-                        continue;
-                    }
+                if let Some(max) = plan.max_filesize
+                    && dent.metadata().map(|m| m.len()).unwrap_or(0) > max
+                {
+                    continue;
                 }
                 items.push(WalkItem::File(dent.into_path()));
             }
@@ -1576,7 +1578,7 @@ fn rg_print_answer(
             .engine
             .search(&fsearch::Query {
                 scope: Some(scope_bytes.to_vec()),
-                name_re: Some(regex::bytes::Regex::new(".*").map_err(|_| "re")?),
+                name_re: None,
                 size: (0, u64::MAX),
                 mtime: (0, u32::MAX),
                 limit: 1 << 24,

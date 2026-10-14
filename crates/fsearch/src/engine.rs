@@ -389,10 +389,10 @@ impl Engine {
             if let Some(r) = h.get_mut(scope) {
                 r.seen = Instant::now();
             } else {
-                if h.len() >= HOT_MAX {
-                    if let Some(oldest) = h.iter().min_by_key(|(_, s)| s.seen).map(|(p, _)| p.clone()) {
-                        h.remove(&oldest);
-                    }
+                if h.len() >= HOT_MAX
+                    && let Some(oldest) = h.iter().min_by_key(|(_, s)| s.seen).map(|(p, _)| p.clone())
+                {
+                    h.remove(&oldest);
                 }
                 h.insert(scope.to_vec(), HotScope { seen: Instant::now(), verified: 0 });
             }
