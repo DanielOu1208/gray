@@ -318,7 +318,6 @@ pub struct Tui {
     pub(crate) left_home: bool,
 
     pub(crate) intro_started: Option<std::time::Instant>,
-    pub(crate) intro_row: u16,
     pub(crate) replay_queue: Option<Box<ReplayQueue>>,
 
     status_line_seen: u64,
@@ -426,38 +425,6 @@ pub enum TranscriptEntry {
 
     ThinkingRun(String),
     Gap(usize),
-}
-
-const WELCOME_HINTS: &[(&str, &str)] = &[("/", "commands")];
-
-pub(crate) fn hint_spans(col_w: usize) -> Vec<Span<'static>> {
-    let theme = crate::theme::theme();
-    let hint_w = |hints: &[(&str, &str)]| -> usize {
-        hints
-            .iter()
-            .map(|(k, l)| k.len() + 1 + l.len())
-            .sum::<usize>()
-            + hints.len().saturating_sub(1) * 3
-    };
-    let mut hints = WELCOME_HINTS.to_vec();
-    while hints.len() > 1 && hint_w(&hints) > col_w {
-        hints.pop();
-    }
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (i, (key, label)) in hints.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw("   "));
-        }
-        spans.push(Span::styled(
-            key.to_string(),
-            Style::default().fg(theme.text_bright),
-        ));
-        spans.push(Span::styled(
-            format!(" {label}"),
-            Style::default().fg(theme.text_muted),
-        ));
-    }
-    spans
 }
 
 pub(crate) fn stats_spans(stats: &str) -> Vec<Span<'static>> {
@@ -625,10 +592,18 @@ fn intro_settle_frames(from: &[String]) -> Vec<(Vec<String>, Vec<String>)> {
 }
 
 fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<Line<'static>> {
+    let (x, col_w) = home_column(w);
+    welcome_body_lines_at(x, col_w, progress, intro)
+}
+
+pub(crate) fn welcome_body_lines_at(
+    x: usize,
+    col_w: usize,
+    progress: f32,
+    intro: Option<Duration>,
+) -> Vec<Line<'static>> {
     let theme = crate::theme::theme();
     let version = env!("CARGO_PKG_VERSION").to_string();
-
-    let (x, col_w) = home_column(w);
 
     let centered = |segs: Vec<Span<'static>>, text_w: usize| -> Line<'static> {
         let pad = x + col_w.saturating_sub(text_w) / 2;
@@ -819,7 +794,7 @@ impl Tui {
                 rows as usize,
                 welcome_h as usize,
             )
-            .map(|row| (std::time::Instant::now(), row))
+            .map(|_| std::time::Instant::now())
         } else {
             None
         };
@@ -845,7 +820,7 @@ impl Tui {
         rows: u16,
         transcript: Vec<Line<'static>>,
         history_entries: Vec<TranscriptEntry>,
-        intro: Option<(std::time::Instant, u16)>,
+        intro: Option<std::time::Instant>,
     ) -> Self {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
@@ -924,8 +899,7 @@ impl Tui {
             home_qol: None,
             home_session: None,
             left_home: false,
-            intro_started: intro.map(|(at, _)| at),
-            intro_row: intro.map(|(_, row)| row).unwrap_or(0),
+            intro_started: intro,
             replay_queue: None,
         }
     }
@@ -1461,13 +1435,7 @@ impl Tui {
 
     pub(crate) fn end_intro(&mut self) {
         if self.intro_started.take().is_some() {
-            self.terminal.set_viewport_area(ratatui::layout::Rect::new(
-                0,
-                self.intro_row,
-                self.last_width,
-                0,
-            ));
-            let _ = draw::draw(self);
+            self.reflow_on_resize_inner(self.last_width);
         }
     }
 

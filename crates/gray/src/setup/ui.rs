@@ -243,7 +243,7 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
         };
         format!("{model_display} · {effort_display}")
     } else {
-        model_display
+        model_display.clone()
     };
     let left_len = 2 + ctx_display.chars().count() + 3 + cache_display.chars().count();
     let pad_len = w.saturating_sub(left_len + right_text.chars().count());
@@ -288,6 +288,7 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
         let home = crate::composer::draw::HomeRows {
             notice: bg.home_notice.as_deref(),
             stats: bg.plugin_stats.as_deref(),
+            model: Some(model_display.as_str()),
             above: bg.home_update.as_deref(),
             session: bg.home_session.as_deref(),
             qol: bg.home_qol.as_deref(),

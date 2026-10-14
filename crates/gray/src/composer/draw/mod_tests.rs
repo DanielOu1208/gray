@@ -2,17 +2,6 @@ use super::widgets::transcript_ends_blank;
 use super::*;
 
 #[test]
-fn home_spacer_fills_to_the_last_row() {
-    assert_eq!(home_spacer_rows(17, 2, 6, 30), 5);
-    assert_eq!(17 + 2 + 6 + home_spacer_rows(17, 2, 6, 30), 30);
-
-    assert_eq!(home_spacer_rows(17, 2, 6, 30) + 17, 30 - 2 - 6);
-
-    assert_eq!(home_spacer_rows(28, 2, 6, 30), 0);
-    assert_eq!(home_spacer_rows(0, 0, 0, 30), 30);
-}
-
-#[test]
 fn transcript_ends_blank_matches_ensure_gap() {
     use ratatui::style::Style;
     assert!(!transcript_ends_blank(&[]));
@@ -30,26 +19,26 @@ fn desired_viewport_exact_fit() {
     assert_eq!(box_rows, 3, "top pad + prompt + bottom pad");
 
     assert_eq!(
-        desired_viewport_h(0, 0, 0, box_rows, 0, 0, viewport_cap(40)),
+        desired_viewport_h(0, 0, 0, box_rows, 0, 0, 1, viewport_cap(40)),
         MIN_VIEWPORT_H
     );
 
     assert_eq!(
-        desired_viewport_h(0, 0, 0, box_rows, 6, 0, viewport_cap(40)),
+        desired_viewport_h(0, 0, 0, box_rows, 6, 0, 1, viewport_cap(40)),
         10
     );
 
     assert_eq!(
-        desired_viewport_h(2, 0, 0, box_rows, 0, 0, viewport_cap(40)),
+        desired_viewport_h(2, 0, 0, box_rows, 0, 0, 1, viewport_cap(40)),
         6
     );
 
     assert_eq!(
-        desired_viewport_h(3, 0, 0, box_rows, 6, 0, viewport_cap(40)),
+        desired_viewport_h(3, 0, 0, box_rows, 6, 0, 1, viewport_cap(40)),
         13
     );
 
-    assert_eq!(desired_viewport_h(0, 0, 0, 0, 15, 0, 23), 16);
+    assert_eq!(desired_viewport_h(0, 0, 0, 0, 15, 0, 1, 23), 16);
 }
 
 #[test]
@@ -67,7 +56,7 @@ fn multiline_input_is_not_clipped_by_the_viewport_cap() {
     let box_rows: u16 = 13;
     let rows: u16 = 40;
     let cap = viewport_cap(rows);
-    let desired = desired_viewport_h(0, 0, 0, box_rows, 0, 0, cap);
+    let desired = desired_viewport_h(0, 0, 0, box_rows, 0, 0, 1, cap);
 
     assert!(
         desired > box_rows,
@@ -128,15 +117,15 @@ fn queued_preview_renders_header_and_entries() {
 
 #[test]
 fn live_tool_viewport_height_counts_live_rows() {
-    let without = desired_viewport_h(2, 0, 0, 3, 0, 0, viewport_cap(40));
-    let with = desired_viewport_h(2, 0, 1, 3, 0, 0, viewport_cap(40));
+    let without = desired_viewport_h(2, 0, 0, 3, 0, 0, 1, viewport_cap(40));
+    let with = desired_viewport_h(2, 0, 1, 3, 0, 0, 1, viewport_cap(40));
     assert_eq!(with, without + 1, "live rows must reserve viewport space");
 
-    let capped = desired_viewport_h(2, 0, 4, 3, 0, 0, viewport_cap(40));
+    let capped = desired_viewport_h(2, 0, 4, 3, 0, 0, 1, viewport_cap(40));
     assert_eq!(capped, without + 4, "3 live + overflow row: {capped}");
 
     let cap = viewport_cap(40);
-    assert_eq!(desired_viewport_h(3, 4, 40, 3, 6, 1, cap), cap);
+    assert_eq!(desired_viewport_h(3, 4, 40, 3, 6, 1, 1, cap), cap);
 }
 
 #[test]
@@ -186,18 +175,18 @@ fn footer_paint_row_clamps_into_the_frame_instead_of_vanishing() {
 #[test]
 fn latched_viewport_floor_covers_the_measured_frame_when_the_estimate_shortcuts_a_segment() {
     for status_h in 0..=3u16 {
-        let floor = latched_viewport_floor(status_h, 0, 0, 3, 0, viewport_cap(40));
+        let floor = latched_viewport_floor(status_h, 0, 0, 3, 0, 1, viewport_cap(40));
         assert!(
             floor > status_h + 3,
             "status_h={status_h}: floor {floor} cannot hold dock {status_h} + box 3 + footer"
         );
     }
 
-    let floor = latched_viewport_floor(0, 0, 2, 3, 0, viewport_cap(40));
+    let floor = latched_viewport_floor(0, 0, 2, 3, 0, 1, viewport_cap(40));
 
     assert!(floor > 2 + 3);
 
-    assert_eq!(latched_viewport_floor(3, 0, 0, 30, 0, 10), 10);
+    assert_eq!(latched_viewport_floor(3, 0, 0, 30, 0, 1, 10), 10);
 }
 
 #[test]

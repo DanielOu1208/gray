@@ -49,7 +49,8 @@ fn home_box_is_the_flat_band_with_hints_stats_and_notice_under_it() {
         notice: Some(
             "⚠ 3 interrupted sessions in ~/gray · /sessions to pick up · /sessions dismiss to clear",
         ),
-        stats: Some("65 plugins · 65 loaded"),
+        stats: Some("65/65 plugins loaded"),
+        model: Some("SWE 2 max"),
         above: None,
         session: None,
         qol: None,
@@ -63,23 +64,19 @@ fn home_box_is_the_flat_band_with_hints_stats_and_notice_under_it() {
     assert_eq!(rows[1], " ❯ hi");
     assert_eq!((ibox.cur_row, ibox.cur_col), (1, 2));
 
-    assert_eq!(rows.len(), 8, "{rows:?}");
-    assert!(rows[3].ends_with("/ commands"), "{rows:?}");
-    assert!(!rows[3].contains("Tip"), "{rows:?}");
-    assert_eq!(display_width(&rows[3]), 78, "hints span the box's width");
-    assert!(
-        rows[5].starts_with("⚠ 3 interrupted sessions in ~/gray"),
-        "{rows:?}"
-    );
-    assert!(rows[5].ends_with("65 plugins · 65 loaded"), "{rows:?}");
+    assert_eq!(rows.len(), 9, "{rows:?}");
+    assert_eq!(rows[3], "");
+    assert!(rows[4].starts_with("SWE 2 max"), "{rows:?}");
+    assert!(rows[4].ends_with("65/65 plugins loaded"), "{rows:?}");
     assert_eq!(
-        display_width(&rows[5]),
+        display_width(&rows[4]),
         78,
-        "headline + stats span the box's width"
+        "model + stats span the box's width"
     );
-    assert_eq!(rows[4], "");
-    assert_eq!(rows[6], "  /sessions           pick up");
-    assert_eq!(rows[7], "  /sessions dismiss   clear");
+    assert_eq!(rows[5], "");
+    assert_eq!(rows[6], "⚠ 3 interrupted sessions in ~/gray");
+    assert_eq!(rows[7], "  /sessions           pick up");
+    assert_eq!(rows[8], "  /sessions dismiss   clear");
 
     let quiet = build_input_box(
         "",
@@ -87,19 +84,24 @@ fn home_box_is_the_flat_band_with_hints_stats_and_notice_under_it() {
         w,
         None,
         Some(HomeRows {
-            stats: Some("65 plugins · 65 loaded"),
+            stats: Some("65/65 plugins loaded"),
+            model: Some("SWE 2 max"),
             ..HomeRows::default()
         }),
         &[],
     );
     let quiet_rows = row_texts(&quiet);
-    assert_eq!(quiet_rows.len(), 6, "{quiet_rows:?}");
-    assert_eq!(quiet_rows[5], "65 plugins · 65 loaded");
+    assert_eq!(quiet_rows.len(), 5, "{quiet_rows:?}");
+    assert!(quiet_rows[4].starts_with("SWE 2 max"), "{quiet_rows:?}");
+    assert!(
+        quiet_rows[4].ends_with("65/65 plugins loaded"),
+        "{quiet_rows:?}"
+    );
 
     let chat = build_input_box("hi", 2, w, None, None, &[]);
     assert_eq!((chat.lines.len(), chat.x, chat.width), (3, 0, w));
 
-    assert_eq!(home_band_h(w), 3 + 1 + 1);
+    assert_eq!(home_band_h(w), 3 + 2 + 1);
 }
 
 #[test]

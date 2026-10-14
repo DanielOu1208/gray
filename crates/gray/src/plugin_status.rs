@@ -104,7 +104,7 @@ pub(crate) fn stats_line() -> Option<String> {
     }
     let loaded = results.iter().filter(|r| r.error.is_none()).count();
     let failed = plugins - loaded;
-    let mut parts = vec![format!("{plugins} plugins"), format!("{loaded} loaded")];
+    let mut parts = vec![format!("{loaded}/{plugins} plugins loaded")];
     if failed > 0 {
         parts.push(format!("{failed} failed"));
     }
