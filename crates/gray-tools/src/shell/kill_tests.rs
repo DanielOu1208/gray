@@ -42,7 +42,7 @@ async fn guards_reject_degenerate_pgid() {
 
 #[tokio::test]
 async fn group_kill_kills_tree() {
-    let spawned = spawn("sleep 30", &std::env::temp_dir(), None, None).expect("spawn");
+    let spawned = spawn("sleep 30", &std::env::temp_dir(), None, None, None).expect("spawn");
     let pgid = spawned.pgid;
     let mut child = spawned.child;
 
@@ -64,6 +64,7 @@ async fn term_ignored_escalates_to_sigkill() {
     let spawned = spawn(
         "trap '' TERM; echo ready; exec sleep 30",
         &std::env::temp_dir(),
+        None,
         None,
         None,
     )

@@ -12,7 +12,8 @@ fn setsid_failure_is_an_error() {
 #[cfg(unix)]
 #[tokio::test]
 async fn spawn_records_real_process_group() {
-    let spawned = spawn("true", &PathBuf::from("/tmp"), None, None).expect("sh -c true must spawn");
+    let spawned =
+        spawn("true", &PathBuf::from("/tmp"), None, None, None).expect("sh -c true must spawn");
     assert_eq!(spawned.pgid, spawned.pid as i32);
 }
 
@@ -56,6 +57,7 @@ async fn exec_prefix_runs_the_command_on_the_far_shell() {
         None,
         None,
         Some(vec!["sh".into(), "-s".into()]),
+        None,
     )
     .expect("prefixed spawn must succeed");
     let out = spawned.child.wait_with_output().await.expect("child");
@@ -76,6 +78,7 @@ async fn exec_prefix_carries_gray_env_across_the_boundary() {
         Some("sess-1"),
         Some(&report),
         Some(vec!["sh".into(), "-s".into()]),
+        None,
     )
     .expect("prefixed spawn must succeed");
     let out = spawned.child.wait_with_output().await.expect("child");
@@ -97,6 +100,7 @@ async fn a_heredoc_survives_the_prefix_boundary_intact() {
         None,
         None,
         Some(vec!["sh".into(), "-s".into()]),
+        None,
     )
     .expect("prefixed spawn must succeed");
     let out = spawned.child.wait_with_output().await.expect("child");

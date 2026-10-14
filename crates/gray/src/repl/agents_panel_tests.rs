@@ -57,6 +57,12 @@ fn viewer_stub() -> Viewer {
         view_h: 1,
         last_tick: Instant::now(),
         note: None,
+        chat: ChatInput {
+            target: "t".into(),
+            name: "run".into(),
+            buf: crate::composer::TextArea::new(),
+            focus: false,
+        },
     }
 }
 

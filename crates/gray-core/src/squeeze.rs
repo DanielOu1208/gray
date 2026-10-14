@@ -25,6 +25,8 @@ impl Squeezed {
 
     pub fn squeezed(&self) -> bool {
         self.rule != "none"
+            && self.sent_bytes < self.raw_bytes
+            && crate::spill::fmt_bytes(self.sent_bytes) != crate::spill::fmt_bytes(self.raw_bytes)
     }
 }
 
@@ -39,19 +41,19 @@ pub fn squeeze(text: &str, command: &str) -> Squeezed {
     let trailing_newline = text.ends_with('\n');
     let body = collapse(text.lines().collect::<Vec<_>>(), rule);
 
-    let sent_bytes = body.len();
-    if sent_bytes >= text.len() {
+    let text_out = if trailing_newline && !body.ends_with('\n') {
+        format!("{body}\n")
+    } else {
+        body
+    };
+    if text_out.len() >= text.len() {
         return Squeezed::none(text);
     }
     Squeezed {
-        text: if trailing_newline && !body.ends_with('\n') {
-            format!("{body}\n")
-        } else {
-            body
-        },
+        sent_bytes: text_out.len(),
+        text: text_out,
         rule: rule.map_or("runs", Rule::id),
         raw_bytes: text.len(),
-        sent_bytes,
     }
 }
 
