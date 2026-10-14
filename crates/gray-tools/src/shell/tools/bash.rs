@@ -560,6 +560,20 @@ async fn search_command(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Option<ToolOutput> {
     let words = search_words(command)?;
+    match words.first().map(String::as_str) {
+        Some("grep") => return bare_grep_claim(&words[1..], cwd).await,
+        Some("egrep") => {
+            let mut a = vec!["-E".to_string()];
+            a.extend_from_slice(&words[1..]);
+            return bare_grep_claim(&a, cwd).await;
+        }
+        Some("fgrep") => {
+            let mut a = vec!["-F".to_string()];
+            a.extend_from_slice(&words[1..]);
+            return bare_grep_claim(&a, cwd).await;
+        }
+        _ => {}
+    }
     if words.first().map(String::as_str) != Some("gray") {
         return None;
     }
@@ -578,6 +592,38 @@ async fn search_command(
     } else {
         crate::search_cmd::grep(&args, &ctx).await
     };
+    Some(finish(text))
+}
+
+/// A bare `grep` (or `egrep`/`fgrep`, normalized above) answered in
+/// process off the resident index — the same machinery the `GRAY_SEARCH_SOCK`
+/// server runs, minus the socket. `None` = the shell runs it for real:
+/// cold index, file/missing operands, unneedled or unanswerable plans.
+#[cfg(unix)]
+async fn bare_grep_claim(argv: &[String], cwd: &Path) -> Option<ToolOutput> {
+    let crate::search_cmd::IndexBackend::Fs(pool) = crate::search_cmd::global_index() else {
+        return None;
+    };
+    let (dir, args) = (cwd.to_path_buf(), argv.to_vec());
+    let ans = crate::search_cmd::spawn_index(move || {
+        pool.engine()
+            .and_then(|e| crate::search_serve::grep_answer(e, &args, &dir))
+    })
+    .await?;
+    let crate::search_serve::Answer::Print { stdout, stderr, code } = ans else {
+        return None;
+    };
+    let mut text = String::from_utf8_lossy(&stdout).into_owned();
+    if !stderr.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(&stderr));
+    }
+    // Non-zero exits keep the label a real run's header would show.
+    if code != 0 {
+        text = format!("exit {code}\n{text}");
+    }
     Some(finish(text))
 }
 
