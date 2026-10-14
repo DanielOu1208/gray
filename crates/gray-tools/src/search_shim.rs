@@ -112,7 +112,7 @@ pub fn run(tool: &str) -> ! {
         start,
     );
     match reply {
-        Some(r) if r.served && r.mode == "answer" => print_answer(r),
+        Some(r) if r.served && r.mode == "answer" => print_answer(tool, r),
         Some(r) if r.served => run_batches(tool, &original[0], r),
         _ => exec_real(tool, &original),
     }
@@ -120,11 +120,11 @@ pub fn run(tool: &str) -> ! {
 
 /// The server computed the real tool's output itself: write it and exit
 /// with its code. Any undecodable payload falls back to the real tool.
-fn print_answer(r: Reply) -> ! {
+fn print_answer(tool: &str, r: Reply) -> ! {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
     let (Ok(out), Ok(err)) = (b64.decode(r.stdout), b64.decode(r.stderr)) else {
-        exec_real("grep", &std::env::args_os().collect::<Vec<_>>());
+        exec_real(tool, &std::env::args_os().collect::<Vec<_>>());
     };
     use std::io::Write as _;
     let _ = std::io::stdout().write_all(&out);

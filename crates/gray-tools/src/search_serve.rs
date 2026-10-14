@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
-use crate::search_plan::{self, GrepPlan};
+use crate::search_plan::{self, GrepPlan, RgPlan};
 use crate::search_watch::Watch;
 
 /// Everything one server answers from.
@@ -152,6 +152,7 @@ fn serve_line(server: &Server, line: &str) -> Result<Answer, &'static str> {
     let cwd = Path::new(req["cwd"].as_str().ok_or("bad request")?);
     match req["tool"].as_str() {
         Some("grep") => grep(server, &argv, cwd),
+        Some("rg") => rg(server, &argv, cwd),
         _ => Err("tool not served"),
     }
 }
@@ -656,6 +657,46 @@ pub(crate) fn grep_answer(engine: &fsearch::Engine, argv: &[String], cwd: &Path)
     }
 }
 
+/// `rg` for the bash tool's in-process claim: the pool engine, no watch
+/// or unheld cache, every operand an indexed directory (`rg` walks
+/// directory operands unconditionally). Anything else — file operands,
+/// missing paths, unanswerable shapes — declines, and the shell runs it.
+pub(crate) fn rg_answer(engine: &fsearch::Engine, argv: &[String], cwd: &Path) -> Option<Answer> {
+    let plan = search_plan::rg_plan(argv).ok()?;
+    if !plan.answerable()
+        || !plan.all_needled
+        || plan.needles.is_empty()
+        || plan.operands.is_empty()
+    {
+        return None;
+    }
+    let st = engine.status();
+    if !st.ready || st.content_pending > 0 || st.content_docs == 0 {
+        return None;
+    }
+    let mut ops = Vec::with_capacity(plan.operands.len());
+    for raw in &plan.operands {
+        let joined = cwd.join(raw);
+        let scope = (!raw.is_empty() && raw != "-" && joined.is_dir())
+            .then(|| joined.canonicalize().ok())
+            .flatten()
+            .filter(|s| engine.covers(s.as_os_str().as_bytes()))?;
+        let trimmed = raw.trim_end_matches('/');
+        let prefix = if raw.starts_with('/') && trimmed.is_empty() {
+            "/".to_string()
+        } else {
+            format!("{trimmed}/")
+        };
+        ops.push(Op::Indexed { scope, prefix });
+    }
+    let src = Src { engine, root: Path::new("/"), watch: None, unheld: None };
+    let mut unheld = None;
+    match rg_print_answer(&src, &plan, &ops, &mut unheld) {
+        Ok(Some(a @ Answer::Print { .. })) => Some(a),
+        _ => None,
+    }
+}
+
 /// `-c`: the real tool prints one `file:N` (or `N`) per file its walk
 /// visits, zero for files it found nothing in. `walked` is every file the
 /// operand's recursion reached; `blocks` the ones that produced anything.
@@ -1020,6 +1061,694 @@ fn print_ctx(out: &mut Vec<u8>, b: &Block, plan: &GrepPlan, show_name: bool, ln:
     }
     out.extend_from_slice(text);
     out.push(b'\n');
+}
+
+// ---------------------------------------------------------------------
+// `rg`: same three modes, ripgrep's walk and ripgrep's bytes. The walk
+// is `ignore`'s own — the crate ripgrep walks with — so its filtering
+// and its serial order are the real tool's. (Parallel `rg` does not
+// promise an order; what is served here is the deterministic order
+// `rg -j1` prints.) A file containing a NUL that matches is never
+// rendered or fed: binary semantics — silent skip, escaped line, or
+// `binary file matches` notice — hinge on where the NUL sits, which the
+// index cannot see, so the real tool takes the call.
+// ---------------------------------------------------------------------
+
+/// One `rg` request: operands resolve like grep's — a directory under
+/// the root is indexed, anything else passes through — but `rg` walks
+/// directory operands unconditionally and `-q` cannot merge exit codes
+/// across execs (a match wins over an error there).
+fn rg(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static str> {
+    let plan = search_plan::rg_plan(argv)?;
+    // No operand: `rg` searches the cwd, printing `src/f` with no `./`.
+    // Served as an implicit `.` operand with an empty prefix when the cwd
+    // is under the root; outside it there is no operand the exec path can
+    // write that displays the same, so the call declines.
+    let raws: Vec<String> = if plan.operands.is_empty() {
+        let cwd_canon = cwd.canonicalize().map_err(|_| "cwd gone")?;
+        if !plan.all_needled || plan.needles.is_empty() || !cwd_canon.starts_with(&server.root) {
+            return Err("cwd search outside the index");
+        }
+        vec![".".to_string()]
+    } else {
+        plan.operands.clone()
+    };
+    let implicit = plan.operands.is_empty();
+    let mut ops = Vec::new();
+    let mut indexed = false;
+    for raw in &raws {
+        let joined = cwd.join(raw);
+        let scope = (!raw.is_empty() && raw != "-" && joined.is_dir())
+            .then(|| joined.canonicalize().ok())
+            .flatten();
+        let serve = scope.as_ref().is_some_and(|s| {
+            plan.all_needled && !plan.needles.is_empty() && s.starts_with(&server.root)
+        });
+        let serve = if implicit { scope.is_some() } else { serve };
+        if !serve {
+            ops.push(Op::Pass(raw.clone()));
+            continue;
+        }
+        let scope = scope.unwrap();
+        // The display path: the operand as written with one `/` between
+        // it and the walked names — `src/` displays `src/f`, `.` `./f`.
+        let trimmed = raw.trim_end_matches('/');
+        let prefix = if implicit {
+            String::new()
+        } else if raw.starts_with('/') && trimmed.is_empty() {
+            "/".to_string()
+        } else {
+            format!("{trimmed}/")
+        };
+        ops.push(Op::Indexed { scope, prefix });
+        indexed = true;
+    }
+    if plan.quiet && ops.iter().any(|op| matches!(op, Op::Pass(_))) {
+        return Err("quiet over pass-through operands");
+    }
+    let mut files = Vec::new();
+    if indexed {
+        let st = server.engine.status();
+        if !st.ready || st.root_missing || st.content_pending > 0 || st.content_docs == 0 {
+            return Err("index not settled");
+        }
+        if plan.answerable() && ops.iter().all(|op| matches!(op, Op::Indexed { .. })) {
+            let mut unheld: Option<Arc<BTreeSet<Vec<u8>>>> = None;
+            let src = Src {
+                engine: &server.engine,
+                root: &server.root,
+                watch: Some(&server.watch),
+                unheld: Some(&server.unheld),
+            };
+            if let Some(print) = rg_print_answer(&src, &plan, &ops, &mut unheld)? {
+                return Ok(print);
+            }
+        }
+        let mut unheld: Option<Arc<BTreeSet<Vec<u8>>>> = None;
+        for op in &ops {
+            match op {
+                Op::Pass(raw) => files.push(raw.clone()),
+                Op::Indexed { scope, prefix } => {
+                    for (display, abs) in rg_dir_files(server, scope, prefix, &plan, &mut unheld)? {
+                        // A NUL candidate fed as an explicit operand gets
+                        // operand-binary output, not the walk's; only a
+                        // candidate that cannot match is safe to feed.
+                        let buf = std::fs::read(&abs).map_err(|_| "file vanished")?;
+                        if buf.contains(&0) {
+                            let safe = plan
+                                .fsearch_grep()
+                                .is_some_and(|g| !g.matches_buf(&buf));
+                            if !safe {
+                                return Err("binary candidate");
+                            }
+                        }
+                        files.push(display);
+                    }
+                }
+            }
+        }
+    } else {
+        files = plan.operands.clone();
+    }
+    // `rg` reports a missing operand in two voices — "IO error for
+    // operation on X" when it is the only operand, "X: No such file..."
+    // when there are more. Keep at least two operands whenever the call
+    // had two, so the real tool picks the same voice.
+    if ops.len() > 1 && files.len() < 2 {
+        files.push("/dev/null".into());
+    }
+    let mut out_argv = plan.argv.clone();
+    // The filename column: explicit `-H`/`-I` stand; otherwise on for
+    // multiple operands or any directory operand.
+    if plan.with_name.is_none() && (ops.len() > 1 || indexed) {
+        out_argv.insert(0, "-H".into());
+    }
+    Ok(Answer::Exec { argv: out_argv, files, mode: if indexed { "index" } else { "pass" } })
+}
+
+/// One yielded item of the rg walk: a file, or a walk error as `rg`
+/// reports it.
+enum WalkItem {
+    File(PathBuf),
+    Err(PathBuf, String),
+}
+
+/// The files `rg` would visit under `scope`, in the order its
+/// single-threaded walk reaches them: hidden pruned unless `--hidden` or
+/// `-uu`, ignore files of every kind unless `--no-ignore`/`-u`, `-g`
+/// overrides, `--ignore-file`s, `--max-depth`, `--max-filesize`,
+/// symlinks never followed (`-L` declines earlier).
+fn rg_walk(scope: &Path, plan: &RgPlan) -> Result<Vec<WalkItem>, &'static str> {
+    let hidden = plan.hidden.unwrap_or(false);
+    let mut wb = ignore::WalkBuilder::new(scope);
+    wb.hidden(!hidden)
+        .follow_links(false)
+        .max_depth(plan.max_depth)
+        .parents(!plan.no_ignore && !plan.no_ignore_parent)
+        .ignore(!plan.no_ignore && !plan.no_ignore_dot)
+        .git_ignore(!plan.no_ignore && !plan.no_ignore_vcs)
+        .git_exclude(!plan.no_ignore && !plan.no_ignore_vcs && !plan.no_ignore_exclude)
+        .git_global(!plan.no_ignore && !plan.no_ignore_global)
+        .require_git(plan.require_git);
+    if !plan.no_ignore && !plan.no_ignore_dot {
+        wb.add_custom_ignore_filename(".rgignore");
+    }
+    for f in &plan.ignore_files {
+        let _ = wb.add_ignore(f);
+    }
+    if !plan.globs.is_empty() {
+        let mut ob = ignore::overrides::OverrideBuilder::new(scope);
+        for g in &plan.globs {
+            ob.add(g).map_err(|_| "bad glob")?;
+        }
+        wb.overrides(ob.build().map_err(|_| "bad glob")?);
+    }
+    let mut items = Vec::new();
+    for e in wb.build() {
+        match e {
+            Ok(dent) => {
+                let Some(ft) = dent.file_type() else { continue };
+                if !ft.is_file() || ft.is_symlink() {
+                    continue;
+                }
+                if let Some(max) = plan.max_filesize {
+                    if dent.metadata().map(|m| m.len()).unwrap_or(0) > max {
+                        continue;
+                    }
+                }
+                items.push(WalkItem::File(dent.into_path()));
+            }
+            Err(e) => {
+                let (p, msg) = walk_err(&e);
+                items.push(WalkItem::Err(p.unwrap_or_else(|| scope.to_path_buf()), msg));
+            }
+        }
+    }
+    Ok(items)
+}
+
+/// Split a walk error into the path it names and the message `rg` prints
+/// after it (`Permission denied (os error 13)` and friends).
+fn walk_err(e: &ignore::Error) -> (Option<PathBuf>, String) {
+    use ignore::Error;
+    let mut cur = e;
+    let mut path = None;
+    loop {
+        match cur {
+            Error::WithPath { path: p, err } => {
+                if path.is_none() {
+                    path = Some(p.clone());
+                }
+                cur = err;
+            }
+            Error::WithDepth { err, .. } | Error::WithLineNumber { err, .. } => cur = err,
+            Error::Io(ioe) => return (path, ioe.to_string()),
+            _ => return (path, cur.to_string()),
+        }
+    }
+}
+
+/// The display paths under one indexed operand, exec mode: the walk's
+/// files that could still match — index-held literal hits, unheld,
+/// watch-changed, or files the name index never saw — in walk order.
+fn rg_dir_files(
+    server: &Server,
+    scope: &Path,
+    prefix: &str,
+    plan: &RgPlan,
+    unheld: &mut Option<Arc<BTreeSet<Vec<u8>>>>,
+) -> Result<Vec<(String, PathBuf)>, &'static str> {
+    let scope_bytes = scope.as_os_str().as_bytes();
+    let changed = server.watch.changed(scope_bytes).ok_or("watch broken")?;
+    if unheld.is_none() {
+        let mut cache = server.unheld.lock().unwrap();
+        if cache.is_none() {
+            let root_bytes = server.root.as_os_str().as_bytes();
+            let all: BTreeSet<Vec<u8>> = server
+                .engine
+                .unheld_files(root_bytes)
+                .ok_or("content index not holding scope")?
+                .into_iter()
+                .collect();
+            *cache = Some(Arc::new(all));
+        }
+        *unheld = Some(cache.as_ref().unwrap().clone());
+    }
+    let insensitive = plan.insensitive();
+    let mut cands: BTreeSet<Vec<u8>> = server
+        .engine
+        .held_matches(scope_bytes, &plan.needles, insensitive)
+        .ok_or("match answer partial")?
+        .into_iter()
+        .collect();
+    cands.extend(changed);
+    cands.extend(
+        unheld
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|p| {
+                p.starts_with(scope_bytes)
+                    && (p.len() == scope_bytes.len() || p.get(scope_bytes.len()) == Some(&b'/'))
+            })
+            .cloned(),
+    );
+    let known: std::collections::HashSet<Vec<u8>> = server
+        .engine
+        .search(&fsearch::Query {
+            scope: Some(scope_bytes.to_vec()),
+            name_re: Some(regex::bytes::Regex::new(".*").map_err(|_| "re")?),
+            size: (0, u64::MAX),
+            mtime: (0, u32::MAX),
+            limit: 1 << 24,
+            ..Default::default()
+        })
+        .map_err(|_| "index list failed")?
+        .into_iter()
+        .map(|f| f.path.as_os_str().as_bytes().to_vec())
+        .collect();
+    let mut out = Vec::new();
+    for item in rg_walk(scope, plan)? {
+        match item {
+            WalkItem::File(path) => {
+                let bytes = path.as_os_str().as_bytes();
+                if !cands.contains(bytes) && known.contains(bytes) {
+                    continue;
+                }
+                let Ok(rel) = path.strip_prefix(scope) else { continue };
+                let Some(name) = rel.to_str() else { return Err("path is not UTF-8") };
+                out.push((rg_display(prefix, name, plan), path));
+            }
+            WalkItem::Err(..) => return Err("walk error"),
+        }
+    }
+    Ok(out)
+}
+
+/// `prefix + name` with `--path-separator` applied.
+fn rg_display(prefix: &str, name: &str, plan: &RgPlan) -> String {
+    let d = format!("{prefix}{name}");
+    match &plan.path_separator {
+        Some(sep) if sep != "/" => d.replace('/', sep),
+        _ => d,
+    }
+}
+
+/// One file's contribution to rg output, in walk order.
+struct RgBlock {
+    display: String,
+    abs: PathBuf,
+    fm: Option<fsearch::FileMatches>,
+    err: Option<String>,
+}
+
+/// Print an `rg` the index can answer exactly, or `None` to fall back to
+/// handing the real tool the candidate files. `Err` declines the call.
+fn rg_print_answer(
+    src: &Src,
+    plan: &RgPlan,
+    ops: &[Op],
+    unheld: &mut Option<Arc<BTreeSet<Vec<u8>>>>,
+) -> Result<Option<Answer>, &'static str> {
+    let Some(mut g) = plan.fsearch_grep() else { return Ok(None) };
+    let mut blocks: Vec<(usize, RgBlock)> = Vec::new();
+    for (oi, op) in ops.iter().enumerate() {
+        let Op::Indexed { scope, prefix } = op else { return Ok(None) };
+        let scope_bytes = scope.as_os_str().as_bytes();
+        // Index-held matches, paged to completion.
+        let mut held: HashMap<Vec<u8>, fsearch::FileMatches> = HashMap::new();
+        g.skip = 0;
+        loop {
+            let q = fsearch::Query {
+                scope: Some(scope_bytes.to_vec()),
+                limit: usize::MAX,
+                size: (0, u64::MAX),
+                mtime: (0, u32::MAX),
+                ..Default::default()
+            };
+            let (res, _idx) = src.engine.grep(&q, &g).map_err(|_| "index grep failed")?;
+            if !res.complete {
+                return Ok(None);
+            }
+            let next = res.next;
+            for fm in res.files {
+                held.insert(fm.path.clone(), fm);
+            }
+            match next {
+                Some(n) => g.skip = n,
+                None => break,
+            }
+        }
+        // Fresh-read paths: changed, unheld, and — reachable only by
+        // walking — files the name index never saw (`.git` under `-uu`).
+        let mut extra: BTreeSet<Vec<u8>> = match src.watch {
+            Some(w) => w.changed(scope_bytes).ok_or("watch broken")?.into_iter().collect(),
+            None => BTreeSet::new(),
+        };
+        match src.unheld {
+            Some(cache) => {
+                if unheld.is_none() {
+                    let mut c = cache.lock().unwrap();
+                    if c.is_none() {
+                        let all: BTreeSet<Vec<u8>> = src
+                            .engine
+                            .unheld_files(src.root.as_os_str().as_bytes())
+                            .ok_or("content index not holding scope")?
+                            .into_iter()
+                            .collect();
+                        *c = Some(Arc::new(all));
+                    }
+                    *unheld = Some(c.as_ref().unwrap().clone());
+                }
+                extra.extend(
+                    unheld
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .filter(|p| {
+                            p.starts_with(scope_bytes)
+                                && (p.len() == scope_bytes.len() || p.get(scope_bytes.len()) == Some(&b'/'))
+                        })
+                        .cloned(),
+                );
+            }
+            None => {
+                extra.extend(
+                    src.engine
+                        .unheld_files(scope_bytes)
+                        .ok_or("content index not holding scope")?,
+                );
+            }
+        }
+        let known: std::collections::HashSet<Vec<u8>> = src
+            .engine
+            .search(&fsearch::Query {
+                scope: Some(scope_bytes.to_vec()),
+                name_re: Some(regex::bytes::Regex::new(".*").map_err(|_| "re")?),
+                size: (0, u64::MAX),
+                mtime: (0, u32::MAX),
+                limit: 1 << 24,
+                ..Default::default()
+            })
+            .map_err(|_| "index list failed")?
+            .into_iter()
+            .map(|f| f.path.as_os_str().as_bytes().to_vec())
+            .collect();
+        for item in rg_walk(scope, plan)? {
+            match item {
+                WalkItem::Err(p, msg) => {
+                    let display = p
+                        .strip_prefix(scope)
+                        .ok()
+                        .and_then(|r| r.to_str())
+                        .map(|n| rg_display(prefix, n, plan))
+                        .unwrap_or_else(|| p.display().to_string());
+                    blocks.push((oi, RgBlock {
+                        display,
+                        abs: p,
+                        fm: None,
+                        err: Some(msg),
+                    }));
+                }
+                WalkItem::File(path) => {
+                    let bytes = path.as_os_str().as_bytes();
+                    if let Some(fm) = held.remove(bytes) {
+                        // A held match is real; a NUL anywhere makes it a
+                        // binary match, which the walk would not print.
+                        let buf = std::fs::read(&path).map_err(|_| "file vanished")?;
+                        if buf.contains(&0) {
+                            return Ok(None);
+                        }
+                        let rel = path.strip_prefix(scope).map_err(|_| "walk mismatch")?;
+                        let name = rel.to_str().ok_or("path is not UTF-8")?;
+                        blocks.push((oi, RgBlock {
+                            display: rg_display(prefix, name, plan),
+                            abs: path,
+                            fm: Some(fm),
+                            err: None,
+                        }));
+                    } else if extra.contains(bytes) || !known.contains(bytes) {
+                        let rel = path.strip_prefix(scope).map_err(|_| "walk mismatch")?;
+                        let name = rel.to_str().ok_or("path is not UTF-8")?;
+                        let display = rg_display(prefix, name, plan);
+                        let buf = match std::fs::read(&path) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                blocks.push((oi, RgBlock {
+                                    display,
+                                    abs: path,
+                                    fm: None,
+                                    err: Some(e.to_string()),
+                                }));
+                                continue;
+                            }
+                        };
+                        if buf.contains(&0) {
+                            if g.matches_buf(&buf) {
+                                return Ok(None);
+                            }
+                            continue;
+                        }
+                        let fm = fsearch::grep_file(&g, path.as_os_str().as_bytes())
+                            .files
+                            .into_iter()
+                            .next();
+                        if let Some(fm) = fm {
+                            blocks.push((oi, RgBlock {
+                                display,
+                                abs: path,
+                                fm: Some(fm),
+                                err: None,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    rg_emit(plan, blocks)
+}
+
+/// Emit the real `rg`'s bytes for `blocks` and its exit code.
+fn rg_emit(plan: &RgPlan, blocks: Vec<(usize, RgBlock)>) -> Result<Option<Answer>, &'static str> {
+    // Operand-count semantics are settled by the caller: the answer path
+    // only ever sees directory operands, which always show names.
+    let show_name = plan.with_name.unwrap_or(true);
+    let numbered = plan.numbered();
+    let column = plan.column || plan.vimgrep;
+    let heading = plan.heading.unwrap_or(false) && show_name && !plan.null_sep;
+    // `-0 --heading`: rows keep their `path\0` form and file groups get a
+    // blank line between them.
+    let file_blank = plan.heading.unwrap_or(false) && plan.null_sep;
+    let sep: u8 = if plan.null_sep { 0 } else { b':' };
+    let mut out = Vec::<u8>::new();
+    let mut err = String::new();
+    let mut errored = false;
+    let mut matched = false;
+    let mut printed = false;
+    let mut last: Option<(usize, Vec<u8>, usize)> = None;
+    let mut headed: Option<Vec<u8>> = None; // the file whose header is out
+    for (oi, b) in &blocks {
+        if let Some(e) = &b.err {
+            if !plan.no_messages {
+                use std::fmt::Write as _;
+                let _ = writeln!(err, "rg: {}: {}", b.display, e);
+            }
+            errored = true;
+            continue;
+        }
+        let Some(fm) = &b.fm else { continue };
+        match plan.mode {
+            search_plan::RgMode::Files => {
+                out.extend_from_slice(b.display.as_bytes());
+                out.push(if plan.null_sep { 0 } else { b'\n' });
+                matched = true;
+            }
+            search_plan::RgMode::Count => {
+                let n = rg_count(fm, plan.only_matching);
+                if show_name {
+                    out.extend_from_slice(b.display.as_bytes());
+                    out.push(sep);
+                }
+                out.extend_from_slice(n.to_string().as_bytes());
+                out.push(b'\n');
+                matched |= n > 0;
+            }
+            search_plan::RgMode::Lines => {
+                match rg_emit_block(
+                    &mut out, plan, b, *oi, show_name, numbered, column, heading, file_blank,
+                    &mut printed, &mut last, &mut headed, fm,
+                )? {
+                    Some(()) => matched = true,
+                    None => return Ok(None),
+                }
+            }
+        }
+        if plan.quiet && matched {
+            break;
+        }
+    }
+    let code = if plan.quiet {
+        if matched { 0 } else if errored { 2 } else { 1 }
+    } else if errored {
+        2
+    } else if matched {
+        0
+    } else {
+        1
+    };
+    if plan.quiet {
+        out.clear();
+    }
+    Ok(Some(Answer::Print { stdout: out, stderr: err.into_bytes(), code }))
+}
+
+/// What one count row counts: matching lines, or under `-o` /
+/// `--count-matches`, matches.
+fn rg_count(fm: &fsearch::FileMatches, matches: bool) -> usize {
+    if !matches {
+        return fm.lines.len();
+    }
+    fm.hits.iter().map(|h| h.ranges.len()).sum()
+}
+
+/// A printable line of one file: a match with its ranges, or context.
+struct RgRow {
+    is_match: bool,
+    ranges: Vec<(usize, usize)>,
+}
+
+/// One file's `Lines`-mode output, appended. `Ok(Some(()))` on success;
+/// `Ok(None)`: the answer cannot be printed exactly — the caller falls
+/// back to exec.
+#[allow(clippy::too_many_arguments)]
+fn rg_emit_block(
+    out: &mut Vec<u8>,
+    plan: &RgPlan,
+    b: &RgBlock,
+    oi: usize,
+    show_name: bool,
+    numbered: bool,
+    column: bool,
+    heading: bool,
+    file_blank: bool,
+    printed: &mut bool,
+    last: &mut Option<(usize, Vec<u8>, usize)>,
+    headed: &mut Option<Vec<u8>>,
+    fm: &fsearch::FileMatches,
+) -> Result<Option<()>, &'static str> {
+    let ctx = plan.before.max(plan.after);
+    let bytes = b.abs.as_os_str().as_bytes().to_vec();
+    let raw = std::fs::read(&b.abs).map_err(|_| "file vanished mid-search")?;
+    let lines: Vec<&[u8]> = raw.split(|&c| c == b'\n').collect();
+    let mut rows: std::collections::BTreeMap<usize, RgRow> = std::collections::BTreeMap::new();
+    for ((ln, _), hit) in fm.lines.iter().zip(fm.hits.iter()) {
+        rows.insert(*ln, RgRow { is_match: true, ranges: hit.ranges.clone() });
+        if ctx > 0 {
+            for k in 0..hit.before.len() {
+                let n = ln.saturating_sub(hit.before.len() - k);
+                rows.entry(n).or_insert(RgRow { is_match: false, ranges: Vec::new() });
+            }
+            for k in 0..hit.after.len() {
+                rows.entry(ln + 1 + k).or_insert(RgRow { is_match: false, ranges: Vec::new() });
+            }
+        }
+    }
+    // File-group transition: `--heading` leads the file's block with its
+    // name (and a blank line before the next); `-0 --heading` keeps the
+    // `path\0` row form and separates groups with a blank line only.
+    if (heading || file_blank) && headed.as_deref() != Some(bytes.as_slice()) {
+        if *printed {
+            out.push(b'\n');
+        }
+        if heading {
+            out.extend_from_slice(b.display.as_bytes());
+            out.push(b'\n');
+        }
+        *headed = Some(bytes.clone());
+    }
+    for (ln, row) in &rows {
+        let Some(raw_l) = lines.get(ln.wrapping_sub(1)).copied() else {
+            return Err("line moved");
+        };
+        let adjacent = last
+            .as_ref()
+            .is_some_and(|(loi, lp, ll)| *loi == oi && *lp == bytes && *ln <= ll + 1);
+        // `--` separates non-adjacent groups; a file transition under a
+        // heading is its own separator.
+        if ctx > 0 && *printed && !adjacent {
+            let same_file = last
+                .as_ref()
+                .is_some_and(|(loi, lp, _)| *loi == oi && *lp == bytes);
+            if same_file || !(heading || file_blank) {
+                out.extend_from_slice(b"--\n");
+            }
+        }
+        if row.is_match {
+            if plan.only_matching {
+                let sh = String::from_utf8_lossy(raw_l);
+                let sh = sh.trim_end();
+                if sh.contains('\u{FFFD}') {
+                    return Ok(None);
+                }
+                for r in &row.ranges {
+                    let Some(seg) = sh.get(r.0..r.1) else { return Ok(None) };
+                    rg_prefix(out, plan, b, show_name, heading, true, numbered,
+                              column.then_some(r.0 + 1), *ln);
+                    out.extend_from_slice(seg.as_bytes());
+                    out.push(b'\n');
+                }
+            } else if plan.vimgrep {
+                for r in &row.ranges {
+                    rg_prefix(out, plan, b, show_name, heading, true, numbered,
+                              column.then_some(r.0 + 1), *ln);
+                    out.extend_from_slice(raw_l);
+                    out.push(b'\n');
+                }
+            } else {
+                let col = column.then(|| row.ranges.iter().map(|r| r.0).min().unwrap_or(0) + 1);
+                rg_prefix(out, plan, b, show_name, heading, true, numbered, col, *ln);
+                out.extend_from_slice(raw_l);
+                out.push(b'\n');
+            }
+        } else {
+            rg_prefix(out, plan, b, show_name, heading, false, numbered, None, *ln);
+            out.extend_from_slice(raw_l);
+            out.push(b'\n');
+        }
+        *printed = true;
+        *last = Some((oi, bytes.clone(), *ln));
+    }
+    Ok(Some(()))
+}
+
+/// One row's fields: `[path SEP]` then `N:`/`N-`, then `C:` on match rows
+/// that carry a column. The name separator is `:` for matches, `-` for
+/// context, `\0` under `--null` either way.
+#[allow(clippy::too_many_arguments)]
+fn rg_prefix(
+    out: &mut Vec<u8>,
+    plan: &RgPlan,
+    b: &RgBlock,
+    show_name: bool,
+    heading: bool,
+    is_match: bool,
+    numbered: bool,
+    col: Option<usize>,
+    ln: usize,
+) {
+    if show_name && !heading {
+        out.extend_from_slice(b.display.as_bytes());
+        out.push(if plan.null_sep { 0 } else if is_match { b':' } else { b'-' });
+    }
+    if numbered {
+        out.extend_from_slice(ln.to_string().as_bytes());
+        out.push(if is_match { b':' } else { b'-' });
+    }
+    if let Some(c) = col {
+        out.extend_from_slice(c.to_string().as_bytes());
+        out.push(b':');
+    }
 }
 
 #[path = "search_serve_tests.rs"]

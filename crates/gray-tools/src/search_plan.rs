@@ -737,6 +737,568 @@ fn group_end(cs: &[char], open: usize) -> Option<usize> {
     None
 }
 
+// ---------------------------------------------------------------------
+// `rg` plans: ripgrep is a different tool. The same serving modes apply,
+// but the walk, the output shapes, the flag grammar and the error forms
+// are ripgrep's own — none of it is interchangeable with GNU grep.
+// ---------------------------------------------------------------------
+
+/// Case handling: the last of `-i`/`-s`/`-S` wins. `Smart` resolves when
+/// the matcher is built: insensitive iff no pattern has an uppercase
+/// character.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CaseMode {
+    Sensitive,
+    Insensitive,
+    Smart,
+}
+
+/// Which kind of output the call produces: the last of `-c`/`--count`,
+/// `--count-matches`, `-l`/`--files-with-matches` decides (`-lc` counts,
+/// `-cl` lists). `-o` is not a mode; under `Count` it counts matches, not
+/// lines.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RgMode {
+    Lines,
+    Count,
+    Files,
+}
+
+/// An `rg` invocation the index can serve, in the spirit of [`GrepPlan`]:
+/// the argv a pass-through exec needs, the operands, a pruning literal
+/// per pattern, and every flag the walker or the emitter honors. `rg`
+/// recurses into any directory operand by default; there is no `-r`.
+pub struct RgPlan {
+    /// Output flags and the patterns as `-e` values — everything the real
+    /// tool needs minus the operands. `-u`, `-g` and friends stay too:
+    /// they re-filter exec-mode operands harmlessly.
+    pub argv: Vec<String>,
+    /// The operands, in argv order. Directory operands under the root are
+    /// served; files and missing paths pass through.
+    pub operands: Vec<String>,
+    /// Every pattern (`-e` values, or the positional one).
+    pub patterns: Vec<String>,
+    /// `-F`/`--fixed-strings` selected.
+    pub fixed: bool,
+    /// Last of `-i`/`-s`/`-S`.
+    pub case: CaseMode,
+    /// Each matching line of the real tool holds one of these, literally.
+    /// Meaningful only when `all_needled`.
+    pub needles: Vec<String>,
+    /// Every pattern contributed at least one required literal.
+    pub all_needled: bool,
+    /// `-H`/`-I` as given; `None` is rg's default.
+    pub with_name: Option<bool>,
+    /// `-n`/`-N` as given. Piped output defaults to no numbers;
+    /// `--column`/`--vimgrep` imply `-n`.
+    pub line_number: Option<bool>,
+    /// `--column`/`--vimgrep`: a byte column after the number.
+    pub column: bool,
+    /// `--vimgrep`: one `path:line:col:text` row per match.
+    pub vimgrep: bool,
+    /// `-o`.
+    pub only_matching: bool,
+    /// Last of `-c`/`--count`/`--count-matches`/`-l`.
+    pub mode: RgMode,
+    /// `-w`.
+    pub word: bool,
+    /// `-x`.
+    pub line_match: bool,
+    /// `-q`/`--quiet`.
+    pub quiet: bool,
+    /// `--no-messages`.
+    pub no_messages: bool,
+    /// `--heading`/`--no-heading` as given.
+    pub heading: Option<bool>,
+    /// `-0`/`--null`: a NUL between the filename and the fields.
+    pub null_sep: bool,
+    pub before: usize,
+    pub after: usize,
+    pub max_count: Option<usize>,
+    /// `--hidden`/`--no-hidden`, or the implicit `--hidden` of `-uu`.
+    pub hidden: Option<bool>,
+    /// `--no-ignore`, or the first `-u`: no ignore files apply at all.
+    pub no_ignore: bool,
+    pub no_ignore_dot: bool,
+    pub no_ignore_vcs: bool,
+    pub no_ignore_parent: bool,
+    pub no_ignore_global: bool,
+    pub no_ignore_exclude: bool,
+    /// `-g`/`--glob`/`--iglob` values in command order, `!` negations kept.
+    pub globs: Vec<String>,
+    /// `--ignore-file` paths.
+    pub ignore_files: Vec<String>,
+    /// `--max-depth`.
+    pub max_depth: Option<usize>,
+    /// `--max-filesize`, bytes resolved (`10K` → 10240).
+    pub max_filesize: Option<u64>,
+    /// `--no-require-git` flips this off; gitignores apply everywhere.
+    pub require_git: bool,
+    /// `--path-separator` replaces `/` in display paths.
+    pub path_separator: Option<String>,
+    /// `--color=always` (or a bare `--color`): ANSI the answer path
+    /// cannot emit.
+    pub color_always: bool,
+    /// A flag was accepted that stays correct in exec mode but cannot be
+    /// rendered exactly: `-r`/`--replace`, `-b`/`--byte-offset`,
+    /// `-M`/`--max-columns`, `-U`/`--multiline`, `-P`/`--pcre2`,
+    /// `-a`/`--text`, `--binary`, `--sort`/`--sortr`, or the third `-u`.
+    pub exec_only: bool,
+}
+
+impl RgPlan {
+    /// The index can print the real tool's bytes for this plan: the
+    /// pattern set compiles to one rust-regex (rg's own engine), no ANSI
+    /// colors, and no exec-only shaping.
+    pub fn answerable(&self) -> bool {
+        !self.color_always && !self.exec_only && self.fsearch_grep().is_some()
+    }
+
+    /// Whether the filename column shows, given the operand shape: `-H`
+    /// wins, `-I` loses, and otherwise it is on when more than one path
+    /// was given or any operand is a directory.
+    pub fn show_name(&self, operand_count: usize, any_dir: bool) -> bool {
+        self.with_name.unwrap_or(operand_count > 1 || any_dir)
+    }
+
+    /// Whether matching folds case (`-i`, or `-S` with an all-lowercase
+    /// pattern set — the same resolution `fsearch_grep` makes).
+    pub fn insensitive(&self) -> bool {
+        match self.case {
+            CaseMode::Insensitive => true,
+            CaseMode::Sensitive => false,
+            CaseMode::Smart => self
+                .patterns
+                .iter()
+                .all(|p| !p.chars().any(char::is_uppercase)),
+        }
+    }
+
+    /// Line numbers: `--column`/`--vimgrep` imply them; otherwise `-n`
+    /// when given (piped rg defaults them off).
+    pub fn numbered(&self) -> bool {
+        self.line_number.unwrap_or(self.column || self.vimgrep)
+    }
+
+    /// The patterns as one `fsearch::Grep`, when the index can run them
+    /// exactly: `-F` literals escaped, else the union rg itself builds
+    /// (`(?:p1)|(?:p2)`), `-x` line-anchored, `-w` half-word-boundary
+    /// wrapped — the same wraps rg applies to its patterns.
+    pub fn fsearch_grep(&self) -> Option<fsearch::Grep> {
+        use fsearch::{Case, Grep, GrepMode};
+        let case = match self.case {
+            CaseMode::Insensitive => Case::Insensitive,
+            CaseMode::Sensitive => Case::Sensitive,
+            CaseMode::Smart => {
+                if self.patterns.iter().all(|p| !p.chars().any(char::is_uppercase)) {
+                    Case::Insensitive
+                } else {
+                    Case::Sensitive
+                }
+            }
+        };
+        let mut src = if self.fixed {
+            self.patterns
+                .iter()
+                .map(|p| regex::escape(p))
+                .collect::<Vec<_>>()
+                .join("|")
+        } else {
+            self.patterns
+                .iter()
+                .map(|p| format!("(?:{p})"))
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        if self.line_match {
+            src = format!("^(?:{src})$");
+        }
+        if self.word {
+            src = format!("\\b{{start-half}}(?:{src})\\b{{end-half}}");
+        }
+        let mut g = Grep::with_case(&src, GrepMode::Regex, case).ok()?;
+        g.max_per_file = usize::MAX;
+        g.budget = None;
+        g.before = self.before;
+        g.after = self.after;
+        if let Some(m) = self.max_count {
+            g.max_per_file = m;
+        }
+        Some(g)
+    }
+}
+
+/// `--max-filesize 10K` and friends: a number with an optional K/M/G/T
+/// suffix, or `None` when it does not parse.
+fn parse_size(v: &str) -> Option<u64> {
+    let (num, mult) = match v.as_bytes().last() {
+        Some(b'K') | Some(b'k') => (&v[..v.len() - 1], 1u64 << 10),
+        Some(b'M') | Some(b'm') => (&v[..v.len() - 1], 1u64 << 20),
+        Some(b'G') | Some(b'g') => (&v[..v.len() - 1], 1u64 << 30),
+        Some(b'T') | Some(b't') => (&v[..v.len() - 1], 1u64 << 40),
+        _ => (v, 1),
+    };
+    num.parse::<u64>().ok()?.checked_mul(mult)
+}
+
+/// Parse an rg argv (without argv[0]) into a plan, or the reason to
+/// decline. Flags that change the file set the index cannot reproduce
+/// (`-v`, `-L`, `-z`, `-t`, `-f`, `--files`) or output the emitter does
+/// not shape (`--json`, `--stats`, custom separators, `--replace` in
+/// answer mode only) decline the whole call; the real tool then runs on
+/// the original argv.
+pub fn rg_plan(args: &[String]) -> Result<RgPlan, &'static str> {
+    let mut argv: Vec<String> = Vec::new();
+    let mut patterns: Vec<String> = Vec::new();
+    let mut positional: Vec<String> = Vec::new();
+    let mut e_seen = false;
+    let mut case = CaseMode::Sensitive;
+    let mut fixed = false;
+    let mut with_name: Option<bool> = None;
+    let mut line_number: Option<bool> = None;
+    let (mut column, mut vimgrep, mut only_matching) = (false, false, false);
+    let mut mode = RgMode::Lines;
+    let (mut word, mut line_match, mut quiet, mut no_messages) = (false, false, false, false);
+    let (mut heading, mut null_sep) = (None, false);
+    let (mut before, mut after, mut max_count) = (0usize, 0usize, None);
+    let (mut unrestricted, mut hidden) = (0u8, None);
+    let mut no_ignore = false;
+    let (mut no_dot, mut no_vcs, mut no_parent, mut no_global, mut no_exclude) =
+        (false, false, false, false, false);
+    let (mut globs, mut ignore_files) = (Vec::new(), Vec::new());
+    let (mut max_depth, mut max_filesize) = (None, None);
+    let (mut require_git, mut path_separator) = (true, None);
+    let (mut color_always, mut exec_only) = (false, false);
+    // The `-u` counter: ignore files off at one, hidden shown at two,
+    // `--binary` at three.
+    macro_rules! bump_u {
+        () => {{
+            unrestricted = (unrestricted + 1).min(3);
+            no_ignore = true;
+            no_dot = false;
+            no_vcs = false;
+            no_parent = false;
+            no_global = false;
+            no_exclude = false;
+            if unrestricted >= 2 {
+                hidden = Some(true);
+            }
+            if unrestricted >= 3 {
+                exec_only = true;
+            }
+        }};
+    }
+    let mut i = 0;
+    let mut opts_done = false;
+    while i < args.len() {
+        let a = args[i].as_str();
+        i += 1;
+        if !opts_done && a == "--" {
+            opts_done = true;
+            continue;
+        }
+        if !opts_done && a.len() > 1 && a.starts_with('-') {
+            if let Some(long) = a.strip_prefix("--") {
+                let (name, value) = match long.split_once('=') {
+                    Some((n, v)) => (n, Some(v.to_string())),
+                    None => (long, None),
+                };
+                let take = |i: &mut usize| -> Result<String, &'static str> {
+                    if let Some(v) = value.clone() {
+                        return Ok(v);
+                    }
+                    let v = args.get(*i).cloned().ok_or("option needs a value")?;
+                    *i += 1;
+                    Ok(v)
+                };
+                // Every accepted flag stays in the argv an exec-mode
+                // pass or batch runs — the real tool applies it to the
+                // operand it is handed the same way. Value flags push a
+                // normalized `--name=value`; `--regexp` patterns ride at
+                // the end as `-e` args.
+                let flag_only = !matches!(name,
+                    "max-depth" | "max-filesize" | "ignore-file" | "glob" | "iglob"
+                    | "path-separator" | "regexp" | "after-context" | "before-context"
+                    | "context" | "max-count" | "threads" | "dfa-size-limit"
+                    | "regex-size-limit" | "engine" | "replace" | "max-columns"
+                    | "sort" | "sortr");
+                if flag_only {
+                    argv.push(a.to_string());
+                }
+                match name {
+                    "ignore-case" => case = CaseMode::Insensitive,
+                    "case-sensitive" => case = CaseMode::Sensitive,
+                    "smart-case" => case = CaseMode::Smart,
+                    "fixed-strings" => fixed = true,
+                    "no-fixed-strings" => fixed = false,
+                    "word-regexp" => word = true,
+                    "no-word-regexp" => word = false,
+                    "line-regexp" => line_match = true,
+                    "no-line-regexp" => line_match = false,
+                    "line-number" => line_number = Some(true),
+                    "no-line-number" => line_number = Some(false),
+                    "column" => column = true,
+                    "no-column" => column = false,
+                    "vimgrep" => vimgrep = true,
+                    "only-matching" => only_matching = true,
+                    "count" => mode = RgMode::Count,
+                    "count-matches" => {
+                        mode = RgMode::Count;
+                        only_matching = true;
+                    }
+                    "files-with-matches" => mode = RgMode::Files,
+                    "quiet" => quiet = true,
+                    "no-messages" => no_messages = true,
+                    "messages" => no_messages = false,
+                    "heading" => heading = Some(true),
+                    "no-heading" => heading = Some(false),
+                    "null" => null_sep = true,
+                    "with-filename" => with_name = Some(true),
+                    "no-filename" => with_name = Some(false),
+                    "unrestricted" => bump_u!(),
+                    "hidden" => hidden = Some(true),
+                    "no-hidden" => hidden = Some(false),
+                    "no-ignore" => {
+                        no_ignore = true;
+                        no_dot = false;
+                        no_vcs = false;
+                        no_parent = false;
+                        no_global = false;
+                        no_exclude = false;
+                    }
+                    "ignore" => no_ignore = false,
+                    "no-ignore-dot" => no_dot = true,
+                    "no-ignore-vcs" => {
+                        no_vcs = true;
+                        no_exclude = true;
+                    }
+                    "no-ignore-parent" => no_parent = true,
+                    "no-ignore-global" => no_global = true,
+                    "no-ignore-exclude" => no_exclude = true,
+                    "no-require-git" => require_git = false,
+                    "require-git" => require_git = true,
+                    "max-depth" => {
+                        let v = take(&mut i)?;
+                        max_depth = Some(v.parse().map_err(|_| "numeric option")?);
+                        argv.push(format!("--max-depth={v}"));
+                    }
+                    "max-filesize" => {
+                        let v = take(&mut i)?;
+                        max_filesize = Some(parse_size(&v).ok_or("bad filesize")?);
+                        argv.push(format!("--max-filesize={v}"));
+                    }
+                    "ignore-file" => {
+                        let v = take(&mut i)?;
+                        ignore_files.push(v.clone());
+                        argv.push(format!("--ignore-file={v}"));
+                    }
+                    "glob" | "iglob" => {
+                        let v = take(&mut i)?;
+                        globs.push(v.clone());
+                        argv.push(format!("--{name}={v}"));
+                    }
+                    "path-separator" => {
+                        let v = take(&mut i)?;
+                        path_separator = Some(v.clone());
+                        argv.push(format!("--path-separator={v}"));
+                    }
+                    "regexp" => {
+                        e_seen = true;
+                        patterns.push(take(&mut i)?);
+                    }
+                    "after-context" | "before-context" | "context" | "max-count" => {
+                        let v = take(&mut i)?;
+                        let n: usize = v.parse().map_err(|_| "numeric option")?;
+                        argv.push(format!("--{name}={v}"));
+                        match name {
+                            "after-context" => after = n,
+                            "before-context" => before = n,
+                            "context" => {
+                                before = n;
+                                after = n;
+                            }
+                            _ => max_count = Some(n),
+                        }
+                    }
+                    // Accepted without effect on what is printed; they
+                    // only tune how the real tool works.
+                    "threads" | "dfa-size-limit" | "regex-size-limit" => {
+                        argv.push(format!("--{name}={}", take(&mut i)?));
+                    }
+                    "mmap" | "no-mmap" | "line-buffered" | "block-buffered" | "no-follow"
+                    | "no-encoding" | "auto-hybrid-regex" | "no-auto-hybrid-regex" => {}
+                    "engine" => {
+                        let v = take(&mut i)?;
+                        match v.as_str() {
+                            "default" | "auto" => argv.push(format!("--engine={v}")),
+                            _ => return Err("pcre2 engine"),
+                        }
+                    }
+                    // Real-tool work the index cannot print: correct to
+                    // serve the candidate files, never the bytes.
+                    "replace" | "max-columns" => {
+                        let v = take(&mut i)?;
+                        exec_only = true;
+                        argv.push(format!("--{name}={v}"));
+                    }
+                    "byte-offset" | "multiline" | "multiline-dotall" | "pcre2" | "text"
+                    | "binary" | "no-binary" | "no-text" | "no-unicode" => exec_only = true,
+                    "sort" | "sortr" => {
+                        let v = take(&mut i)?;
+                        exec_only = true;
+                        argv.push(format!("--{name}={v}"));
+                    }
+                    "color" | "colour" => {
+                        if !matches!(value.as_deref(), Some("auto") | Some("never")) {
+                            color_always = true;
+                        }
+                    }
+                    _ => return Err("unsupported long option"),
+                }
+                continue;
+            }
+            let cluster: Vec<char> = a[1..].chars().collect();
+            let mut k = 0;
+            while k < cluster.len() {
+                let c = cluster[k];
+                k += 1;
+                // Options that take a value: the rest of the word, else the
+                // next word.
+                if matches!(c, 'A' | 'B' | 'C' | 'm' | 'e' | 'g' | 'j' | 'r' | 'M' | 'f' | 't' | 'T' | 'E') {
+                    let rest: String = cluster[k..].iter().collect();
+                    let v = if rest.is_empty() {
+                        i += 1;
+                        args.get(i - 1).cloned().ok_or("option needs a value")?
+                    } else {
+                        rest
+                    };
+                    match c {
+                        'e' => {
+                            e_seen = true;
+                            patterns.push(v);
+                        }
+                        'g' => {
+                            globs.push(v.clone());
+                            argv.push(format!("-g{v}"));
+                        }
+                        'A' | 'B' | 'C' | 'm' => {
+                            let n: usize = v.parse().map_err(|_| "numeric option")?;
+                            argv.push(format!("-{c}{v}"));
+                            match c {
+                                'A' => after = n,
+                                'B' => before = n,
+                                'C' => {
+                                    before = n;
+                                    after = n;
+                                }
+                                _ => max_count = Some(n),
+                            }
+                        }
+                        'j' => argv.push(format!("-j{v}")),
+                        'r' | 'M' => {
+                            exec_only = true;
+                            argv.push(format!("-{c}{v}"));
+                        }
+                        _ => return Err("pattern file / type / encoding"),
+                    }
+                    break;
+                }
+                match c {
+                    'i' => case = CaseMode::Insensitive,
+                    's' => case = CaseMode::Sensitive,
+                    'S' => case = CaseMode::Smart,
+                    'F' => fixed = true,
+                    'w' => word = true,
+                    'x' => line_match = true,
+                    'n' => line_number = Some(true),
+                    'N' => line_number = Some(false),
+                    'o' => only_matching = true,
+                    'c' => mode = RgMode::Count,
+                    'l' => mode = RgMode::Files,
+                    'q' => quiet = true,
+                    'u' => bump_u!(),
+                    '0' => null_sep = true,
+                    'H' => with_name = Some(true),
+                    'I' => with_name = Some(false),
+                    'a' | 'b' | 'P' | 'U' => exec_only = true,
+                    _ => return Err("unsupported short flag"),
+                }
+                argv.push(format!("-{c}"));
+            }
+            continue;
+        }
+        positional.push(a.to_string());
+    }
+    if patterns.is_empty() {
+        if e_seen {
+            return Err("no pattern");
+        }
+        let Some(first) = positional.first().cloned() else {
+            return Err("stdin search");
+        };
+        patterns.push(first);
+        positional.remove(0);
+    }
+    let insensitive = match case {
+        CaseMode::Insensitive => true,
+        CaseMode::Sensitive => false,
+        CaseMode::Smart => patterns.iter().all(|p| !p.chars().any(char::is_uppercase)),
+    };
+    let syntax = if fixed { Syntax::Fixed } else { Syntax::Extended };
+    let mut needles = Vec::new();
+    let mut all_needled = true;
+    for p in &patterns {
+        match needles_for(p, syntax, insensitive) {
+            Some(ns) if !ns.is_empty() => needles.extend(ns),
+            _ => all_needled = false,
+        }
+    }
+    for p in &patterns {
+        argv.push("-e".into());
+        argv.push(p.clone());
+    }
+    Ok(RgPlan {
+        argv,
+        operands: positional,
+        patterns,
+        fixed,
+        case,
+        needles,
+        all_needled,
+        with_name,
+        line_number,
+        column,
+        vimgrep,
+        only_matching,
+        mode,
+        word,
+        line_match,
+        quiet,
+        no_messages,
+        heading,
+        null_sep,
+        before,
+        after,
+        max_count,
+        hidden,
+        no_ignore,
+        no_ignore_dot: no_dot,
+        no_ignore_vcs: no_vcs,
+        no_ignore_parent: no_parent,
+        no_ignore_global: no_global,
+        no_ignore_exclude: no_exclude,
+        globs,
+        ignore_files,
+        max_depth,
+        max_filesize,
+        require_git,
+        path_separator,
+        color_always,
+        exec_only,
+    })
+}
+
 #[cfg(test)]
 #[path = "search_plan_tests.rs"]
 mod tests;
+
