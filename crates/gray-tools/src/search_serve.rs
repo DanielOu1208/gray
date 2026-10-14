@@ -115,15 +115,18 @@ fn answer(server: &Server, mut stream: UnixStream) -> std::io::Result<()> {
 fn decide(server: &Server, line: &str) -> Value {
     let started = Instant::now();
     let mut reply = match serve_line(server, line) {
-        Ok((argv, files)) => json!({ "served": true, "argv": argv, "candidates": files.len(), "files": files }),
+        Ok((argv, files, mode)) => json!({ "served": true, "argv": argv, "candidates": files.len(), "files": files, "mode": mode }),
         Err(why) => json!({ "served": false, "reason": why }),
     };
     reply["server_ms"] = json!(started.elapsed().as_secs_f64() * 1000.0);
     reply
 }
 
-/// The real tool's argv and the display paths of the files it must read.
-type Answer = (Vec<String>, Vec<String>);
+/// The real tool's argv and the display paths of the files it must read,
+/// plus how it was served: `"index"` when at least one operand's candidates
+/// came from the index, `"pass"` when every operand goes to the real tool
+/// verbatim (identical output, but no index work was done).
+type Answer = (Vec<String>, Vec<String>, &'static str);
 
 fn serve_line(server: &Server, line: &str) -> Result<Answer, &'static str> {
     let req: Value = serde_json::from_str(line).map_err(|_| "bad request")?;
@@ -201,7 +204,7 @@ fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static
     if plan.with_name.is_none() && (ops.len() > 1 || indexed) {
         out_argv.insert(0, "-H".into());
     }
-    Ok((out_argv, files))
+    Ok((out_argv, files, if indexed { "index" } else { "pass" }))
 }
 
 /// The display paths under one indexed operand: the union of unheld,

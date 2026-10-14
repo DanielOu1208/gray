@@ -40,6 +40,9 @@ pub struct Reply {
     pub files: Vec<String>,
     pub candidates: usize,
     pub server_ms: f64,
+    /// "index" when the index pruned the file list, "pass" for a verbatim
+    /// pass-through (identical output but no index work), "" when declined.
+    pub mode: String,
 }
 
 impl Reply {
@@ -67,6 +70,7 @@ impl Reply {
             files: strings("files")?,
             candidates: v.get("candidates").and_then(|c| c.as_u64()).unwrap_or(0) as usize,
             server_ms: v.get("server_ms").and_then(|c| c.as_f64()).unwrap_or(0.0),
+            mode: v.get("mode").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
         })
     }
 }
@@ -84,9 +88,9 @@ pub fn run(tool: &str) -> ! {
     let original: Vec<OsString> = std::env::args_os().collect();
     let start = Instant::now();
     let reply = ask(tool, &original[1..]);
-    let (served, reason, candidates, server_ms) = match &reply {
-        Some(r) => (r.served, r.reason.as_str(), r.candidates, r.server_ms),
-        None => (false, "no index", 0, 0.0),
+    let (served, reason, candidates, server_ms, mode) = match &reply {
+        Some(r) => (r.served, r.reason.as_str(), r.candidates, r.server_ms, r.mode.as_str()),
+        None => (false, "no index", 0, 0.0, ""),
     };
     trace(
         tool,
@@ -95,6 +99,7 @@ pub fn run(tool: &str) -> ! {
         reason,
         candidates,
         server_ms,
+        mode,
         start,
     );
     match reply {
@@ -222,6 +227,7 @@ fn trace(
     reason: &str,
     candidates: usize,
     server_ms: f64,
+    mode: &str,
     start: Instant,
 ) {
     let Some(path) = std::env::var_os(TRACE_ENV) else {
@@ -239,6 +245,7 @@ fn trace(
         "reason": reason,
         "candidates": candidates,
         "server_ms": server_ms,
+        "mode": mode,
         "total_ms": start.elapsed().as_secs_f64() * 1000.0,
     });
     if let Ok(mut f) = std::fs::OpenOptions::new()
