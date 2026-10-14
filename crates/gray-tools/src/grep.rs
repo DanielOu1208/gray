@@ -18,9 +18,9 @@ const GREP_MAX_LINE_LENGTH: usize = 500;
 
 /// Search file contents with ripgrep. Respects .gitignore.
 ///
-/// The resident index is *not* wired in here on purpose — same reasoning as
-/// `FindTool`: this tool answers exactly what `rg` answers, and `gray grep`
-/// (`crate::search_cmd`) is the command that puts the index in front of it.
+/// The resident index answers first when it can reproduce `rg`'s contract
+/// exactly (match-only searches over an indexed directory); anything else
+/// declines to the rg/builtin lanes below.
 pub struct GrepTool;
 
 /// `format_matches` as text, for the `gray grep` command's index lane: the
@@ -353,6 +353,49 @@ fn truncate_line(line: &str) -> (String, bool) {
 
 use crate::truncate::{append_notices, truncate_head};
 
+/// The index lane: `rg`'s match-only contract off the resident engine,
+/// behind the same `GRAY_SEARCH_INDEX` switch `gray grep` honors. `None` =
+/// the rg/builtin lanes answer.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+async fn indexed_grep(
+    search_path: &Path,
+    pattern: &str,
+    glob: &Option<String>,
+    ignore_case: bool,
+    literal: bool,
+    effective_limit: usize,
+    context: usize,
+) -> Option<crate::grep_builtin::Found> {
+    let crate::search_cmd::IndexBackend::Fs(pool) = crate::search_cmd::global_index() else {
+        return None;
+    };
+    let (dir, pat, g) = (
+        search_path.to_path_buf(),
+        pattern.to_string(),
+        glob.clone(),
+    );
+    crate::search_cmd::spawn_index(move || {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        pool.indexed_grep(&dir, &pat, g.as_deref(), ignore_case, literal, effective_limit, context, &cancel)
+    })
+    .await
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
+async fn indexed_grep(
+    _search_path: &Path,
+    _pattern: &str,
+    _glob: &Option<String>,
+    _ignore_case: bool,
+    _literal: bool,
+    _effective_limit: usize,
+    _context: usize,
+) -> Option<crate::grep_builtin::Found> {
+    None
+}
+
 fn relativize(search_path: &Path, file_path: &str, is_dir: bool) -> String {
     let fp = Path::new(file_path);
     if is_dir && let Ok(rel) = fp.strip_prefix(search_path) {
@@ -446,6 +489,32 @@ impl Tool for GrepTool {
             Ok(m) => m.is_dir(),
             Err(e) => return fail(format!("Path not found: {}: {e}", search_path.display())),
         };
+
+        // The resident index answers a match-only search on an indexed
+        // directory without spawning rg: `Found` renders through the same
+        // `format_matches` every lane shares. Context searches, file
+        // operands, cold indexes, and unprovable truncations all decline to
+        // the lanes below.
+        if is_dir
+            && let Some(found) = indexed_grep(
+                &search_path,
+                &pattern,
+                &glob,
+                ignore_case,
+                literal,
+                effective_limit,
+                context,
+            )
+            .await
+        {
+            return format_matches(
+                &search_path,
+                is_dir,
+                &found.hits,
+                effective_limit,
+                found.limit_reached,
+            );
+        }
 
         // No ripgrep on PATH: use the built-in search rather than failing the
         // tool. Same output contract, so callers cannot tell the difference

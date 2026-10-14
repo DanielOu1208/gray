@@ -38,10 +38,9 @@ fn relativize(result_path: &str, search_path: &Path) -> String {
 /// Filename glob search. Respects .gitignore via `fd` when available,
 /// otherwise falls back to a manual walk.
 ///
-/// The resident index is *not* wired in here on purpose: this tool's answer
-/// is `fd`'s answer, always. `gray find` (see `crate::search_cmd`) is where
-/// the index lives, so a model that reaches for this tool gets the tool's
-/// documented behavior and never a lane that depends on the directory.
+/// The resident index answers first when it can reproduce `fd`'s contract
+/// exactly (basename globs, ignore-filtered relpaths, provably untruncated);
+/// anything else declines to the fd lane below.
 pub struct FindTool;
 
 #[async_trait]
@@ -98,6 +97,12 @@ impl Tool for FindTool {
             Ok(m) if m.is_dir() => {}
             Ok(_) => return fail(format!("Not a directory: {}", search_path.display())),
             Err(e) => return fail(format!("Path not found: {}: {e}", search_path.display())),
+        }
+
+        // The resident index answers `fd`'s contract without a spawn or a
+        // walk; anything it cannot answer exactly declines to fd below.
+        if let Some(out) = indexed_find(&pattern, &search_path, effective_limit).await {
+            return out;
         }
 
         // Try fd first (preferred, respects .gitignore correctly).
@@ -244,12 +249,42 @@ async fn try_fd(
         .filter(|s| !s.is_empty())
         .collect();
 
-    if relativized.is_empty() {
-        return Some(finish("No files found matching pattern".to_string()));
+    Some(finish_find(relativized, effective_limit))
+}
+
+/// The index lane: `fd`'s contract off the resident engine, behind the same
+/// `GRAY_SEARCH_INDEX` switch `gray find` honors. `None` = fd answers.
+#[cfg(unix)]
+async fn indexed_find(pattern: &str, search_path: &Path, effective_limit: usize) -> Option<ToolOutput> {
+    let crate::search_cmd::IndexBackend::Fs(pool) = crate::search_cmd::global_index() else {
+        return None;
+    };
+    let (dir, pat) = (search_path.to_path_buf(), pattern.to_string());
+    let hits = crate::search_cmd::spawn_index(move || pool.indexed_glob(&dir, &pat, effective_limit))
+        .await?;
+    // fd prints directory hits bare; the index marks them with a slash.
+    Some(finish_find(
+        hits.iter()
+            .map(|h| h.strip_suffix('/').unwrap_or(h).to_string())
+            .collect(),
+        effective_limit,
+    ))
+}
+
+#[cfg(not(unix))]
+async fn indexed_find(_pattern: &str, _search_path: &Path, _effective_limit: usize) -> Option<ToolOutput> {
+    None
+}
+
+/// Shared rendering for both lanes: relpaths, newline-joined, with the
+/// limit and truncation notices `fd`'s output would carry.
+fn finish_find(rel_paths: Vec<String>, effective_limit: usize) -> ToolOutput {
+    if rel_paths.is_empty() {
+        return finish("No files found matching pattern".to_string());
     }
 
-    let result_limit_reached = relativized.len() >= effective_limit;
-    let raw_output = relativized.join("\n");
+    let result_limit_reached = rel_paths.len() >= effective_limit;
+    let raw_output = rel_paths.join("\n");
     let trunc = truncate_head(&raw_output);
     let mut output = trunc.content;
 
@@ -270,7 +305,7 @@ async fn try_fd(
         append_notices(&mut output, &notices);
     }
 
-    Some(finish(output))
+    finish(output)
 }
 
 /// Fallback when `fd` is missing: recursive walk via the `ignore` crate

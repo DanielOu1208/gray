@@ -102,7 +102,7 @@ impl FsearchPool {
     /// The engine, started lazily. `Engine::start` only opens the index dir
     /// and spawns its threads — the whole-disk scan happens on its own.
     /// A failed start sticks at `None` and every caller falls back.
-    fn engine(&self) -> Option<&Engine> {
+    pub(crate) fn engine(&self) -> Option<&Engine> {
         self.engine
             .get_or_init(|| Engine::start(self.opts.clone()).ok())
             .as_ref()
