@@ -153,6 +153,10 @@ fn an_inline_attachment_marker_renders_as_a_chip_not_literal_text() {
     let text = "see [image: pic.png] here";
     let ibox = build_input_box(text, text.len(), 100, None, None, &[]);
     assert_eq!(row_texts(&ibox)[1], " ❯ see  IMAGE  pic.png  here");
+
+    let text = "watch [video: clip.mp4] now";
+    let ibox = build_input_box(text, text.len(), 100, None, None, &[]);
+    assert_eq!(row_texts(&ibox)[1], " ❯ watch  VIDEO  clip.mp4  now");
 }
 
 #[test]
