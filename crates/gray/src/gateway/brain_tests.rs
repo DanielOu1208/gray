@@ -274,7 +274,7 @@ fn recovery_requeues_when_the_recorded_child_is_dead() {
     assert!(orphan_rows(&brain).is_empty());
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn recovery_kills_a_live_orphan_group_before_requeueing() {
     use std::io::BufRead as _;
