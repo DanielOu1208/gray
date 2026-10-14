@@ -1575,8 +1575,7 @@ impl JsonlSessionStore {
         let mut entries = Vec::with_capacity(entry_lines.len());
         let mut entry_line_nums = Vec::with_capacity(entry_lines.len());
 
-        for (idx, ((line_num, _), result)) in entry_lines.iter().zip(parsed.into_iter()).enumerate()
-        {
+        for (idx, ((line_num, _), result)) in entry_lines.iter().zip(parsed).enumerate() {
             let is_final_line = idx == entry_lines.len() - 1;
             match result {
                 Ok(entry) => {
@@ -1617,7 +1616,7 @@ impl JsonlSessionStore {
             let mut backup = tempfile::Builder::new()
                 .prefix("session-tail-backup-")
                 .tempfile_in(&self.root_dir)?;
-            backup.write_all(raw.as_deref().unwrap_or_else(|| content.as_bytes()))?;
+            backup.write_all(raw.as_deref().unwrap_or(content.as_bytes()))?;
             let (_, backup_path) = backup.keep().map_err(|e| SessionError::Io(e.error))?;
             let mut repaired = String::new();
             let keep = if damaged_tail {

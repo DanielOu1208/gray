@@ -34,7 +34,7 @@ pub fn serve(dir: PathBuf, home: String) {
     let engine = match Engine::start(Options { dir: dir.clone(), home, root, skip: None }) {
         Ok(e) => e,
         Err(e) => {
-            fsearch::diag_line(format!("{e}"));
+            fsearch::diag_line(&e);
             return;
         }
     };

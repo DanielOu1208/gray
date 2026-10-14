@@ -257,14 +257,14 @@ fn localize_utc_time_converts_to_offset() {
 fn detailed_provider_error_classifies_by_variant_and_fields_not_text() {
     let err = CoreError::Detailed {
         class: Box::new(CoreError::RateLimited("status 429: slow down".into())),
-        detail: ProviderDetail {
+        detail: Box::new(ProviderDetail {
             status: Some(429),
             vendor_code: Some("rate_limit_exceeded".into()),
             vendor_message: Some("Rate limit reached for requests per min.".into()),
             cf_ray: Some("a35cf09b-SEA".into()),
             request_id: Some("req_abc123".into()),
             retry_after_ms: None,
-        },
+        }),
     };
     let out = format_core_error(&err, "https://example.com");
     assert!(out.starts_with("✗ Rate limited (retryable):"), "{out}");
@@ -282,10 +282,10 @@ fn detailed_provider_error_classifies_by_variant_and_fields_not_text() {
 fn detailed_error_class_survives_the_wrap_for_code_and_retryable() {
     let err = CoreError::Detailed {
         class: Box::new(CoreError::Auth("status 401: bad key".into())),
-        detail: ProviderDetail {
+        detail: Box::new(ProviderDetail {
             status: Some(401),
             ..Default::default()
-        },
+        }),
     };
     assert_eq!(err.code(), "auth_failed");
     assert!(!err.retryable());

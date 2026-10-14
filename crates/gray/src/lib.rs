@@ -128,10 +128,10 @@ pub fn sys_prompt_path() -> anyhow::Result<PathBuf> {
 pub fn load_or_create_system_prompt_at(path: &Path) -> anyhow::Result<String> {
     if let Ok(file) = std::fs::read_to_string(path) {
         if let Some(body) = managed_body(&file) {
-            if body != DEFAULT_SYS_PROMPT {
-                if std::fs::write(path, stamped_system_prompt(DEFAULT_SYS_PROMPT)).is_ok() {
-                    return Ok(DEFAULT_SYS_PROMPT.to_string());
-                }
+            if body != DEFAULT_SYS_PROMPT
+                && std::fs::write(path, stamped_system_prompt(DEFAULT_SYS_PROMPT)).is_ok()
+            {
+                return Ok(DEFAULT_SYS_PROMPT.to_string());
             }
             return Ok(body.to_string());
         }

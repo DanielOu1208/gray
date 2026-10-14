@@ -227,6 +227,7 @@ pub fn real_tool(tool: &str) -> Option<PathBuf> {
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn trace(
     tool: &str,
     argv: &[OsString],

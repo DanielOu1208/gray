@@ -71,7 +71,7 @@ pub enum CoreError {
     #[error("{class}")]
     Detailed {
         class: Box<CoreError>,
-        detail: ProviderDetail,
+        detail: Box<ProviderDetail>,
     },
 }
 
@@ -86,7 +86,7 @@ impl CoreError {
 
     pub fn detail(&self) -> Option<&ProviderDetail> {
         if let Self::Detailed { detail, .. } = self {
-            Some(detail)
+            Some(detail.as_ref())
         } else {
             None
         }

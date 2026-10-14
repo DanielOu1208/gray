@@ -15,6 +15,7 @@ pub(crate) use widgets::{
     queued_preview_lines, shimmer_spans, status_dock_h, tail_block_h, tail_gap_h,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn desired_viewport_h(
     status_h: u16,
     queued_h: u16,

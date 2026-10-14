@@ -34,7 +34,7 @@ pub enum ProviderError {
     #[error("{class}")]
     Detailed {
         class: Box<ProviderError>,
-        detail: crate::error::ProviderDetail,
+        detail: Box<crate::error::ProviderDetail>,
     },
 }
 
@@ -49,7 +49,7 @@ impl ProviderError {
 
     pub fn detail(&self) -> Option<&crate::error::ProviderDetail> {
         if let Self::Detailed { detail, .. } = self {
-            Some(detail)
+            Some(detail.as_ref())
         } else {
             None
         }

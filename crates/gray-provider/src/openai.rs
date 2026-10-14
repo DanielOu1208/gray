@@ -1435,14 +1435,14 @@ pub(crate) fn classify_http_error(
     }
     ProviderError::Detailed {
         class: Box::new(class),
-        detail: gray_core::error::ProviderDetail {
+        detail: Box::new(gray_core::error::ProviderDetail {
             status: Some(status.as_u16()),
             vendor_code,
             vendor_message,
             cf_ray: cf_ray.map(str::to_string),
             request_id: req_id.map(str::to_string),
             retry_after_ms: resets_in.map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64),
-        },
+        }),
     }
 }
 
@@ -2293,7 +2293,7 @@ fn stream_failure(event: &Value, detail: String) -> ProviderError {
         let resets_in = parse_quota_reset_delay(&detail);
         return ProviderError::Detailed {
             class: Box::new(ProviderError::Auth(detail.clone())),
-            detail: gray_core::error::ProviderDetail {
+            detail: Box::new(gray_core::error::ProviderDetail {
                 status: None,
                 vendor_code: Some(quota_vendor_code(
                     (!code.is_empty()).then_some(code),
@@ -2303,7 +2303,7 @@ fn stream_failure(event: &Value, detail: String) -> ProviderError {
                 cf_ray: None,
                 request_id: None,
                 retry_after_ms: resets_in.map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64),
-            },
+            }),
         };
     }
     ProviderError::Stream(detail)

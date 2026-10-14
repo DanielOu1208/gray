@@ -1404,7 +1404,7 @@ mod turn_retry_tests {
     fn detailed(e: ProviderError, detail: crate::error::ProviderDetail) -> ProviderError {
         ProviderError::Detailed {
             class: Box::new(e),
-            detail,
+            detail: Box::new(detail),
         }
     }
 

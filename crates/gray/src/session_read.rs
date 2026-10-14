@@ -78,7 +78,7 @@ async fn list_live(root: &Path, json: bool) -> anyhow::Result<()> {
             }
         })
         .collect();
-    rows.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    rows.sort_by_key(|a| std::cmp::Reverse(a.last_activity));
     if json {
         let out: Vec<Value> = rows
             .iter()
@@ -141,7 +141,7 @@ async fn read_session(root: &Path, id: &str, last: usize, json: bool) -> anyhow:
         .filter(|e| !e.message.injected && e.message.role != Role::System)
         .filter_map(|e| {
             let lines = render_blocks(&e.message.content);
-            (!lines.is_empty()).then(|| (e.timestamp, e.message.role.clone(), lines))
+            (!lines.is_empty()).then_some((e.timestamp, e.message.role, lines))
         })
         .collect();
     let start = messages.len().saturating_sub(last.max(1));

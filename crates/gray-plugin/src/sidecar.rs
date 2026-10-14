@@ -1282,6 +1282,7 @@ fn largest_scrubbable(wire: &[Message]) -> Option<(usize, usize)> {
     best.map(|(mi, bi, _)| (mi, bi))
 }
 
+#[allow(clippy::type_complexity)]
 fn scrub_text_for_frame(
     wire: &mut Vec<Message>,
     session: &Value,
