@@ -87,11 +87,11 @@ pub fn spool_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 pub fn spool_name(id: &str) -> String {
-    let ms = std::time::SystemTime::now()
+    let ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
+        .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{ms:020}-{id}.json")
+    format!("{ns:020}-{id}.json")
 }
 
 pub fn admit(dir: &Path, event: &Event) -> anyhow::Result<PathBuf> {
