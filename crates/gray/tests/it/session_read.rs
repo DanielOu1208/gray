@@ -38,9 +38,8 @@ fn read_lists_only_locked_sessions_as_live() {
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
 
-    let mut unrelated = Command::new("sleep").arg("30").spawn().unwrap();
     write_session(&sessions, "stale-session");
-    write_open(&sessions, "stale-session", unrelated.id());
+    write_open(&sessions, "stale-session", std::process::id());
 
     write_session(&sessions, "live-session");
     let live_open = std::fs::OpenOptions::new()
@@ -59,7 +58,6 @@ fn read_lists_only_locked_sessions_as_live() {
     live_open.try_lock().unwrap();
 
     let out = run(&["read", "--live"], dir.path());
-    unrelated.kill().ok();
     assert!(
         out.status.success(),
         "stderr: {}",

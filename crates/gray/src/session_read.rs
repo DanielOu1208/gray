@@ -34,19 +34,20 @@ struct Live {
     last_activity: Option<SystemTime>,
 }
 
-pub async fn live_sessions(root: &Path) -> Vec<(String, Option<u32>)> {
+pub async fn live_sessions(root: &Path) -> std::io::Result<Vec<(String, Option<u32>)>> {
     let store = JsonlSessionStore::new(root);
-    let ids: Vec<SessionId> = std::fs::read_dir(root)
-        .map(|it| {
-            it.flatten()
-                .filter_map(|e| {
-                    let name = e.file_name().into_string().ok()?;
-                    name.strip_suffix(".open")
-                        .map(|id| SessionId::new(id.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let read = match std::fs::read_dir(root) {
+        Ok(read) => read,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut ids = Vec::new();
+    for entry in read {
+        let name = entry?.file_name().into_string().ok();
+        if let Some(id) = name.and_then(|n| n.strip_suffix(".open").map(str::to_owned)) {
+            ids.push(SessionId::new(id));
+        }
+    }
     let held = store.held_open_locks(ids).await;
     let mut out: Vec<(String, Option<u32>)> = held
         .into_iter()
@@ -56,12 +57,12 @@ pub async fn live_sessions(root: &Path) -> Vec<(String, Option<u32>)> {
         })
         .collect();
     out.sort();
-    out
+    Ok(out)
 }
 
 async fn list_live(root: &Path, json: bool) -> anyhow::Result<()> {
     let mut rows: Vec<Live> = live_sessions(root)
-        .await
+        .await?
         .into_iter()
         .map(|(id, pid)| {
             let transcript = root.join(format!("{id}.jsonl"));
