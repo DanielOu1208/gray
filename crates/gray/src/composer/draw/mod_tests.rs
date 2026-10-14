@@ -2,17 +2,6 @@ use super::widgets::transcript_ends_blank;
 use super::*;
 
 #[test]
-fn home_spacer_fills_to_the_last_row() {
-    assert_eq!(home_spacer_rows(17, 2, 6, 30), 5);
-    assert_eq!(17 + 2 + 6 + home_spacer_rows(17, 2, 6, 30), 30);
-
-    assert_eq!(home_spacer_rows(17, 2, 6, 30) + 17, 30 - 2 - 6);
-
-    assert_eq!(home_spacer_rows(28, 2, 6, 30), 0);
-    assert_eq!(home_spacer_rows(0, 0, 0, 30), 30);
-}
-
-#[test]
 fn transcript_ends_blank_matches_ensure_gap() {
     use ratatui::style::Style;
     assert!(!transcript_ends_blank(&[]));

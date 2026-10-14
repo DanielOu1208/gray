@@ -42,18 +42,6 @@ pub(crate) fn latched_viewport_floor(
     with_dock.max(no_status).max(live_overrun).min(max_h)
 }
 
-pub(crate) fn home_spacer_rows(
-    visible_above: u16,
-    reserved: u16,
-    box_rows: u16,
-    screen_rows: u16,
-) -> u16 {
-    screen_rows
-        .saturating_sub(visible_above)
-        .saturating_sub(reserved)
-        .saturating_sub(box_rows)
-}
-
 pub(crate) fn attachment_cells(attachments: &[std::path::PathBuf], text: &str) -> Vec<InputCell> {
     let t = crate::theme::theme();
     let mut open = std::collections::HashMap::<String, usize>::new();
@@ -198,30 +186,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let tail_est = stream_tail.len() as u16 + tail_gap;
 
     let chips = attachment_cells(&tui.attachments, &text);
-    let mut ibox = build_input_box(&text, cursor, w, ghost, home, &chips);
-    if home.is_some() {
-        let above: usize = {
-            let transcript_h: usize = tui
-                .transcript
-                .iter()
-                .map(|l| l.width().max(1).div_ceil(w.max(1)))
-                .sum();
-            if paint {
-                transcript_h.min(usize::from(tui.terminal.viewport_area.y))
-            } else {
-                transcript_h
-            }
-        };
-
-        let spacer = usize::from(home_spacer_rows(
-            above as u16,
-            status_h + queued_est + live_est + tail_est + panel_est + ask_est + attach_h + 1,
-            ibox.lines.len() as u16,
-            rows,
-        ));
-        ibox.lines
-            .splice(0..0, std::iter::repeat_n(Line::default(), spacer));
-    }
+    let ibox = build_input_box(&text, cursor, w, ghost, home, &chips);
     let box_h = ibox.lines.len().max(1) as u16;
 
     let box_rows_est: u16 = box_h;
