@@ -2759,3 +2759,243 @@ async fn responses_transient_403_then_success_delivers_text() {
         "transient 403 must not surface an error: {events:?}"
     );
 }
+
+static STALL_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn quota_hint_bodies_classify_as_terminal_quota() {
+    for body in [
+        r#"{"error":{"message":"You exceeded your current quota, please check your plan","code":"insufficient_quota"}}"#,
+        "insufficient quota for this request",
+        "insufficient credits",
+        "insufficient balance",
+        "you exceeded your current quota",
+        "usage exceeds your allocated quota",
+        "quota exceeded",
+        "quota_exceeded",
+        "GoUsageLimitError: free tier exhausted",
+        "available balance is empty",
+        "usage limit reached",
+        "session limit hit",
+        "subscription_sharing_usage_limit_exceeded",
+        "usage limit reached, resets in ~2h",
+    ] {
+        let err = classify_http_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body, None, None);
+        assert!(
+            matches!(err.class(), ProviderError::Auth(_)),
+            "{body}: {err:?}"
+        );
+        assert!(!is_retryable_error(&err), "{body}");
+        assert!(!should_retry_request(&err, 429, 1), "{body}");
+        assert!(is_quota_exhausted(&err), "{body}");
+        let code = err
+            .detail()
+            .and_then(|d| d.vendor_code.as_deref())
+            .unwrap_or("");
+        assert_eq!(code.split(';').next(), Some(QUOTA_VENDOR_CODE), "{body}");
+    }
+}
+
+#[test]
+fn quota_marker_preserves_vendor_code() {
+    let err = classify_http_error(
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        r#"{"error":{"message":"You exceeded your current quota","code":"insufficient_quota"}}"#,
+        None,
+        None,
+    );
+    let code = err
+        .detail()
+        .and_then(|d| d.vendor_code.as_deref())
+        .unwrap_or("");
+    assert!(code.contains("code=insufficient_quota"), "{code}");
+}
+
+#[test]
+fn plain_429_without_quota_hint_stays_retryable() {
+    let err = classify_http_error(
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        r#"{"error":{"message":"rate limit exceeded","code":"rate_limit_exceeded"}}"#,
+        None,
+        None,
+    );
+    assert!(matches!(err.class(), ProviderError::RateLimited(_)));
+    assert!(is_retryable_error(&err));
+    assert!(should_retry_request(&err, 429, 1));
+    assert!(!is_quota_exhausted(&err));
+    assert_eq!(quota_reset_in(&err), None);
+}
+
+#[test]
+fn quota_resets_in_parses_relative_hints() {
+    for (body, secs) in [
+        ("resets in ~2h", 7200),
+        ("usage limit reached, resets in ~30m", 1800),
+        ("reset in 90 seconds", 90),
+        ("will reset in about 1h", 3600),
+        ("resets in 1.5 hours", 5400),
+        ("resets in 2 days", 172800),
+    ] {
+        assert_eq!(
+            parse_quota_reset_delay(body),
+            Some(Duration::from_secs(secs)),
+            "{body}"
+        );
+    }
+    assert_eq!(parse_quota_reset_delay("rate limit exceeded"), None);
+}
+
+#[test]
+fn quota_resets_in_parses_absolute_hints() {
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 600;
+    let body = format!("usage limit reached, resets at {epoch}");
+    let d = parse_quota_reset_delay(&body).expect("epoch parses");
+    assert!(
+        d <= Duration::from_secs(600) && d > Duration::from_secs(550),
+        "{d:?}"
+    );
+    let d = parse_quota_reset_delay("resets at 2099-12-31T00:00:00Z").expect("iso parses");
+    assert!(d > Duration::from_secs(86400 * 365), "{d:?}");
+    let d = parse_quota_reset_delay("resets at 23:59 UTC").expect("clock parses");
+    assert!(d <= Duration::from_secs(86400) && !d.is_zero(), "{d:?}");
+}
+
+#[test]
+fn quota_reset_hint_flows_through_classification() {
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 7200;
+    let body = format!("usage limit reached, resets at {epoch}");
+    let err = classify_http_error(reqwest::StatusCode::TOO_MANY_REQUESTS, &body, None, None);
+    assert!(is_quota_exhausted(&err));
+    let d = quota_reset_in(&err).expect("resets parsed");
+    assert!(
+        d <= Duration::from_secs(7200) && d > Duration::from_secs(7100),
+        "{d:?}"
+    );
+    let err = classify_http_error(
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "session limit reached, resets in ~2h",
+        None,
+        None,
+    );
+    assert_eq!(quota_reset_in(&err), Some(Duration::from_secs(7200)));
+    let err = classify_http_error(
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "usage limit reached",
+        None,
+        None,
+    );
+    assert!(is_quota_exhausted(&err));
+    assert_eq!(quota_reset_in(&err), None, "no reset hint -> None");
+}
+
+#[test]
+fn quota_detection_falls_back_to_message_hints() {
+    let err = ProviderError::Auth("insufficient_quota".to_string());
+    assert!(is_quota_exhausted(&err));
+    let err = ProviderError::Auth("invalid api key".to_string());
+    assert!(!is_quota_exhausted(&err));
+}
+
+#[test]
+fn midstream_quota_event_marks_quota() {
+    let event = serde_json::json!({"type":"response.failed","response":{"error":{"code":"insufficient_quota","message":"usage limit reached, resets in ~1h"}}});
+    let err = stream_failure(&event, "usage limit reached, resets in ~1h".into());
+    assert!(is_quota_exhausted(&err));
+    assert_eq!(quota_reset_in(&err), Some(Duration::from_secs(3600)));
+    assert!(!is_retryable_error(&err));
+    assert!(!should_retry_request(&err, 0, 1));
+    assert!(matches!(err.class(), ProviderError::Auth(_)));
+}
+
+#[tokio::test]
+async fn silent_event_stream_trips_stall_cap() {
+    use futures::StreamExt;
+    let pending: BoxedEventStream = futures::stream::pending().boxed();
+    let mut guarded = stall_guard(pending, Duration::from_millis(50));
+    let item = tokio::time::timeout(Duration::from_secs(5), guarded.next())
+        .await
+        .expect("watchdog fires before outer timeout")
+        .expect("stall yields an item");
+    match item {
+        Err(SseReadError::Stalled(cap)) => assert_eq!(cap, Duration::from_millis(50)),
+        other => panic!("expected stall error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn data_events_pass_through_then_silence_stalls() {
+    use futures::StreamExt;
+    let ev = eventsource_stream::Event {
+        event: "message".into(),
+        data: "x".into(),
+        ..Default::default()
+    };
+    let s: BoxedEventStream = futures::stream::iter(vec![Ok(ev)])
+        .chain(futures::stream::pending())
+        .boxed();
+    let mut guarded = stall_guard(s, Duration::from_millis(50));
+    let first = guarded.next().await.expect("event delivered");
+    assert!(first.is_ok(), "{first:?}");
+    let second = tokio::time::timeout(Duration::from_secs(5), guarded.next())
+        .await
+        .expect("watchdog fires")
+        .expect("item");
+    assert!(
+        matches!(second, Err(SseReadError::Stalled(_))),
+        "{second:?}"
+    );
+}
+
+#[tokio::test]
+async fn hung_sse_response_surfaces_retryable_stall() {
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let _lock = STALL_ENV.lock().unwrap();
+    unsafe { std::env::set_var("GRAY_PROVIDER_STALL_SECS", "1") };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+                    .await;
+                tokio::time::sleep(Duration::from_secs(300)).await;
+            });
+        }
+    });
+    let provider =
+        OpenAiProvider::new("key", "test-model", format!("http://{addr}/v1"), None, None)
+            .expect("provider builds");
+    let started = std::time::Instant::now();
+    let mut s = provider.stream(empty_chat_req());
+    let item = tokio::time::timeout(Duration::from_secs(30), s.next())
+        .await
+        .expect("watchdog fires before outer timeout")
+        .expect("stream yields an item");
+    let elapsed = started.elapsed();
+    unsafe { std::env::remove_var("GRAY_PROVIDER_STALL_SECS") };
+    server.abort();
+    match item {
+        Err(err) => {
+            assert!(matches!(err.class(), ProviderError::Stream(_)), "{err:?}");
+            assert!(is_retryable_error(&err), "stall stays retryable: {err:?}");
+            assert!(err.to_string().contains("stalled"), "{err}");
+        }
+        Ok(ev) => panic!("expected stall error, got {ev:?}"),
+    }
+    assert!(
+        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(15),
+        "failed at stall cap, not instantly or after hanging: {elapsed:?}"
+    );
+}
