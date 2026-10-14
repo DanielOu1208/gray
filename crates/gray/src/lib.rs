@@ -34,6 +34,7 @@ pub mod repl;
 pub mod resume;
 mod rotation;
 pub mod search;
+pub mod session_read;
 pub mod session_send;
 pub mod session_store;
 pub mod setup;
@@ -499,6 +500,24 @@ pub enum Commands {
 
         #[arg(long)]
         all: bool,
+    },
+
+    #[command(
+        about = "Read a session's recent conversation, or list live sessions",
+        after_help = "Examples:\n  gray read --live            live sessions: id, pid, cwd, model, last activity\n  gray read <SESSION_ID>      last 20 messages, tool calls summarized\n  gray read <SESSION_ID> --last 50 --json\nReads the owner's session store ($GRAY_USER_HOME, else $GRAY_HOME). A session is live only while its .open lock is held."
+    )]
+    Read {
+        #[arg(value_name = "SESSION_ID")]
+        session: Option<String>,
+
+        #[arg(long)]
+        live: bool,
+
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        last: usize,
+
+        #[arg(long)]
+        json: bool,
     },
 
     Send {

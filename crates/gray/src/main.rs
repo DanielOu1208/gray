@@ -129,6 +129,16 @@ async fn run() -> anyhow::Result<()> {
         return gray::session_send::run_cli(session, text, attach, from.as_deref(), *wait).await;
     }
 
+    if let Some(gray::Commands::Read {
+        session,
+        live,
+        last,
+        json,
+    }) = &cli.command
+    {
+        return gray::session_read::run_cli(session.as_deref(), *live, *last, *json).await;
+    }
+
     if let Some(gray::Commands::External(args)) = &cli.command {
         let (name, rest) = args
             .split_first()
@@ -197,6 +207,9 @@ async fn run() -> anyhow::Result<()> {
             }
             gray::Commands::Send { .. } => {
                 unreachable!("send dispatch happens before configuration")
+            }
+            gray::Commands::Read { .. } => {
+                unreachable!("read dispatch happens before configuration")
             }
             gray::Commands::Gateway { cmd } => {
                 return gray::gateway::run_cli(cmd, &config).await;
