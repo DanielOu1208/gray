@@ -22,3 +22,16 @@ fn raw_paths_pass_through() {
     assert_eq!(decoded_paste_path("/tmp/100%.png"), "/tmp/100%.png");
     assert_eq!(decoded_paste_path("/tmp/plain.png"), "/tmp/plain.png");
 }
+
+#[test]
+fn attach_image_inserts_marker_at_caret() {
+    let mut tui = Tui::test_tui(80, 30);
+    tui.textarea.set_text("prefix suffix");
+    tui.textarea.set_cursor(7);
+    let path = PathBuf::from("/tmp/pic one.png");
+    let marker = crate::repl::attachments::attachment_marker(&path);
+    attach_image(&mut tui, path.clone());
+    assert_eq!(tui.textarea.text(), format!("prefix {marker}suffix"));
+    assert_eq!(tui.textarea.cursor(), 7 + marker.len());
+    assert_eq!(tui.attachments, vec![path]);
+}
