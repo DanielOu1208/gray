@@ -1,8 +1,3 @@
-//! T0.1 — hostile-file fixture zoo + golden-output harness.
-//!
-//! Self-contained until T1.1 wires `src/read/testkit.rs` into the crate and
-//! dedups the builders (that module uses `crate::` paths, this file `gray_tools::`).
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -92,8 +87,6 @@ async fn zoo_golden_harness_fails_loudly_on_drift() {
     assert_golden("a\nb\n", "a\nc\n");
 }
 
-// INT-C wires T1.3: empty.txt returns the is_error=false empty note (absolute
-// path, so assert shape not bytes).
 #[tokio::test]
 async fn zoo_golden_empty_file_matches_current_output() {
     let zoo = Zoo::build().unwrap();
@@ -123,8 +116,7 @@ async fn zoo_golden_long_txt_line_cut_exact() {
     let zoo = Zoo::build().unwrap();
     let out = zoo.read("long.txt", None, None).await;
     assert!(!out.is_error);
-    // T1.2: every shown line carries its absolute cat -n prefix.
-    // INT-C wires T1.3: line-cap hint uses the notices::line_cap contract wording.
+
     let shown: Vec<String> = (1..=2000)
         .map(|i| format!("{:>6}\tline {i:04}", i))
         .collect();
@@ -134,8 +126,6 @@ async fn zoo_golden_long_txt_line_cut_exact() {
     );
     assert_golden(&out.content, &expected);
 }
-
-// ── T2.2 deferred chunk-boundary truncation ──
 
 async fn read_signed(
     root: &Path,
@@ -158,8 +148,6 @@ async fn read_signed(
     ReadTool::default().execute(&ctx, Value::Object(map)).await
 }
 
-/// Numbered content lines (`cat -n` prefixes). Notes never contain `\t`,
-/// so every line with a numeric prefix is file content.
 fn numbered_lines(content: &str) -> Vec<usize> {
     content
         .lines()
@@ -167,8 +155,6 @@ fn numbered_lines(content: &str) -> Vec<usize> {
         .collect()
 }
 
-/// Resume offset from a cut/user hint (`Continue with offset=N` /
-/// `Use offset=N`). Past-EOF notes are handled separately.
 fn resume_offset(content: &str) -> Option<u64> {
     let i = content.find("offset=")?;
     content[i + 7..]
@@ -181,9 +167,7 @@ fn resume_offset(content: &str) -> Option<u64> {
 
 #[tokio::test]
 async fn t22_exactly_filled_window_claims_no_more_remains() {
-    // Line 2000 ends the file: the peek observes EOF → complete, no note.
-    // (The old whole-file code agreed here; a naive streaming swap that sets
-    // `cut` when the window fills would falsely claim offset=2001.)
+
     let dir = TempDir::new().unwrap();
     let lines: Vec<String> = (1..=2000).map(|i| format!("e{i:04}")).collect();
     std::fs::write(dir.path().join("exact.txt"), lines.join("\n") + "\n").unwrap();
@@ -196,8 +180,7 @@ async fn t22_exactly_filled_window_claims_no_more_remains() {
 
 #[tokio::test]
 async fn t22_one_more_byte_names_offset_2001() {
-    // Same file plus one byte (an unterminated 2001st line): the peek
-    // observes it → line cut resuming exactly there.
+
     let dir = TempDir::new().unwrap();
     let lines: Vec<String> = (1..=2000).map(|i| format!("e{i:04}")).collect();
     std::fs::write(dir.path().join("plus1.txt"), lines.join("\n") + "\n").unwrap();
@@ -212,7 +195,7 @@ async fn t22_one_more_byte_names_offset_2001() {
         "{}",
         out.content
     );
-    // The property: re-reading at the named offset returns that line.
+
     let again = read_signed(dir.path(), "plus1.txt", Some(2001), None).await;
     assert!(
         again
@@ -254,10 +237,7 @@ async fn t22_byte_resume_points_at_the_unshown_line() {
 
 #[tokio::test]
 async fn t22_cut_iff_reread_returns_a_line() {
-    // Property over deterministic pseudo-random small files (line counts
-    // straddle the 2000 boundary, lengths straddle the byte cap, offsets
-    // cover head/tail/past-EOF, limits cover exact/over): a named resume
-    // offset always yields content, and a note-free read really ended.
+
     struct Rng(u64);
     impl Rng {
         fn below(&mut self, n: u64) -> u64 {
@@ -273,9 +253,9 @@ async fn t22_cut_iff_reread_returns_a_line() {
     let dir = TempDir::new().unwrap();
     for case in 0..150 {
         let nlines = if case % 10 == 9 {
-            1995 + rng.below(12) // 1995..=2006: the line-cap boundary
+            1995 + rng.below(12)
         } else if case % 25 == 24 {
-            100 + rng.below(400) // long lines: the byte-cap zone
+            100 + rng.below(400)
         } else {
             1 + rng.below(30)
         } as usize;
@@ -292,7 +272,7 @@ async fn t22_cut_iff_reread_returns_a_line() {
             text.push('\n');
         }
         if case % 7 == 3 {
-            // One clamped line.
+
             text.push_str(&"Q".repeat(2500));
             text.push('\n');
         }
@@ -303,7 +283,7 @@ async fn t22_cut_iff_reread_returns_a_line() {
             1 => Some(1),
             2 => Some(1 + rng.below(total as u64 + 3) as i64),
             3 => Some(-(1 + rng.below(total as u64 + 2) as i64)),
-            _ => Some(total as i64 + 1 + rng.below(3) as i64), // past EOF
+            _ => Some(total as i64 + 1 + rng.below(3) as i64),
         };
         let limit: Option<u64> = match case % 4 {
             0 => None,
@@ -318,7 +298,7 @@ async fn t22_cut_iff_reread_returns_a_line() {
             out.content
         );
         if out.content.contains("beyond the end") {
-            // Past EOF: the suggested tail retry must yield lines.
+
             let retry = resume_offset(&out.content).expect("EOF note suggests a retry");
             let r2 = read_signed(dir.path(), "p.txt", Some(retry as i64), None).await;
             assert!(
@@ -327,7 +307,7 @@ async fn t22_cut_iff_reread_returns_a_line() {
                 r2.content
             );
         } else if let Some(n) = resume_offset(&out.content) {
-            // Cut/user hint: re-reading there returns that very line.
+
             let r2 = read_signed(dir.path(), "p.txt", Some(n as i64), None).await;
             let first = r2.content.lines().next().unwrap_or("");
             assert!(
@@ -336,7 +316,7 @@ async fn t22_cut_iff_reread_returns_a_line() {
                 r2.content
             );
         } else {
-            // Complete: the line after the last shown one is past EOF.
+
             let shown = numbered_lines(&out.content);
             assert!(
                 !shown.is_empty(),
@@ -361,9 +341,7 @@ async fn t22_cut_iff_reread_returns_a_line() {
 
 #[tokio::test]
 async fn t22_huge_file_skips_count_but_resumes_and_guards_write() {
-    // >64 MiB text: exact counting is skipped (fragment note) while the
-    // resume offset still names an observed line; the partial view still
-    // refuses a blind overwrite with that offset.
+
     const BIG_LINE: usize = 70 * 1024 * 1024;
     let dir = TempDir::new().unwrap();
     let mut data = "x\n".repeat(2000).into_bytes();
@@ -394,7 +372,6 @@ async fn t22_huge_file_skips_count_but_resumes_and_guards_write() {
         &out.content[out.content.len().saturating_sub(300)..]
     );
 
-    // Resume lands on the observed over-long line, clamped exactly.
     let again = read_signed(dir.path(), "huge.txt", Some(2001), None).await;
     let first = again.content.lines().next().unwrap_or("");
     assert!(first.starts_with("  2001\t"), "{first:.80}");
@@ -406,7 +383,6 @@ async fn t22_huge_file_skips_count_but_resumes_and_guards_write() {
         &again.content[..again.content.len().min(200)]
     );
 
-    // The partial view refuses a blind overwrite with the resume offset.
     let wout = gray_tools::WriteTool::new(ledger)
         .execute(
             &ctx,
@@ -421,7 +397,7 @@ async fn t22_huge_file_skips_count_but_resumes_and_guards_write() {
 #[tokio::test]
 async fn zoo_smoke_every_small_fixture_reads() {
     let zoo = Zoo::build().unwrap();
-    // INT-C wires T1.4: real.png returns an is_error=false mime note, not a failure.
+
     for name in [
         "long.txt",
         "lockfile.txt",
@@ -445,10 +421,9 @@ async fn zoo_smoke_every_small_fixture_reads() {
         "real.png returns a note today: {}",
         miss.content
     );
-    // magic-sniff removed, so binary fixtures report the NUL
-    // note instead of a mime note. Still refused, still is_error=false.
+
     assert!(miss.content.contains("not shown"), "{}", miss.content);
-    // A decodable image rides as vision (opencode parity).
+
     let tiny = zoo.read("tiny.png", None, None).await;
     assert!(!tiny.is_error, "tiny.png reads as vision: {}", tiny.content);
     assert!(

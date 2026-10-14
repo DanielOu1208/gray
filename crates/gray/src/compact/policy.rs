@@ -1,28 +1,16 @@
-//! Compaction policy: settings, token estimates, overflow detection (split from `compact`).
-
 use super::*;
 
 pub struct CompactionSettings {
     pub reserve_tokens: usize,
-    /// Pre-turn ceiling beyond the window bound: an explicit `--compact-at` /
-    /// `GRAY_COMPACT_AT` / `"compact_at_tokens"` choice, or the ceiling
-    /// `gray_core::price_cliff_ceiling` derives from the model's
-    /// declared price cliff. The window bound always applies on top.
+
     pub ceiling_tokens: Option<usize>,
-    /// The provider-declared cliff `ceiling_tokens` came from, for the "why"
-    /// on compaction notices. `None` when the ceiling is an explicit user
-    /// value.
+
     pub price_cliff_tokens: Option<usize>,
 }
 
-/// Master switch for *automatic* compaction only (`should_compact` callers and
-/// `auto_compact_if_needed`). Manual entry points (`compact_with_keep`,
-/// `compact_with_instructions`) always run, so an `enabled=false` session keeps
-/// its manual escape hatch.
 static AUTO_COMPACT_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
 
-/// Disables/enables automatic compaction for this session. Manual `/compact` ignores this.
 pub fn set_auto_compact_enabled(on: bool) {
     AUTO_COMPACT_ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
@@ -31,9 +19,6 @@ pub fn is_auto_compact_enabled() -> bool {
     AUTO_COMPACT_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Env kill-switch for automatic compaction, following the `GRAY_*` pattern in
-/// `config.rs`: `GRAY_NO_AUTO_COMPACT=1` (also `true`/`yes`/`on`) disables it.
-/// `0`/`false`/`no`/`off`/unset leave it enabled. Manual `/compact` still runs.
 pub fn init_auto_compact_from_env() {
     let disabled = std::env::var("GRAY_NO_AUTO_COMPACT")
         .map(|s| {
@@ -51,8 +36,6 @@ pub fn should_compact(tokens: usize, window: usize, s: &CompactionSettings) -> b
         || s.ceiling_tokens.is_some_and(|c| tokens >= c)
 }
 
-/// Why a firing at `tokens` was the ceiling rather than the window bound —
-/// `None` means the window bound (or nothing) fired.
 pub fn binding_reason(tokens: usize, s: &CompactionSettings) -> Option<CompactReason> {
     s.ceiling_tokens
         .filter(|&c| tokens >= c)
@@ -62,8 +45,6 @@ pub fn binding_reason(tokens: usize, s: &CompactionSettings) -> Option<CompactRe
         })
 }
 
-/// Display suffix for a compaction trigger: the empty string for the plain
-/// window bound so existing lines read unchanged.
 pub fn compact_reason_note(reason: CompactReason) -> String {
     match reason {
         CompactReason::Window => String::new(),
@@ -78,9 +59,6 @@ pub fn compact_reason_note(reason: CompactReason) -> String {
     }
 }
 
-/// Effective (ceiling, price_cliff) for one model: an explicit `compact_at`
-/// is the user's choice — it clamps to `window − reserve` and keeps no cliff
-/// reason; `Auto`/unset derives the ceiling from the declared cliff.
 pub fn ceiling_for(
     compact_at: Option<crate::setup::CompactAt>,
     window: usize,
@@ -99,9 +77,6 @@ pub fn ceiling_for(
     }
 }
 
-/// The estimate at which auto-compaction fires for `config`'s model right now
-/// (the ceiling when one is declared, else the window bound) — what
-/// `run_print_inner`'s registration and `--json` metadata report.
 pub fn effective_compact_ceiling(config: &crate::Config) -> usize {
     let model = config.model.as_deref().unwrap_or("");
     let window = crate::setup::resolve_model_context_length(model);
@@ -116,9 +91,6 @@ pub fn effective_compact_ceiling(config: &crate::Config) -> usize {
     .unwrap_or_else(|| window.saturating_sub(reserve))
 }
 
-/// Window-aware variant — prefer this where the model window is known.
-/// `ceiling`/`price_cliff` come from the built agent
-/// ([`Agent::compact_ceiling`], [`Agent::price_cliff`]).
 pub fn compaction_settings_for(
     window: usize,
     ceiling: Option<usize>,
@@ -132,12 +104,7 @@ pub fn compaction_settings_for(
 }
 
 pub fn estimate_tokens(msg: &Message) -> usize {
-    // Must measure billable context, not displayable prose: a message whose
-    // only block is a 50 KiB tool result is ~12.8k tokens, not 0. See
-    // `Message::context_text`.
-    // Images AND other inline media (PDF/audio/video) take the per-block
-    // path: `context_text` includes the base64 payload, so bytes/4 of a
-    // large attachment read as millions of tokens the moment it was sent.
+
     if msg.content.iter().any(|block| {
         matches!(
             block,

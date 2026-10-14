@@ -1,4 +1,3 @@
-"""Black-box CLI contract; run with GRAY_TEST_BIN pointing at a built gray."""
 import json
 import os
 from pathlib import Path
@@ -6,7 +5,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-
 
 @unittest.skipUnless(os.environ.get('GRAY_TEST_BIN'), 'Set GRAY_TEST_BIN to run CLI integration')
 class PluginCliTests(unittest.TestCase):

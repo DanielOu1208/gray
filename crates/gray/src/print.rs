@@ -1,6 +1,3 @@
-//! Print mode: one-shot execution of a user prompt, streaming events to stdout
-//! and recording the conversation to a JSONL session.
-
 use std::collections::HashMap;
 use std::io::{ErrorKind, Write};
 use std::path::Path;
@@ -16,26 +13,18 @@ use gray_core::redaction::{redact_for_disclosure, redact_message};
 use crate::build_agent;
 use crate::config::Config;
 
-/// Wall-clock milliseconds since the Unix epoch (0 on a pre-epoch clock).
 pub(crate) use gray_core::spill::now_millis;
 
-/// Tracking state for active tool call during streaming.
 #[derive(Debug, Clone, Default)]
 pub struct ActiveToolCall {
     pub name: String,
     pub args: Option<serde_json::Value>,
-    /// Display-only headline (plugin `label`): renderer-injected into a
-    /// copy of args, so the wire args the executor saw stay untouched.
+
     pub label: Option<String>,
-    /// Display-only arg preview path (plugin `preview`): same injection.
+
     pub preview: Option<String>,
 }
 
-/// Renders a single AgentEvent with active tool tracking and CWD context.
-///
-/// In-flight calls are keyed by call id so concurrent starts/ends/results
-/// can't clobber each other (single-slot tracking swapped names/args on
-/// parallel calls).
 pub fn render_event_with_context<W: Write>(
     w: &mut W,
     event: &AgentEvent,
@@ -51,7 +40,7 @@ pub fn render_event_with_context<W: Write>(
             w.flush()
         }
         AgentEvent::ThinkingDelta { delta } => {
-            // Same dim+italic treatment as the REPL (pi's thinking style).
+
             write!(w, "\x1b[2m\x1b[3m{delta}\x1b[0m")?;
             w.flush()
         }
@@ -106,8 +95,7 @@ pub fn render_event_with_context<W: Write>(
                 }
                 None => args,
             };
-            // The declared preview path comes from the tool's manifest entry —
-            // a wire `preview` argument is data, not a display directive.
+
             let preview_path = entry
                 .preview
                 .as_deref()
@@ -151,8 +139,7 @@ pub fn render_event_with_context<W: Write>(
             w.flush()
         }
         AgentEvent::StepUsage { .. } => Ok(()),
-        // Compaction is observable, not silent: one dim accounting line per
-        // history rewrite (arXiv:2512.22087 / 2601.16746).
+
         AgentEvent::Compacted {
             tokens_before,
             tokens_after,
@@ -171,9 +158,9 @@ pub fn render_event_with_context<W: Write>(
             )?;
             w.flush()
         }
-        // Codex steal: retry notices go to the same stream, dim, never fatal.
+
         AgentEvent::StreamError { message, details } => {
-            // Provider retry notices can echo request details: scrub first.
+
             let message = scrub_error_text(message);
             let details = scrub_error_text(details);
             if details.is_empty() {
@@ -183,8 +170,7 @@ pub fn render_event_with_context<W: Write>(
             }
             w.flush()
         }
-        // A mid-turn note split the stream into two messages: keep the
-        // paragraph break the composer would paint.
+
         AgentEvent::MessageBoundary => {
             write!(w, "\n\n")?;
             w.flush()
@@ -203,15 +189,10 @@ pub fn render_event_with_context<W: Write>(
     }
 }
 
-/// Executes a prompt in one-shot print mode, printing events to stdout and persisting the session.
 pub async fn run_print_mode(config: &Config, prompt: &str) -> anyhow::Result<()> {
     run_print_mode_with_session(config, prompt, None, false).await
 }
 
-/// Print mode with `--session <id>` / `-c` support: a resolved session is
-/// continued in place (new messages appended to its JSONL); otherwise a fresh
-/// session is created. Bogus ids fail with the same `no session matching`
-/// error as `gray resume <id>` (exit 1), before any model work starts.
 pub async fn run_print_mode_with_session(
     config: &Config,
     prompt: &str,
@@ -229,8 +210,6 @@ pub async fn run_print_mode_with_session(
     .await
 }
 
-/// Machine-readable print mode. Never forwards reasoning, tool arguments/results,
-/// provider error bodies, or plugin host/say output to the transport.
 pub async fn run_print_mode_json(
     config: &Config,
     prompt: &str,
@@ -252,9 +231,6 @@ pub async fn run_print_mode_json(
     .await
 }
 
-/// Machine-readable one-shot mode for a versioned structured input event.
-/// The event remains a typed user block in the session instead of being
-/// converted into prompt prose.
 pub async fn run_print_mode_json_input(
     config: &Config,
     input: &InputEnvelope,
@@ -319,8 +295,7 @@ async fn run_print_mode_json_message(
         }
         Err(error) => Err(error),
     };
-    // A failed or cancelled turn never reaches `TurnEnd`: close any prose
-    // still open so the consumer is not left holding a half segment.
+
     for row in output.take_text(true) {
         output.write(row)?;
     }
@@ -333,9 +308,7 @@ async fn run_print_mode_json_message(
             if let Some(hint) = failure.hint {
                 row["hint"] = hint.into();
             }
-            // A locked session names the holder: the canned message carries
-            // no session id, and the PID lets an orchestrator wait on the
-            // process that owns it.
+
             if let Some(crate::session_store::SessionError::Locked { pid, .. }) =
                 error.downcast_ref::<crate::session_store::SessionError>()
             {
@@ -344,9 +317,7 @@ async fn run_print_mode_json_message(
                     row["lockHolderPid"] = (*pid).into();
                 }
             }
-            // The canned message names the failure class, not the cause:
-            // carry the scrubbed error chain so operators and supervisors
-            // can see why the turn actually died.
+
             let detail = scrub_error_text(&format!("{error:#}"));
             if !detail.is_empty() && row["message"] != detail {
                 row["detail"] = detail.into();
@@ -364,8 +335,6 @@ async fn run_print_mode_json_message(
     }
 }
 
-/// Emit a bounded protocol-1 error row before a structured input can enter
-/// the agent. The input parser never includes payload contents in this row.
 pub fn write_structured_input_error(error: &InputError) {
     let row = serde_json::json!({
         "protocol": 1,
@@ -377,17 +346,9 @@ pub fn write_structured_input_error(error: &InputError) {
     println!("{row}");
 }
 
-/// Process exit codes for `--json` print mode. Harnesses branch on these (and
-/// the JSON `code`) instead of parsing prose: infra failures are the turn the
-/// provider dropped, safe to re-run; `turn_failed` means the agent itself
-/// stopped and retrying repeats the same outcome.
 pub const EXIT_TURN_FAILED: i32 = 1;
 pub const EXIT_INFRA: i32 = 3;
 
-/// Machine-readable failure class carried from `--json` print mode to the
-/// process exit, with the operator hint that names the next command to run.
-/// `retryable` marks provider/network deaths — the bench-class failure that
-/// decides whether a harness re-runs the turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrintFailure {
     pub code: &'static str,
@@ -397,12 +358,9 @@ pub struct PrintFailure {
 }
 
 impl PrintFailure {
-    /// Classify an anyhow error by downcasting to [`gray_core::error::CoreError`];
-    /// anything unrecognized is a plain turn failure.
+
     pub fn of(error: &anyhow::Error) -> Self {
-        // Session-store failures keep their own taxonomy: a live owner is
-        // `session_locked`, safe to re-run once that process closes —
-        // the harness-visible shape mirrors every other retryable class.
+
         if matches!(
             error.downcast_ref::<crate::session_store::SessionError>(),
             Some(crate::session_store::SessionError::Locked { .. })
@@ -435,7 +393,6 @@ impl PrintFailure {
         }
     }
 
-    /// One-line operator message; never carries provider response bodies.
     pub fn message(&self) -> &'static str {
         match self.code {
             "auth_failed" => "The provider rejected the credentials.",
@@ -456,7 +413,6 @@ impl PrintFailure {
         }
     }
 
-    /// The mmx lesson: every failure class names the command that fixes it.
     fn hint_for(code: &str) -> Option<&'static str> {
         Some(match code {
             "auth_failed" => {
@@ -490,15 +446,10 @@ impl std::fmt::Display for PrintFailure {
 
 impl std::error::Error for PrintFailure {}
 
-/// Caps on disclosed tool data (chars) and the reasoning buffer flush
-/// threshold. Bounds what a chatty surface (Discord, Telegram, a log tail)
-/// receives per row; the full text stays in the session log.
 const DETAIL_CAP: usize = 240;
 const OUTPUT_CAP: usize = 1200;
 const THINKING_FLUSH: usize = 800;
-/// Minimum gap between two streamed `text` rows for one segment. The first
-/// row of a segment goes out at once; after that a chat surface edits at
-/// about one frame a second, so a row per token is pure overhead.
+
 const TEXT_EVERY: Duration = Duration::from_millis(200);
 
 struct JsonOutput {
@@ -507,46 +458,33 @@ struct JsonOutput {
     text: String,
     usage: gray_core::event::Usage,
     meter: Option<crate::print_meter::Meter>,
-    /// Tool call id -> name, for rows that carry no name of their own
-    /// (`ToolCallEnd` has args only). Cleared per call by `ToolResult`.
+
     tools: HashMap<String, String>,
-    /// Reasoning buffer: flushed as one `thinking` row per THINKING_FLUSH
-    /// chars, never one row per token.
+
     thinking: String,
     show_reasoning: bool,
-    /// `GRAY_STREAM_TEXT=1`: stream assistant prose as `text` rows so a chat
-    /// surface can edit its reply in place instead of posting it at the end.
-    /// Opt-in: a consumer that never asked keeps the old row set.
+
     stream_text: bool,
     segment: TextSegment,
-    /// Display names for plugin tools that declare a manifest `label`.
-    /// Every other tool is named by humanizing its wire name.
+
     labels: HashMap<String, String>,
-    /// Arg preview dot paths for plugin tools that declare a manifest
-    /// `preview`. Same contract as `labels`: display-only, never
-    /// model-visible.
+
     previews: HashMap<String, String>,
 }
 
-/// The assistant prose streamed since the last tool boundary. A new segment
-/// starts after every tool call, so a surface can give each run of prose its
-/// own message (Hermes' segment break).
 #[derive(Default)]
 struct TextSegment {
-    /// Zero-based segment number within the turn.
+
     index: u64,
-    /// Unredacted prose received for this segment.
+
     raw: String,
-    /// Byte offset into `raw` up to which complete lines were sent as
-    /// `delta`. Redaction works line by line, so a sent line never changes.
+
     sent: usize,
-    /// The provisional tail last sent, to skip rows that say nothing new.
+
     tail: String,
     last_emit: Option<Instant>,
 }
 
-/// Redact a streamed fragment exactly as the final answer is: scrub only
-/// when a secret fired, so prose and paths stay verbatim.
 fn scrub(text: &str) -> String {
     let redaction = redact_for_disclosure(text);
     if redaction.has_secret() {
@@ -556,8 +494,6 @@ fn scrub(text: &str) -> String {
     }
 }
 
-/// `GRAY_STREAM_TEXT` truthy check (same spelling rules as
-/// `GRAY_SHOW_REASONING`).
 fn stream_text_enabled() -> bool {
     std::env::var("GRAY_STREAM_TEXT").is_ok_and(|v| {
         matches!(
@@ -567,8 +503,6 @@ fn stream_text_enabled() -> bool {
     })
 }
 
-/// `GRAY_STDIN_STEER` truthy check: the caller owns stdin for the whole
-/// process and writes `{"type":"steer","text":…}` / ask-answer lines on it.
 fn steer_enabled() -> bool {
     std::env::var("GRAY_STDIN_STEER").is_ok_and(|v| {
         matches!(
@@ -579,9 +513,7 @@ fn steer_enabled() -> bool {
 }
 
 impl JsonOutput {
-    /// What a surface should call `name`: the plugin's own label, else the
-    /// wire name humanized (`discord_send` → `Discord Send`; a single token
-    /// such as `bash` stays as it is), the same rule the TUI headers use.
+
     fn display_name(&self, name: &str) -> String {
         self.labels
             .get(name)
@@ -605,10 +537,8 @@ impl JsonOutput {
         Ok(())
     }
 
-    /// Progress rows for one event (thinking flushes first at turn end).
-    /// Pure builder so the narration wire is unit-testable off stdout.
     fn rows(&mut self, event: &AgentEvent) -> Vec<serde_json::Value> {
-        // Reasoning arrives per token; batch it into capped `thinking` rows.
+
         if let AgentEvent::ThinkingDelta { delta } = event {
             if self.show_reasoning {
                 self.thinking.push_str(delta);
@@ -633,9 +563,7 @@ impl JsonOutput {
                 Vec::new()
             };
         }
-        // The withdrawn segment's prose is dropped, not flushed: the
-        // surface removes what it already showed, then later `text` rows
-        // carry fresh indices.
+
         if let AgentEvent::Retract = event {
             let seg = self.segment.index;
             self.segment = TextSegment {
@@ -644,8 +572,7 @@ impl JsonOutput {
             };
             return vec![serde_json::json!({"type": "retract", "segment": seg})];
         }
-        // A tool call, the end of a provider step, or the end of the turn
-        // closes the prose before it: the closing row carries everything.
+
         let mut rows = match event {
             AgentEvent::ToolCallStart { .. }
             | AgentEvent::MessageBoundary
@@ -671,17 +598,14 @@ impl JsonOutput {
                     row["tool"] = name.as_str().into();
                     row["label"] = self.display_name(name).into();
                     row["call_id"] = disclose(id, DETAIL_CAP).into();
-                    // Surface-declared preview first: the plugin names a dot
-                    // path, core resolves it. Falls through to the built-in
-                    // arms when the path resolves to nothing.
+
                     let preview = self
                         .previews
                         .get(name)
                         .map(|x| x.trim())
                         .filter(|x| !x.is_empty())
                         .and_then(|path| crate::tool_fmt::preview_at(args, path));
-                    // The resolved text passes explicitly — a wire `preview`
-                    // arg is data, never a display directive.
+
                     if let Some(detail) = tool_detail(name, args, preview.as_deref()) {
                         row["detail"] = detail.into();
                     }
@@ -730,12 +654,6 @@ impl JsonOutput {
         rows
     }
 
-    /// One `text` row for the live segment. Complete lines go out once as
-    /// `delta` (append-only: a consumer concatenates them); the unfinished
-    /// line goes out as a provisional `tail` that the next row replaces,
-    /// with its last word held back so a secret is never shown half typed.
-    /// `done` sends everything, marks the segment closed, and starts the
-    /// next one.
     fn take_text(&mut self, done: bool) -> Vec<serde_json::Value> {
         let segment = &mut self.segment;
         if segment.raw.is_empty() {
@@ -751,8 +669,7 @@ impl JsonOutput {
             String::new()
         } else {
             let open = &segment.raw[stable..];
-            // Hold the word still being typed: its redaction is only known
-            // once it is complete.
+
             let shown = open.rfind(char::is_whitespace).map_or("", |i| &open[..i]);
             scrub(shown)
         };
@@ -776,9 +693,6 @@ impl JsonOutput {
         vec![row]
     }
 
-    /// One `thinking` row for whatever reasoning has accumulated. Redacted
-    /// like every disclosed detail: a model that reads a key file can
-    /// quote it back.
     fn take_thinking(&mut self) -> Vec<serde_json::Value> {
         let text = std::mem::take(&mut self.thinking);
         if text.trim().is_empty() {
@@ -790,14 +704,6 @@ impl JsonOutput {
     }
 }
 
-/// Collapse to one line, cap, and redact secrets. Every `detail` on the wire
-/// goes through here: tool args and model output are untrusted for secrets.
-///
-/// Paths stay verbatim when no secret is present — the same gate as
-/// [`gray_core::redaction::redact_message`]: this wire feeds owner-local
-/// surfaces (Discord narration), where `cat /tmp/shot.png` redacted to
-/// `cat <path>` is noise, not safety. A secret in the same string
-/// still scrubs the whole unit (paths included).
 fn disclose(text: &str, cap: usize) -> String {
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let capped: String = flat.chars().take(cap).collect();
@@ -814,20 +720,14 @@ fn disclose(text: &str, cap: usize) -> String {
     }
 }
 
-/// Preserve line breaks for a bounded terminal transcript while applying the
-/// same disclosure rules as one-line details. The full result remains in the
-/// session log; chat surfaces only receive this redacted prefix.
 fn disclose_output(text: &str, cap: usize) -> String {
-    // Redaction is linear in the input. Keep a small look-ahead past the
-    // disclosure cap so a credential split at the boundary is still treated
-    // as a credential, without scanning an unbounded tool result.
+
     let look_ahead = cap.saturating_add(256);
     let mut chars = text.chars();
     let prefix = chars.by_ref().take(look_ahead).collect::<String>();
     let source_truncated = chars.next().is_some();
     let redaction = redact_for_disclosure(&prefix);
-    // ponytail: secret-free output stays byte-faithful (paths included);
-    // scrub only when a secret fired.
+
     let base = if redaction.has_secret() {
         redaction.into_text()
     } else {
@@ -839,13 +739,9 @@ fn disclose_output(text: &str, cap: usize) -> String {
     format!("{}…", base.chars().take(cap).collect::<String>())
 }
 
-/// The one-line "what did it just do" for known tools. Returns `None` for
-/// anything else rather than dumping raw args: a value we do not
-/// understand is exactly where a token hides.
 fn tool_detail(name: &str, args: &serde_json::Value, preview: Option<&str>) -> Option<String> {
     let arg = |k: &str| args.get(k).and_then(serde_json::Value::as_str);
-    // Plugin-declared arg preview: the surface resolved the declared path
-    // and passes the text explicitly — never read from wire args.
+
     if let Some(text) = preview {
         return Some(disclose(text, DETAIL_CAP));
     }
@@ -853,9 +749,7 @@ fn tool_detail(name: &str, args: &serde_json::Value, preview: Option<&str>) -> O
         "bash" | "shell" => arg("command").map(|c| disclose(c, DETAIL_CAP)),
         "read" | "view" | "cat" => {
             let path = arg("path")?;
-            // Line range when the reader has one: `config.yaml L110-139`.
-            // `offset` is 1-based and negative means tail; either way the
-            // path alone is the honest summary.
+
             let (Some(start), Some(limit)) = (
                 args.get("offset").and_then(|v| v.as_u64()),
                 args.get("limit").and_then(|v| v.as_u64()),
@@ -882,11 +776,6 @@ fn tool_detail(name: &str, args: &serde_json::Value, preview: Option<&str>) -> O
     }
 }
 
-/// A live `gray -p` worker's self-registration: `~/.gray/running/<pid>.json`
-/// holds the record for the process's life so run registries
-/// (gray-subagents' widget) adopt scripted/`gray_prompt` children without
-/// argv archaeology. Removed on drop; a `kill -9` leftover is a stale row
-/// consumers discard on the pid's liveness.
 struct RunningGuard(Option<std::path::PathBuf>);
 
 #[cfg(unix)]
@@ -997,19 +886,14 @@ async fn run_print_inner(
     continue_last: bool,
     mut json: Option<&mut JsonOutput>,
 ) -> anyhow::Result<()> {
-    // Same canonicalization as the REPL boot: a saved `swe-2-max` becomes
-    // `swe-2` at `max` before the agent is built, so headless runs ride
-    // the family row too (the wire id is re-expanded at request build).
+
     let mut config_owned = config.clone();
     let _ = crate::repl::normalize_adopted_model(&mut config_owned);
     let config = &config_owned;
     crate::setup::set_user_context_window(config.context_window);
     crate::setup::set_user_reserve_tokens(config.context_reserve);
     crate::setup::set_user_keep_recent_tokens(config.context_keep);
-    // Sidecar `host/ask` without a TUI: the `--json` wire when the caller
-    // asked for it (a chat bridge answers on stdin), else piped-stdin/empty.
-    // GRAY_STDIN_STEER implies the json ask wire: its caller always pipes
-    // stdin, and a per-ask reader would race the demux.
+
     let steering = json.is_some() && steer_enabled();
     match json.as_deref() {
         Some(output) if crate::ask::json_enabled() || steering => {
@@ -1054,7 +938,7 @@ async fn run_print_inner(
     };
     let cwd = std::env::current_dir()?;
     let store = JsonlSessionStore::default();
-    // Explicit `--session` wins over `-c` (same precedence as the REPL).
+
     let (resume_target, needs_maintain): (Option<SessionId>, bool) = match session {
         Some(raw)
             if json.is_some()
@@ -1070,10 +954,7 @@ async fn run_print_inner(
         None if continue_last => (crate::resume::latest_session_anywhere(&store).await, false),
         None => (None, false),
     };
-    // One owner per session: a second `-p` on a live session gets
-    // `session_locked` with the holder's PID, never silent interleaved
-    // appends. Claimed before maintain/load so the file can't change
-    // under another owner.
+
     let mut _open_guard = None;
     if let Some(sid) = resume_target.as_ref() {
         _open_guard = Some(store.acquire_open(sid).await?);
@@ -1093,7 +974,7 @@ async fn run_print_inner(
         None => Vec::new(),
     };
     log::debug!(target: "gray_timing", "spawn history_loaded elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
-    // Pin memory to the same durable identity for plain and JSON print mode.
+
     let session_id = match resume_target.clone() {
         Some(id) => id,
         None => store.fresh_id().await,
@@ -1126,9 +1007,6 @@ async fn run_print_inner(
         crate::compact::effective_compact_ceiling(config),
     );
 
-    // One-shot run = one turn: only max_turns=0 (nonsensical but
-    // explicit) and an already-blown wall clock can stop it pre-run.
-    // max_turns=0 is rejected at resolve, so this is dead-simple.
     if let Some(max) = config.max_wall_secs
         && crate::turn_caps::process_start().elapsed().as_secs() >= max
     {
@@ -1136,8 +1014,7 @@ async fn run_print_inner(
     }
     let mut agent = build_agent(config, &cwd, Some(session_id.as_str())).await?;
     log::debug!(target: "gray_timing", "spawn agent_built elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
-    // The effective compaction trigger is supervisor-facing metadata (a
-    // parent choosing GRAY_COMPACT_AT for a child verifies what took).
+
     if let Some(out) = json.as_deref_mut() {
         let mut row = serde_json::json!({
             "type": "progress",
@@ -1187,9 +1064,7 @@ async fn run_print_inner(
                 .with_origin(crate::session_store::print_session_origin()),
             )
             .await?;
-        // Fresh id — always free; held so `gray -r` can't double-open the
-        // session while this turn writes it. Pathological failure degrades
-        // to guardless rather than failing the turn.
+
         match store.acquire_open(&session_id).await {
             Ok(guard) => _open_guard = Some(guard),
             Err(e) => log::warn!("session open-lock failed: {e}"),
@@ -1206,14 +1081,7 @@ async fn run_print_inner(
     }
 
     let history_revision = agent.history_revision();
-    // Persist the turn step by step, not only when it ends: a killed
-    // `gray -p` (benchmark timeout, kill -9, power cut) then loses at most
-    // the step in flight instead of the whole transcript. Same contract as
-    // the REPL checkpoint (repl/prompt_turn.rs): stop on any history rewrite
-    // (the end-of-turn path owns the replacement) and on the first failed
-    // append (a partial pass leaves lines on disk, so repair stays
-    // end-of-turn). Print mode persists the redacted copy, so the
-    // checkpoint scrubs every message through the same helper.
+
     let checkpointed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(initial_count));
     let checkpoint_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     agent.set_checkpoint(Some(session_checkpoint(
@@ -1229,9 +1097,7 @@ async fn run_print_inner(
             rx.lock().ok().and_then(|mut r| r.try_recv().ok())
         }));
     }
-    // Headless `-p` has no paste-attach: inline file links still carry vision.
-    // Structured input already owns its typed block and never scans arbitrary
-    // text for attachment paths.
+
     let user_msg = if let Some(prompt) = prompt {
         let inline = crate::repl::attachments::extract_inline_image_paths(prompt, &cwd);
         crate::repl::build_user_message_with_attachments(prompt, &inline)
@@ -1239,17 +1105,14 @@ async fn run_print_inner(
         user_message
     };
     log::debug!(target: "gray_timing", "spawn_to_ready_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
-    // SIGINT only signals the shared token — never wrap the run in a
-    // select! that would drop it. Aborted once the run returns.
+
     let sigint_cancel = cancel.clone();
     let sigint_task = tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             sigint_cancel.cancel();
         }
     });
-    // Stream events live so piped output isn't all-or-nothing. The first
-    // stdout error cancels paid model/tool work and stops further writes
-    // (recorded once, never spammed per event).
+
     let stdout = std::io::stdout();
     let mut in_flight: HashMap<String, ActiveToolCall> = HashMap::new();
     let mut render_err: Option<std::io::Error> = None;
@@ -1290,9 +1153,7 @@ async fn run_print_inner(
         .run_streaming(user_msg, ctx.clone(), &mut on_event)
         .await
         .map_err(map_err);
-    // Steer lines that land after the last model request never met an
-    // injection point — each becomes a follow-up turn in this session,
-    // inside the one `result` row.
+
     while run_result.is_ok()
         && let Some(rx) = &steer_rx
         && let Some(text) = rx.lock().ok().and_then(|mut r| r.try_recv().ok())
@@ -1313,8 +1174,7 @@ async fn run_print_inner(
     if run_result.is_ok()
         && let Some(output) = json.as_deref_mut()
     {
-        // Read the live final assistant message, not redacted JSONL and not
-        // an exact-text search that could select a previous identical turn.
+
         if let Some(message) = agent
             .messages()
             .last()
@@ -1324,13 +1184,6 @@ async fn run_print_inner(
         }
     }
 
-    // F14: no `?` between run completion and finalization — always attempt
-    // session persistence AND shell teardown, then propagate the original
-    // error combined with any persistence error.
-    // Whatever the checkpoints wrote must not be appended twice. A failed
-    // checkpoint pass can leave earlier lines on disk, so the only safe
-    // write then is the replacement path a mid-turn rewrite already takes
-    // (a blind append could duplicate them); `prior_count` is unused there.
     let checkpoint_failed = checkpoint_failed.load(std::sync::atomic::Ordering::Relaxed);
     let rewritten = agent.history_revision() != history_revision || checkpoint_failed;
     let persist_from = if checkpoint_failed {
@@ -1352,8 +1205,7 @@ async fn run_print_inner(
     let render_broken = render_err
         .as_ref()
         .is_some_and(|e| e.kind() == ErrorKind::BrokenPipe);
-    // Cron (or other plugin-initiated) `host/say` lines queued mid-turn.
-    // Fallible writeln on a locked handle: stdout may already be closed.
+
     if render_broken || json.is_some() {
         let _ = crate::host::take_host_say();
     } else {
@@ -1372,9 +1224,7 @@ async fn run_print_inner(
     }
 
     if render_broken {
-        // Graceful BrokenPipe: the consumer went away. Paid work is already
-        // cancelled, history persisted, shell torn down. Swallow a
-        // cancellation (it is our own stop), keep any other error.
+
         match (&run_result, &persist_result) {
             (_, Err(p)) => return Err(anyhow::anyhow!("{p:#}")),
             (Ok(_), Ok(_)) => return Ok(()),
@@ -1385,7 +1235,7 @@ async fn run_print_inner(
         }
     }
     if let Some(e) = render_err {
-        // Non-pipe stdout failure: surface it, combined with run/persist.
+
         return match (run_result, persist_result) {
             (Err(r), Err(p)) => Err(anyhow::anyhow!(
                 "{r:#}; stdout write failed: {e}; also failed to persist session: {p:#}"
@@ -1408,16 +1258,10 @@ async fn run_print_inner(
     }
 }
 
-/// Scrub provider/error text before it reaches stderr or a receipt.
 pub(crate) fn scrub_error_text(s: &str) -> String {
     redact_for_disclosure(s).into_text()
 }
 
-/// The print-mode step-boundary checkpoint: appends every message past the
-/// `done` cursor to the session file (the redacted copy, like
-/// `append_new_messages`), stops writing on a history rewrite — the
-/// end-of-turn path owns the replacement — and on the first failed append,
-/// whose partial pass only a full replacement can safely repair.
 fn session_checkpoint(
     store: JsonlSessionStore,
     sid: SessionId,
@@ -1447,13 +1291,6 @@ fn session_checkpoint(
     })
 }
 
-/// Appends only messages at index `prior_count..` to an existing session
-/// (print-mode `--session`/`-c` continuation in place — never a new file).
-/// When in-loop compaction rewrote history (even if it grew past the cursor),
-/// persists the whole active transcript behind a replacement boundary.
-/// `usage`/`duration_ms` ride the last appended entry, like the REPL's
-/// `persist_turn_messages`: when every message was already checkpointed
-/// nothing is appended and the pair is dropped.
 pub async fn append_new_messages(
     store: &JsonlSessionStore,
     sid: &SessionId,
@@ -1464,7 +1301,7 @@ pub async fn append_new_messages(
     duration_ms: Option<u64>,
 ) -> anyhow::Result<()> {
     if history_rewritten || messages.len() < prior_count {
-        // Same redaction as the normal path: secrets never land in the file.
+
         let redacted: Vec<Message> = messages.iter().map(redact_message).collect();
         return store
             .append_compaction_replacement(sid, &redacted)
@@ -1474,8 +1311,7 @@ pub async fn append_new_messages(
     let new = &messages[prior_count.min(messages.len())..];
     for (i, msg) in new.iter().enumerate() {
         let is_last = i + 1 == new.len();
-        // Durable JSONL: persist the redacted copy (secrets/paths never land
-        // in the session file); the live turn keeps the raw text.
+
         let redacted = redact_message(msg);
         store
             .append_with_usage_and_duration(
@@ -1490,7 +1326,6 @@ pub async fn append_new_messages(
     Ok(())
 }
 
-/// Saves the accumulated messages to the session store.
 pub async fn save_session(
     store: &JsonlSessionStore,
     model: &str,
@@ -1510,7 +1345,7 @@ pub async fn save_session(
     store.create(meta).await?;
 
     for msg in messages {
-        // Durable JSONL: persist the redacted copy (see append_new_messages).
+
         let redacted = redact_message(msg);
         store
             .append(&session_id, &redacted)

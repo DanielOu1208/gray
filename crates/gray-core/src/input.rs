@@ -1,22 +1,13 @@
-//! Versioned structured input accepted by Gray's one-shot runner.
-//!
-//! The host owns the envelope shape. A plugin validates its own payload before
-//! constructing this value; Gray core preserves the typed block in the session
-//! and gives providers a bounded, marked representation when one is needed.
-
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub const STRUCTURED_INPUT_PROTOCOL: &str = "gray.input";
-/// The first version of the identifier, kept for envelopes produced by
-/// plugins that still emit it.
+
 pub const LEGACY_STRUCTURED_INPUT_PROTOCOL: &str = "gray.discord.input";
 pub const STRUCTURED_INPUT_VERSION: u32 = 1;
 pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_KIND_CHARS: usize = 64;
 
-/// A structured input envelope. The payload is deliberately opaque to core;
-/// the producer owns its schema and validation rules.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputEnvelope {
@@ -54,7 +45,7 @@ impl fmt::Display for InputError {
 impl std::error::Error for InputError {}
 
 impl InputEnvelope {
-    /// Parse and validate one bounded structured-input envelope.
+
     pub fn from_json(bytes: &[u8]) -> Result<Self, InputError> {
         if bytes.len() > MAX_INPUT_BYTES {
             return Err(InputError::TooLarge);
@@ -85,7 +76,6 @@ impl InputEnvelope {
         Ok(())
     }
 
-    /// Convert into the typed user content block without a prose conversion.
     pub fn into_content_block(self) -> crate::message::ContentBlock {
         crate::message::ContentBlock::StructuredInput {
             protocol: self.protocol,

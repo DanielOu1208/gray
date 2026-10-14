@@ -33,7 +33,7 @@ fn headless_row_shows_short_id_preview_and_age() {
 
 #[test]
 fn row_previews_the_latest_message_and_its_timestamp() {
-    // A session opened an hour ago whose latest message just landed.
+
     let s = summary(
         Some("how do I fix the resume picker"),
         Some("ok that worked, thanks"),
@@ -71,8 +71,7 @@ fn search_matches_the_latest_message() {
     );
     assert!(session_matches(&s, "resume row", None));
     assert!(session_matches(&s, "RESUME ROW", None));
-    // The opener stays searchable too: a session is still *about* a topic it
-    // opened with, so the filter keeps both ends rather than narrowing.
+
     assert!(session_matches(&s, "sqlite", None));
     assert!(!session_matches(&s, "sqlite resume row", None));
 }
@@ -194,8 +193,6 @@ async fn resumed_line_bogus_errors() {
     );
 }
 
-// ── the list reads as a timeline ──
-
 fn aged(id: &str, started: u64, last_active: u64) -> SessionSummary {
     SessionSummary {
         title: None,
@@ -213,8 +210,7 @@ fn aged(id: &str, started: u64, last_active: u64) -> SessionSummary {
 
 #[test]
 fn the_last_session_is_the_most_recently_used_not_the_newest_made() {
-    // A session opened last week and used this morning is the one to
-    // continue — sorting by creation put it at the bottom.
+
     let summaries = vec![
         aged("old-but-active", 1_000, 9_000),
         aged("new-but-stale", 5_000, 2_000),
@@ -272,14 +268,14 @@ fn last_and_headless_lists_skip_empty_sessions() {
     );
     live.cwd = std::path::PathBuf::from("/tmp");
     let summaries = vec![empty, live];
-    // --last skips the newer-but-empty session for the older live one.
+
     let latest = latest_summary(&summaries, None).expect("live session");
     assert_eq!(
         latest.last_user_text.as_deref(),
         Some("real followup"),
         "an empty session must never win --last, even when newest"
     );
-    // Same skip the headless list applies (mirror its filter chain).
+
     let listed: Vec<&SessionSummary> = summaries
         .iter()
         .filter(|s| session_matches(s, "", None))
@@ -290,9 +286,7 @@ fn last_and_headless_lists_skip_empty_sessions() {
 
 #[tokio::test]
 async fn empty_sessions_exist_on_disk_but_hide_from_resume() {
-    // End-to-end against the real store: a created-but-never-used session
-    // is a header-only file. `list()` keeps reporting it (no data loss),
-    // but no resume surface offers it — while an explicit id still loads.
+
     let dir = tempfile::tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path());
     let cwd = std::env::current_dir().unwrap();
@@ -323,9 +317,7 @@ async fn empty_sessions_exist_on_disk_but_hide_from_resume() {
 
 #[tokio::test]
 async fn auxiliary_sessions_exist_on_disk_but_hide_from_resume() {
-    // A subagent child session has real content — `is_empty` would never
-    // catch it — but its `origin` tag keeps it out of every resume surface
-    // while `--session <id>` (steer) and `resume <id>` still load it.
+
     let dir = tempfile::tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path());
     let cwd = std::env::current_dir().unwrap();
@@ -368,8 +360,7 @@ async fn auxiliary_sessions_exist_on_disk_but_hide_from_resume() {
 
 #[tokio::test]
 async fn auxiliary_sessions_dont_bury_the_real_latest() {
-    // -c/--last must land on the user's session even when a subagent child
-    // was active more recently in the same cwd.
+
     let dir = tempfile::tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path());
     let cwd = std::env::current_dir().unwrap();
@@ -414,8 +405,6 @@ fn short_id_keeps_uuid_prefix_and_full_names() {
     let name = SessionId::new("chiral-xenon-pulsar");
     assert_eq!(short_id(&name), "chiral-xenon-pulsar");
 }
-
-// ── session state markers ──
 
 fn ended(id: &str, end: SessionEnd, span_ms: u64) -> SessionSummary {
     let mut s = aged(id, 1_000, 1_000 + span_ms);
@@ -522,7 +511,7 @@ fn dismissal_silences_only_that_exact_state() {
     assert_eq!(session_state(&s, &none), SessionState::Interrupted);
     s.dismissed_at = Some(s.last_message_at);
     assert_eq!(session_state(&s, &none), SessionState::Done);
-    // The session ran again and was cut off again: flagged again.
+
     s.last_message_at += 5_000;
     assert_eq!(session_state(&s, &none), SessionState::Interrupted);
 }
@@ -537,8 +526,6 @@ fn dismissal_round_trips_through_the_sidecar_file() {
     assert_eq!(raw, "4242");
     let _ = std::fs::remove_dir_all(&dir);
 }
-
-// ── titles ──
 
 #[test]
 fn a_title_replaces_the_preview_and_is_searchable() {
@@ -566,7 +553,7 @@ fn write_title_stores_a_clean_one_liner_and_blank_clears_it() {
         None
     );
     assert!(!dir.path().join("tectonic-nickel-cyclone.title").exists());
-    // Clearing a title that was never set is fine.
+
     assert!(crate::session_store::write_title(dir.path(), &id, "").is_ok());
 }
 
@@ -578,14 +565,12 @@ fn write_title_rejects_a_path_like_id() {
     );
 }
 
-// ── take over ──
-
 #[test]
 fn take_over_a_free_lock_is_a_noop() {
     let dir = tempfile::tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path().to_path_buf());
     let id = SessionId::new("takeover-free");
-    // Lock already free: nothing to take, no pid needed.
+
     assert!(try_take_over(&store, &id, None).is_ok());
     assert!(try_take_over(&store, &id, Some(9_999_999)).is_ok());
 }
@@ -597,8 +582,7 @@ async fn take_over_our_own_pid_never_signals() {
     let id = seed(&store, "takeover-self", dir.path().to_path_buf(), &["hi"]).await;
     let _guard = store.acquire_open(&id).await.unwrap();
     assert!(store.open_lock_held_sync(&id));
-    // Held by us and the recorded holder is this process: pass through
-    // without a signal — SIGTERM to self would kill the REPL.
+
     assert_eq!(store.open_holder_pid(&id), Some(std::process::id()));
     assert!(try_take_over(&store, &id, Some(std::process::id())).is_ok());
 }
@@ -626,8 +610,7 @@ async fn take_over_sigterm_frees_a_foreign_lock() {
     )
     .await;
     let open_path = dir.path().join(format!("{}.open", id.as_str()));
-    // One bash holds the lock on inherited fd 9 and execs `sleep` under
-    // the argv0 "gray", so the pid is both holder and a /proc gray.
+
     let mut child = std::process::Command::new("bash")
         .arg("-c")
         .arg("exec 9>$1; flock -n 9; exec -a gray sleep 60")

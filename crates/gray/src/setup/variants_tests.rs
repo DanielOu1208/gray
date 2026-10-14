@@ -23,8 +23,6 @@ fn vp(id: &str, effort: Option<&str>, fast: bool, p: Parts) -> ModelVariant {
     }
 }
 
-/// The GPT-6 Sol shape: standard ids for every tier, priority only at
-/// some.
 fn sol() -> Vec<ModelVariant> {
     vec![
         v("gpt-6-sol-none", Some("off"), false),
@@ -53,7 +51,7 @@ fn an_exact_effort_match_wins() {
         id_of(resolve_variant(&vs, Some("high"), true, &none)),
         Some("gpt-6-sol-high-priority")
     );
-    // `none` and `off` are one level.
+
     assert_eq!(
         id_of(resolve_variant(&vs, Some("none"), false, &none)),
         Some("gpt-6-sol-none")
@@ -87,17 +85,17 @@ fn a_variant_without_effort_is_the_fallback_before_nearest() {
 fn otherwise_the_nearest_effort_wins_with_ties_going_up() {
     let vs = sol();
     let none = Parts::new();
-    // xhigh sits between high and max: the tie goes up.
+
     assert_eq!(
         id_of(resolve_variant(&vs, Some("xhigh"), false, &none)),
         Some("gpt-6-sol-max")
     );
-    // minimal: off and low are equidistant — up again.
+
     assert_eq!(
         id_of(resolve_variant(&vs, Some("minimal"), false, &none)),
         Some("gpt-6-sol-low")
     );
-    // Only high/off are fast: max lands on high-priority.
+
     assert_eq!(
         id_of(resolve_variant(&vs, Some("max"), true, &none)),
         Some("gpt-6-sol-high-priority")
@@ -167,7 +165,7 @@ fn knobs_come_from_the_variants_of_the_current_fast_set() {
     );
     assert!(has_variant(&plain, true, &none), "but Tab is live");
     assert!(!has_variant(&[v("x", None, false)], true, &none));
-    // Clamping into a fast set's levels.
+
     assert_eq!(clamp_to_levels(&["off", "high"], "max"), Some("high"));
     assert_eq!(clamp_to_levels(&["off", "high"], "minimal"), Some("off"));
     assert_eq!(
@@ -236,8 +234,7 @@ fn cached_rows_load_both_the_legacy_pair_and_the_object_form() {
     };
     assert_eq!(m.variants[0].id, "gpt-6-sol-high-priority");
     assert!(m.variants[0].fast);
-    // Pairs stay pairs on the way back out (old readers keep working on
-    // lists without metadata).
+
     let back = serde_json::to_string(&rows[0]).unwrap();
     assert_eq!(back, r#"["old-model","Old Model"]"#);
 }

@@ -1,7 +1,3 @@
-//! Concurrency-limit tests for `join_ordered`. The lane is unlimited by
-//! default; `GRAY_PARALLEL_MAX` caps it. Env is process-global: `LOCK`
-//! serializes the tests in this file.
-
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -15,7 +11,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn cap_parsing_is_a_pure_table() {
-    // No env access, no unsafe, no lock: the parser takes the raw value.
+
     let max = tokio::sync::Semaphore::MAX_PERMITS;
     for (raw, want) in [
         (None, max),
@@ -25,9 +21,9 @@ fn cap_parsing_is_a_pure_table() {
         (Some("abc"), max),
         (Some(""), max),
         (Some("  "), max),
-        // Parses but clamps to what tokio accepts.
+
         (Some("18446744073709551615"), max),
-        // Overflow falls back to unlimited rather than panicking.
+
         (Some("99999999999999999999999"), max),
     ] {
         assert_eq!(
@@ -54,7 +50,7 @@ async fn no_cap_starts_every_call_at_once() {
                 Box::pin(async move {
                     let n = current.fetch_add(1, Ordering::SeqCst) + 1;
                     observed_max.fetch_max(n, Ordering::SeqCst);
-                    // Wait (bounded) for all twelve to be in flight.
+
                     for _ in 0..200 {
                         if current.load(Ordering::SeqCst) >= 12 {
                             break;

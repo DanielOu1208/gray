@@ -1,89 +1,57 @@
-//! Gray color palette plus user themes.
-//!
-//! One [`UiTheme`] struct of semantic roles — every TUI call site reads
-//! `theme().role()` instead of a hardcoded `Color::Rgb`. Gray ships exactly
-//! one palette ([`GRAY_UI_THEME`]); there are no other built-in themes.
-//! Users may layer their own on top: `~/.gray/themes/<name>.json`, selected
-//! with `/theme <name>`, `"theme"` in `config.json`, or `GRAY_THEME`.
-//!
-//! A theme file only overrides the roles it names; everything else keeps
-//! the gray value, so a two-line file is a valid theme:
-//!
-//! ```json
-//! {
-//!   "vars": { "peach": "#f6ad7e" },
-//!   "colors": { "accent": "peach", "surface_bg": "default" }
-//! }
-//! ```
-//!
-//! Colors are `"#rrggbb"`, `"#rgb"`, an ANSI name (`"red"`, `"darkgray"`,
-//! `"lightblue"`, …), a 256-color index (`42` or `"42"`), `"default"` (the
-//! terminal's own color), or the name of an entry in `vars`.
-
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::RwLock;
 
 use ratatui::style::Color;
 
-/// Semantic color roles for the whole TUI. Field order is stable; add new
-/// roles at the end-adjacent group, never renumber (const initializers below
-/// are positional-independent, but diffs stay reviewable when grouped).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiTheme {
-    // Surfaces
-    /// `Reset` leaves the terminal's own background in place: the
-    /// built-in gray look is transparent over the terminal's black. File
-    /// themes that name no `window_bg` get one derived from their
-    /// `surface_bg` (see `derive_window`): darker than a dark surface and
-    /// lighter than a light one, so cards and the composer band stand out
-    /// from the window. Pure black and pure white have no room on that side
-    /// and keep an equal window. `"window_bg": "default"` opts back out.
+
     pub window_bg: Color,
     pub surface_bg: Color,
     pub raised_bg: Color,
     pub input_bg: Color,
     pub on_selection: Color,
     pub chip_bg: Color,
-    // Text ramp (faint → bright)
+
     pub text_faint: Color,
     pub text_dim: Color,
     pub text_muted: Color,
     pub text_soft: Color,
     pub text_body: Color,
     pub text_bright: Color,
-    // Brand accents
+
     pub accent: Color,
     pub accent_soft: Color,
-    // Status
+
     pub success: Color,
     pub error: Color,
     pub error_soft: Color,
     pub rose: Color,
     pub info: Color,
-    // Tool-call rendering (GrokNight/TokyoNight heritage)
+
     pub tool_accent: Color,
     pub tool_path: Color,
     pub tool_command: Color,
     pub tool_dim: Color,
-    // Diffs
+
     pub diff_add_fg: Color,
     pub diff_add_bg: Color,
     pub diff_del_fg: Color,
     pub diff_del_bg: Color,
     pub diff_gutter: Color,
-    // Footer cache-hit readout (positive-neutral, distinct from success)
+
     pub cache_hit: Color,
-    // /context category pastels
+
     pub ctx_system: Color,
     pub ctx_context: Color,
     pub ctx_tools: Color,
     pub ctx_skills: Color,
     pub ctx_messages: Color,
     pub ctx_free: Color,
-    // Shimmer sweep base (highlight is text_bright)
+
     pub shimmer_base: Color,
-    // Composer frame bezel: top/left edge, mixed corners, bottom/right edge
+
     pub bezel_hi: Color,
     pub bezel_mid: Color,
     pub bezel_lo: Color,
@@ -100,8 +68,6 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// Default `gray` theme: today's exact colors, pixel-identical. The neutral
-/// gray ramp plus the peach accent and TokyoNight tool/diff slots.
 pub const GRAY_UI_THEME: UiTheme = UiTheme {
     window_bg: Color::Reset,
     surface_bg: rgb(22, 22, 22),
@@ -150,26 +116,22 @@ pub const GRAY_UI_THEME: UiTheme = UiTheme {
     hue_blue: rgb(122, 162, 247),
     hue_magenta: rgb(187, 154, 247),
 };
-/// Name of the built-in palette. Selecting it (or `default`) clears any
-/// user theme.
+
 pub const BUILTIN_THEME_NAME: &str = "gray";
 
 static ACTIVE: RwLock<UiTheme> = RwLock::new(GRAY_UI_THEME);
 static ACTIVE_NAME: RwLock<Option<String>> = RwLock::new(None);
 
-/// The active palette: [`GRAY_UI_THEME`] unless a user theme was applied.
 #[must_use]
 pub fn theme() -> UiTheme {
     ACTIVE.read().map(|t| *t).unwrap_or(GRAY_UI_THEME)
 }
 
-/// Name of the active user theme; `None` while the built-in palette is up.
 #[must_use]
 pub fn active_theme_name() -> Option<String> {
     ACTIVE_NAME.read().ok().and_then(|n| n.clone())
 }
 
-/// Swap the active palette. `name` is `None` for the built-in palette.
 pub fn set_theme(theme: UiTheme, name: Option<&str>) {
     if let Ok(mut t) = ACTIVE.write() {
         *t = theme;
@@ -180,7 +142,6 @@ pub fn set_theme(theme: UiTheme, name: Option<&str>) {
     gray_markdown::set_palette(Some(markdown_palette(&theme)));
 }
 
-/// Every role name a theme file may set, in struct order.
 pub const ROLE_NAMES: &[&str] = &[
     "window_bg",
     "surface_bg",
@@ -231,7 +192,7 @@ pub const ROLE_NAMES: &[&str] = &[
 ];
 
 impl UiTheme {
-    /// Mutable access to one role by its theme-file name.
+
     pub fn role_mut(&mut self, name: &str) -> Option<&mut Color> {
         Some(match name {
             "window_bg" => &mut self.window_bg,
@@ -284,22 +245,18 @@ impl UiTheme {
         })
     }
 
-    /// Read one role by its theme-file name.
     #[must_use]
     pub fn role(&self, name: &str) -> Option<Color> {
         let mut copy = *self;
         copy.role_mut(name).map(|c| *c)
     }
 
-    /// The window background, `Reset` when the theme leaves the
-    /// terminal's own background in place (the built-in gray look).
     #[must_use]
     pub fn window(&self) -> Color {
         self.window_bg
     }
 }
 
-/// Parse one color value from a theme file. `vars` resolves names first.
 pub fn parse_color(
     value: &serde_json::Value,
     vars: &serde_json::Map<String, serde_json::Value>,
@@ -364,7 +321,6 @@ pub fn swatch_spans(theme: &UiTheme) -> Vec<ratatui::text::Span<'static>> {
     .collect()
 }
 
-/// A color as theme-file text (inverse of [`parse_color`]).
 #[must_use]
 pub fn color_to_string(c: Color) -> serde_json::Value {
     use serde_json::Value;
@@ -396,16 +352,6 @@ pub fn color_to_string(c: Color) -> serde_json::Value {
     }
 }
 
-/// The window a file theme gets when it names no `window_bg`: its surface
-/// pushed away from the middle, so cards and the composer band read as
-/// panels against the window. A dark surface sinks to 55% of each channel
-/// (22-gray cards get a 12-gray window); a light one rises 55% of the way
-/// to white. Near-black and near-white surfaces, where that shift is too
-/// small to read, step a further `MIN_WINDOW_STEP` the same way, clamped at
-/// each channel's end: the window never flips to the other side of its
-/// surface. Pure black and white have nowhere to go and keep an equal
-/// window. Only RGB surfaces have channels to move: `Reset`, indexed and
-/// named colors come back unchanged.
 pub(crate) fn derive_window(surface: Color) -> Color {
     let Color::Rgb(r, g, b) = surface else {
         return surface;
@@ -422,8 +368,7 @@ pub(crate) fn derive_window(surface: Color) -> Color {
         moved.round().clamp(0.0, 255.0) as u8
     };
     let (wr, wg, wb) = (shift(r), shift(g), shift(b));
-    // Near-white / near-black surfaces have no room to move outward
-    // (#fafafa -> #fdfdfd is invisible): step further the same way instead.
+
     let gap = [(r, wr), (g, wg), (b, wb)]
         .iter()
         .map(|(a, w)| a.abs_diff(*w))
@@ -442,11 +387,8 @@ pub(crate) fn derive_window(surface: Color) -> Color {
     Color::Rgb(step(r), step(g), step(b))
 }
 
-/// Smallest per-channel distance between a derived window and its cards.
 const MIN_WINDOW_STEP: u8 = 12;
 
-/// Build a palette from theme-file JSON on top of [`GRAY_UI_THEME`].
-/// Bad entries are skipped and reported; only a non-object file fails.
 pub fn parse_theme(text: &str) -> Result<(UiTheme, Vec<String>), String> {
     let root: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;
@@ -502,8 +444,6 @@ pub fn parse_theme(text: &str) -> Result<(UiTheme, Vec<String>), String> {
     Ok((theme, warnings))
 }
 
-/// The full palette as a theme file (every role spelled out), for
-/// `/theme new` to give users something to edit.
 #[must_use]
 pub fn theme_to_json(theme: &UiTheme) -> String {
     let mut colors = serde_json::Map::new();
@@ -548,12 +488,10 @@ pub fn markdown_palette(theme: &UiTheme) -> gray_markdown::Palette {
     }
 }
 
-/// `~/.gray/themes`.
 pub fn themes_dir() -> anyhow::Result<PathBuf> {
     Ok(crate::setup::gray_home()?.join("themes"))
 }
 
-/// A theme name is a plain file stem: no separators, no dot-dirs.
 #[must_use]
 pub fn valid_theme_name(name: &str) -> bool {
     !name.is_empty()
@@ -563,13 +501,11 @@ pub fn valid_theme_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// True for the names that mean "the built-in palette".
 #[must_use]
 pub fn is_builtin_name(name: &str) -> bool {
     name.eq_ignore_ascii_case(BUILTIN_THEME_NAME) || name.eq_ignore_ascii_case("default")
 }
 
-/// Theme names in `dir` (`*.json` stems), sorted.
 #[must_use]
 pub fn list_themes_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -588,7 +524,6 @@ pub fn list_themes_in(dir: &Path) -> Vec<String> {
     names
 }
 
-/// Load `<dir>/<name>.json`.
 pub fn load_theme_in(dir: &Path, name: &str) -> Result<(UiTheme, Vec<String>), String> {
     if !valid_theme_name(name) {
         return Err(format!("`{name}` is not a valid theme name"));
@@ -598,8 +533,6 @@ pub fn load_theme_in(dir: &Path, name: &str) -> Result<(UiTheme, Vec<String>), S
     parse_theme(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Startup: apply `GRAY_THEME` or the saved `"theme"`, if any. Failures
-/// keep the gray palette and are logged (the TUI is not up yet).
 pub fn init_from_saved(saved: Option<&str>) {
     gray_markdown::set_palette(Some(markdown_palette(&theme())));
     let env = std::env::var("GRAY_THEME").ok();

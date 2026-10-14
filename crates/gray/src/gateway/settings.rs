@@ -1,8 +1,3 @@
-//! `~/.gray/gateway/config.json`: how the always-on gateway behaves.
-//!
-//! Every field has a default, so a missing or partial file is a working
-//! configuration: no owner (every chat is its own session), two concurrent turns.
-
 use std::path::Path;
 
 use crate::cron::store::Origin as Route;
@@ -10,14 +5,13 @@ use crate::cron::store::Origin as Route;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Owner surfaces; the first is where autonomous output goes when the
-    /// session has no route of its own yet.
+
     pub owners: Vec<Route>,
-    /// Turns running at once across all sessions.
+
     pub max_turns: usize,
-    /// Wall clock for one turn before it is killed.
+
     pub turn_timeout_secs: u64,
-    /// Working directory for turns (default: the user's home).
+
     pub workdir: Option<std::path::PathBuf>,
 }
 
@@ -33,8 +27,7 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Read the file; any problem reads as defaults (logged), never a crash
-    /// loop for a typo.
+
     pub fn load(dir: &Path) -> Self {
         let path = dir.join("config.json");
         match std::fs::read(&path) {
@@ -50,7 +43,6 @@ impl Settings {
     }
 }
 
-/// A local `HH:MM-HH:MM` window; wraps midnight when end < start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
     pub start: u32,
@@ -66,7 +58,6 @@ impl Window {
         })
     }
 
-    /// `minute` of the day (0..1440) is inside the window.
     pub fn contains(&self, minute: u32) -> bool {
         if self.start == self.end {
             return true;

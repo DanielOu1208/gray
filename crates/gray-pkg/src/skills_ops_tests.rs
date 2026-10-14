@@ -3,17 +3,15 @@ use super::*;
 
 const FIXTURE_SKILL: &str = "---\nname: demo-skill\ndescription: demo skill for tests\n---\nBody\n";
 
-/// Point `GRAY_HOME` at a fresh tempdir. Must run under `ENV_GUARD`.
 fn use_skills_env() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
-    // SAFETY: serialized by ENV_GUARD.
+
     unsafe {
         std::env::set_var("GRAY_HOME", home.path());
     }
     home
 }
 
-/// Fixture bundle: `<root>/demo-skill/{SKILL.md, references/notes.md}`.
 fn fixture_bundle() -> (tempfile::TempDir, PathBuf) {
     let root = tempfile::tempdir().unwrap();
     let bundle = root.path().join("demo-skill");
@@ -52,7 +50,7 @@ fn frontmatter_parses_name_and_description() {
         parse_skill_frontmatter("---\nname: 'q'\ndescription: \"d\"\n---\n"),
         ("q".to_string(), "d".to_string())
     );
-    // Absent/unclosed frontmatter degrades to empty (callers refuse).
+
     assert_eq!(
         parse_skill_frontmatter("no frontmatter\n"),
         (String::new(), String::new())
@@ -260,8 +258,6 @@ async fn install_url_downloads_skill_md_over_loopback() {
     });
     let _home = use_skills_env();
 
-    // Fixture frontmatter names `demo-skill` while the URL slug is
-    // `x-skill`: mismatch warns, install lands on the URL slug.
     let report = install(&format!("url:http://127.0.0.1:{port}/x-skill/SKILL.md"))
         .await
         .unwrap();

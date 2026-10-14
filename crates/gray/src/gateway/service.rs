@@ -1,15 +1,3 @@
-//! Supervisor-facing lifecycle: install/uninstall a user service and drive it.
-//!
-//! Two backends, chosen from the real init (pid 1) plus env — never inferred
-//! outside-in (hermes doctrine):
-//!   - runit: a `runsvdir` tree, `$SVDIR` or `~/.config/service` (Void's
-//!     native user supervision),
-//!   - systemd: `--user` units when pid 1 is systemd.
-//!
-//! `install` writes the service and (unless `--no-start`) starts it; `run` is
-//! what the supervisor executes. The gateway never daemonizes itself: one
-//! supervisor per box, and it owns restarts.
-
 use std::path::{Path, PathBuf};
 
 pub const SERVICE_NAME: &str = "gray-gateway";
@@ -25,13 +13,12 @@ pub enum Supervisor {
 pub struct ServiceStatus {
     pub installed: bool,
     pub up: bool,
-    /// runsvdir has picked the service up (runit); always true for systemd units.
+
     pub supervised: bool,
     pub pid: Option<u32>,
     pub detail: String,
 }
 
-/// Where *this* process was launched from (identify's `supervisor` field).
 pub fn supervisor_kind() -> String {
     if std::env::var_os("INVOCATION_ID").is_some() {
         return "systemd".to_string();
@@ -45,7 +32,7 @@ pub fn supervisor_kind() -> String {
 fn parent_comm() -> Option<String> {
     #[cfg(unix)]
     {
-        // SAFETY: getppid has no failure mode.
+
         let ppid = unsafe { libc::getppid() };
         proc_comm(ppid as u32)
     }
@@ -68,7 +55,6 @@ fn find_in_path(cmd: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// `$SVDIR` when set (the same override `sv` honors), else `~/.config/service`.
 pub fn svdir() -> PathBuf {
     if let Some(dir) = std::env::var_os("SVDIR") {
         return PathBuf::from(dir);
@@ -99,7 +85,7 @@ pub fn detect() -> Supervisor {
             unit_dir: systemd_user_dir(),
         };
     }
-    // Not the init we expected: fall back on the tools that are actually here.
+
     if find_in_path("sv").is_some() {
         return Supervisor::Runit { dir: svdir() };
     }
@@ -194,7 +180,6 @@ pub fn status(sup: &Supervisor) -> ServiceStatus {
     }
 }
 
-/// One line for `gateway status`.
 pub fn describe(sup: &Supervisor) -> String {
     let st = status(sup);
     match (st.installed, st.up) {
@@ -326,8 +311,7 @@ pub fn stop() -> anyhow::Result<String> {
 
 pub fn restart() -> anyhow::Result<String> {
     let home = crate::setup::gray_home()?;
-    // The daemon reads this on SIGTERM and records the exit as a restart.
-    // Only when a supervisor will bring it back (the None arm bails).
+
     if !matches!(detect(), Supervisor::None) {
         let _ = crate::gateway::lifecycle::request_restart(&home.join("gateway"));
     }
@@ -365,7 +349,6 @@ pub fn restart() -> anyhow::Result<String> {
     }
 }
 
-/// runsv owns a picked-up service dir; without this, `sv` refuses to talk.
 fn supervise_ok(svc: &Path) -> bool {
     svc.join("supervise/ok").exists()
 }
@@ -383,12 +366,10 @@ fn wait_for_supervise(svc: &Path, timeout: std::time::Duration) -> bool {
     }
 }
 
-/// True when a live `runsvdir` names this directory on its command line —
-/// cheaper and more honest than timing out on a scan that will never come.
 fn runsvdir_supervises(dir: &Path) -> bool {
     let needle = dir.display().to_string();
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return true; // no /proc: let the wait loop decide
+        return true;
     };
     for entry in entries.flatten() {
         let Some(pid) = entry
@@ -429,16 +410,13 @@ fn require_supervised(svc: &Path, dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Single-PID `SIGTERM` is deliberate: children this process spawned
-/// (pre-scripts, tool subshells) are not signalled. Process-group kill
-/// (`kill(-pid)`) risks signalling the supervisor's own group — rejected.
 fn stop_by_pid(home: &Path) -> anyhow::Result<String> {
     let Some(rec) = super::pid::running(home) else {
         return Ok("gateway is not running".to_string());
     };
     #[cfg(unix)]
     {
-        // SAFETY: SIGTERM is the documented stop path for a manual foreground run.
+
         unsafe { libc::kill(rec.pid as libc::pid_t, libc::SIGTERM) };
     }
     #[cfg(not(unix))]
@@ -546,8 +524,7 @@ fn install_systemd(
     std::fs::write(&unit, &body)?;
     let _ = systemctl(&["daemon-reload"]);
     let mut msg = format!("installed systemd user unit: {}", unit.display());
-    // Warning text only: never changes the install/start flow. Best-effort;
-    // a missing loginctl (or empty USER) warns rather than errors.
+
     let user = std::env::var("USER").unwrap_or_default();
     let linger_out = std::process::Command::new("loginctl")
         .args(["show-user", &user, "--property=Linger"])
@@ -602,8 +579,6 @@ fn wait_runit_down(svc: &Path, timeout: std::time::Duration) {
     }
 }
 
-/// runit `run` script: what the supervisor executes. `exec` keeps gray as
-/// runsv's direct child, which is what `supervisor_kind()` reads back.
 fn runit_run_script(home: &Path, exe: &Path) -> String {
     format!(
         "#!/bin/sh\n# {SERVICE_NAME} — written by `gray gateway install`; `gray gateway uninstall` removes it.\nexport GRAY_HOME={home}\ncd \"$HOME\"\nexec {exe} gateway run\n",
@@ -613,8 +588,7 @@ fn runit_run_script(home: &Path, exe: &Path) -> String {
 }
 
 fn runit_log_script(home: &Path) -> String {
-    // runit scripts run under sh: force forward slashes so a Windows-style
-    // join can never inject backslashes into the quoted path.
+
     let logs = shell_quote(
         &home
             .join("logs/gateway")
@@ -656,8 +630,6 @@ fn run_sv(svc: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
         .output()
 }
 
-/// Pure check for the linger warning: `Some(text)` unless loginctl output
-/// confirms `Linger=yes`. Kept pure so tests cover it without loginctl.
 pub(crate) fn linger_warning_for(loginctl_stdout: &str) -> Option<&'static str> {
     if loginctl_stdout.contains("Linger=yes") {
         return None;
@@ -682,7 +654,6 @@ fn output_text(out: &std::process::Output) -> String {
     )
 }
 
-/// First `(pid N)` in an `sv status` line.
 fn parse_pid(text: &str) -> Option<u32> {
     let start = text.find("(pid ")? + 5;
     text[start..]

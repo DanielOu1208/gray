@@ -1,32 +1,19 @@
-//! `fsearch mcp`: a Model Context Protocol server on stdin/stdout for coding
-//! agents (Claude Code, Codex, ...): JSON-RPC 2.0, one message per line. The
-//! tools are fff-mcp's (find_files, grep, multi_grep) so prompts written for
-//! it work here. Each call is a request or two to the shared daemon (started
-//! if need be), so every agent shares one live index; answers are terse
-//! text: paths relative to the project, git status where it isn't clean,
-//! definitions first.
-
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Protocol versions spoken, newest first. A client asking for another one
-/// gets the newest and decides for itself.
 const VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// How long a call waits for a first index build before giving up.
 const WAIT_INDEX: Duration = Duration::from_secs(30);
 
-/// The most daemon requests one tool call makes (the most fallbacks of an
-/// unlucky query; a definition lookup takes five).
 const MAX_ASKS: usize = 16;
 
 const INSTRUCTIONS: &str = "fsearch: indexed search over this project (or any folder, or the whole disk with path \"/\").
 - grep: file contents; the default for any identifier or text. Definitions come first, with their first lines.
 - find_files: file names (fuzzy, typo-tolerant), to locate a file or see what exists.
 - multi_grep: several spellings at once (snake_case, CamelCase), OR'd.
-Filters go inline: *.rs or *.{ts,tsx}, src/ (in a folder), src/**/*.rs (glob), !test/ or !*.md (exclude), \
+Filters go inline: *.rs or *.{ts,tsx}, src/ (in a folder), src*.rs (glob), !test/ or !*.md (exclude), \
 git:modified|staged|untracked (git status); grep also takes a file name (main.rs foo). Results are best first: \
 read the top file instead of searching again.";
 
@@ -59,13 +46,12 @@ pub fn run(dir: PathBuf) {
 struct Session {
     dir: PathBuf,
     home: String,
-    /// The project: the first MCP root, else the git repo holding the
-    /// working directory, else the working directory.
+
     root: String,
-    /// Messages to send after the current reply (requests to the client).
+
     outbox: Vec<Value>,
     asked_roots: u32,
-    /// Daemon requests made for the current tool call (see `spend`).
+
     asks: std::cell::Cell<usize>,
 }
 
@@ -81,20 +67,19 @@ impl Session {
     fn new(dir: PathBuf) -> Session {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
         let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| home.clone());
-        // Real paths, as the index holds them (/tmp is /private/tmp).
+
         let real = |p: String| std::fs::canonicalize(&p).map_or(p, |c| c.to_string_lossy().into_owned());
         let root = real(repo_root(&cwd, &home).unwrap_or(cwd));
         Session { dir, home, root, outbox: Vec::new(), asked_roots: 0, asks: Default::default() }
     }
 
-    /// The reply to one message, if it needs one.
     fn message(&mut self, m: &Value) -> Option<Value> {
         let id = m.get("id");
         let Some(method) = m.get("method").and_then(Value::as_str) else {
             if m.get("result").is_none() && m.get("error").is_none() {
                 return Some(error(id.unwrap_or(&Value::Null), -32600, "invalid request: no method"));
             }
-            // A reply to one of our requests (roots/list).
+
             if let Some(roots) = m.pointer("/result/roots").and_then(Value::as_array)
                 && let Some(p) = roots.iter().find_map(|r| r["uri"].as_str().and_then(file_uri))
             {
@@ -115,7 +100,7 @@ impl Session {
                 let want = params["protocolVersion"].as_str().unwrap_or("");
                 let version = VERSIONS.iter().find(|v| **v == want).unwrap_or(&VERSIONS[0]);
                 if params.pointer("/capabilities/roots").is_some() {
-                    // Asked once the client says it's ready (notifications/initialized).
+
                     self.asked_roots = 1;
                 }
                 self.warm();
@@ -150,9 +135,6 @@ impl Session {
         })
     }
 
-    /// Have the daemon up and its index loading while the agent thinks.
-    /// (The project's git status is read on the first search that uses it:
-    /// many sessions never search.)
     fn warm(&self) {
         let dir = self.dir.clone();
         std::thread::spawn(move || ask_at(&dir, &json!({"op": "ping"})).ok());
@@ -168,10 +150,6 @@ impl Session {
         ask_at(&self.dir, req)
     }
 
-    /// Two requests, one after the other: two at once that share a names
-    /// table can deadlock the daemon's search pool (query.rs
-    /// `NameTable::dense` fills a `OnceLock` with a parallel loop; a worker
-    /// waiting in it steals the other search, which waits on the same lock).
     fn ask2(&self, a: &Value, b: &Value) -> (Result<Value, String>, Result<Value, String>) {
         if let Err(e) = self.spend(2) {
             return (Err(e.clone()), Err(e));
@@ -179,8 +157,6 @@ impl Session {
         (ask_at(&self.dir, a), ask_at(&self.dir, b))
     }
 
-    /// Count `n` more daemon requests for this tool call: fallbacks and
-    /// definition lookups stop when MAX_ASKS run out.
     fn spend(&self, n: usize) -> Result<(), String> {
         let used = self.asks.get() + n;
         if used > MAX_ASKS {
@@ -190,7 +166,6 @@ impl Session {
         Ok(())
     }
 
-    /// The folder a call searches (None: the whole disk), from its `path`.
     fn scope(&self, a: &Value) -> Option<String> {
         let p = a["path"].as_str().map(str::trim).filter(|p| !p.is_empty() && *p != ".").unwrap_or(&self.root);
         Some(match p {
@@ -201,8 +176,6 @@ impl Session {
         })
     }
 
-    /// How this call shows paths: relative to the project, or to the
-    /// folder searched when that's elsewhere (said once, up top).
     fn view(&self, scope: &Option<String>) -> View {
         match scope {
             Some(s) if !within(s, &self.root) => View { base: s.clone(), head: Some(format!("in {s}/:")) },
@@ -219,7 +192,7 @@ impl Session {
             return self.worked_on(&scope, max);
         }
         let mut p = split(&query, false);
-        // A lone `name/`: the folders called that.
+
         let dirs = p.words.is_empty() && p.globs.len() == 1 && p.globs[0].ends_with('/') && !p.globs[0].starts_with('!');
         if dirs {
             let d = p.globs.pop().unwrap();
@@ -230,7 +203,7 @@ impl Session {
                 "q": words.iter().chain(&p.filters).cloned().collect::<Vec<_>>().join(" "),
                 "limit": max, "offset": offset, "git": true, "boost": true,
             });
-            // What git ignores isn't the project's, unless asked for.
+
             if hide && !query.contains(".git") {
                 r["ignored"] = false.into();
             }
@@ -240,8 +213,7 @@ impl Session {
             if let Some(s) = &scope {
                 r["in"] = s.as_str().into();
             }
-            // A repo's own files aren't the project's (unless asked for):
-            // git status leaves them out of a repo, this out of a folder of repos.
+
             let mut globs = p.globs.clone();
             if !query.contains(".git") && (!hide || !Path::new(&self.root).join(".git").exists()) {
                 globs.push("!.git/".into());
@@ -260,8 +232,7 @@ impl Session {
         if !hits.is_empty() {
             return Ok(v.list_files(&hits, &p.words, r["next"].as_u64(), None));
         }
-        // A short word with two letters swapped ("mian"): the index forgives
-        // typos only from five letters.
+
         for (i, w) in p.words.iter().enumerate().filter(|(_, w)| (3..5).contains(&w.len()) && w.bytes().all(|b| b.is_ascii_alphanumeric())) {
             for j in 0..w.len() - 1 {
                 let mut t = w.clone().into_bytes();
@@ -278,13 +249,13 @@ impl Session {
                 }
             }
         }
-        // Nothing the project tracks: maybe in what git ignores (build output).
+
         let r = self.ask(&req(&p.words, false)).unwrap_or_default();
         let hits = r["hits"].as_array().cloned().unwrap_or_default();
         if !hits.is_empty() {
             return Ok(v.list_files(&hits, &p.words, r["next"].as_u64(), Some("0 matches outside git-ignored files; ignored:".into())));
         }
-        // Nothing: drop one word at a time (the last first).
+
         if p.words.len() > 1 {
             for i in (0..p.words.len()).rev() {
                 let fewer: Vec<String> = p.words.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, w)| w.clone()).collect();
@@ -296,8 +267,7 @@ impl Session {
                 }
             }
         }
-        // Then contents: an identifier is often a file's subject. Where it's
-        // defined first (the symbol index, asked alongside).
+
         let text = p.words.join(" ");
         if !text.is_empty() {
             let mut g = json!({"op": "grep", "pattern": text, "limit": 5, "per_file": 1, "budget_ms": 500});
@@ -328,8 +298,6 @@ impl Session {
         Ok(format!("0 files match '{query}' in {}", scope.as_deref().unwrap_or("the whole disk")))
     }
 
-    /// No query: what git says is changed, then what you worked on lately
-    /// (opened, committed).
     fn worked_on(&self, scope: &Option<String>, max: usize) -> Result<String, String> {
         let mut changed = json!({"q": "git:modified", "kind": "file", "limit": max, "git": true, "boost": true});
         let mut recent = json!({"op": "recent", "kind": "file", "limit": max, "git": true});
@@ -366,7 +334,7 @@ impl Session {
         } else {
             let query = arg_str(a, &["query", "pattern"]).ok_or("grep needs a query")?;
             let mut p = split(&query, true);
-            // Constraints alone: they were the text after all ("src/", "main.rs").
+
             if p.words.is_empty() {
                 p = Parts { words: vec![query.trim().to_string()], ..Default::default() };
             }
@@ -378,7 +346,7 @@ impl Session {
             let mut r = json!({
                 "op": "grep", "pattern": pattern, "mode": if regex { "regex" } else { "literal" },
                 "q": p.filters.join(" "), "offset": offset, "budget_ms": 2000, "git": true, "ignored": false,
-                // Pages hold `max` lines, several a file: about half as many files do.
+
                 "limit": if matches!(mode, Out::Content) { max / 2 + 1 } else { max },
                 "per_file": match mode { Out::Count => 1000, Out::Files => 1, Out::Content => if globs.iter().any(|g| is_file_glob(g)) { max } else { 5 } },
             });
@@ -391,9 +359,7 @@ impl Session {
             r
         };
         let v = self.view(&scope);
-        // An identifier's definitions lead the first page even when the
-        // ranking (newest first) has them further down: the symbol index
-        // has them, asked alongside the search.
+
         let name = def_name(&pattern).filter(|_| offset == 0 && matches!(mode, Out::Content) && !regex && !multi);
         let def_req = |pat: &str, regex: bool, mode: &str, limit: usize, budget: u64| {
             let mut d = req(pat, regex, &p.globs, 0);
@@ -406,7 +372,7 @@ impl Session {
             None => (self.ask(&req(&pattern, regex, &p.globs, offset)), Err(String::new())),
         };
         let mut r = match main {
-            // Not a regex after all (an unbalanced paren): as text.
+
             Err(e) if regex && !multi && a["regex"].as_bool().is_none() && e.contains("regex") => {
                 self.ask(&req(&pattern, false, &p.globs, offset))?
             }
@@ -417,7 +383,7 @@ impl Session {
             return Ok(format!("no more matches past cursor {offset}"));
         }
         if offset == 0 && files(&r).is_empty() {
-            // Nothing: loosen one way at a time, and say how.
+
             let ident = !regex && is_ident(&pattern);
             let tries: Vec<(String, bool, Vec<String>, String)> = [
                 p.globs.iter().any(|g| is_file_glob(g)).then(|| {
@@ -439,8 +405,7 @@ impl Session {
                 if let Ok(r2) = self.ask(&req(&pat, re, &globs, 0))
                     && !files(&r2).is_empty()
                 {
-                    // Another spelling found (kthread_create_on_node): searched
-                    // for as itself, so its definition leads.
+
                     if ident
                         && !multi
                         && pat == variants(&pattern)
@@ -455,7 +420,7 @@ impl Session {
                 }
             }
             if note.is_none() {
-                // Maybe it names a file rather than something in one.
+
                 let mut f = json!({"q": pattern, "kind": "file", "limit": 3});
                 if let Some(s) = &scope {
                     f["in"] = s.as_str().into();
@@ -491,13 +456,7 @@ impl Session {
                 fs
             };
             let mut defs = only_defs(&sym);
-            // C, when nothing better turned up: the symbol index misses it (no
-            // keyword before a function; `struct x *p` taken for a
-            // definition). So: every `struct name {` (a literal: the index
-            // finds them at once) and `name(` from column 0 after a type, or
-            // none (the type on the line before), first in files whose path
-            // has a word of the name (sched/sleep_timeout.c for
-            // schedule_timeout), then in all; not in tools, tests or docs.
+
             let c = |f: &Value| {
                 f["path"].as_str().and_then(|p| p.rsplit_once('.')).is_some_and(|(_, e)| ["c", "h", "cc", "cpp", "hpp", "m", "mm"].contains(&e))
             };
@@ -517,22 +476,21 @@ impl Session {
                 )
                 .into();
                 let (st, nr) = both(def_req(&format!("struct {name} {{"), false, "literal", 8, 2000), near);
-                // Before any of another language (a Rust binding of a C function).
+
                 let mut cs: Vec<Value> = only_defs(&st).into_iter().chain(only_defs(&nr)).collect();
                 if !cs.iter().any(good) {
                     cs.extend(only_defs(&self.ask(&code(def_req(&fun, true, "regex", 8, 25)))));
                 }
                 defs.splice(0..0, cs);
             }
-            // The page's own count too (the only one may be in tests/), but
-            // not a C prototype spanning lines (`int f(int a,` ... `);`).
+
             defs.extend(only_defs(&Ok(r.clone())));
             defs.retain(|f| !prototype(f["path"].as_str().unwrap_or(""), &f["matches"][0]));
             let rank = |f: &Value| def_rank(v.show(f["path"].as_str().unwrap_or("")), f["matches"][0]["text"].as_str().unwrap_or(""), name);
             defs.sort_by_key(rank);
             let mut seen = std::collections::HashSet::new();
             defs.retain(|f| seen.insert(f["path"].as_str().unwrap_or("").to_string()));
-            // The best, and a second as good (not a copy in tools/).
+
             let best = defs.first().map(|f| rank(f).0);
             defs.retain(|f| Some(rank(f).0) == best);
             defs.truncate(2);
@@ -542,13 +500,9 @@ impl Session {
     }
 }
 
-/// Put `defs` (files with definitions) first in `r`'s files, merging lines
-/// into a file already there, marked `lead` to stay first; files new to the
-/// page are marked `extra` so the cursor doesn't count them, the others
-/// `at` their place in the daemon's order.
 fn lead(r: &mut Value, defs: &[Value]) {
     let Some(fs) = r["files"].as_array_mut() else { return };
-    // Where each was in the daemon's order: pages count by it.
+
     for (i, f) in fs.iter_mut().enumerate() {
         f["at"] = i.into();
     }
@@ -570,7 +524,6 @@ fn lead(r: &mut Value, defs: &[Value]) {
     }
 }
 
-/// How a call shows paths (see `Session::view`).
 struct View {
     base: String,
     head: Option<String>,
@@ -585,14 +538,14 @@ impl View {
     }
 
     fn list_files(&self, hits: &[Value], words: &[String], next: Option<u64>, note: Option<String>) -> String {
-        // A path given (`include/linux/sched.h`): the file at it first.
+
         let at = |h: &&Value| {
             let p = self.show(h["path"].as_str().unwrap_or(""));
             words.iter().any(|w| w.contains('/') && (p == w.trim_start_matches("./") || p.ends_with(&format!("/{}", w.trim_start_matches("./")))))
         };
         let mut hits: Vec<&Value> = hits.iter().collect();
         hits.sort_by_key(|h| !at(h));
-        // Weak: the best hit doesn't spell every word out (typos, scattered letters).
+
         let spelled = |h: &Value| {
             let p = h["path"].as_str().unwrap_or("").to_lowercase();
             words.iter().all(|w| p.contains(&w.to_lowercase()))
@@ -634,9 +587,7 @@ impl View {
             format!("{}{git}", self.show(f["path"].as_str().unwrap_or("")))
         };
         let lines = |f: &Value| f["matches"].as_array().cloned().unwrap_or_default();
-        // The daemon's files (not definitions put first from elsewhere) in
-        // its order: a page shows a run of them from the cursor, and the
-        // next starts past exactly those, whatever order they're shown in.
+
         let mut ranked: Vec<(usize, &Value)> =
             fs.iter().enumerate().filter(|(_, f)| f.get("extra").is_none()).map(|(i, f)| (f["at"].as_u64().map_or(i, |a| a as usize), *f)).collect();
         ranked.sort_by_key(|&(at, _)| at);
@@ -650,9 +601,7 @@ impl View {
             Out::Content => {
                 let text = |m: &Value| m["text"].as_str().unwrap_or("").to_string();
                 let def = |f: &Value, m: &Value| is_def(&text(m), name) && !prototype(f["path"].as_str().unwrap_or(""), m);
-                // Definitions in the code itself first, then the code, then
-                // tools, tests and docs (theirs first), then files that only
-                // import it.
+
                 let rank = |f: &&Value| {
                     let ls = lines(f);
                     if f.get("lead").is_some() {
@@ -663,9 +612,7 @@ impl View {
                     }
                     2 * aux(self.show(f["path"].as_str().unwrap_or(""))) as u8 + !ls.iter().any(|m| def(f, m)) as u8
                 };
-                // The definitions put first, then the daemon's files, at least
-                // one, until `max` lines. (A definition from further down
-                // shows again in its place on a later page.)
+
                 let lead = |f: &Value| f.get("lead").is_some();
                 let mut n: usize = fs.iter().filter(|f| lead(f)).map(|f| lines(f).len()).sum();
                 taken = 0;
@@ -680,10 +627,9 @@ impl View {
                     out.push(head(f));
                     let ls = lines(f);
                     let path = f["path"].as_str().unwrap_or("");
-                    // A definition's body, shown for the first two (a second
-                    // only in the code itself: not a copy in tools/).
+
                     let body_of = |m: &Value, done: usize| done < 2 && (done == 0 || !aux(self.show(path))) && def(f, m) && opens_body(&text(m));
-                    // Context and definition bodies come from the file itself.
+
                     let text = if context > 0 || ls.iter().any(|m| body_of(m, expanded)) { read_text(path) } else { String::new() };
                     let body: Vec<&str> = text.lines().collect();
                     let mut last = 0;
@@ -693,7 +639,7 @@ impl View {
                             continue;
                         }
                         if context > 0 && !body.is_empty() {
-                            // Not past its end: the file may have shrunk since.
+
                             for c in ln.saturating_sub(context).max(last + 1)..ln.min(body.len() + 1) {
                                 out.push(format!("{c}-{}", clip(body[c - 1], "", 160)));
                             }
@@ -709,7 +655,7 @@ impl View {
                             0
                         };
                         for c in ln + 1..=(ln + after).min(body.len()) {
-                            // A definition's body ends at a blank line; context doesn't.
+
                             if context == 0 && body[c - 1].trim().is_empty() {
                                 break;
                             }
@@ -736,9 +682,6 @@ impl View {
     }
 }
 
-/// One request to the daemon. A connection each, its write side closed once
-/// the request is out: the daemon then knows no keystroke follows and
-/// doesn't keep the cores spinning for one (agents think for seconds).
 fn ask_at(dir: &Path, req: &Value) -> Result<Value, String> {
     let t = Instant::now();
     loop {
@@ -833,19 +776,16 @@ fn tools() -> Value {
     ])
 }
 
-/// The first of `keys` given as a string.
 fn arg_str(a: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|k| a[*k].as_str()).map(str::to_string)
 }
 
-/// A count argument (models send 20, 20.0 or "20"); `default` when absent or not positive.
 fn arg_num(a: &Value, key: &str, default: usize) -> usize {
     let v = &a[key];
     let n = v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())).unwrap_or(-1.0);
     if n.is_finite() && n >= 0.5 { (n.round() as usize).min(1000) } else { default }
 }
 
-/// The page offset a cursor carries (cursors are offsets: no state to lose).
 fn cursor(a: &Value) -> Result<usize, String> {
     match &a["cursor"] {
         Value::Null => Ok(0),
@@ -856,7 +796,6 @@ fn cursor(a: &Value) -> Result<usize, String> {
     }
 }
 
-/// multi_grep's patterns: a list, or a string holding a JSON list or one pattern.
 fn patterns(v: &Value) -> Vec<String> {
     match v {
         Value::Array(a) => a.iter().filter_map(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string).collect(),
@@ -866,8 +805,6 @@ fn patterns(v: &Value) -> Vec<String> {
     }
 }
 
-/// A tool query taken apart: name words (find_files) or the text (grep),
-/// fsearch filters, and path globs for the daemon.
 #[derive(Default)]
 struct Parts {
     words: Vec<String>,
@@ -875,8 +812,6 @@ struct Parts {
     globs: Vec<String>,
 }
 
-/// fsearch filters a query may carry as they are. Grep text is code, so
-/// there only the ones code rarely spells take effect.
 const FILTERS: &[&str] = &["ext", "type", "kind", "in", "size", "mtime", "modified", "re", "path", "git", "limit"];
 const GREP_FILTERS: &[&str] = &["ext", "in", "git", "size", "mtime"];
 
@@ -899,7 +834,7 @@ fn split(query: &str, grep: bool) -> Parts {
         } else if is_glob(body) || (body.len() > 1 && body.ends_with('/')) {
             p.globs.push(w.clone());
         } else if neg {
-            // `!word`: leave out paths below the project with it in a name.
+
             p.globs.push(format!("!*{body}*/"));
         } else if grep && texts > 0 && is_file(body) {
             p.globs.push(body.to_string());
@@ -920,7 +855,6 @@ fn is_constraint(w: &str, grep: bool) -> bool {
         || (grep && is_file(b))
 }
 
-/// Words, with "double quoted" runs kept whole.
 fn words(s: &str) -> Vec<String> {
     let (mut out, mut cur, mut quoted) = (Vec::new(), String::new(), false);
     for c in s.chars() {
@@ -940,7 +874,6 @@ fn words(s: &str) -> Vec<String> {
     out
 }
 
-/// `*.rs`, `**/*.rs`, `*.{ts,tsx}`: the extensions, as `ext:` takes them.
 fn ext_glob(w: &str) -> Option<String> {
     let rest = w.strip_prefix("**/").unwrap_or(w).strip_prefix("*.")?;
     let list = rest.strip_prefix('{').and_then(|r| r.strip_suffix('}')).unwrap_or(rest);
@@ -948,8 +881,6 @@ fn ext_glob(w: &str) -> Option<String> {
     ok.then(|| list.to_string())
 }
 
-/// A path glob (rather than code that happens to hold a `*`): wildcards
-/// with a `/` or braces, or `*word*`.
 fn is_glob(w: &str) -> bool {
     let wild = w.contains(['*', '?', '[']) || (w.contains('{') && w.contains(','));
     wild && (w.contains('/')
@@ -957,7 +888,6 @@ fn is_glob(w: &str) -> bool {
         || (w.len() > 2 && w.starts_with('*') && w.ends_with('*') && !w[1..w.len() - 1].contains('*')))
 }
 
-/// `main.rs`, `src/lib.rs`: a file to search in.
 fn is_file(w: &str) -> bool {
     let name = w.rsplit('/').next().unwrap_or(w);
     match name.rsplit_once('.') {
@@ -972,12 +902,10 @@ fn is_file(w: &str) -> bool {
     }
 }
 
-/// A glob naming one file (see `is_file`) rather than a pattern.
 fn is_file_glob(g: &str) -> bool {
     !g.starts_with('!') && !is_glob(g) && is_file(g)
 }
 
-/// Text that only makes sense as a regex.
 fn looks_like_regex(p: &str) -> bool {
     let escapes = ["\\b", "\\s", "\\d", "\\w", "\\S", "\\W", "\\D", "\\(", "\\[", "\\.", "\\{", "(?"];
     let alternation = p.contains('|') && !p.contains("||") && p.split('|').all(|a| !a.is_empty() && !a.starts_with(' ') && !a.ends_with(' '));
@@ -990,8 +918,6 @@ fn looks_like_regex(p: &str) -> bool {
         || (p.len() > 1 && p.ends_with('$') && !p.ends_with("\\$"))
 }
 
-/// The name a grep for a definition is after: an identifier, or the one
-/// after a declaring keyword ("struct task_struct", "fn parse").
 fn def_name(p: &str) -> Option<&str> {
     if is_ident(p) {
         return Some(p);
@@ -1004,7 +930,6 @@ fn is_ident(p: &str) -> bool {
     p.len() >= 3 && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') && p.chars().any(|c| c.is_ascii_alphabetic())
 }
 
-/// The spelling of `re` most of `r`'s matching lines use, if one does.
 fn spelling(r: &Value, re: &str) -> Option<String> {
     let re = regex::Regex::new(re).ok()?;
     let mut n: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
@@ -1016,8 +941,6 @@ fn spelling(r: &Value, re: &str) -> Option<String> {
     n.into_iter().max_by_key(|&(w, c)| (c, std::cmp::Reverse(w))).map(|(w, _)| w.to_string()).filter(|w| is_ident(w))
 }
 
-/// An identifier's other spellings: its words with or without `_`/`-`
-/// between them, any case (`prepareUpload` finds `prepare_upload`, `PREPARE-UPLOAD`).
 fn variants(id: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut prev = '_';
@@ -1064,8 +987,6 @@ const DEF_WORDS: &[&str] = &[
 const MODIFIERS: &[&str] =
     &["pub", "export", "default", "async", "abstract", "unsafe", "static", "protected", "private", "public", "final", "inline", "extern", "const"];
 
-/// Does `line` define something (`name`, if given)? A declaring keyword
-/// after any modifiers, then the name; or C style (`c_fn`).
 fn is_def(line: &str, name: Option<&str>) -> bool {
     let mut s = line.trim_start();
     loop {
@@ -1084,14 +1005,14 @@ fn is_def(line: &str, name: Option<&str>) -> bool {
             let rest = s[k.len()..].trim_start_matches(|c: char| c.is_whitespace() || c == '*' || c == '&');
             let rest = rest.strip_prefix("mut ").unwrap_or(rest);
             let Some(tail) = rest.strip_prefix(n).filter(|t| !t.starts_with(|c: char| c.is_alphanumeric() || c == '_')) else {
-                // `struct page *alloc_page(...)`: a function returning one.
+
                 return matches!(*k, "struct" | "union" | "enum") && c_fn(line, n);
             };
             let tail = tail.trim();
-            // `struct x *p;`, `class X;`: a use or a forward declaration.
+
             match *k {
                 "struct" | "union" | "enum" | "class" => {
-                    // Past type parameters (`struct Searcher<'a> {`).
+
                     let tail = tail.strip_prefix('<').map_or(tail, |t| {
                         let mut depth = 1;
                         let end = t.find(|c| {
@@ -1111,8 +1032,6 @@ fn is_def(line: &str, name: Option<&str>) -> bool {
     }
 }
 
-/// A C function definition's first line: from column 0, `name(` after a
-/// type or alone, no `;` at the end (not a call or a one-line prototype).
 fn c_fn(line: &str, n: &str) -> bool {
     let t = line.trim_end();
     !line.starts_with([' ', '\t'])
@@ -1124,19 +1043,14 @@ fn c_fn(line: &str, n: &str) -> bool {
         })
 }
 
-/// Does a definition's first line open a body to show: `{`, a macro going
-/// on (`\`), a Python block (`:`), or a signature going on (`(`, `,`,
-/// `)`: the body is below). Not `#define X 1` or `type X = Y;`.
 fn opens_body(line: &str) -> bool {
     line.trim_end().ends_with(['{', '\\', ':', '(', ',', ')'])
 }
 
-/// A path in tools, tests, samples or docs rather than the code itself.
 fn aux(path: &str) -> bool {
     path.split('/').any(|c| AUX.contains(&c))
 }
 
-/// Folders of tools, tests, samples and docs rather than the code itself.
 const AUX: &[&str] = &[
     "tools",
     "test",
@@ -1155,18 +1069,11 @@ const AUX: &[&str] = &[
     "third_party",
 ];
 
-/// How good a definition is to lead with, best first: in the code (not
-/// tools, tests, docs), the thing itself (not an `impl` of it, not
-/// file-local: `static`, a header's inline stub or another function of the
-/// same name), in a path naming more words of the name (lib/find_bit.c for
-/// _find_first_bit), not a stub (`{}`).
 fn def_rank(path: &str, line: &str, name: &str) -> (bool, bool, usize, bool) {
     let missing = name.split('_').filter(|w| w.len() >= 3 && !path.contains(w)).count();
     (aux(path), ["static ", "impl"].iter().any(|w| line.trim_start().starts_with(w)), missing, line.contains("{}"))
 }
 
-/// Is match `m` in `path` the start of a C prototype spanning lines, not a
-/// definition: its declaration ends with `;` before any `{`.
 fn prototype(path: &str, m: &Value) -> bool {
     let text = m["text"].as_str().unwrap_or("").trim_end();
     if !text.ends_with([',', '(']) || !path.rsplit_once('.').is_some_and(|(_, e)| ["c", "h", "cc", "cpp", "hpp", "m", "mm"].contains(&e)) {
@@ -1189,7 +1096,6 @@ fn is_import(line: &str) -> bool {
     ["import ", "use ", "from ", "#include", "require(", "@import"].iter().any(|p| s.starts_with(p))
 }
 
-/// A line for display: trimmed, and if long, a window around `pat`.
 fn clip(line: &str, pat: &str, max: usize) -> String {
     let t = line.trim();
     if t.chars().count() <= max {
@@ -1202,7 +1108,6 @@ fn clip(line: &str, pat: &str, max: usize) -> String {
     format!("{}{}{}", if start > 0 { "…" } else { "" }, &t[start..end], if end < t.len() { "…" } else { "" })
 }
 
-/// A file's text (for context lines), if it reads as text.
 fn read_text(path: &str) -> String {
     match std::fs::read(path) {
         Ok(b) if b.len() <= 8 << 20 => String::from_utf8(b).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
@@ -1210,13 +1115,10 @@ fn read_text(path: &str) -> String {
     }
 }
 
-/// Is `path` `dir` or inside it?
 fn within(path: &str, dir: &str) -> bool {
     path.strip_prefix(dir).is_some_and(|r| r.is_empty() || r.starts_with('/'))
 }
 
-/// The repo holding `dir` (its top folder), unless that's the home folder
-/// itself or `/` (a dotfiles repo isn't a project).
 fn repo_root(dir: &str, home: &str) -> Option<String> {
     let mut d = Path::new(dir);
     loop {
@@ -1228,7 +1130,6 @@ fn repo_root(dir: &str, home: &str) -> Option<String> {
     }
 }
 
-/// The path of a `file://` URI.
 fn file_uri(u: &str) -> Option<String> {
     let p = u.strip_prefix("file://")?;
     let p = p.strip_prefix("localhost").unwrap_or(p);
@@ -1280,14 +1181,14 @@ mod tests {
         assert!(is_def("struct task_struct {", Some("task_struct")) && !is_def("struct task_struct *p;", Some("task_struct")));
         assert!(!is_def("extern long foo(int a,", Some("foo")) && !is_def("class Foo;", Some("Foo")));
         assert_eq!(def_name("struct task_struct"), Some("task_struct"));
-        // C functions returning a struct or an enum.
+
         assert!(is_def("const struct cpumask *housekeeping_cpumask(enum hk_type type)", Some("housekeeping_cpumask")));
         assert!(is_def("enum dlm_status dlmlock(struct dlm_ctxt *dlm, int mode,", Some("dlmlock")));
         assert!(!is_def("struct page *p = alloc_page(gfp);", Some("alloc_page")));
         assert!(opens_body("struct x {") && opens_body("int f(int a)") && !opens_body("#define FOO 1") && !opens_body("type X = Y;"));
         assert!(is_def("pub struct Searcher<'a> {", Some("Searcher")) && is_def("class Foo extends Bar<T> {", Some("Foo")));
         assert!(is_def("struct Meters(u32);", Some("Meters")) && !is_def("struct Foo<T> *p;", Some("Foo")));
-        // Code before tools/ copies, global before static.
+
         assert!(
             def_rank("lib/rbtree.c", "struct rb_node *rb_prev(", "rb_prev") < def_rank("tools/lib/rbtree.c", "struct rb_node *rb_prev(", "rb_prev")
         );
@@ -1297,7 +1198,7 @@ mod tests {
 
     #[test]
     fn context_past_the_end() {
-        // The file shrank since it was grepped: its line is past the end.
+
         let path = std::env::temp_dir().join(format!("fsearch-mcp-{}.txt", std::process::id()));
         std::fs::write(&path, "a\nb\n").unwrap();
         let r = json!({"files": [{"path": path.to_str().unwrap(), "matches": [{"line": 50, "text": "x"}]}]});
@@ -1308,9 +1209,7 @@ mod tests {
 
     #[test]
     fn cursor_counts_what_was_shown() {
-        // Daemon order: a test file, the code, a definition; 3 lines each, 4 a
-        // page. However they're shown, the cursor must not skip one or show
-        // one twice.
+
         let f = |p: &str, t: &str| json!({"path": p, "matches": [{"line": 1, "text": t}, {"line": 2, "text": t}, {"line": 3, "text": t}]});
         let r = json!({"files": [f("/p/tests/a.rs", "parse"), f("/p/src/b.rs", "parse"), f("/p/src/c.rs", "fn parse() {")], "next": 3});
         let v = View { base: "/p".into(), head: None };
@@ -1320,7 +1219,7 @@ mod tests {
         let order = ["tests/a.rs", "src/b.rs", "src/c.rs"];
         assert!(order[..n].iter().all(|p| shown.contains(p)), "skipped: {shown:?} cursor {n}");
         assert!(order[n..].iter().all(|p| !shown.contains(p)), "shown again next page: {shown:?} cursor {n}");
-        // A definition put first from elsewhere (extra) must not keep the cursor at 0.
+
         let mut d = f("/p/src/d.rs", "fn parse() {");
         (d["extra"], d["lead"]) = (true.into(), true.into());
         let r = json!({"files": [d, f("/p/src/b.rs", "parse")], "next": 1});

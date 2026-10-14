@@ -1,8 +1,5 @@
-//! Plain ANSI string formatters (split from `tool_fmt`).
-
 use super::*;
 
-/// Converts a [`Line`] to an ANSI string (single line, no trailing newline).
 fn line_to_ansi(l: &Line<'_>) -> String {
     let mut line_str = String::new();
     for span in &l.spans {
@@ -38,8 +35,6 @@ fn line_to_ansi(l: &Line<'_>) -> String {
     line_str
 }
 
-/// Plain ANSI string formatting of a tool card's headline (line one only).
-/// Callers that print the whole card use [`format_tool_call_lines_plain`].
 pub fn format_tool_call_header_plain(
     name: &str,
     args: &serde_json::Value,
@@ -49,9 +44,6 @@ pub fn format_tool_call_header_plain(
     line_to_ansi(&format_tool_call_header(name, args, cwd, preview_path))
 }
 
-/// Plain ANSI formatting for a tool call card's header: every line, the
-/// headline first and a template preview's second line after it, joined with
-/// `\n` (no trailing newline).
 pub fn format_tool_call_lines_plain(
     name: &str,
     args: &serde_json::Value,
@@ -65,7 +57,6 @@ pub fn format_tool_call_lines_plain(
         .join("\n")
 }
 
-/// Plain ANSI string formatting for tool output lines with context.
 pub fn format_tool_result_plain_with_context(
     tool_name: &str,
     args: Option<&serde_json::Value>,

@@ -30,11 +30,7 @@ pub use capabilities::{
     CapabilitySpec, HOST_ASK as CAP_HOST_ASK, HOST_SAY as CAP_HOST_SAY, HOST_TURN, TOOL_OVERRIDE,
     WIDGET_OVERRIDE,
 };
-/// Protocol version for sidecars with a **live** tool set: the manifest's
-/// `tools` may be empty, the host asks `plugin/tools` after the manifest
-/// and again whenever the sidecar sends the id-less `host/tools_changed`
-/// notification. A 1.3 sidecar gets everything 1.1 (lifecycle, `host/ask`
-/// budget) and 1.2 (providers) already get.
+
 pub const DYNAMIC_PROTOCOL: &str = "1.3";
 
 pub use provider::{
@@ -54,10 +50,6 @@ pub enum CoreEvent {
     TurnEnd { usage: Usage },
 }
 
-/// Protocol v1 manifest: `plugin/manifest` result
-/// `{"name","version","tools":[{"name","description","parameters"}],
-/// "commands":["/x"],"hooks":["prompt/context","tool/before","turn/end"]}`.
-/// `commands`/`hooks` are empty for pre-v1 sidecars (field absent → default).
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Manifest {
     pub name: String,
@@ -67,34 +59,22 @@ pub struct Manifest {
     pub commands: Vec<String>,
     #[serde(default)]
     pub hooks: Vec<String>,
-    /// Protocol version claimed by the sidecar (`None` = v1 pre-lifecycle).
-    /// v1.1 sidecars send `"1.1"` and handle `plugin/shutdown` + `session`.
+
     #[serde(default)]
     pub protocol: Option<String>,
-    /// Host-owned namespaces this plugin extends (`cron`, …).
-    /// Entries route argv through the same `command/run` wire as `commands`
-    /// (the adapter merges both into [`PluginHooks::commands`]).
+
     #[serde(default)]
     pub subcommands: Vec<String>,
-    /// Privileged host surfaces this plugin declares (`host.turn`,
-    /// `host.ask`, `tool.override`, …). Declaring is not consent: the
-    /// operator grants them and the grant is enforced at the call site
-    /// (see [`crate::capabilities`]).
+
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// Validated protocol-1.2 provider declarations. Invalid declarations
-    /// are isolated in `provider_errors` so legacy tool surfaces survive.
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderDecl>,
     #[serde(skip)]
     pub provider_errors: Vec<ProviderValidationError>,
 }
 
-/// Parse one manifest `tools` entry. Pre-v1 sidecars send bare strings
-/// (`"tools": ["echo"]`) — those still parse, with an empty schema.
-/// An optional `"label"` names the transcript headline; anything else
-/// derives it from the wire name (see `tool_fmt`). Labels never reach
-/// the model — both providers project name/description/parameters only.
 pub fn parse_tool_entry(v: &Value) -> Option<ToolDef> {
     if let Some(name) = v.as_str() {
         return Some(ToolDef::new(
@@ -133,7 +113,6 @@ pub fn parse_tool_entry(v: &Value) -> Option<ToolDef> {
     Some(def)
 }
 
-/// Parse the `tools` array of a `plugin/manifest` result into definitions.
 pub fn manifest_tools(v: &Value) -> Vec<ToolDef> {
     v.get("tools")
         .and_then(|t| t.as_array())
@@ -142,8 +121,7 @@ pub fn manifest_tools(v: &Value) -> Vec<ToolDef> {
 }
 
 impl Manifest {
-    /// Parse a `plugin/manifest` result value. Lenient on purpose: missing
-    /// sections default to empty so pre-v1 sidecars keep working.
+
     pub fn from_result(v: &Value) -> Self {
         let str_list = |key: &str| {
             v.get(key)
@@ -211,9 +189,6 @@ impl Manifest {
     }
 }
 
-/// Canonical `tool/before` verdict + `command/run` outcome: single source of
-/// truth lives in [`gray_core::agent`] (core owns it so the agent loop never
-/// depends on this crate); re-exported here so sidecar call sites keep one import.
 pub use gray_core::agent::{CommandOutcome, InputSubmit, ToolBefore};
 
 #[async_trait]
@@ -222,75 +197,51 @@ pub trait Plugin: Send + Sync {
     fn tools(&self) -> Vec<Arc<dyn gray_core::agent::Tool>> {
         vec![]
     }
-    // NOTE: an earlier `provider()` hook was deleted — every
-    // impl returned None and nothing called it. `on_event`/`CoreEvent` stay:
-    // SidecarPlugin dispatches them to the subprocess over stdio.
-    /// Capabilities the operator granted this plugin (empty = none).
-    /// Sync on purpose: tool assembly (`builder::from_plugins`) runs
-    /// outside async, and the set is written once at boot.
+
     fn capabilities(&self) -> Vec<String> {
         Vec::new()
     }
     async fn on_event(&self, _e: CoreEvent) {}
-    /// `prompt/context` hook (`params: {"cwd", "session"}` → `result: {"text"}`).
-    /// Default `None` = no extra context (pre-v1 behavior).
+
     async fn prompt_context(&self, _cwd: &str) -> Option<String> {
         None
     }
-    /// Pin the agent's session id for `session.id` on wire points with no
-    /// `ToolContext` (`prompt/context`). Default no-op: only sidecars carry
-    /// wire state.
+
     fn set_session_id(&self, _id: &str) {}
-    /// `tool/before` hook (`params: {"name","args"}` → allow/deny/modify).
-    /// Default allow = no veto (pre-v1 behavior).
+
     async fn tool_before(&self, _name: &str, _args: &Value) -> ToolBefore {
         ToolBefore::Allow
     }
-    /// `command/run` hook (`params: {"name":"/x","argv"}` → `result: {"text"}` or `{"prompt"}`).
-    /// Default `None` = command unclaimed (pre-v1 behavior).
+
     async fn run_command(&self, _name: &str, _argv: Vec<String>) -> Option<CommandOutcome> {
         None
     }
-    /// `input/submit` hook (protocol 2.0): `params: {"text","session"}` →
-    /// `{text}` rewrite | `{handled: true}` swallow | anything else passes.
-    /// Default pass (pre-2.0 behavior).
+
     async fn input_submit(&self, _text: &str) -> InputSubmit {
         InputSubmit::Pass
     }
-    /// `agent/before_start` hook (protocol 2.0): `params: {"session"}` →
-    /// `{text}` appended to history as a user message before the first
-    /// request. Default `None` = inject nothing.
+
     async fn agent_before_start(&self) -> Option<String> {
         None
     }
-    /// `context/build` hook (protocol 2.0): `params: {"messages","session"}`
-    /// → `{"messages": [...]}` replacement list for this request only;
-    /// history is never touched. Default `None` = keep the list.
+
     async fn context_build(&self, _messages: &[Message]) -> Option<Vec<Message>> {
         None
     }
-    /// `tool/after` hook (protocol 2.0): `params: {"name","content",
-    /// "is_error","session"}` → `{content?, is_error?}` replacement fields.
-    /// Default `None` = keep the executor output.
+
     async fn tool_after(&self, _name: &str, _output: &ToolOutput) -> Option<ToolOutput> {
         None
     }
-    /// Lifecycle teardown: host is going away (`session_end`/`host_exit`/`reload`
-    /// sent on the wire by the sidecar transport). Default no-op so existing
-    /// impls keep compiling.
+
     async fn shutdown(&self) {}
-    /// True for a plugin booted from a `global` lock entry: under the lean
-    /// prompt its `prompt/context` is the only hook that still runs.
-    /// Default false — the flag is set by the builder, not declared.
+
     fn is_global(&self) -> bool {
         false
     }
-    /// The builder's marker for a `global`-lock spawn. Default no-op:
-    /// in-process impls are never global.
+
     fn set_global(&self, _global: bool) {}
 }
 
-/// Later manifests win on tool-name conflict. Returns owner per tool name.
 pub fn merge_manifests(manifests: Vec<Manifest>) -> HashMap<String, String> {
     let mut owner = HashMap::new();
     for m in manifests {
@@ -301,13 +252,6 @@ pub fn merge_manifests(manifests: Vec<Manifest>) -> HashMap<String, String> {
     owner
 }
 
-/// Thin bridge from any [`Plugin`] (notably the sidecar transport) to the
-/// host-side [`PluginHooks`] view the agent loop and REPL consume.
-/// Exists because the two signatures differ: `Plugin::prompt_context`
-/// takes the cwd per call while `PluginHooks::prompt_context` takes none,
-/// so the adapter pins the boot cwd once. `tool_before` needs no mapping
-/// (one canonical [`ToolBefore`]); `commands` projects the manifest's
-/// names (the wire carries no per-command descriptions).
 pub struct PluginHookAdapter {
     plugin: Arc<dyn Plugin>,
     cwd: String,
@@ -321,7 +265,6 @@ impl PluginHookAdapter {
         }
     }
 
-    /// One adapter per plugin, in boot order (hook order = plugin order).
     pub fn for_plugins(plugins: &[Arc<dyn Plugin>], cwd: &str) -> Vec<Arc<dyn PluginHooks>> {
         plugins
             .iter()
@@ -342,8 +285,7 @@ impl PluginHooks for PluginHookAdapter {
         self.plugin.tool_before(name, args).await
     }
     fn commands(&self) -> Vec<PluginCommand> {
-        // `subcommands` ride the same `command/run` wire: the REPL routes
-        // them to the owning plugin with argv untouched.
+
         let m = self.plugin.manifest();
         m.commands
             .into_iter()

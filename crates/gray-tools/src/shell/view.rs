@@ -1,25 +1,8 @@
-//! shell/view.rs — middle-out view, header, resume hint (brief 1B).
-//!
-//! NOT wired into the crate yet (`pub mod shell` + `bash.rs` shrink land
-//! with brief 1D, which unifies these mirrors with `contract.rs`). Until
-//! then this file is standalone (std only) so it compiles without touching
-//! `lib.rs` / `mod.rs` / `contract.rs`.
-//!
-//! Types come from `super::contract` (mirrors deleted by 1D wiring;
-//! signatures unchanged).
-//!
-//! Marker protocol: `middle_out` leaves a literal `{{MARKER}}` line where
-//! `resume_hint(view)` output goes. The caller replaces it, so
-//! `middle_out` stays pure over `(log, budgets, base_offset)`.
-
 use std::path::Path;
 use std::time::Duration;
 
 use super::contract::{ExitReport, VIEW_HEAD_FRACTION, View};
 
-// ── formatting helpers ──────────────────────────────────────────────
-
-/// Thousands separators: 402113 -> "402,113". Models misread bare digits.
 pub fn fmt_num(mut n: usize) -> String {
     if n == 0 {
         return "0".to_string();
@@ -44,7 +27,6 @@ fn fmt_num_u64(n: u64) -> String {
     fmt_num(n as usize)
 }
 
-/// Elapsed table: 100ms->0.1s, 1200ms->1.2s, 41s->41s, 123s->2m03s, 3720s->1h02m.
 pub fn format_elapsed(d: Duration) -> String {
     let secs = d.as_secs();
     if secs < 10 {
@@ -58,11 +40,9 @@ pub fn format_elapsed(d: Duration) -> String {
     }
 }
 
-/// Home-relative log path: $GRAY_HOME/... -> ~/... else $HOME/... -> ~/...
 pub fn home_relative(p: &Path) -> String {
     let s = p.to_string_lossy();
-    // Prefix match must accept both separators: Windows paths arrive with
-    // backslashes while GRAY_HOME/HOME may hold either spelling.
+
     let under = |root: &str| -> bool {
         !root.is_empty()
             && (s.as_ref() == root
@@ -74,9 +54,7 @@ pub fn home_relative(p: &Path) -> String {
         && !gray.trim().is_empty()
         && under(gray.trim())
     {
-        // Keep the documented "~/..." shape: normalize the remainder's
-        // first separator so consumers expanding "~/", including the
-        // shell_contract log-path parser, keep working on native paths.
+
         return format!(
             "~/{}",
             s[gray.trim().len()..].trim_start_matches(['/', '\\'])
@@ -90,12 +68,6 @@ pub fn home_relative(p: &Path) -> String {
     s.into_owned()
 }
 
-// ── sanitize (moved here from bash.rs sanitize_binary_output) ───────
-
-/// Drop C0 controls except \t \n \r, lossy UTF-8, CRLF and bare CR -> LF.
-/// Progress updates must not carry cursor-reset controls into the terminal UI.
-/// Byte-level filter first: bytes < 0x20 are never part of a multi-byte
-/// UTF-8 sequence, so filtering cannot tear a codepoint.
 fn sanitize(log: &[u8]) -> String {
     let filtered: Vec<u8> = log
         .iter()
@@ -107,8 +79,6 @@ fn sanitize(log: &[u8]) -> String {
         .replace('\r', "\n")
 }
 
-/// Lines = newline count, plus a trailing partial line. Operates on bytes
-/// so a trailing newline is not miscounted (`wc -l` agreement).
 fn count_lines(s: &str) -> usize {
     if s.is_empty() {
         return 0;
@@ -117,9 +87,6 @@ fn count_lines(s: &str) -> usize {
     if s.ends_with('\n') { nl } else { nl + 1 }
 }
 
-/// First `byte_budget` bytes, cut back to a line boundary (drop the partial
-/// last line); no newline in window -> byte-cut at the codepoint boundary
-/// (single-huge-line case). Then cap to the first `line_budget` lines.
 fn take_head(s: &str, byte_budget: usize, line_budget: usize) -> String {
     if s.is_empty() || byte_budget == 0 || line_budget == 0 {
         return String::new();
@@ -130,7 +97,7 @@ fn take_head(s: &str, byte_budget: usize, line_budget: usize) -> String {
     {
         end = nl;
     }
-    // Exclude the boundary newline itself; the marker join adds newlines.
+
     let mut head = s[..end].trim_end_matches('\n').to_string();
     if count_lines(&head) > line_budget {
         let keep: Vec<&str> = head.lines().take(line_budget).collect();
@@ -139,9 +106,6 @@ fn take_head(s: &str, byte_budget: usize, line_budget: usize) -> String {
     head
 }
 
-/// Last `byte_budget` bytes, cut forward past the partial first line; a cut
-/// that would empty the tail keeps the byte-cut at the codepoint boundary.
-/// Then keep only the last `line_budget` lines.
 fn take_tail(s: &str, byte_budget: usize, line_budget: usize) -> String {
     if s.is_empty() || byte_budget == 0 || line_budget == 0 {
         return String::new();
@@ -153,14 +117,14 @@ fn take_tail(s: &str, byte_budget: usize, line_budget: usize) -> String {
             if after < s.len() {
                 start = after;
             }
-            // else: dropping would empty the tail -> keep the byte-cut.
+
         }
-        // else: no newline in window (huge line) -> keep the byte-cut.
+
     } else if start == 0 {
-        // Whole string fits the byte window; line cap below still applies.
+
     }
     let mut tail = s[start..].trim_start_matches('\n').to_string();
-    // Strip one trailing newline for clean joins; counts are unaffected.
+
     tail = tail.trim_end_matches('\n').to_string();
     if count_lines(&tail) > line_budget {
         let lines: Vec<&str> = tail.lines().collect();
@@ -170,16 +134,11 @@ fn take_tail(s: &str, byte_budget: usize, line_budget: usize) -> String {
     tail
 }
 
-// ── contract fns ────────────────────────────────────────────────────
-
-/// Bounded middle-out view. Offsets/lengths are in sanitized space; 1D
-/// re-sanitizes identically when paging, so `omitted_range` lines up.
 pub fn middle_out(log: &[u8], budget_bytes: usize, budget_lines: usize, base_offset: u64) -> View {
     let s = sanitize(log);
     let total_bytes = s.len() as u64;
     let total_lines = count_lines(&s);
-    // Raw-log check (pre-sanitize): sanitize folds `\r\n` for display, so
-    // the flag must come from the unfolded bytes.
+
     let has_cr = log.contains(&b'\r');
     if s.len() <= budget_bytes && total_lines <= budget_lines {
         return View {
@@ -218,43 +177,19 @@ pub fn middle_out(log: &[u8], budget_bytes: usize, budget_lines: usize, base_off
     }
 }
 
-/// Model-facing shrink of an inline body, applied on the way into the fence
-/// (the log on disk and the terminal keep every byte):
-///
-/// 1. ANSI escapes are removed. `NO_COLOR=1`/`TERM=dumb` already ask tools
-///    not to colorize (see `spawn.rs`), but plenty of them colorize anyway,
-///    and the bytes ride the wire on every later request of the turn.
-/// 2. A run of [`REPEAT_RUN_MIN`]+ identical lines collapses to the line plus
-///    a count. Progress logs (`ok`, `PASS`, a repeated warning) are the bulk
-///    of a long test run and say nothing new after the first.
-///
-/// The count is kept, not just the line: a collapsed run of `FAILED` lines is
-/// the opposite of noise, and the model must still see how many there were.
 pub fn squeeze(body: &str) -> String {
     collapse_repeats(&strip_ansi(body))
 }
 
-/// A run this long or longer is collapsed.
 const REPEAT_RUN_MIN: usize = 3;
 
-/// Drop ANSI escape sequences: CSI (`ESC [ … final`), OSC (`ESC ] … BEL` or
-/// `ESC ] … ESC \`), and the ESC designators (`ESC ( B` charset select,
-/// `ESC 7` save-cursor). A sequence cut in half by the head/tail sample drops
-/// its remainder too — half a sequence is not text.
-///
-/// Known edge: output that *is* about escape bytes (a hexdump) loses the
-/// `ESC` and up to two following characters, since a designator is
-/// indistinguishable from data once the colorizing source is gone. `NO_COLOR`
-/// keeps real color out of the log in the first place, so this only bites
-/// dumps of escapes.
 pub fn strip_ansi(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] != 0x1b {
-            // Copy one whole char: the input is valid UTF-8 and escapes are
-            // ASCII, so a byte-wise walk would split a multi-byte char.
+
             let start = i;
             i += 1;
             while i < bytes.len() && !s.is_char_boundary(i) {
@@ -263,7 +198,7 @@ pub fn strip_ansi(s: &str) -> String {
             out.push_str(&s[start..i]);
             continue;
         }
-        // OSC: runs to BEL or ST.
+
         if bytes.get(i + 1) == Some(&b']') {
             i += 2;
             while i < bytes.len() {
@@ -279,7 +214,7 @@ pub fn strip_ansi(s: &str) -> String {
             }
             continue;
         }
-        // CSI: parameter/intermediate bytes then one final byte in 0x40..=0x7e.
+
         if bytes.get(i + 1) == Some(&b'[') {
             i += 2;
             while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
@@ -288,9 +223,7 @@ pub fn strip_ansi(s: &str) -> String {
             i += usize::from(i < bytes.len());
             continue;
         }
-        // ESC designator: optional intermediates (0x20..=0x2f, so `ESC ( B`
-        // consumes all three bytes) then one final byte (0x30..=0x7e, so
-        // `ESC 7` consumes two). A trailing lone ESC drops by the bounds check.
+
         i += 1;
         while i < bytes.len() && (0x20..=0x2f).contains(&bytes[i]) {
             i += 1;
@@ -300,9 +233,6 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Collapse runs of [`REPEAT_RUN_MIN`]+ identical lines to one line plus
-/// `[… ×N more]`; shorter runs pass through line for line. The count in the
-/// marker is the only lossy part, and the count is the part that matters.
 fn collapse_repeats(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut lines = s.lines().peekable();
@@ -326,15 +256,6 @@ fn collapse_repeats(s: &str) -> String {
     out
 }
 
-/// Marker line for the `{{MARKER}}` slot. Empty string when nothing omitted.
-///
-/// The paging command is line-based on purpose. `omitted_range` is a byte
-/// range, but sanitize folds `\r\n` for display, so byte offsets stop lining
-/// up with the on-disk log the moment a file has CRLF endings. Line numbers
-/// survive that folding unchanged, so `sed -n 'A,Bp'` lands on the right text
-/// either way. Telling the model *how* to page, rather than telling it to go
-/// grep, is what stops the re-read loop: the bench retro measured 380
-/// truncation re-reads per run.
 pub fn resume_hint(view: &View, log_path: &std::path::Path) -> String {
     let Some((a, b)) = view.omitted_range else {
         return String::new();
@@ -342,7 +263,7 @@ pub fn resume_hint(view: &View, log_path: &std::path::Path) -> String {
     if view.omitted_lines == 0 && view.omitted_bytes == 0 {
         return String::new();
     }
-    // The omitted block is what sits between the head and the tail.
+
     let first = view.shown_lines.0 + 1;
     let last = view.shown_lines.0 + view.omitted_lines;
     format!(
@@ -355,13 +276,6 @@ pub fn resume_hint(view: &View, log_path: &std::path::Path) -> String {
     )
 }
 
-/// First result line: "{label}{(note)} \u{00b7} {elapsed} \u{00b7} {total} lines[ \u{00b7} showing
-/// first h + last t \u{00b7} omitted \u{00b7} grep-hint][ \u{00b7} CR folded] \u{00b7} log {path}[ \u{00b7} no output]".
-/// The grep hint points at the on-disk log (never rerun to see more); the
-/// log path stays last so `split("\u{00b7} log ")` parsers keep working.
-/// `CR folded` discloses sanitize's CRLF folding: without it a CRLF file
-/// and an LF file render identically and the model cannot see the bytes
-/// that fail a byte-exact check.
 pub fn header(
     report: &ExitReport,
     view: Option<&View>,

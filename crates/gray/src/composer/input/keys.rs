@@ -1,37 +1,26 @@
-//! One key dispatcher for both composer input loops.
-//!
-//! The idle prompt (`read_line`) and the mid-turn key watcher used to
-//! carry their own copies of every editing key and had drifted apart
-//! (mid-turn Tab skipped `completion_fill`, Ctrl+D typed a `d`). Both now
-//! resolve the key through [`crate::keymap`] and apply it here; only the
-//! outcomes that differ by context (submit, interrupt, clear, exit, a
-//! bound slash command) go back to the caller.
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::super::Tui;
 use crate::keymap::{Action, Binding};
 
-/// What the caller has to do after [`dispatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KeyOutcome {
-    /// Draft, cursor or popup changed: redraw (and refresh completions).
+
     Edited,
-    /// Nothing bound or applicable.
+
     Ignored,
-    /// Send the draft (idle) or queue it (mid-turn).
+
     Submit,
-    /// `app.clear`: clear the draft, exit on an empty prompt, or cancel.
+
     Clear,
-    /// `app.exit` on an empty draft.
+
     Exit,
-    /// `app.interrupt`: cancel the turn / clear the draft.
+
     Interrupt,
-    /// A slash command bound in `keybindings.json`.
+
     Command(String),
 }
 
-/// Resolves `ev` against the active keymap and applies editor actions.
 pub(crate) fn dispatch(tui: &mut Tui, ev: &KeyEvent) -> KeyOutcome {
     let bindings = crate::keymap::resolve_event(ev);
     dispatch_bindings(tui, ev, &bindings)
@@ -48,7 +37,7 @@ pub(crate) fn dispatch_bindings(tui: &mut Tui, ev: &KeyEvent, bindings: &[Bindin
             }
         }
     }
-    // Unbound printable key: type it. Ctrl/Alt chords never insert.
+
     if let KeyCode::Char(c) = ev.code
         && !ev
             .modifiers
@@ -62,8 +51,6 @@ pub(crate) fn dispatch_bindings(tui: &mut Tui, ev: &KeyEvent, bindings: &[Bindin
     KeyOutcome::Ignored
 }
 
-/// Applies one action; `None` means "not applicable here, try the next
-/// action bound to this key" (Up with no popup, Ctrl+D on a draft).
 fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
     use KeyOutcome::*;
     let popup = !tui.matches.is_empty();
@@ -110,8 +97,7 @@ fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
             edited
         }
         Action::Submit => {
-            // An open popup completes its selection first; a second Enter
-            // on the completed command sends it.
+
             if let Some((name, _)) = tui.matches.get(tui.sel).cloned() {
                 let cur = tui.textarea.text();
                 if cur != format!("/{name}") && cur != format!("/{name} ") {
@@ -199,7 +185,7 @@ fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
         Action::DeleteToLineStart => edit(tui, |t| {
             let cur = t.textarea.cursor();
             let start = line_start(t.textarea.text(), cur);
-            // At a line start, join with the previous line (readline).
+
             let start = if start == cur && cur > 0 {
                 cur - 1
             } else {
@@ -266,13 +252,11 @@ fn history_next(tui: &mut Tui) {
     tui.textarea.move_to_end();
 }
 
-/// Byte offset of the start of the line holding `cur`.
 pub(crate) fn line_start(text: &str, cur: usize) -> usize {
     let cur = cur.min(text.len());
     text[..cur].rfind('\n').map(|i| i + 1).unwrap_or(0)
 }
 
-/// Byte offset of the end of the line holding `cur` (before its `\n`).
 pub(crate) fn line_end(text: &str, cur: usize) -> usize {
     let cur = cur.min(text.len());
     text[cur..]

@@ -1,15 +1,11 @@
-//! Small terminal helpers: ANSI-aware width/wrap (`strip_ansi`,
-//! `visible_width`, `wrap`, `print_wrapped`), and logo/color/clear utilities.
-
 use std::io::Write;
 
-/// Strips SGR (and other CSI) escape sequences for width measurement.
 pub(crate) fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            // CSI: ESC [ params final-byte(@-~); other escape types: consume.
+
             if chars.next() == Some('[') {
                 for t in chars.by_ref() {
                     if ('\u{40}'..='\u{7e}').contains(&t) {
@@ -35,12 +31,8 @@ pub fn visible_width(s: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(strip_ansi(s).as_str())
 }
 
-/// Greedy word-wrap to at most `width` visible chars per line. ANSI spans may
-/// cross line breaks; callers wrap whole styled strings and re-emit codes per
-/// line only when needed (Text keeps styling by wrapping the raw string).
 pub fn wrap(s: &str, width: usize) -> Vec<String> {
-    // Merge zero-width tokens (bare SGR sequences like \x1b[0m) into a
-    // neighbor so they never force their own line break.
+
     let mut toks: Vec<String> = Vec::new();
     for w in s.split_whitespace() {
         if visible_width(w) == 0 {
@@ -58,16 +50,15 @@ pub fn wrap(s: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut cur = String::new();
     let mut cur_w = 0usize;
-    let mut active_codes: Vec<String> = Vec::new(); // SGR states open at line start
+    let mut active_codes: Vec<String> = Vec::new();
     for word in &toks {
-        // Emptiness is measured by VISIBLE width: reopened SGR codes make
-        // `cur` non-empty without occupying columns.
+
         let sep = usize::from(cur_w > 0);
         let w_w = visible_width(word);
         if cur_w + sep + w_w > width && cur_w > 0 {
             lines.push(std::mem::take(&mut cur));
             cur_w = 0;
-            // Reopen whatever SGR state was active so style survives the break.
+
             for code in &active_codes {
                 cur.push_str(code);
             }
@@ -78,7 +69,7 @@ pub fn wrap(s: &str, width: usize) -> Vec<String> {
         }
         cur.push_str(word);
         cur_w += w_w;
-        // Track open SGR codes so wrapped lines restore them (dim/accent etc).
+
         update_active_codes(&mut active_codes, word);
     }
     if !cur.is_empty() {
@@ -87,7 +78,6 @@ pub fn wrap(s: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// Records `\x1b[..m` sequences inside `chunk` into `active` (reset clears).
 fn update_active_codes(active: &mut Vec<String>, chunk: &str) {
     let bytes = chunk.as_bytes();
     let mut i = 0;
@@ -114,7 +104,6 @@ fn update_active_codes(active: &mut Vec<String>, chunk: &str) {
     }
 }
 
-/// Prints `text` indented by `pad` spaces, wrapped to the terminal width.
 pub fn print_wrapped(text: &str, pad: usize) {
     let width = crate::term_width().saturating_sub(pad);
     for line in wrap(text, width) {
@@ -125,8 +114,6 @@ pub fn print_wrapped(text: &str, pad: usize) {
 
 pub const LOGO: &str = include_str!("../assets/logo.txt");
 
-/// The gray logo (icon) as plain indented lines — for callers that
-/// insert it into scrollback rather than printing raw.
 pub fn logo_lines() -> Vec<String> {
     LOGO.lines()
         .filter(|l| !l.trim().is_empty())
@@ -151,8 +138,6 @@ pub fn blend_color(
     }
 }
 
-/// Prints the gray logo with a subtle diagonal shine gradient, sized to terminal.
-/// Falls back to dim if NO_COLOR is set.
 pub fn print_logo() {
     use std::io::IsTerminal;
     if !std::io::stdout().is_terminal() {
@@ -182,7 +167,6 @@ pub fn print_logo() {
     let _ = std::io::stdout().flush();
 }
 
-/// Clears the terminal; tty-only.
 pub fn clear_screen() {
     use std::io::IsTerminal;
     if std::io::stdout().is_terminal() && crossterm::terminal::size().is_ok() {

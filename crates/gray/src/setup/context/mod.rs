@@ -25,8 +25,6 @@ fn user_context_window_cell() -> &'static std::sync::RwLock<Option<usize>> {
     USER_CONTEXT_WINDOW.get_or_init(|| std::sync::RwLock::new(None))
 }
 
-/// Sets the user-configured global context window override (highest priority).
-/// `None` clears the override (auto-fetch / hardcoded fallback resumes).
 pub fn set_user_context_window(v: Option<usize>) {
     if let Ok(mut g) = user_context_window_cell().write() {
         *g = v.filter(|&n| n > 0);
@@ -51,20 +49,18 @@ fn user_keep_cell() -> &'static std::sync::RwLock<Option<usize>> {
     USER_KEEP_TOKENS.get_or_init(|| std::sync::RwLock::new(None))
 }
 
-/// User override for auto-compact reserve (`None` = default 16k).
 pub fn set_user_reserve_tokens(v: Option<usize>) {
     if let Ok(mut g) = user_reserve_cell().write() {
         *g = v.filter(|&n| n > 0);
     }
 }
-/// User override for keep-recent tail (`None` = default 20k).
+
 pub fn set_user_keep_recent_tokens(v: Option<usize>) {
     if let Ok(mut g) = user_keep_cell().write() {
         *g = v;
     }
 }
-/// Effective keep-recent: override or default.
-// Legacy flat default; new code prefers `user_keep_for(window)`.
+
 pub fn user_keep_recent_tokens() -> usize {
     user_keep_cell()
         .read()
@@ -73,8 +69,6 @@ pub fn user_keep_recent_tokens() -> usize {
         .unwrap_or(DEFAULT_KEEP_RECENT_TOKENS)
 }
 
-/// Proportional budgets: reserve ≈ window/16, keep ≈ window/13, clamped to
-/// [4k, 64k]. 256k → 16k / ~19.7k (≈ legacy 16384 / 20000).
 pub fn default_reserve_for_window(window: usize) -> usize {
     (window / 16).clamp(4096, 65_536)
 }
@@ -82,7 +76,6 @@ pub fn default_keep_for_window(window: usize) -> usize {
     (window / 13).clamp(4096, 65_536)
 }
 
-/// Effective reserve for a window: override or proportional default.
 pub fn user_reserve_tokens_for(window: usize) -> usize {
     user_reserve_cell()
         .read()
@@ -90,7 +83,7 @@ pub fn user_reserve_tokens_for(window: usize) -> usize {
         .and_then(|g| *g)
         .unwrap_or_else(|| default_reserve_for_window(window))
 }
-/// Effective keep-recent for a window: override or proportional default.
+
 pub fn user_keep_for(window: usize) -> usize {
     user_keep_cell()
         .read()
@@ -99,25 +92,14 @@ pub fn user_keep_for(window: usize) -> usize {
         .unwrap_or_else(|| default_keep_for_window(window))
 }
 
-/// Parses a human-friendly context window string: `128000`, `1,000,000`,
-/// `1.000.000`, `128k`, `1000k`, `1m`, `1.5m`, etc. Case-insensitive,
-/// `k` = 1_000, `m` = 1_000_000. Commas/underscores/spaces are thousand
-/// separators; dots are too when grouped (`1.000.000`) — a single dot stays
-/// a decimal point (`1.5m`), and bare decimals (`1.5`) are rejected.
-/// User's explicit auto-compact trigger (`--compact-at` / `GRAY_COMPACT_AT` /
-/// `"compact_at_tokens"` in config.json): a token count, or `Auto` for the
-/// provider price-cliff default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactAt {
-    /// The cliff-aware default: the provider-declared cliff's ceiling when
-    /// the model declares one, else just the window bound.
+
     Auto,
-    /// An explicit trigger; still clamped to `window − reserve`.
+
     Tokens(usize),
 }
 
-/// Parse a `--compact-at`/`GRAY_COMPACT_AT`/`compact_at_tokens` value:
-/// `"auto"`, or the [`parse_context_window`] grammar (`90000`, `90k`, `1.5m`).
 pub fn parse_compact_at(s: &str) -> Option<CompactAt> {
     if s.trim().eq_ignore_ascii_case("auto") {
         return Some(CompactAt::Auto);
@@ -163,7 +145,7 @@ pub fn parse_context_window(s: &str) -> Option<usize> {
     if t.is_empty() {
         return None;
     }
-    // Strip one k/m suffix first so `1000k` / `1.000.000m` work uniformly.
+
     let (num, mult) = if let Some(n) = t.strip_suffix('k') {
         (n, 1_000.0)
     } else if let Some(n) = t.strip_suffix('m') {
@@ -177,13 +159,13 @@ pub fn parse_context_window(s: &str) -> Option<usize> {
     }
     let dots = num.bytes().filter(|&b| b == b'.').count();
     let plain = if dots > 1 {
-        // `1.000.000` — unambiguous thousand separators.
+
         num.replace('.', "")
     } else {
         num.to_string()
     };
     if mult == 1.0 {
-        // No suffix: integers only. A lone dot must be grouped thousands.
+
         if dots == 1 && !is_grouped_thousands(num) {
             return None;
         }
@@ -203,7 +185,6 @@ pub fn parse_context_window(s: &str) -> Option<usize> {
     None
 }
 
-/// `1.000.000`-style grouping: 1–3 leading digits then `.ddd` groups.
 fn is_grouped_thousands(num: &str) -> bool {
     let mut parts = num.split('.');
     match parts.next() {
@@ -282,27 +263,21 @@ pub fn format_context_length(tokens: usize) -> String {
 }
 
 pub fn resolve_model_context_length(model_name: &str) -> usize {
-    // 1) explicit user override wins over everything (CLI --context-window / GRAY_CONTEXT_WINDOW / config.json)
+
     if let Some(user) = get_user_context_window() {
         return user;
     }
     model_max_context(model_name)
 }
 
-/// The provider-declared price cliff for a model (prompt tokens above which
-/// a higher price tier bills), from its plugin catalog. `None` = the provider
-/// declared none or the row isn't known — auto-compaction stays on the
-/// window bound then, never guessing a cliff.
 pub fn model_price_cliff(model_name: &str) -> Option<u32> {
     ensure_disk_loaded();
     get_cached_model_price_cliff(model_name)
 }
 
-/// Model max ignoring the user override: live cache → hardcoded fallback.
-/// Use for clamping user input so effective window never exceeds what the model supports.
 pub fn model_max_context(model_name: &str) -> usize {
     ensure_disk_loaded();
-    // auto-fetched provider value (populated by fetch_live_provider_models)
+
     if let Some(cached) = get_cached_model_context(model_name) {
         return cached;
     }
@@ -310,7 +285,7 @@ pub fn model_max_context(model_name: &str) -> usize {
     if let Some(cached) = get_cached_model_context(&lower) {
         return cached;
     }
-    // `provider/model` ids vs bare cache keys (`gpt-4o`): try the tail.
+
     if let Some((_, suffix)) = model_name.rsplit_once('/')
         && let Some(cached) = get_cached_model_context(suffix)
     {
@@ -319,7 +294,6 @@ pub fn model_max_context(model_name: &str) -> usize {
     fallback_context_length(&lower)
 }
 
-// Guess fallback; live/models.dev/litellm/disk cache wins when present.
 fn fallback_context_length(lower: &str) -> usize {
     if lower.contains("gemini-1.5-pro")
         || lower.contains("gemini-2.0")
@@ -398,20 +372,16 @@ fn fallback_context_length(lower: &str) -> usize {
     }
 }
 
-/// Returns the model context limit in tokens and a human-friendly label (e.g. 256_000, "256k").
 pub fn model_context_info(model_name: &str) -> (usize, String) {
     let tokens = resolve_model_context_length(model_name);
     let label = format_context_length(tokens);
     (tokens, label)
 }
 
-/// Token estimate for an arbitrary string, matching `compact::estimate_tokens`
-/// (`chars/4` ceiling) so `/context` breakdown stays consistent.
 pub fn estimate_str_tokens(s: &str) -> usize {
     (s.len() as f64 / 4.0).ceil() as usize
 }
 
-/// Estimated per-category usage for the `/context` visual. All estimates.
 #[derive(Debug, Clone, Default)]
 pub struct ContextParts {
     pub system_prompt: usize,
@@ -434,8 +404,6 @@ impl ContextParts {
         window.saturating_sub(self.used().saturating_add(reserve))
     }
 
-    /// 100 grid cells split across categories + free + reserve. Sums to 100.
-    /// Order: system, project, tools, skills, messages, free, reserve.
     pub fn grid_cells(&self, window: usize, reserve: usize) -> [usize; 7] {
         if window == 0 {
             return [0; 7];
@@ -446,12 +414,12 @@ impl ContextParts {
             ((self.tools as f64 / window as f64) * 100.0).round() as usize,
             ((self.skills as f64 / window as f64) * 100.0).round() as usize,
             ((self.messages as f64 / window as f64) * 100.0).round() as usize,
-            0, // free takes the rounding remainder
+            0,
             ((reserve as f64 / window as f64) * 100.0).round() as usize,
         ];
         let used: usize = cells[0] + cells[1] + cells[2] + cells[3] + cells[4] + cells[6];
         cells[5] = 100usize.saturating_sub(used.min(100));
-        // Shrink overflow from the largest bucket so the row always sums to 100.
+
         let total: usize = cells.iter().sum();
         if total > 100 {
             let mut over = total - 100;

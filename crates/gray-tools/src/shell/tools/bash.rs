@@ -1,10 +1,3 @@
-//! Shell execution, mini-swe-agent shaped: the model sends `command` and an
-//! optional `timeout`, nothing else. A call blocks until the command exits or
-//! the timeout passes; past the timeout the command is NOT killed, it moves
-//! to a session-owned background job and the call returns its log, pgid and
-//! stop command. Time passes only inside commands (`sleep`) or between turns
-//! (a finished job wakes the session), so there is no wait primitive to misuse.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -32,10 +25,6 @@ use crate::view::Attached;
 use gray_core::spill::{self, MeterEvent};
 use gray_core::squeeze::squeeze;
 
-/// Bytes served by one `Read more` recovery command. A page has to fit the
-/// head sample verbatim, or paging buys nothing: the page is truncated again
-/// on its way back in and its middle is elided with a fresh hint. A round trip
-/// is the expensive part here, not the bytes.
 const READ_CHUNK: u64 = 4 * 1024;
 use crate::{fail, finish, get_opt_u64, get_str, resolve_path};
 
@@ -43,16 +32,11 @@ mod jobs;
 mod read_dedup;
 
 impl BashTool {
-    /// Completion-wake for the agent loop's turn end: block until any
-    /// unfinished background job settles (bounded), so a headless run that
-    /// backgrounded work holds the turn instead of exiting and killing the
-    /// job. Returns false when the timeout elapsed / cancel fired / no jobs.
+
     pub async fn wait_any_job(&self, ctx: &ToolContext, timeout: Duration) -> bool {
         self.jobs.wait_any(ctx, timeout).await
     }
 
-    /// The same wait as an owned future, for the executor's turn-end hook
-    /// (which cannot borrow the tool past the call).
     pub fn wait_any_job_fut(
         &self,
         ctx: &ToolContext,
@@ -63,63 +47,40 @@ impl BashTool {
         Box::pin(async move { jobs.wait_any(&ctx, timeout).await })
     }
 
-    /// Whether any unfinished background job belongs to this session.
     pub fn has_unfinished_jobs(&self, ctx: &ToolContext) -> bool {
         self.jobs.has_unfinished(ctx)
     }
 
-    /// This session's jobs that are running in the background, oldest first.
     pub fn running_jobs(&self, ctx: &ToolContext) -> Vec<gray_core::agent::BackgroundJob> {
         self.jobs.running(ctx)
     }
 
-    /// One line per still-running job of this session (id, elapsed, log,
-    /// stop command), for the loop to show the model each turn.
     pub fn running_jobs_note(&self, ctx: &ToolContext) -> Option<String> {
         self.jobs.footer(ctx, &self.jobs.live_ids(ctx))
     }
 
-    /// Request cancellation of one of this session's running jobs.
     pub fn cancel_job(&self, ctx: &ToolContext, id: &str) -> bool {
         self.jobs.cancel_running(ctx, id)
     }
 }
 
-/// One registry-owned job collection. Dropping the tool cancels its jobs.
 #[derive(Default)]
 pub struct BashTool {
-    /// Shared so a completion-wake future can be `'static`: the executor
-    /// holds `Arc<dyn Tool>` and the turn-end wait outlives the borrow.
+
     jobs: std::sync::Arc<jobs::Jobs>,
-    /// Per-session working directory. Every command is a fresh `sh -c`, so a
-    /// `cd` would otherwise be forgotten the moment it ran; the shell reports
-    /// its final directory and the next command in the same session starts
-    /// there. Keyed by session id (empty for an anonymous run) so a shared
-    /// registry cannot cross sessions.
-    ///
-    /// The base the entry was recorded against is stored with it: a caller that
-    /// hands over a different context cwd is being explicit, so the stale
-    /// record is dropped rather than silently overriding it.
+
     cwd: Mutex<BTreeMap<String, (PathBuf, PathBuf)>>,
-    /// Session read ledger, shared with `read`/`write`/`edit` when the host
-    /// builds them together (see [`BashTool::with_ledger`]). `None` on the
-    /// `Default` a lone tool gets: no ledger, no dedup.
+
     ledger: Option<Arc<crate::ledger::FileLedger>>,
 }
 
 impl BashTool {
-    /// Shares the session's read ledger, so a file read through `read` and
-    /// one read through `cat` dedup against each other, and `/new` +
-    /// compaction's ledger lifecycle covers this tool's entries too.
+
     pub fn with_ledger(mut self, ledger: Arc<crate::ledger::FileLedger>) -> Self {
         self.ledger = Some(ledger);
         self
     }
 
-    /// Where this session's commands run. Falls back to the context cwd when
-    /// the record belongs to a different base, or when the recorded directory
-    /// has since been deleted, so neither a moved session nor a vanished
-    /// directory can wedge it.
     fn session_cwd(&self, ctx: &ToolContext) -> PathBuf {
         let key = session_key(ctx);
         let cell = self.cwd.lock().unwrap_or_else(|e| e.into_inner());
@@ -131,9 +92,6 @@ impl BashTool {
             .unwrap_or_else(|| ctx.cwd.clone())
     }
 
-    /// Adopt the directory the shell reported, if it is still there. A command
-    /// that was killed, or one whose trailing comment swallowed the report,
-    /// leaves the previous cwd standing rather than resetting it.
     fn adopt_reported_cwd(&self, ctx: &ToolContext, report: &Path) {
         let reported = std::fs::read_to_string(report)
             .ok()
@@ -177,8 +135,7 @@ impl Tool for BashTool {
         if let Some(out) = self.noop_steer(ctx, &command) {
             return out;
         }
-        // The advertised stop for one of this session's jobs is carried
-        // out here, on the right machine; anything else runs as written.
+
         if let Some(out) = self.jobs.intercept_stop(ctx, &command).await {
             return out;
         }
@@ -196,23 +153,16 @@ impl Tool for BashTool {
         if let Some(out) = search_command(&command, &cwd, &ctx.cancel).await {
             return out;
         }
-        // With the jobs lane, every call is bounded: an omitted `timeout` is
-        // the default (stretched past a leading `sleep N`), and reaching it
-        // hands the command to a job instead of killing it. Bare mode
-        // (`GRAY_NO_JOBS`) is plain mini-swe-agent: explicit timeouts kill,
-        // none means unbounded.
+
         let detach = jobs_enabled();
         let secs = if detach {
             Some(explicit.unwrap_or_else(|| block_bound(&command)))
         } else {
             explicit
         };
-        // Jobs already running before this call get a footer line on its
-        // result; the job this call may create is described by its own notice.
+
         let running_before = self.jobs.live_ids(ctx);
-        // Read dedup: a `cat`/`sed`/`head`/`tail` of a file already shown
-        // whole and unchanged since answers with a stub instead of the bytes
-        // (once — see `read_dedup`).
+
         let dedup = self
             .ledger
             .as_deref()
@@ -226,13 +176,9 @@ impl Tool for BashTool {
         let log_path = log_path(ctx);
         let logged = log_path.clone();
         let start = Instant::now();
-        // A media `cat` the claim refused (compound, flags, glob) runs as a
-        // plain shell command with nothing attached:
-        // decide the note here, before `command` moves, append it after the
-        // run. The predicate itself declines when nothing was ever at stake.
+
         let unattached = unattached_media_note(&command);
-        // Report the final directory to a scratch file so the next command in
-        // this session starts where this one finished.
+
         let cwd_report =
             std::env::temp_dir().join(format!("gray-cwd-{}.txt", uuid::Uuid::new_v4()));
         let spawned = match spawn(
@@ -259,14 +205,9 @@ impl Tool for BashTool {
             cwd_report.clone(),
         )
         .await;
-        // Whether it succeeded, failed or was killed: a `cd` that ran is a `cd`
-        // that ran. A killed command never writes the report, so its cwd stands.
+
         self.adopt_reported_cwd(ctx, &cwd_report);
-        // Arm the next dedup from what this run actually showed. A settled,
-        // complete result is the only thing worth citing: a timeout, a
-        // cancellation, a background hand-off or a truncated pump drain all
-        // prefix the body with a note instead of a header, and their log is
-        // part of an unfinished read.
+
         if let Some((ledger, read)) = &dedup
             && !out.is_error
             && out.content.starts_with("exit ")
@@ -286,10 +227,8 @@ impl Tool for BashTool {
     }
 }
 
-/// The bash schema: `command` + `timeout` either way; the description says
-/// what reaching the timeout means (a background job, or a kill in bare mode).
 fn tool_def(jobs: bool) -> ToolDef {
-    // Only what the model can't infer: shell basics are free.
+
     const VIEW: &str =
         "`cat` bare image, video, PDF or audio paths (as the whole command) to view them.";
     if !jobs {
@@ -305,8 +244,7 @@ fn tool_def(jobs: bool) -> ToolDef {
             }),
         );
     }
-    // A `--reminder` cron job delivers into the session that added it
-    // (`GRAY_SESSION_ID`). Cron does not fire on Windows.
+
     const CRON: &str = if cfg!(windows) {
         ""
     } else {
@@ -334,20 +272,6 @@ fn tool_def(jobs: bool) -> ToolDef {
     )
 }
 
-/// Arguments the bash tool used to take (job actions, explicit
-/// backgrounding, yield/wait windows) and aliases other harnesses use for
-/// them. Each fails loudly with what to do instead; silently ignoring one
-/// would drop the caller's intent. Values that carry no intent
-/// (`background:false`, `action:"run"`, null) are let through, and so is a
-/// stray `job_id` on a plain run: it never meant anything without an action
-/// (which does fail), and rejecting it looped real sessions (2026-09-17).
-///
-/// Wait/yield windows are different: schema-filling models (the gpt-6
-/// family fills every property it has ever seen on a tool) echo
-/// `wait_ms`/`yield_ms` onto a plain `command` run, where they carry no
-/// intent — the call already blocks until exit or timeout. Rejecting the
-/// echo made the model resend the identical call until the turn died, so
-/// on a run they drop. Bare (no `command`) they still fail loudly.
 fn removed_arg(args: &Value) -> Option<ToolOutput> {
     const REMOVED: &[&str] = &[
         "action",
@@ -356,9 +280,7 @@ fn removed_arg(args: &Value) -> Option<ToolOutput> {
         "task_id",
         "from_offset",
         "notify_on",
-        // Other harnesses' spellings. The registry only renames an alias onto
-        // a name the schema still has, so these must be listed themselves or
-        // they would pass through and be silently ignored.
+
         "run_in_background",
         "is_background",
         "detach",
@@ -390,9 +312,6 @@ fn removed_arg(args: &Value) -> Option<ToolOutput> {
     )))
 }
 
-/// How long a call without `timeout` blocks before handing off: the default,
-/// or long enough for a leading `sleep N` (plus slack) so an in-band wait
-/// like `sleep 300 && tail log` runs as written instead of becoming a job.
 fn block_bound(command: &str) -> u64 {
     let default = default_timeout();
     match leading_sleep(command) {
@@ -403,8 +322,6 @@ fn block_bound(command: &str) -> u64 {
     }
 }
 
-/// `command` past any leading `cd DIR &&` / `cd DIR;` / `cd DIR` + newline
-/// steps (DIR one word, optionally quoted without spaces-in-quotes tricks).
 fn skip_leading_cds(mut command: &str) -> &str {
     loop {
         let Some(after) = command.strip_prefix("cd") else {
@@ -432,8 +349,6 @@ fn skip_leading_cds(mut command: &str) -> &str {
     }
 }
 
-/// The default block window, overridable per process via
-/// `GRAY_BASH_TIMEOUT_SECS` (tests use short ones).
 fn default_timeout() -> u64 {
     std::env::var("GRAY_BASH_TIMEOUT_SECS")
         .ok()
@@ -443,11 +358,6 @@ fn default_timeout() -> u64 {
         .unwrap_or(DEFAULT_TIMEOUT_SECS)
 }
 
-/// Seconds of a command whose first real step is a foreground `sleep N`
-/// (`N`, `Ns`, `Nm`, `Nh`, fractions rounded up) followed by nothing, `;`,
-/// `&&`, `||` or a newline. Leading `cd DIR &&`/`cd DIR;` steps are skipped
-/// (`cd repo && sleep 300 && tail log` is the same wait). `sleep 5 &`
-/// backgrounds the sleep, so it does not count.
 fn leading_sleep(command: &str) -> Option<u64> {
     let rest = skip_leading_cds(command.trim_start()).strip_prefix("sleep")?;
     if !rest.starts_with([' ', '\t']) {
@@ -477,29 +387,8 @@ fn leading_sleep(command: &str) -> Option<u64> {
     (secs.is_finite() && secs >= 0.0).then(|| (secs * unit).ceil().min(u64::MAX as f64) as u64)
 }
 
-/// Ask the shell to report its final directory to `$GRAY_CWD_REPORT`.
-///
-/// Appended, never substituted: the command the model wrote is still what runs,
-/// and the report goes to a file so stdout (and the durable log) are untouched.
-///
-/// The original exit status is captured and re-raised, because a bare
-/// `; printf ...` would end the command with *the report's* status and turn
-/// every failing command into a success -- which is how the benign-exit table
-/// lost `grep`'s "no matches" the first time this was tried.
-///
-/// Each piece of the suffix sits on its OWN line. Joining with `; ` broke any
-/// command whose last line is a heredoc terminator: `EOF` became
-/// `EOF; __gray_rc=$?`, so the terminator never matched and the suffix landed
-/// inside the heredoc body -- a shell file written with a garbage trailer, or a
-/// SyntaxError for an interpreter heredoc. 33 of 47 DeepSWE runs in the
-/// 2026-09-29 retro reported exactly this; it cost each one a wasted turn at
-/// best.
 fn with_cwd_report(command: &str) -> String {
-    // Git Bash's plain `pwd` is an MSYS path (/c/Users/...), which Rust's
-    // `is_dir` rejects on Windows, so the report would be read and thrown away
-    // on exactly the platform that cannot be checked locally. `pwd -W` is
-    // MSYS's Windows-path form (C:/Users/...), which Rust resolves. A shell
-    // without `-W` writes nothing and the cwd simply stays put.
+
     #[cfg(windows)]
     let reported = "$(pwd -W)";
     #[cfg(not(windows))]
@@ -509,51 +398,17 @@ fn with_cwd_report(command: &str) -> String {
     )
 }
 
-/// `GRAY_NO_JOBS=1` (bare mode) drops the background lane entirely: an
-/// explicit `timeout` kills the process group, as in mini-swe-agent, and no
-/// `timeout` means no limit. The schema is the same two fields either way.
 fn jobs_enabled() -> bool {
     std::env::var_os("GRAY_NO_JOBS").is_none()
 }
 
-/// Session identity for the cwd cell: the session id when there is one, empty
-/// for an anonymous run (headless, print) where every call shares one cwd.
 fn session_key(ctx: &ToolContext) -> String {
     ctx.session_id.clone().unwrap_or_default()
 }
 
-/// `cat PATH...` of media returns images, video, PDFs and audio as model
-/// parts instead of the binary garbage a shell would stream: every model
-/// already reaches for `cat`. It shares the 5MB byte cap with `read` and
-/// pasted attachments.
-///
-/// The command is claimed before the shell ever runs, so anything the shell
-/// would interpret (flags, pipes, redirects, globs, quotes, `$`) falls through
-/// to a normal run — as does a missing file, so the shell's own error is what
-/// the model sees. A leading `~` is the one thing expanded here: the shell
-/// would have done it and nothing else would, and without it `cat
-/// ~/shot.png` fails while the absolute path works. A missing, undecodable or
-/// non-media path is skipped with a note and the valid ones still ship; when
-/// nothing is usable the claim is dropped and the shell gives the error, which
-/// reads better than a note attached to nothing.
-// Cap multi-image claims: 8 paths (the per-turn inline-attach cap) and 20 MiB
-// of aggregate base64 (4x the 5 MiB per-image cap in `crate::images`). Past
-// the path cap the claim is cut to the prefix with a note; past the byte
-// budget intake stops with a note. Either way the valid prefix still returns
-// vision blocks instead of the whole command falling through to a text-only
-// run.
 const MAX_IMAGE_CLAIM_PATHS: usize = 8;
 const MAX_IMAGE_CLAIM_BYTES: usize = 20 * 1024 * 1024;
 
-/// `gray find` / `gray grep` claimed before the shell runs, for the same
-/// reason `cat` of media is: the model should not have to know that `gray`
-/// happens to be on its PATH. Text in, text out, so this is one thin parse
-/// over [`crate::search_cmd`] — the index, or the tool's own lane, decided
-/// there.
-///
-/// Bare `grep` / `find` are not claimed: their output is the real tool's
-/// (the shim serves them, see `search_shim`), and the shell runs them as
-/// written.
 async fn search_command(
     command: &str,
     cwd: &Path,
@@ -581,9 +436,6 @@ async fn search_command(
     Some(finish(text))
 }
 
-/// `gray find|grep` verb flags → [`crate::search_cmd::SearchArgs`]. A flag
-/// missing its value, or an unknown flag, falls through to the shell: it
-/// owns the usage error, and it names the real argv.
 fn verb_search_args(rest: &[String], cwd: &Path) -> Option<crate::search_cmd::SearchArgs> {
     let mut positional: Vec<String> = Vec::new();
     let (mut limit, mut glob, mut context) = (None, None, None);
@@ -591,8 +443,7 @@ fn verb_search_args(rest: &[String], cwd: &Path) -> Option<crate::search_cmd::Se
     let mut i = 0;
     while i < rest.len() {
         let arg = rest[i].as_str();
-        // `--name=value` carries its own value; bare `--name` consumes the
-        // next word.
+
         let mut take = |name: &str| -> Option<String> {
             if let Some(v) = arg.strip_prefix(name).and_then(|r| r.strip_prefix('=')) {
                 return Some(v.to_string());
@@ -632,12 +483,6 @@ fn verb_search_args(rest: &[String], cwd: &Path) -> Option<crate::search_cmd::Se
     })
 }
 
-/// Splits a `gray find` / `gray grep` command line into words the way the
-/// shell would for the simple cases: whitespace separates, `'…'` is literal,
-/// `"…"` and `\` escape. Bare `*` / `?` stay in the word, since the claimed
-/// search reads them as its own glob. None when the shell would do more than
-/// split — pipes, redirects, separators, substitution, an unclosed quote — so
-/// the command falls through to a real shell instead of being half-claimed.
 pub(crate) fn search_words(command: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
@@ -699,21 +544,13 @@ pub(crate) fn search_words(command: &str) -> Option<Vec<String>> {
 }
 
 impl BashTool {
-    /// Whole-command no-ops are how a model stalls for a background job or
-    /// placeholders work it announced but never calls (`echo "switching
-    /// tools"`). The matcher is deliberately broad (`noop_family`): a model
-    /// that only saw `true` steered will shop for another shape (`echo stub`,
-    /// `foo() { :; }`, `bash -c 'echo x'`, `sleep 5`, `jobs`), so anything
-    /// that can provably do no work and report nothing new lands here. Jobs
-    /// report on their own between turns, so say that instead of spawning a
-    /// shell that does nothing.
+
     fn noop_steer(&self, ctx: &ToolContext, command: &str) -> Option<ToolOutput> {
         let trimmed = command.trim();
         let live = self.jobs.live_ids(ctx);
         let family = noop_family(trimmed, !live.is_empty())?;
         let mut note = match family {
-            // `jobs`/`wait` & friends actively mislead: they report this
-            // one-shot shell's own (empty) job table while session jobs run.
+
             NoopFamily::JobControl => format!(
                 "`{trimmed}` can only see this one-shot shell's own children — \
                  there are none; session jobs live outside it — nothing ran and \
@@ -738,21 +575,15 @@ impl BashTool {
     }
 }
 
-/// Which no-op family a stalled command belongs to. `JobControl` builtins
-/// get their own note: they answer with the wrong table, not with nothing.
 pub(crate) enum NoopFamily {
     Plain,
     JobControl,
 }
 
-/// Whether `command` can only stall: every top-level stage produces no
-/// output the model didn't already write and leaves no state behind.
-/// Conservative — one real stage (`echo x > f`, `$()`, a glob) runs the
-/// whole line.
 pub(crate) fn noop_family(command: &str, live_jobs: bool) -> Option<NoopFamily> {
     let segments = top_level_segments(command);
     if segments.iter().all(|s| s.trim().is_empty()) {
-        // `;` alone & friends: a syntax error the shell should report itself.
+
         return None;
     }
     let mut family = NoopFamily::Plain;
@@ -766,11 +597,6 @@ pub(crate) fn noop_family(command: &str, live_jobs: bool) -> Option<NoopFamily> 
     Some(family)
 }
 
-/// Splits a command line on top-level `;`, newlines, `&&`, `||` and a
-/// bare `&` — delimiters inside quotes or inside a `()`/`{}` group do not
-/// separate, so `f() { :; }` stays one segment. A single `|` does not
-/// separate either: a pipeline's stages cannot be judged independently,
-/// so it stays one segment and `search_words` refuses it.
 fn top_level_segments(command: &str) -> Vec<String> {
     let mut segs = Vec::new();
     let mut cur = String::new();
@@ -820,21 +646,17 @@ fn top_level_segments(command: &str) -> Vec<String> {
     segs
 }
 
-/// One stage of a whole-command no-op. `None` = real work possible, run it.
 fn noop_segment(seg: &str, live_jobs: bool) -> Option<NoopFamily> {
     if seg.is_empty() || seg.starts_with('#') {
-        // An empty stage (`x &&`) or a whole-line comment contributes nothing.
+
         return Some(NoopFamily::Plain);
     }
     if is_fn_def(seg) {
         return Some(NoopFamily::Plain);
     }
-    // Metacharacters (`$`, backquote, `<`, `>`, glob joins …) mean the shell
-    // could do real work; leave it to the shell.
+
     let words = search_words(seg)?;
-    // `FOO=bar` prefixes are transparent: they die with the one-shot shell,
-    // and the command they prefix decides the outcome. A line that is only
-    // assignments still dies with it — a no-op.
+
     let lead = words.iter().take_while(|w| is_assignment(w)).count();
     let words = &words[lead..];
     if words.is_empty() {
@@ -843,22 +665,19 @@ fn noop_segment(seg: &str, live_jobs: bool) -> Option<NoopFamily> {
     let head = words[0].as_str();
     let rest = &words[1..];
     match head {
-        // Builtins whose arguments change nothing observable. `exit` is
-        // not here: it sets the status the result header reports.
+
         "true" | ":" | "false" => Some(NoopFamily::Plain),
-        // Job control sees only this shell's own (empty) job table.
+
         "jobs" | "wait" | "fg" | "bg" | "disown" => Some(NoopFamily::JobControl),
-        // A lone `cat` copies nothing it wasn't fed.
+
         "cat" if rest.is_empty() => Some(NoopFamily::Plain),
-        // A literal print returns exactly what the model wrote, unless it
-        // transforms the text (escapes, `%`, echo flags): then it does work.
+
         "echo" | "printf" if rest.iter().all(|w| literal_word(w)) && verbatim_print(head, rest) => {
             Some(NoopFamily::Plain)
         }
-        // A timed stall only matters when a job exists to await; with none,
-        // a bare `sleep` can be a deliberate pause (service startup, …).
+
         "sleep" if live_jobs && rest.iter().all(|w| is_duration(w)) => Some(NoopFamily::Plain),
-        // Shell-state writes that die with the one-shot `sh -c`.
+
         "export" | "readonly" | "declare" | "typeset" | "local" | "alias"
             if !rest.is_empty() && rest.iter().all(|w| is_assignment(w)) =>
         {
@@ -869,7 +688,7 @@ fn noop_segment(seg: &str, live_jobs: bool) -> Option<NoopFamily> {
         {
             Some(NoopFamily::Plain)
         }
-        // Transparent wrappers: peel and re-check the inner command.
+
         "sh" | "bash" | "dash" | "zsh" | "ksh" => {
             let c_flag = words
                 .get(1)
@@ -889,8 +708,6 @@ fn noop_segment(seg: &str, live_jobs: bool) -> Option<NoopFamily> {
     }
 }
 
-/// `name() {…}` / `name() (…)` / `function name[()] {…}` — a definition in
-/// a one-shot shell is dead code: the body never runs.
 fn is_fn_def(seg: &str) -> bool {
     let mut t = seg;
     let kw = t
@@ -907,13 +724,12 @@ fn is_fn_def(seg: &str) -> bool {
     }
     let mut rest = t[name_len..].trim_start();
     match rest.strip_prefix('(') {
-        // `name()` — the parens must close immediately (`name(arg)` is not
-        // a definition; it isn't shell at all).
+
         Some(r) => match r.trim_start().strip_prefix(')') {
             Some(r) => rest = r.trim_start(),
             None => return false,
         },
-        // `function f {…}` may skip the parens; a bare `name {…}` is no def.
+
         None if !kw => return false,
         None => {}
     }
@@ -925,17 +741,10 @@ fn is_fn_def(seg: &str) -> bool {
     }
 }
 
-/// A word that expands to nothing the model didn't write: no glob (`*`,
-/// `?`, `[`), no brace expansion (`{a,b}`) and no leading `~`.
-/// `$`/backquote never reach this — the word splitter bails on them first.
 fn literal_word(w: &str) -> bool {
     !w.contains(['*', '?', '[', ']', '{', '}']) && !w.starts_with('~')
 }
 
-/// Whether an `echo`/`printf` prints its arguments unchanged. Backslash
-/// escapes are expanded by `printf` and by dash's `echo` (`/bin/sh`);
-/// `printf` also expands `%` conversions, and `echo` reads leading `-`
-/// words as flags (`-n`, `-e`). Any of these transforms the output.
 fn verbatim_print(cmd: &str, args: &[String]) -> bool {
     !args.iter().any(|w| {
         w.contains('\\')
@@ -944,13 +753,11 @@ fn verbatim_print(cmd: &str, args: &[String]) -> bool {
     })
 }
 
-/// `sleep`-shaped durations: `5`, `0.5`, `30s`, `2m`, `1h`, `1d`.
 fn is_duration(w: &str) -> bool {
     let num = w.trim_end_matches(['s', 'm', 'h', 'd']);
     !num.is_empty() && num.parse::<f64>().is_ok()
 }
 
-/// `NAME=value` / `NAME+=value`: a leading assignment in a one-shot shell.
 fn is_assignment(w: &str) -> bool {
     let Some(eq) = w.find('=') else {
         return false;
@@ -964,10 +771,6 @@ fn is_assignment(w: &str) -> bool {
             .all(|(i, c)| c == '_' || c.is_ascii_alphanumeric() && (i > 0 || !c.is_ascii_digit()))
 }
 
-/// Peels a transparent wrapper's own arguments (`nice -n 1`, `env A=1`,
-/// `timeout -s KILL 30`) and returns the real command words. Where a flag's
-/// value can't be told from the command the peel under-fires — the leaf
-/// check then fails and the command runs, which is the safe direction.
 fn peel_wrapper<'a>(head: &str, rest: &'a [String]) -> Option<&'a [String]> {
     let value_flags: &[&str] = match head {
         "nice" => &["-n", "--adjustment"],
@@ -975,9 +778,7 @@ fn peel_wrapper<'a>(head: &str, rest: &'a [String]) -> Option<&'a [String]> {
         "env" => &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
         _ => &[],
     };
-    // `command -v x` / `time -v` & friends take flags that are themselves
-    // the query — only wrappers whose flags merely decorate the command
-    // get them peeled.
+
     let peels_flags = matches!(head, "nice" | "timeout" | "env");
     let mut r = rest;
     loop {
@@ -988,18 +789,13 @@ fn peel_wrapper<'a>(head: &str, rest: &'a [String]) -> Option<&'a [String]> {
             _ => break,
         }
     }
-    // `timeout`'s duration word sits between its flags and the command.
+
     if head == "timeout" {
         r = r.split_first().map(|(_, tail)| tail)?;
     }
     if r.is_empty() { None } else { Some(r) }
 }
 
-/// What to say when a `cat <media>` ran as an ordinary shell command instead
-/// of being claimed: the shell streams binary (or nothing) while nothing is
-/// attached to the turn, which costs the model a pile of re-runs. Only shape
-/// refusals get this: a bare claim that missed on a missing file is already
-/// reported by the shell, and a lecture on top of its own error helps nobody.
 fn unattached_media_note(command: &str) -> Option<String> {
     let ws: Vec<&str> = command.split_whitespace().collect();
     let cat_at = ws.iter().position(|t| *t == "cat")?;
@@ -1026,8 +822,7 @@ fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
     if parts.next()? != "cat" {
         return None;
     }
-    // Any argument that is not a media path (text, a flag, `|`, `>`) makes
-    // it `cat`'s own job again, so the shell runs it.
+
     let paths: Vec<&str> = parts.collect();
     if paths.is_empty()
         || paths
@@ -1036,11 +831,7 @@ fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
     {
         return None;
     }
-    // A path that is not there is skipped like a decode failure, not fatal:
-    // the common case is one typo among several paths, and sinking the valid
-    // ones with it is the whole complaint this claim shape exists to avoid.
-    // A lone bad path still yields nothing usable, and the `images.is_empty()`
-    // bail below hands it to the shell, which reports the path itself.
+
     let mut files: Vec<PathBuf> = Vec::with_capacity(paths.len());
     let mut failed: Vec<String> = Vec::new();
     for raw in paths {
@@ -1094,8 +885,7 @@ fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
         }
     }
     if images.is_empty() && media.is_empty() && texts.is_empty() {
-        // Every path failed: drop the claim so the shell reports the errors
-        // directly, which beats a note attached to no media.
+
         return None;
     }
     let mut content = format!("Shown: {}", shown.join(", "));
@@ -1119,9 +909,6 @@ fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
     })
 }
 
-/// True when the shell would read more than a bare path into this argument:
-/// flags, pipes, redirects, substitution, globs, quotes. Those fall through,
-/// where the shell is there to interpret them.
 fn shell_meta(arg: &str) -> bool {
     arg.starts_with('-')
         || arg.chars().any(|c| {
@@ -1132,18 +919,12 @@ fn shell_meta(arg: &str) -> bool {
         })
 }
 
-/// One bare path, expanded and resolved, when the shell would have found it:
-/// a leading `~`/`~/` — the shell's job, now ours since it never runs — over a
-/// plain relative or absolute path. None when the file is not there, so the
-/// shell reports the missing path instead of a tool error.
 fn resolve_bare_path(cwd: &Path, raw: &str) -> Option<PathBuf> {
     let expanded = expand_tilde(raw);
     let full = resolve_path(cwd, expanded.as_deref().unwrap_or(raw));
     full.is_file().then_some(full)
 }
 
-/// `~/shot.png` -> `$HOME/shot.png`, `~` -> `$HOME`. The one expansion the
-/// shell would have done, since the fast path claims the command first.
 fn expand_tilde(raw: &str) -> Option<String> {
     let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
     if raw == "~" {
@@ -1154,7 +935,7 @@ fn expand_tilde(raw: &str) -> Option<String> {
 }
 
 fn log_path(ctx: &ToolContext) -> PathBuf {
-    // Session IDs are host-supplied, not path components trusted from a tool call.
+
     let session = ctx.session_id.as_deref().unwrap_or("nosession");
     let safe: String = session
         .chars()
@@ -1171,8 +952,6 @@ fn log_path(ctx: &ToolContext) -> PathBuf {
         .join(format!("bash-{}.log", uuid::Uuid::new_v4().as_simple()))
 }
 
-/// Sleep until the explicit timeout, or never when none was requested:
-/// `pending()` is the "no timeout" arm of the `select!` in `run_command`.
 async fn wait_or_pend(secs: Option<u64>, start: Instant) {
     match secs {
         Some(s) => {
@@ -1185,10 +964,6 @@ async fn wait_or_pend(secs: Option<u64>, start: Instant) {
     }
 }
 
-/// A still-running command handed back by [`settle_command`] when its
-/// timeout passed on the jobs lane: the live child, its armed group guard,
-/// and its already-draining pump, so [`run_command`] can register it as a
-/// background job. Never a kill.
 struct Handoff {
     spawned: crate::shell::contract::Spawned,
     #[cfg(not(windows))]
@@ -1197,26 +972,12 @@ struct Handoff {
 }
 
 enum Settled {
-    /// The command exited, timed out, was cancelled, or failed to wait.
+
     Done(ToolOutput),
-    /// A command that reached its timeout was handed off; it keeps running. Boxed:
-    /// the handoff carries the live child, guard, pump and clock (~300 B)
-    /// and would otherwise blow up every `Settled` on the stack.
+
     Stalled(Box<Handoff>),
 }
 
-/// The shared wait-and-render for one spawned command: exit, timeout or
-/// cancel. With `handoff` set (the jobs lane), reaching the timeout stops the
-/// wait and returns the running child, its armed group guard and its
-/// already-draining pump as [`Settled::Stalled`]; it is never killed here.
-/// Without it (bare mode), the timeout kills the process group.
-///
-/// A distinct function from [`run_command`] on purpose: the background
-/// continuation calls it with `handoff=false` and no timeout, so it is not a
-/// recursive `async fn` and its future stays `Send` for `tokio::spawn`.
-// one lane carries a live child + its group guard + pump + clock; bundling
-// them into structs is speculative and would thrash this Send-sensitive call
-// path, so the count stands.
 #[allow(clippy::too_many_arguments)]
 async fn settle_command(
     command: &str,
@@ -1251,7 +1012,7 @@ async fn settle_command(
             }
         },
         _ = wait_or_pend(secs, start) => {
-            // Raced exit between the timer and now: report it, don't kill.
+
             match child.try_wait() {
                 Ok(Some(st)) => { exited = Some(st); Cause::Exit }
                 _ => Cause::Timeout,
@@ -1260,7 +1021,7 @@ async fn settle_command(
         _ = ctx.cancel.cancelled() => Cause::Cancel,
     };
     if handoff && matches!(cause, Cause::Timeout) {
-        // Hand the running child back to run_command, which registers it.
+
         return Settled::Stalled(Box::new(Handoff {
             spawned,
             #[cfg(not(windows))]
@@ -1268,16 +1029,12 @@ async fn settle_command(
             pump,
         }));
     }
-    // Unix escalates SIGTERM -> SIGKILL; Windows terminates the owned job.
-    // Failed termination is a harness error, never a successful timeout.
+
     let first_line: Option<String> = match cause {
         Cause::Exit => None,
-        // Bare mode only: the jobs lane handed the timeout off above.
+
         Cause::Timeout => {
-            // Reap while Unix escalation polls: macOS can return EPERM
-            // when only an unreaped zombie remains in the process group.
-            // try_join also stops waiting if termination fails; never hide
-            // that failure or block forever waiting for an unkillable child.
+
             match tokio::try_join!(term_then_kill(target, Duration::from_secs(2)), async {
                 child
                     .wait()
@@ -1297,10 +1054,7 @@ async fn settle_command(
             ))
         }
         Cause::Cancel => {
-            // Reap while Unix escalation polls: macOS can return EPERM
-            // when only an unreaped zombie remains in the process group.
-            // try_join also stops waiting if termination fails; never hide
-            // that failure or block forever waiting for an unkillable child.
+
             match tokio::try_join!(term_then_kill(target, Duration::from_secs(2)), async {
                 child
                     .wait()
@@ -1320,9 +1074,7 @@ async fn settle_command(
             ))
         }
     };
-    // A Windows shell may exit before background descendants release the
-    // pipes. End this call's job before draining, not after a 30s pipe wait.
-    // Native Windows shell background jobs therefore never outlive a call.
+
     #[cfg(windows)]
     drop(spawned.job);
     #[cfg(not(windows))]
@@ -1355,15 +1107,6 @@ async fn settle_command(
     ))
 }
 
-/// Entry point for one spawned command. Starts the output pump, runs
-/// [`settle_command`], and when the command reaches its timeout on the jobs
-/// lane (`adopt`), registers it as a background job and spawns the
-/// continuation (a fresh [`settle_command`] with `handoff=false` and no
-/// timeout, so it runs until exit or cancel), returning a "still running"
-/// notice with its log, pgid and stop command. Never kills on timeout there.
-// one lane carries a live child + its group guard + pump + registry handle;
-// bundling them into structs is speculative and would thrash this
-// Send-sensitive call path, so the count stands.
 #[allow(clippy::too_many_arguments)]
 async fn run_command(
     command: String,
@@ -1373,12 +1116,9 @@ async fn run_command(
     ctx: ToolContext,
     spawned: crate::shell::contract::Spawned,
     #[cfg(not(windows))] guard: crate::shell::kill::GroupGuard,
-    // Jobs lane: where a command that reaches its timeout is registered.
-    // `None` (bare mode) makes the timeout a kill.
+
     adopt: Option<&jobs::Jobs>,
-    // The cwd scratch file this command still owes: a stalled run hands the
-    // shell to a background job whose trailing printf writes the report
-    // *after* adopt_reported_cwd already ran — the job waiter deletes it.
+
     cwd_report: PathBuf,
 ) -> ToolOutput {
     let mut spawned = spawned;
@@ -1417,8 +1157,7 @@ async fn run_command(
                 pump,
             } = *hoff;
             let jobs = adopt.expect("a handoff is only armed on the jobs lane");
-            // The stop command has to take the whole tree: a bare `kill
-            // <pgid>` would hit only the `sh` wrapper and leave cargo running.
+
             #[cfg(not(windows))]
             let (handle, stop) = (
                 format!("pgid {}", spawned.pgid),
@@ -1460,11 +1199,6 @@ async fn run_command(
     }
 }
 
-/// The whole UX of a command that outlived its timeout: what it is, that it
-/// was not killed, how to wait (end the turn), peek (`tail`) and stop it, and
-/// what it printed so far (mini-swe-agent shows partial output on timeout;
-/// here the command also keeps going). The first line keeps the
-/// `still running · job ` shape the loop guard and transcript renderer key on.
 fn handoff_notice(id: &str, secs: u64, handle: &str, stop: &str, log: &Path) -> ToolOutput {
     let quoted = shell_quote_path(log);
     let mut text = format!(
@@ -1482,8 +1216,6 @@ fn handoff_notice(id: &str, secs: u64, handle: &str, stop: &str, log: &Path) -> 
     ToolOutput::ok(text)
 }
 
-/// Single-quote a path for a shell command the model will copy. Forward
-/// slashes for Git Bash, which treats backslashes as escapes.
 fn shell_quote_path(path: &Path) -> String {
     let raw = path
         .to_string_lossy()
@@ -1505,11 +1237,6 @@ async fn abort_pump(pump: JoinHandle<PumpSummary>) {
     let _ = pump.await;
 }
 
-/// Bounded pump drain after the child exits: a grandchild inheriting the
-/// pipes keeps the pump alive forever, so the result must never wait past
-/// [`PUMP_DRAIN_TIMEOUT`]. On timeout the handle is aborted and
-/// `truncated=true` so the caller reports truncated cleanup. Happy path
-/// (drain completes in time) is byte-identical to a bare `pump.await`.
 async fn drain_pump(
     mut pump: JoinHandle<PumpSummary>,
     log_path: &std::path::Path,
@@ -1525,10 +1252,6 @@ async fn drain_pump(
     }
 }
 
-/// Fallback summary when the drain times out: rebuilt from the log file with
-/// bounded reads (head + tail budgets only, never the whole file) so the
-/// rendered view stays middle-out with an `omitted` marker and the header
-/// size stays honest.
 fn truncated_summary_from_disk(log_path: &std::path::Path) -> PumpSummary {
     use std::io::{Read, Seek, SeekFrom};
     let total_bytes = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
@@ -1552,8 +1275,7 @@ fn truncated_summary_from_disk(log_path: &std::path::Path) -> PumpSummary {
         .chain(tail.iter())
         .filter(|&&b| b == b'\n')
         .count();
-    // Best effort: only the sampled head+tail are in hand (never read the
-    // whole file here); the live pump path above tracks this exactly.
+
     let has_cr = head.iter().chain(tail.iter()).any(|&b| b == b'\r');
     PumpSummary {
         total_bytes,
@@ -1565,8 +1287,6 @@ fn truncated_summary_from_disk(log_path: &std::path::Path) -> PumpSummary {
     }
 }
 
-/// Render a reaped command: header + fenced body. `first_line` prefixes the
-/// header (timeout/cancel/truncation arms) or is absent (plain exit).
 fn finish_inline(
     command: &str,
     log_path: &std::path::Path,
@@ -1578,14 +1298,7 @@ fn finish_inline(
     let elapsed = start.elapsed();
     let report = exit_report(status, command);
     let mut view = build_view(log_path, summary);
-    // Kind-aware compression, after the window is chosen: `view`'s line
-    // numbers (`shown_lines`, `omitted_lines`) describe the window in the
-    // on-disk log, and every paging hint below is derived from them, so they
-    // have to stay anchored to the log rather than to a squeezed copy of it.
-    // Squeezing the body only changes how much of that window is displayed.
-    // Color and repeat runs go first (the log on disk keeps every byte, so
-    // `dd`/`sed` paging still lands on the text this body was cut from), so
-    // the kind rules match plain lines.
+
     view.body = squeeze_view(&view.body);
     let squeezed = squeeze(&view.body, command);
     let squeeze_note = squeezed.squeezed().then(|| {
@@ -1610,8 +1323,7 @@ fn finish_inline(
         Some(first) => format!("{first}\n{head}"),
         None => head,
     };
-    // Disclosure before the fence: a body that is shorter than the log is a
-    // statement about the bytes, and the model has to be able to see it.
+
     if let Some(note) = &squeeze_note {
         out.push('\n');
         out.push_str(note);
@@ -1621,28 +1333,22 @@ fn finish_inline(
         out.push_str(&fence(&view.body));
     }
     if let Some((start, end)) = view.omitted_range {
-        // Absolute, shell-quoted path: never expand the display-only ~/
-        // shorthand. Git Bash consumes the command string, so the path must
-        // use forward slashes; backslashes are shell escapes there.
+
         let path = log_path
             .to_string_lossy()
             .replace('\\', "/")
             .replace('\'', "'\"'\"'");
         let command = if small_log_on_disk(log_path, summary) {
-            // middle_out offsets are sanitized bytes. Recover by line instead,
-            // including the last shown line in case it was cut mid-line.
+
             let first = view.shown_lines.0.max(1);
             let last = first.saturating_add(199);
             format!("sed -n '{first},{last}p;{last}q' '{path}' | head -c {READ_CHUNK}")
         } else {
-            // Large-log sampling tracks raw offsets, not sanitized ones.
+
             let count = end.saturating_sub(start).min(READ_CHUNK);
             format!("dd if='{path}' bs=1 skip={start} count={count} 2>/dev/null")
         };
-        // The marker above already names the window (`resume_hint` prints the
-        // byte range), so say only what it does not: where the next page
-        // starts. Elision without that made models re-read whole logs to find
-        // what was missing, and once hid a compiler error in the middle.
+
         let next = start + READ_CHUNK;
         if next < end {
             out.push_str(&format!(
@@ -1658,10 +1364,6 @@ fn finish_inline(
     ToolOutput::ok(out)
 }
 
-/// One-line nudge when a command was missing entirely. The benchmark retro
-/// showed agents burning turns re-trying tools the image does not ship
-/// (`rg`, `xxd`, `goyacc`, linters) or trying to install them offline; the
-/// shell's own "not found" line never says what to do instead.
 fn missing_command_hint(text: &str) -> Option<String> {
     let line = text.lines().find(|l| {
         let low = l.to_ascii_lowercase();
@@ -1679,10 +1381,6 @@ fn missing_command_hint(text: &str) -> Option<String> {
     ))
 }
 
-/// Honest per-binary substitutes, from the DeepSWE campaign's not-found
-/// telemetry (84 `rg`, 30 `xxd`, 9 `file`, 4 `time` misses). Only list a
-/// replacement that exists on a bare POSIX image; everything else keeps the
-/// generic list. New binaries are one line each.
 const EQUIVALENTS: &[(&str, &str)] = &[
     ("rg", "`grep -r` / `grep -rn`"),
     ("xxd", "`od -c` (bytes) or `od -An -tx1` (hex)"),
@@ -1699,13 +1397,10 @@ fn equivalent_for(name: &str) -> Option<&'static str> {
         .map(|(_, equivalent)| *equivalent)
 }
 
-/// Pulls the tool name out of the shell's not-found wording:
-/// `bash: line 1: rg: command not found`, `sh: 1: rg: not found`,
-/// `zsh: command not found: rg`.
 fn not_found_subject(line: &str) -> Option<String> {
     let low = line.to_ascii_lowercase();
     let idx = low.find("not found")?;
-    // `zsh: command not found: rg` names the tool after the phrase.
+
     if let Some(tok) = line[idx + "not found".len()..]
         .trim_start_matches([':', ' '])
         .split_whitespace()
@@ -1714,9 +1409,7 @@ fn not_found_subject(line: &str) -> Option<String> {
     {
         return Some(clean_tool_name(tok));
     }
-    // `bash: line 1: rg: command not found` names it before, in the last
-    // colon-delimited field ahead of the phrase (minus the word "command"
-    // for the bash/dash wording).
+
     let before = line[..idx].trim_end();
     let before = before.strip_suffix("command").unwrap_or(before);
     before
@@ -1727,8 +1420,6 @@ fn not_found_subject(line: &str) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// Shell noise that rides a captured name — a literal `\n` fragment, a
-/// trailing colon — is punctuation, not part of the binary name.
 fn clean_tool_name(tok: &str) -> String {
     let tok = tok.replace("\\n", " ").replace("\n", " ");
     tok.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+')))
@@ -1740,17 +1431,10 @@ fn small_log_on_disk(log_path: &std::path::Path, summary: &PumpSummary) -> bool 
     summary.total_bytes <= INLINE_BUDGET_BYTES as u64 && file_len <= INLINE_BUDGET_BYTES as u64
 }
 
-/// Bounded inline view (≤ ~12 KiB): the whole log read back from disk when
-/// it fits the inline budget, else head ++ tail from the bounded memory
-/// sample with the elided shape imposed explicitly.
-/// `{{MARKER}}` is replaced only when bytes were actually omitted, so user
-/// text can never collide with the slot.
 fn build_view(log_path: &std::path::Path, summary: &PumpSummary) -> View {
-    // Byte-bounded: the small path reads the log back from disk — never read
-    // an unbounded log on a stale/small summary. Check the real length first
-    // and fall back to the bounded in-memory head ++ tail.
+
     let use_disk = small_log_on_disk(log_path, summary);
-    // On read error fall through to the memory sample below.
+
     if use_disk && let Ok(bytes) = std::fs::read(log_path) {
         let mut view = middle_out(&bytes, INLINE_BUDGET_BYTES, VIEW_BUDGET_LINES, 0);
         if view.omitted_range.is_some() {
@@ -1759,12 +1443,7 @@ fn build_view(log_path: &std::path::Path, summary: &PumpSummary) -> View {
         }
         return view;
     }
-    // Large logs: the ≤12 KiB memory sample (first MEM_HEAD_BYTES verbatim ++
-    // ring of last MEM_TAIL_BYTES) always fits the inline budget, so a plain
-    // middle_out pass would report nothing omitted. Sanitize head and tail
-    // separately instead — a whole-path middle_out returns its sanitized
-    // input verbatim with exact line counts — and impose the elided shape
-    // with honest totals from the summary. The full log stays on disk.
+
     let head_part = middle_out(&summary.head, usize::MAX, usize::MAX, 0);
     let tail_part = middle_out(&summary.tail, usize::MAX, usize::MAX, 0);
     let shown = (head_part.total_lines, tail_part.total_lines);
@@ -1776,14 +1455,12 @@ fn build_view(log_path: &std::path::Path, summary: &PumpSummary) -> View {
     )
     .unwrap_or(usize::MAX);
     if omitted_lines == 0 && omitted_bytes == 0 {
-        // Degenerate (summary disagrees with the log length, e.g. the drain
-        // fallback undercounted): render the sample whole, no marker.
+
         let mut cat = summary.head.clone();
         cat.extend_from_slice(&summary.tail);
         return middle_out(&cat, INLINE_BUDGET_BYTES, VIEW_BUDGET_LINES, 0);
     }
-    // Omitted middle in raw-log space: the head is the first bytes verbatim
-    // and the tail ring the last.
+
     let omitted_range = Some((
         summary.head.len() as u64,
         summary
@@ -1801,8 +1478,7 @@ fn build_view(log_path: &std::path::Path, summary: &PumpSummary) -> View {
         has_cr: summary.has_cr,
     };
     let hint = resume_hint(&view, log_path);
-    // trim_end on the head is count-preserving (a trailing newline never
-    // starts a new line), so shown counts match the displayed lines exactly.
+
     view.body = format!(
         "{}\n{}\n{}",
         head_part.body.trim_end_matches('\n'),

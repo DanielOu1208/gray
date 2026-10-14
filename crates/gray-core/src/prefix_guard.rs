@@ -1,21 +1,8 @@
-//! One guard at the request choke point.
-//!
-//! Prompt caching rests on a single rule: a session's outbound prefix
-//! (provider, system prompt, tool inventory, history) only grows. Every
-//! request is fingerprinted here and compared with the previous one of the
-//! same agent; the first differing component is reported. A change the
-//! agent announced beforehand (compaction, soft elision, the stale-output
-//! mask — all funnelled through `expect_change`) is normal and logged at
-//! debug; anything else is a self-inflicted cache miss and logged at warn,
-//! so an accident (a tempdir in the system prompt, a reordered tool, a
-//! timestamp) becomes a loud line instead of a silent re-bill.
-
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::message::ChatRequest;
 
-/// Hashes of the prefix components, in prefix order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fingerprint {
     provider: u64,
@@ -24,15 +11,14 @@ pub struct Fingerprint {
     messages: Vec<u64>,
 }
 
-/// The first prefix component that differs between two consecutive requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     Provider,
     System,
     Tools,
-    /// Message `k` of the earlier request was rewritten.
+
     HistoryAt(usize),
-    /// The history shrank without any earlier message changing.
+
     HistoryTruncated {
         from: usize,
         to: usize,
@@ -59,9 +45,6 @@ fn digest<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
     h.finish()
 }
 
-/// Fingerprint of what a provider would see for `req` (the model id stands
-/// in for the provider: a relay that bakes the tier into it renames the
-/// cache key with the tier).
 pub fn fingerprint(model_id: &str, req: &ChatRequest) -> Fingerprint {
     Fingerprint {
         provider: digest(model_id),
@@ -71,8 +54,6 @@ pub fn fingerprint(model_id: &str, req: &ChatRequest) -> Fingerprint {
     }
 }
 
-/// First component of `prev` that `next` no longer shares, in prefix order;
-/// `None` when `next` merely appends.
 pub fn diff(prev: &Fingerprint, next: &Fingerprint) -> Option<Change> {
     if prev.provider != next.provider {
         return Some(Change::Provider);
@@ -97,8 +78,6 @@ pub fn diff(prev: &Fingerprint, next: &Fingerprint) -> Option<Change> {
     })
 }
 
-/// Per-agent state: the previous request's fingerprint and whether the
-/// next change was announced.
 #[derive(Debug, Default)]
 pub struct PrefixGuard {
     last: Option<Fingerprint>,
@@ -106,13 +85,11 @@ pub struct PrefixGuard {
 }
 
 impl PrefixGuard {
-    /// Announce that the next request legitimately rewrites the prefix.
+
     pub fn expect_change(&mut self, reason: &'static str) {
         self.expected = Some(reason);
     }
 
-    /// Record `req`; returns the change against the previous request (if
-    /// any) with the announced reason, if one was given.
     pub fn observe(
         &mut self,
         model_id: &str,

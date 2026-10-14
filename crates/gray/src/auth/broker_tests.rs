@@ -413,9 +413,7 @@ async fn expired_credential_without_refresh_fails_closed() {
 
 #[tokio::test]
 async fn expired_credential_refreshes_when_supported() {
-    // Short-lived access tokens (an hour for ChatGPT plan usage) are routinely
-    // expired when gray comes back from sleep; the refresh token outlives
-    // them, so the rotation must still run instead of forcing a new login.
+
     let dir = tempfile::tempdir().unwrap();
     let store = CredentialStore::new(dir.path().join("auth.json"));
     store
@@ -497,8 +495,6 @@ async fn expired_credential_survives_transient_refresh_failure() {
         async fn shutdown(&self) {}
     }
 
-    // Offline at wake-up: the expired token is unusable, but the refresh
-    // token may still be good, so the entry stays for the next attempt.
     let dir = tempfile::tempdir().unwrap();
     let store = CredentialStore::new(dir.path().join("auth.json"));
     store
@@ -668,8 +664,7 @@ async fn relay_chat_unavailable_maps_to_login_required() {
 
 #[tokio::test]
 async fn relay_verified_marker_counts_as_connected() {
-    // `/connect` on a relay-only login stores no secret: the verified marker
-    // must read back through the store so the row counts as connected.
+
     struct OkChat;
     #[async_trait::async_trait]
     impl ProviderRpc for OkChat {

@@ -1,13 +1,3 @@
-//! Content freshness rig: how soon text written to a file is greppable, in
-//! a real engine (FSEvents, the content worker).
-//!
-//!   fresh <data dir> <home> <trials>
-//!
-//! The engine's "whole disk" is just the path down to `<home>` (every other
-//! folder on the way is skipped), so `<home>` should be a small scratch
-//! folder. Each trial writes a new token, alternately into a new file and
-//! appended to a file the index already holds, then greps until it is found.
-
 use fsearch::{Engine, Grep, GrepMode, Options, Query};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -33,7 +23,7 @@ pub fn main() {
         assert!(t0.elapsed() < Duration::from_secs(120), "no content index after 2 min");
         std::thread::sleep(Duration::from_millis(50));
     }
-    // Let the first sync's own FSEvents settle.
+
     std::thread::sleep(Duration::from_secs(3));
     let old = Path::new(&home).join("held.txt");
     let mut ms = Vec::new();
@@ -55,12 +45,12 @@ pub fn main() {
             std::thread::sleep(Duration::from_millis(5));
         };
         ms.push(found.map_or(f64::INFINITY, |d| d.as_secs_f64() * 1e3));
-        // Apart enough that each trial's write is its own change.
+
         std::thread::sleep(Duration::from_millis(3000));
     }
     let mut sorted = ms.clone();
     sorted.sort_by(f64::total_cmp);
     println!("{}", serde_json::json!({"trials": ms, "p50_ms": sorted[sorted.len() / 2], "max_ms": sorted[sorted.len() - 1]}));
-    // Exit without dropping the engine (it has no stop).
+
     std::process::exit(0);
 }

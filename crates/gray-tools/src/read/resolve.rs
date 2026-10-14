@@ -1,40 +1,5 @@
-//! T4.1 — Unicode filename retry (7 spellings) before failing.
-//!
-//! Pure functions + `std::fs` existence checks only (std only, no new deps).
-//! WIRED (wave gate): `read/mod.rs` has `mod resolve;` — `ReadTool::execute`
-//! resolves the retry right after `resolve_path` and before the T2.3 guard:
-//!
-//! ```ignore
-//! mod resolve;
-//! let given = resolve_path(&ctx.cwd, &path);
-//! let full = resolve::resolve_existing(&given).unwrap_or(given.clone());
-//! let note = (full != given).then(|| {
-//!     notices::repaired_note(&full.display().to_string(), &given.display().to_string())
-//! });
-//! // ... guard + read `full` as today; prepend `note` to the output.
-//! ```
-//!
-//! Spec: plan.ts T4.1 ("Unicode filename retry (7 spellings) before failing").
-//! Only the final path component is ever mutated — a repair never changes
-//! directories ([`same_parent`] enforces it). Note wording lives in
-//! `notices.rs`.
-//!
-//! FOLLOW-UPS (not done here — files outside T4.1 ownership):
-//! 1. Done (wave gate): `read/mod.rs` wiring above.
-//! 2. Done (wave gate): `notices.rs` owns [`super::notices::repaired_note`] verbatim.
-//! 3. `write.rs`/`edit.rs`: call the same helper (spec's follow-up).
-//! 4. `Cargo.toml`: plan suggests `unicode-normalization`; deliberately NOT
-//!    added here (outside ownership). See the note on [`to_nfc`].
-//!
-//! Minimal Latin accent table (~50 entries) instead of the
-//! `unicode-normalization` crate — covers the spec's café/NFD cases with
-//! zero new deps. Upgrade to the crate if non-Latin scripts need repairs.
-
 use std::path::{Path, PathBuf};
 
-/// (precomposed, base, combining) for the Latin scripts the retry covers.
-/// Combining marks: U+0300 grave, U+0301 acute, U+0302 circumflex,
-/// U+0303 tilde, U+0308 diaeresis, U+030A ring, U+0327 cedilla.
 const ACCENTS: &[(char, char, char)] = &[
     ('\u{C0}', 'A', '\u{300}'),
     ('\u{C1}', 'A', '\u{301}'),
@@ -91,8 +56,6 @@ const ACCENTS: &[(char, char, char)] = &[
     ('\u{E7}', 'c', '\u{327}'),
 ];
 
-/// Minimal NFD: split covered precomposed chars into base + combining.
-/// Anything outside [`ACCENTS`] passes through untouched.
 pub fn to_nfd(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -107,8 +70,6 @@ pub fn to_nfd(s: &str) -> String {
     out
 }
 
-/// Minimal NFC: fold covered base + combining pairs back into precomposed.
-/// One left-to-right pass; uncovered sequences pass through untouched.
 pub fn to_nfc(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
@@ -129,15 +90,10 @@ pub fn to_nfc(s: &str) -> String {
     out
 }
 
-/// Spelling 4: narrow no-break space (U+202F) and no-break space (U+00A0)
-/// become a plain space.
 fn nbsp_to_space(s: &str) -> String {
     s.replace(['\u{202F}', '\u{A0}'], " ")
 }
 
-/// Spelling 5: every ASCII space may be the macOS screenshot shape (U+202F).
-/// Enumerates all 2ⁿ−1 non-trivial combinations for n ≤ 4 spaces; beyond that
-/// only the all-NBSP form (combinatorial cap — screenshot names have ≤ 2).
 fn space_to_nbsp_variants(name: &str) -> Vec<String> {
     let n = name.chars().filter(|&c| c == ' ').count();
     if n == 0 {
@@ -167,12 +123,10 @@ fn space_to_nbsp_variants(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Spelling 6a: ASCII quotes become curly (`'` → `’`, `"` → `”`).
 fn ascii_to_curly(s: &str) -> String {
     s.replace('\'', "\u{2019}").replace('"', "\u{201D}")
 }
 
-/// Spelling 6b: curly quotes become ASCII (both single/double directions).
 fn curly_to_ascii(s: &str) -> String {
     s.replace(['\u{2019}', '\u{2018}'], "'")
         .replace(['\u{201C}', '\u{201D}'], "\"")
@@ -187,9 +141,6 @@ fn push_dedup(out: &mut Vec<String>, v: String) {
     }
 }
 
-/// Ordered repair candidates for a file name (final component only), spec
-/// order: (1) as given; (2) NFC; (3) NFD; (4) NBSP→space; (5) space→U+202F
-/// variants; (6) quote swaps both ways; (7) NFD of each quote swap.
 pub fn candidates(name: &str) -> Vec<String> {
     let mut out = vec![name.to_string()];
     push_dedup(&mut out, to_nfc(name));
@@ -207,19 +158,10 @@ pub fn candidates(name: &str) -> Vec<String> {
     out
 }
 
-/// Boundary: a repair never changes directories. Lexical parent comparison —
-/// sufficient because [`resolve_existing`] builds every candidate as
-/// `parent.join(file_name)`; a future caller passing an arbitrary path with a
-/// different parent is rejected here.
 pub fn same_parent(original: &Path, candidate: &Path) -> bool {
     original.parent() == candidate.parent()
 }
 
-/// First candidate that exists (1) as given, then (2)–(7) in order.
-/// Non-UTF-8 file names and parent-less edge cases yield `None` when the
-/// literal is missing (spec repairs are Unicode spellings of the name).
-/// `symlink_metadata` (not `exists`) so symlinks to anything still hit —
-/// the T2.3 guard decides refusals later.
 pub fn resolve_existing(original: &Path) -> Option<PathBuf> {
     if std::fs::symlink_metadata(original).is_ok() {
         return Some(original.to_path_buf());

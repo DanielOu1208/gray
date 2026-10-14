@@ -1,17 +1,5 @@
-//! What a `grep` argv asks for, reduced to what the index can answer exactly:
-//! the real tool's argv without its walk flags, the one directory it walks,
-//! the walk's file and directory rules, and per pattern a literal every
-//! matching line must contain. Anything else is a decline with its reason.
-//!
-//! The literal is a pruning key only. A file the index says cannot contain
-//! it is never handed to the real tool; a file it may contain is, and the
-//! real tool decides. So a literal that is too broad costs time, and one
-//! that is too narrow costs a wrong answer: when in doubt, decline.
-
 use globset::{Glob, GlobMatcher};
 
-/// The shortest literal worth an index lookup. Shorter ones match nearly
-/// every file, so the lookup prunes nothing.
 const MIN_NEEDLE: usize = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -21,19 +9,15 @@ pub enum Syntax {
     Fixed,
 }
 
-/// `--include` / `--exclude` / `--exclude-dir` as grep applies them to the
-/// files its recursion finds.
 #[derive(Default)]
 pub struct Walk {
-    /// In command-line order: `true` for `--include`, `false` for `--exclude`.
+
     rules: Vec<(bool, GlobMatcher)>,
     exclude_dirs: Vec<GlobMatcher>,
 }
 
 impl Walk {
-    /// Does recursion keep a file of this base name? The last matching rule
-    /// decides; with none matching, the file is kept unless the first rule
-    /// is an include.
+
     pub fn keeps_file(&self, name: &[u8]) -> bool {
         let Ok(name) = std::str::from_utf8(name) else {
             return false;
@@ -50,26 +34,22 @@ impl Walk {
         }
     }
 
-    /// Does recursion skip a directory of this base name?
     pub fn skips_dir(&self, name: &[u8]) -> bool {
         std::str::from_utf8(name).is_ok_and(|n| self.exclude_dirs.iter().any(|m| m.is_match(n)))
     }
 }
 
-/// A grep invocation the index can serve.
 pub struct GrepPlan {
-    /// The real tool's argv without the operand, the walk flags, or `-r`:
-    /// output flags, `-e` patterns, and `-H` unless the caller said `-h`.
+
     pub argv: Vec<String>,
-    /// The directory the real tool would have walked, as given.
+
     pub operand: String,
-    /// Each matching line of the real tool holds one of these, literally.
+
     pub needles: Vec<String>,
     pub ignore_case: bool,
     pub walk: Walk,
 }
 
-/// Parse a grep argv (without argv[0]) into a plan, or the reason to decline.
 pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
     let mut argv: Vec<String> = Vec::new();
     let mut patterns: Vec<String> = Vec::new();
@@ -96,7 +76,7 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
                 Some((n, v)) => (n, Some(v.to_string())),
                 None => (long, None),
             };
-            // Options that take a value: `--name=V` or `--name V`.
+
             let take = |i: &mut usize| -> Result<String, &'static str> {
                 if let Some(v) = value.clone() {
                     return Ok(v);
@@ -154,7 +134,7 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
             while k < cluster.len() {
                 let c = cluster[k];
                 k += 1;
-                // Options that take a value: the rest of the word, else the next word.
+
                 if matches!(c, 'A' | 'B' | 'C' | 'm' | 'e') {
                     let rest: String = cluster[k..].iter().collect();
                     let v = if rest.is_empty() {
@@ -244,8 +224,6 @@ fn glob(pat: &str) -> Result<GlobMatcher, &'static str> {
     Ok(Glob::new(pat).map_err(|_| "bad glob")?.compile_matcher())
 }
 
-/// One literal per alternative of `pattern` that every match of that
-/// alternative must contain. `None` when some alternative has none.
 pub fn needles_for(pattern: &str, syntax: Syntax, ignore_case: bool) -> Option<Vec<String>> {
     let branches: Vec<String> = match syntax {
         Syntax::Fixed => vec![pattern.to_string()],
@@ -268,9 +246,6 @@ pub fn needles_for(pattern: &str, syntax: Syntax, ignore_case: bool) -> Option<V
     Some(out)
 }
 
-/// Under `-i`, a needle must fold the same way in the index as in the tool:
-/// ASCII only, and free of the letters whose folds reach beyond ASCII (or
-/// whose upper case a locale folds to them).
 fn folds_safely(needle: &str) -> bool {
     needle.is_ascii()
         && !needle
@@ -278,8 +253,6 @@ fn folds_safely(needle: &str) -> bool {
             .any(|c| matches!(c.to_ascii_lowercase(), 'i' | 'k' | 's'))
 }
 
-/// Split an ERE at its top-level `|`. `None` if the parentheses do not
-/// balance (the real tool reports that).
 fn split_alternatives(p: &str) -> Option<Vec<String>> {
     let cs: Vec<char> = p.chars().collect();
     let mut out = vec![String::new()];
@@ -315,10 +288,6 @@ fn split_alternatives(p: &str) -> Option<Vec<String>> {
     (depth == 0).then_some(out)
 }
 
-/// The literal runs every match must contain, at the top level of one
-/// alternative. Anything that can match other text (classes, groups, `.`,
-/// anchors, optional atoms) ends a run; a group's content is not required.
-/// `None` for syntax it does not model, so the caller declines.
 fn required_runs(p: &str, ere: bool) -> Option<Vec<String>> {
     let cs: Vec<char> = p.chars().collect();
     let mut runs: Vec<String> = Vec::new();
@@ -329,7 +298,7 @@ fn required_runs(p: &str, ere: bool) -> Option<Vec<String>> {
         match c {
             '\\' => {
                 let n = *cs.get(i + 1)?;
-                // Escaped punctuation is literal, except the BRE operators.
+
                 if !n.is_ascii_punctuation() || (!ere && "(){}|+?".contains(n)) {
                     return None;
                 }
@@ -353,7 +322,7 @@ fn required_runs(p: &str, ere: bool) -> Option<Vec<String>> {
                 runs.push(std::mem::take(&mut cur));
                 i += 1;
             }
-            // In a BRE, `( ) { } | + ?` are plain characters.
+
             _ => {
                 push_literal(c, cs.get(i + 1), ere, &mut cur, &mut runs);
                 i += 1;
@@ -364,9 +333,6 @@ fn required_runs(p: &str, ere: bool) -> Option<Vec<String>> {
     Some(runs.into_iter().filter(|r| !r.is_empty()).collect())
 }
 
-/// Add a literal char to the run, unless the quantifier after it makes it
-/// optional (then the run ends before it). An ERE `+` keeps it required but
-/// ends the run after it.
 fn push_literal(c: char, next: Option<&char>, ere: bool, cur: &mut String, runs: &mut Vec<String>) {
     let optional = next == Some(&'*') || (ere && matches!(next, Some('?' | '{')));
     if optional {
@@ -379,7 +345,6 @@ fn push_literal(c: char, next: Option<&char>, ere: bool, cur: &mut String, runs:
     }
 }
 
-/// Index of the `]` closing the bracket expression opening at `open`.
 fn bracket_end(cs: &[char], open: usize) -> Option<usize> {
     let mut i = open + 1;
     if cs.get(i) == Some(&'^') {
@@ -403,7 +368,6 @@ fn bracket_end(cs: &[char], open: usize) -> Option<usize> {
     None
 }
 
-/// Index of the `)` closing the group opening at `open` (ERE).
 fn group_end(cs: &[char], open: usize) -> Option<usize> {
     let mut depth = 0usize;
     let mut i = open;

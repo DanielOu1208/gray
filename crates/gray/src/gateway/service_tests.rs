@@ -56,8 +56,7 @@ fn linger_warning_fires_only_without_linger_yes() {
 
 #[test]
 fn the_unit_quotes_gray_home() {
-    // Audit #17: an unquoted Environment=GRAY_HOME breaks on any home with
-    // whitespace, and misparses the rest of the unit.
+
     let home = std::path::Path::new("/home/it s home");
     let exe = std::path::Path::new("/usr/local/bin/gray");
     let body = super::systemd_unit_body(home, exe);
@@ -65,7 +64,7 @@ fn the_unit_quotes_gray_home() {
         body.contains("Environment=GRAY_HOME=\"/home/it s home\""),
         "{body}"
     );
-    // A double quote inside the path must not break out of the quoting.
+
     let body = super::systemd_unit_body(
         std::path::Path::new("/home/we\"ird"),
         std::path::Path::new("/usr/local/bin/gray"),

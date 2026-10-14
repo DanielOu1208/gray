@@ -8,7 +8,7 @@ async fn append_continues_session_in_place() {
         .await
         .unwrap();
     let before = store.load(&sid).await.unwrap().1.len();
-    // Prior history + one new turn: only the new message lands in the file.
+
     let with_new = vec![Message::user("first"), Message::user("second")];
     append_new_messages(&store, &sid, before, &with_new, false, None, None)
         .await
@@ -16,7 +16,7 @@ async fn append_continues_session_in_place() {
     let (_, entries) = store.load(&sid).await.unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].message.text_content(), "second");
-    // Same file, not a new session.
+
     assert_eq!(store.list().await.len(), 1);
 }
 
@@ -54,7 +54,7 @@ async fn saved_sessions_redact_secrets_and_paths() {
             Message::user(
                 "read /Users/hunter/src/app/main.rs with ZAI_API_KEY=supersecretvalue12345",
             ),
-            // Secret-free: persists verbatim (resume fidelity).
+
             Message::user("read crates/foo/src/main.rs"),
         ],
     )
@@ -112,7 +112,7 @@ fn concurrent_tool_calls_track_by_id() {
         &HashMap::new(),
     )
     .unwrap();
-    // Second call's end must not clobber the first call's name/args.
+
     assert_eq!(in_flight["id1"].name, "alpha");
     assert_eq!(in_flight["id1"].args.as_ref(), Some(&a));
     render_event_with_context(
@@ -134,7 +134,7 @@ fn concurrent_tool_calls_track_by_id() {
         &HashMap::new(),
     )
     .unwrap();
-    // id2 survives id1's result (no single-slot take() wiping both).
+
     assert!(in_flight.contains_key("id2"));
     assert!(!in_flight.contains_key("id1"));
     render_event_with_context(
@@ -226,7 +226,7 @@ async fn checkpointed_messages_are_not_appended_twice() {
         failed.clone(),
         0,
     );
-    // Mid-turn step boundary: everything past the initial history lands now.
+
     let msgs = vec![
         Message::user("prompt"),
         Message::assistant("step one"),
@@ -236,11 +236,9 @@ async fn checkpointed_messages_are_not_appended_twice() {
     use std::sync::atomic::Ordering::Relaxed;
     assert_eq!(done.load(Relaxed), msgs.len());
     assert!(!failed.load(Relaxed));
-    // The initial message was saved at session create; the checkpoint adds
-    // only the fresh tail, so the file holds exactly msgs.len() entries.
+
     assert_eq!(store.load(&sid).await.unwrap().1.len(), msgs.len());
-    // End of turn starts at the checkpointed cursor: only the final
-    // assistant message is appended, carrying the turn's usage/duration.
+
     let mut full = msgs.clone();
     full.push(Message::assistant("final answer"));
     let usage = gray_core::event::Usage {
@@ -289,8 +287,7 @@ async fn checkpoint_writes_nothing_after_history_rewrite() {
     let msgs = vec![Message::user("prompt"), Message::assistant("step one")];
     hook(&msgs, 0).await;
     assert_eq!(store.load(&sid).await.unwrap().1.len(), 2);
-    // Compaction bumped history_revision: a later boundary must not append
-    // the rewritten history — the end-of-turn replacement owns that write.
+
     let rewritten = vec![
         Message::system("summary"),
         Message::user("prompt"),
@@ -331,10 +328,7 @@ async fn checkpoint_persists_the_redacted_copy() {
 
 #[test]
 fn provider_failures_classify_as_retryable_infra() {
-    // The bench-class failure: a dropped stream must be distinguishable from
-    // an agent-side stop so a harness re-runs the turn instead of giving up.
-    // CoreError::Provider is the generic fallback (e.g. the turn-event cap),
-    // not an infra class - real provider deaths keep their variant.
+
     for error in [
         gray_core::error::CoreError::Connection("dns".into()),
         gray_core::error::CoreError::Timeout("read".into()),
@@ -351,9 +345,7 @@ fn provider_failures_classify_as_retryable_infra() {
 
 #[test]
 fn config_failures_are_not_retryable_even_though_they_arrive_from_the_provider() {
-    // The campaign's model-404: the endpoint answers "model does not exist"
-    // as a 400-class bad request. Retrying that turn can never help, and the
-    // hint must point at the configuration, not the network.
+
     let model_missing = PrintFailure::of(&anyhow::Error::new(
         gray_core::error::CoreError::BadRequest(
             "status 404 Not Found: model deepseek-v4.1-flash does not exist".into(),
@@ -397,8 +389,7 @@ fn agent_side_stops_are_not_retryable() {
 
 #[test]
 fn failure_message_never_carries_provider_detail() {
-    // The JSON record must stay scrubbed even when the underlying error text
-    // quotes the provider's response body.
+
     let failure = PrintFailure::of(&anyhow::Error::new(gray_core::error::CoreError::Auth(
         "401 sk-live-secret".into(),
     )));
@@ -409,15 +400,12 @@ fn failure_message_never_carries_provider_detail() {
     assert!(rendered.contains("hint:"), "{rendered}");
     assert!(rendered.contains("(exit code"), "{rendered}");
 
-    // A generic provider error keeps the turn-failure message and no hint.
     let generic = PrintFailure::of(&anyhow::Error::new(gray_core::error::CoreError::Provider(
         "401 sk-live-secret".into(),
     )));
     assert_eq!(generic.code, "provider_error");
     assert!(generic.hint.is_none());
 }
-
-// ── progress narration rows (tool detail / reasoning on the --json wire) ──
 
 fn json_out(show_reasoning: bool) -> JsonOutput {
     JsonOutput {
@@ -474,16 +462,14 @@ fn tool_rows_carry_a_display_name() {
 
 #[test]
 fn tool_detail_prefers_injected_preview_text() {
-    // Surfaces resolve the text; core only discloses it. No wire-shape
-    // parsing in `tool_detail`.
+
     let detail = tool_detail(
         "some_surface_tool",
         &serde_json::json!({"document": {"title": "Hi"}}),
         Some("## Hello"),
     );
     assert_eq!(detail.as_deref(), Some("## Hello"));
-    // No resolved text -> built-in arms (unknown tool: none). A wire
-    // `preview` arg is data, not a display directive.
+
     assert!(
         tool_detail(
             "some_surface_tool",
@@ -496,8 +482,7 @@ fn tool_detail_prefers_injected_preview_text() {
 
 #[test]
 fn tool_ran_row_uses_declared_preview_path() {
-    // End-to-end on the --json wire: a manifest `preview` path resolves
-    // against the call args into `detail`.
+
     let mut out = json_out(false);
     out.previews
         .insert("send_card".into(), "document.title".into());
@@ -507,7 +492,7 @@ fn tool_ran_row_uses_declared_preview_path() {
         args: serde_json::json!({"document": {"title": "  ## Hello  "}}),
     });
     assert_eq!(rows[0]["detail"], "## Hello");
-    // Undeclared path -> built-in arms (unknown tool: no detail key).
+
     let mut out2 = json_out(false);
     out2.tools.insert("c1".into(), "send_card".into());
     let rows2 = out2.rows(&AgentEvent::ToolCallEnd {
@@ -524,8 +509,6 @@ fn text_out() -> JsonOutput {
     }
 }
 
-/// What a consumer shows after replaying `rows`: concatenated deltas per
-/// segment plus the latest tail.
 fn replay(rows: &[serde_json::Value]) -> Vec<String> {
     let mut stable: Vec<String> = Vec::new();
     let mut tails: Vec<String> = Vec::new();
@@ -612,7 +595,7 @@ fn text_rows_redact_secrets_and_never_show_them_half_typed() {
     let mut rows = Vec::new();
     for piece in ["key: sk-abc1", "23SECRETxyz789 ok"] {
         rows.extend(out.rows(&delta(piece)));
-        // Defeat the frame gap so every fragment is observable.
+
         out.segment.last_emit = None;
     }
     rows.extend(out.take_text(true));
@@ -743,8 +726,7 @@ fn progress_detail_redacts_secrets_from_commands() {
 
 #[test]
 fn progress_detail_preserves_secret_free_paths() {
-    // The --json wire feeds owner-local surfaces (Discord narration); a path
-    // with no secret in it is the whole point, not a leak.
+
     let detail = tool_detail(
         "bash",
         &serde_json::json!({"command": "cat /tmp/shot.png"}),
@@ -778,7 +760,7 @@ fn progress_output_preserves_secret_free_paths() {
 
 #[test]
 fn progress_detail_for_an_unknown_tool_drops_the_args() {
-    // A value we do not understand is exactly where a token hides.
+
     assert!(
         tool_detail(
             "some_plugin_tool",
@@ -815,7 +797,7 @@ fn progress_batches_reasoning_instead_of_one_row_per_token() {
     });
     assert_eq!(flushed.len(), 1);
     assert_eq!(flushed[0]["phase"], "thinking");
-    // Turn end flushes whatever reasoning is left.
+
     let end = out.rows(&AgentEvent::TurnEnd {
         stop_reason: gray_core::event::StopReason::EndTurn,
         usage: Default::default(),

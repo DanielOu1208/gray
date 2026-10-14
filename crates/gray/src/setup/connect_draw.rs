@@ -1,5 +1,3 @@
-//! Connect-modal render: provider list + API-key entry (split from `setup::connect`).
-
 use super::connect::ConnectColors;
 use super::*;
 
@@ -11,7 +9,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
-/// Centered dialog: clears the region, paints the bg block, returns the padded inner rect.
 fn centered_dialog(
     frame: &mut Frame,
     area: Rect,
@@ -40,7 +37,6 @@ fn centered_dialog(
     Rect::new(x + 3, y + 1, w.saturating_sub(6), h.saturating_sub(2))
 }
 
-/// Title row with the padded "esc" hint at the right edge.
 fn render_header_esc(frame: &mut Frame, inner: Rect, title: &str, colors: &ConnectColors) {
     let pad_len =
         (inner.width as usize).saturating_sub(title.chars().count() + "esc".chars().count());
@@ -63,8 +59,6 @@ fn render_header_esc(frame: &mut Frame, inner: Rect, title: &str, colors: &Conne
     );
 }
 
-/// Footer of (key, description) pairs: bold keys, dim descriptions.
-/// Bold-key / dim-desc spans for a static footer table.
 fn footer_key_spans<'a>(keys: &[(&'a str, &'a str)], colors: &ConnectColors) -> Vec<Span<'a>> {
     keys.iter()
         .flat_map(|(k, v)| {
@@ -82,10 +76,6 @@ fn footer_key_spans<'a>(keys: &[(&'a str, &'a str)], colors: &ConnectColors) -> 
         .collect()
 }
 
-/// Render a footer line at the bottom of `inner`. Takes pre-built spans so a
-/// caller whose footer is conditional (the provider list appends a
-/// shift+enter hint only for rows that hold a credential) shares the
-/// positioning without the styling being frozen to a static table.
 fn render_footer(frame: &mut Frame, inner: Rect, spans: Vec<Span<'_>>) {
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
@@ -93,7 +83,6 @@ fn render_footer(frame: &mut Frame, inner: Rect, spans: Vec<Span<'_>>) {
     );
 }
 
-/// Status message (error-styled bullet) or a dim default note, one row at y+5.
 fn render_note_or_status(
     frame: &mut Frame,
     inner: Rect,
@@ -121,7 +110,6 @@ fn render_note_or_status(
     );
 }
 
-/// Clears and renders one input row with the input background.
 fn render_input_row(frame: &mut Frame, inner: Rect, content: Line, colors: &ConnectColors) {
     let rect = Rect::new(inner.x, inner.y + 3, inner.width, 1);
     frame.render_widget(Clear, rect);
@@ -132,7 +120,7 @@ fn render_input_row(frame: &mut Frame, inner: Rect, content: Line, colors: &Conn
 }
 
 #[allow(clippy::too_many_arguments)]
-// Mechanical split of `run_connect_modal`: params are the modal state the arm renders.
+
 pub(crate) fn render_selecting(
     frame: &mut Frame,
     area: Rect,
@@ -156,10 +144,8 @@ pub(crate) fn render_selecting(
         .collect();
     let inner = centered_dialog(frame, area, 68, 18, 42, 10, colors);
 
-    // 1. Header Line (with esc at top right)
     render_header_esc(frame, inner, "Connect a provider", colors);
 
-    // 2. Search Bar
     let search_line = if filter.is_empty() {
         Line::from(vec![
             Span::styled(
@@ -203,7 +189,6 @@ pub(crate) fn render_selecting(
         Rect::new(inner.x, inner.y + 1, inner.width, 1),
     );
 
-    // The separator follows Custom even when connected providers precede it.
     let list_y = inner.y + 3;
     let list_h = inner.height.saturating_sub(4) as usize;
     let mut rows = Vec::new();
@@ -306,10 +291,9 @@ pub(crate) fn render_selecting(
         }
     }
 
-    // 4. Footer Help Line (no brackets)
     let mut footer_spans =
         footer_key_spans(&[("↑↓ ", "navigate    "), ("enter ", "select")], colors);
-    // Removal is only offered for a row that actually holds a credential.
+
     if filtered
         .get(sel.min(filtered.len().saturating_sub(1)))
         .is_some_and(|item| super::connect::is_removable(item, config, auth))
@@ -335,8 +319,6 @@ pub(crate) fn render_selecting(
     render_footer(frame, inner, footer_spans);
 }
 
-/// Shift+Enter confirmation: names the provider (and its endpoint, which is
-/// what a custom entry is really keyed by) and states the one consequence.
 pub(crate) fn render_confirm_remove(
     frame: &mut Frame,
     area: Rect,
@@ -441,11 +423,6 @@ pub(crate) fn render_confirm_remove(
     );
 }
 
-/// The custom-endpoint screen: URL input plus a pick list of local
-/// servers probed when the screen opened (`(running)` = the model list
-/// answered). `suggestions` arrives filtered+selected by the caller; the
-/// box grows a row per suggestion, capped so short terminals keep the
-/// footer on screen.
 pub(crate) fn render_entering_url(
     frame: &mut Frame,
     area: Rect,
@@ -499,8 +476,6 @@ pub(crate) fn render_entering_url(
         colors,
     );
 
-    // Suggestion rows at y+7: name, URL, running badge; the selected row
-    // takes the accent fill like the provider list.
     for (i, suggestion) in suggestions.iter().take(8).enumerate() {
         let is_selected = i == sel && !suggestions.is_empty();
         let y = inner.y + 7 + i as u16;
@@ -579,7 +554,7 @@ pub(crate) fn render_entering_key(
     status_msg: &Option<String>,
     colors: &ConnectColors,
 ) {
-    // Compose the dim hint rows first — the box sizes to the widest line.
+
     let provider_line = format!("Provider: {}", item.name);
     let provenance = env_var.map(|var| format!(" (from ${var})"));
     let get_a_key = catalog::key_url(&item.id).map(|url| format!(" Get a key: {url}"));
@@ -621,8 +596,7 @@ pub(crate) fn render_entering_key(
     .into_iter()
     .max()
     .unwrap_or(0) as u16;
-    // Width follows the longest line (never narrower than the old fixed
-    // box); one hint row fits inside the old height, a second grows it.
+
     let hint_rows = u16::from(provenance.is_some()) + u16::from(get_a_key.is_some());
     let inner = centered_dialog(
         frame,
@@ -634,7 +608,6 @@ pub(crate) fn render_entering_key(
         colors,
     );
 
-    // Header (with esc at top right)
     render_header_esc(frame, inner, "API Key Configuration", colors);
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
@@ -644,7 +617,6 @@ pub(crate) fn render_entering_key(
         Rect::new(inner.x, inner.y + 1, inner.width, 1),
     );
 
-    // Input Box (inset colored block)
     let input_content = if key_buf.is_empty() {
         if let Some(existing) = existing_key.as_ref() {
             let masked = mask_key_pretty(existing);
@@ -690,16 +662,13 @@ pub(crate) fn render_entering_key(
 
     render_input_row(frame, inner, input_content, colors);
 
-    // Status or note
     render_note_or_status(frame, inner, status_msg, note, colors);
 
-    // Provenance and the get-a-key URL each take their own dim row under
-    // the status — sharing a line truncated the URL at narrower widths.
     let footer_y = inner.y + inner.height.saturating_sub(1);
     for (i, hint) in [provenance, get_a_key].into_iter().flatten().enumerate() {
         let hint_y = inner.y + 6 + i as u16;
         if hint_y >= footer_y {
-            break; // Tiny terminal: the footer owns the last row.
+            break;
         }
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -712,7 +681,6 @@ pub(crate) fn render_entering_key(
         );
     }
 
-    // Footer buttons (enter update / submit - no brackets)
     render_footer(
         frame,
         inner,
@@ -724,8 +692,6 @@ pub(crate) fn render_entering_key(
 #[path = "connect_draw_tests.rs"]
 mod tests;
 
-/// Plugin browser-login dialog: the full verification URI plus a bounded,
-/// secret-free status line. Esc cancels the host-side operation.
 pub(crate) fn render_authorizing_plugin(
     frame: &mut Frame,
     area: Rect,
@@ -734,13 +700,10 @@ pub(crate) fn render_authorizing_plugin(
     status_msg: Option<&str>,
     colors: &ConnectColors,
 ) {
-    // External-login providers never produce a browser URL: show the
-    // terminal-first status, not a "waiting for URL" line that reads broken.
+
     let status = status_msg.unwrap_or("Checking your terminal login");
     let uri = verification_uri.unwrap_or("");
 
-    // Size the dialog to its content: title, status, optional URI row,
-    // esc-cancel footer. Anything taller paints an empty box.
     let inner = centered_dialog(
         frame,
         area,
@@ -761,7 +724,7 @@ pub(crate) fn render_authorizing_plugin(
         )]),
         Line::from(""),
     ];
-    // External-login providers never produce a URL line; OAuth rows keep theirs.
+
     if !uri.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             uri,
@@ -782,7 +745,7 @@ pub(crate) fn render_authorizing_plugin(
             Style::default().fg(colors.text_dim).bg(colors.box_bg),
         ),
     ]));
-    // Body starts below the header row; drawing at `inner` overwrote the title.
+
     let body = Rect::new(
         inner.x,
         inner.y + 2,

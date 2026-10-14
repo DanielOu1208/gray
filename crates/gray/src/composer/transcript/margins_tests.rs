@@ -23,13 +23,13 @@ fn edge_blanks_become_boundary_marks() {
     assert!(shaped.lead);
     assert!(shaped.trail);
     assert_eq!(shaped.lines, vec![text("a"), text("b")]);
-    // The link on `a` moves with its row; the one on the trailing blank goes.
+
     assert_eq!(shaped.hyperlinks, vec![link(0)]);
 }
 
 #[test]
 fn inner_blanks_are_content_and_stay() {
-    // A code block's empty lines: the funnel never collapses them.
+
     let rows = vec![text("let a = 1;"), text(""), text(""), text("let b = 2;")];
     let shaped = shape_block(rows.clone(), vec![]);
     assert!(!shaped.lead && !shaped.trail);
@@ -45,7 +45,7 @@ fn an_all_blank_block_is_only_a_boundary() {
 
 #[test]
 fn painted_rows_are_edges_not_gaps() {
-    // A card's padding row is part of the card: never lifted out.
+
     let bg = Style::default().bg(Color::Rgb(22, 22, 22));
     let rows = vec![text("").style(bg), text("card"), text("").style(bg)];
     let shaped = shape_block(rows.clone(), vec![]);
@@ -78,14 +78,10 @@ fn junction_counts_blanks_across_the_seam() {
 
 #[test]
 fn junction_ignores_a_documents_leading_margin() {
-    // The welcome banner's top-centering blanks replay into an empty
-    // transcript on reflow (and after `retract_slash_echo` at home): a top
-    // margin is not a seam, so it cannot double.
+
     assert_eq!(junction_blank_run(&[], &[text(""), text(""), text("x")]), 0);
 }
 
-/// The `Tui` funnel without a terminal: `ensure_gap` is `boundary`, every
-/// commit is `block`, and both decide through the same `admit`.
 #[derive(Default)]
 struct Session {
     rows: Vec<Line<'static>>,
@@ -126,27 +122,23 @@ fn card(title: &str) -> Vec<Line<'static>> {
     ]
 }
 
-/// A whole turn: prompt card, two thought paragraphs, an answer streamed in
-/// markdown chunks with a code block, a tool card, the footer. Every block
-/// boundary comes out as exactly one unpainted row, whichever writer marked
-/// it, however many times, and however the content was chunked.
 #[test]
 fn a_turn_has_exactly_one_row_between_blocks() {
     let mut s = Session::default();
-    s.block(vec![text("gray · Run /help"), text("")]); // welcome ends blank
+    s.block(vec![text("gray · Run /help"), text("")]);
     s.boundary();
     s.block(card("❯ fix it"));
     s.boundary();
-    // Thinking starts: a boundary, then fragments; `\n\n` is a blank one.
+
     s.boundary();
     s.block(vec![text("First thought.")]);
     s.block(vec![text("")]);
-    // Mid-pause the tail is content and a gap is owed: the band's seam is it.
+
     assert_eq!(s.texts().last().unwrap(), "First thought.");
     assert!(s.owed);
     s.block(vec![text("Second thought.")]);
-    s.boundary(); // thinking ends
-    // The answer: the renderer's frozen chunks carry edge blanks.
+    s.boundary();
+
     s.boundary();
     s.block(vec![text("Para one."), text("")]);
     s.block(vec![
@@ -157,7 +149,7 @@ fn a_turn_has_exactly_one_row_between_blocks() {
         text("let b = 2;"),
     ]);
     s.boundary();
-    s.boundary(); // a second mark is no second gap
+    s.boundary();
     s.block(card("⬢ Ran cargo test"));
     s.boundary();
     s.block(vec![text("✻ Thought for 3s")]);
@@ -190,8 +182,7 @@ fn a_turn_has_exactly_one_row_between_blocks() {
             "✻ Thought for 3s",
         ]
     );
-    // The two blank code rows are content; everything else is one row.
-    // (Card rows above: painted padding, gap, painted padding, title, ...)
+
     let bg = Some(Color::Rgb(22, 22, 22));
     assert_eq!(s.rows[1].style.bg, None, "welcome's own gap");
     assert_eq!(s.rows[2].style.bg, bg, "card padding, not a second gap");
@@ -203,8 +194,6 @@ fn a_turn_has_exactly_one_row_between_blocks() {
     );
 }
 
-/// The live stream and a resize reflow see the same blocks cut differently
-/// (fragments vs one run, chunks vs one block): the margins must not move.
 #[test]
 fn chunking_does_not_move_a_margin() {
     let mut live = Session::default();

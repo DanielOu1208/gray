@@ -1,31 +1,9 @@
-//! First-run rig: a fresh engine (empty data dir) from start to the first
-//! correct answer, in-process.
-//!
-//!   firstrun truth <data> <home> <out.json> <spec>...   build fully, record answers
-//!   firstrun truth-names <data> <home> <out.json> <spec>...   record answers once the
-//!       name index is in (greps then read the files: no content index is built)
-//!   firstrun trial <data> <home> <truth.json> <spec>    time one spec's first correct answer
-//!   firstrun full <data> <home>                         time a whole first run
-//!   firstrun same <data> <home> <spec>...               first answers == built answers?
-//!   firstrun seq <data> <home> <truth.json> <spec>...   ask each in turn until correct
-//!   firstrun diff <data> <home> <truth.json> <spec>...  first answers vs the truth's, by path
-//!   firstrun probe <data> <home> <probe.json> <root>    the bench's first-run probe ({q, target,
-//!       pattern, files}: paths under root): name ranked first, then a grep holding every file
-//!
-//! spec: `name:<query>`, `grep:<limit>:<pattern> in:<folder>` (a literal,
-//! no time budget). A trial asks again every 10 ms until the answer equals
-//! the truth's. `<data>` must not exist. Folders macOS guards with a consent
-//! prompt are skipped for the real home as well as `<home>` (the rig runs
-//! without Full Disk Access; opening them could pop a prompt).
-
 use fsearch::{Engine, GrepMode, Options, Query};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// The daemon's allocator (src/main.rs), so footprints here are the daemon's:
-/// big buffers straight from mmap and back with munmap.
 struct Alloc;
 const BIG: usize = 1 << 20;
 
@@ -130,8 +108,7 @@ pub fn main() {
             println!("{}", json!({"seq": out, "peak_mb": mb(peak.load(Ordering::Relaxed))}));
         }
         "same" => {
-            // Each spec's first answer (asked as soon as one comes), then
-            // the answer once everything is built: they must be equal.
+
             let first: Vec<(f64, Value)> = a[3..]
                 .iter()
                 .map(|s| {
@@ -170,9 +147,7 @@ pub fn main() {
             println!("{}", json!({"specs": first.len(), "differ": bad, "ready_s": ready, "built_s": done}));
         }
         "probe" => {
-            // As the bench probes a first run (bench/fsrun): the name query, in
-            // <root>, until its target ranks first; then every match of the
-            // pattern until the answer holds each listed file. Times from start.
+
             let p: Value = serde_json::from_slice(&std::fs::read(&a[3]).unwrap()).unwrap();
             let root = &a[4];
             let s = |k: &str| p[k].as_str().unwrap().to_string();
@@ -223,7 +198,7 @@ pub fn main() {
             println!("{}", json!({"name_s": name_s, "grep_s": grep_s, "peak_mb": mb(peak.load(Ordering::Relaxed))}));
         }
         "diff" => {
-            // Each spec's first answer vs the truth's, by path: missing, extra, lines differing.
+
             let truth: Value = serde_json::from_slice(&std::fs::read(&a[3]).unwrap()).unwrap();
             for spec in &a[4..] {
                 let got = loop {
@@ -266,15 +241,13 @@ pub fn main() {
         }
         _ => panic!("unknown command"),
     }
-    // Exit without dropping the engine (it has no stop).
+
     std::process::exit(0);
 }
 
-/// The sampled peak footprint since the name index was ready.
 static CONTENT_PEAK: AtomicU64 = AtomicU64::new(0);
 static READY: AtomicBool = AtomicBool::new(false);
 
-/// Seconds to the name index being ready, then to the content index done.
 fn wait_built(e: &Engine, t0: Instant) -> (f64, f64) {
     let mut ready = None;
     loop {
@@ -290,7 +263,6 @@ fn wait_built(e: &Engine, t0: Instant) -> (f64, f64) {
     }
 }
 
-/// One spec's answer, without timings.
 fn ask(e: &Engine, spec: &str, home: &str) -> Result<Value, String> {
     if let Some(q) = spec.strip_prefix("name:") {
         let found = e.search(&Query::parse(q, home)?)?;
@@ -314,7 +286,6 @@ fn mb(b: u64) -> f64 {
     (b as f64 / 1048576.0 * 10.0).round() / 10.0
 }
 
-/// (phys_footprint, lifetime max) of this process.
 #[cfg(target_os = "macos")]
 fn footprint() -> (u64, u64) {
     let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
@@ -322,7 +293,6 @@ fn footprint() -> (u64, u64) {
     (ri.ri_phys_footprint, ri.ri_lifetime_max_phys_footprint)
 }
 
-/// (RSS, peak RSS) on Linux, from /proc/self/status.
 #[cfg(target_os = "linux")]
 fn footprint() -> (u64, u64) {
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
@@ -334,9 +304,6 @@ fn lifetime_peak() -> u64 {
     footprint().1
 }
 
-/// Peak footprint, sampled every 20 ms (the lifetime max also counts
-/// transient spikes). With FIRSTRUN_TRACE set, also prints the footprint
-/// every 100 ms to stderr (`trace <s> <MB>`).
 fn sampler() -> &'static AtomicU64 {
     static PEAK: AtomicU64 = AtomicU64::new(0);
     static STARTED: AtomicBool = AtomicBool::new(false);

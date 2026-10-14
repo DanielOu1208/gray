@@ -1,33 +1,15 @@
-//! Shell log upkeep for blocking-only bash.
-//!
-//! One tool, no background tasks: each `bash` call writes its full log to
-//! `$GRAY_HOME/shell/<session>/bash-<uuid>.log` and the result header names
-//! the path (grep it instead of rerunning). This module keeps the agent
-//! tool timeout above bash's max and sweeps stale/oversized logs at startup.
-
 use std::time::Duration;
 
-/// Last-resort agent-level ceiling, kept above bash's largest explicit
-/// timeout (`MAX_TIMEOUT_SECS` = 3600 s). Bash itself has no default timeout
-/// any more, so a hung command is stopped here — one hour in, not on a
-/// budget the agent has to guess.
 pub const SHELL_TOOL_TIMEOUT: Duration = Duration::from_secs(3660);
-/// Startup sweep: logs older than 7 days go.
+
 const LOG_SWEEP_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
-/// Shell transcript cap per log file: matches pump + gray.log 10MiB. The
-/// age sweep alone let real usage reach 208MB; the sweep deletes oversized
-/// files too (pre-cap leftovers), the pump stops live writes past this.
+
 const SHELL_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Pure sweep check (unit-testable): age sweep plus size cap for pre-cap
-/// oversized logs.
 fn sweep_due(len: u64, age: Option<Duration>) -> bool {
     len > SHELL_LOG_MAX_BYTES || age.is_some_and(|a| a > LOG_SWEEP_AGE)
 }
 
-/// Startup sweep: delete `~/.gray/shell/*/*.log` older than 7 days or
-/// bigger than 10MiB (size catches pre-cap runaway logs the pump now stops),
-/// then any session dir left empty that is itself older than 7 days.
 pub fn sweep_old_shell_logs() {
     let Ok(home) = crate::setup::gray_home() else {
         return;
@@ -38,7 +20,7 @@ pub fn sweep_old_shell_logs() {
         return;
     };
     for sess in sessions.flatten() {
-        // Read before the file loop: deleting a file bumps the dir mtime.
+
         let dir_age = sess
             .metadata()
             .ok()
@@ -63,9 +45,7 @@ pub fn sweep_old_shell_logs() {
                 let _ = std::fs::remove_file(&p);
             }
         }
-        // Emptied session dirs otherwise pile up forever (thousands seen)
-        // and every startup walks them. `remove_dir` refuses a non-empty
-        // dir; the pump recreates a missing parent before each log.
+
         if dir_age.is_some_and(|a| a > LOG_SWEEP_AGE) {
             let _ = std::fs::remove_dir(sess.path());
         }

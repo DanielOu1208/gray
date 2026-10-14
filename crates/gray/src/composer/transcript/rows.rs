@@ -1,5 +1,3 @@
-//! Transcript row helpers: wrapping, prompt formatting (split from `transcript`).
-
 use super::*;
 use crate::text_width::{chars_width, fit_char_count, word_window_end};
 
@@ -9,16 +7,6 @@ pub(crate) fn thinking_style() -> Style {
         .add_modifier(Modifier::ITALIC)
 }
 
-/// True when a transcript row is a bare blank (no bg, no glyphs): the same
-/// predicate `ensure_gap` / `transcript_ends_blank` use, shared so the live
-/// thinking drain skips a blank exactly when `stream` would.
-///
-/// A painted row (a card's padding, a code block's tinted edge) is NOT
-/// blank: it belongs to its block. Codex draws the same distinction: the
-/// user cell owns painted padding rows, and the history inserts one
-/// unpainted row *between* cells (`history_cell/base.rs`, `if !first`).
-/// Counting the padding as the gap is what glued prose flush against
-/// every card.
 pub(crate) fn transcript_row_is_blank(line: &Line<'static>) -> bool {
     line.style.bg.is_none()
         && line
@@ -27,24 +15,14 @@ pub(crate) fn transcript_row_is_blank(line: &Line<'static>) -> bool {
             .all(|s| s.style.bg.is_none() && s.content.trim().is_empty())
 }
 
-/// Columns left of prose and thinking rows, and of the `●`/`❯` glyph of a
-/// card, so the whole transcript starts in one column. One is enough to
-/// keep text off the terminal edge; two read as a second, empty column.
 pub(crate) const GUTTER: usize = 1;
 
-/// Columns kept clear at the right edge, so a wrapped row never touches the
-/// terminal border (codex keeps the same single column on prompts).
 pub(crate) const RIGHT_MARGIN: usize = 1;
 
-/// Wrap budget for prose and thinking at terminal `width`: the gutter and
-/// the right margin come off. Every path that cuts, wraps or lays out a
-/// table for the transcript goes through here, so live, reflow and replay
-/// all agree.
 pub(crate) fn prose_width(width: usize) -> usize {
     width.saturating_sub(GUTTER + RIGHT_MARGIN).max(1)
 }
 
-/// Left padding for prose and thinking rows: the `GUTTER`.
 pub(crate) fn left_pad() -> Span<'static> {
     Span::raw(" ".repeat(GUTTER))
 }
@@ -72,7 +50,7 @@ fn slice_line_spans<'a>(
             let local_start = seg_start - s;
             let local_end = seg_end - s;
             let content = original.spans[i].content.as_ref();
-            // ensure boundaries are char boundaries (they should be since we only cut at word boundaries which are char boundaries)
+
             let slice = &content[local_start..local_end];
             acc.push(Span {
                 style: *style,
@@ -90,8 +68,6 @@ fn slice_line_spans<'a>(
     }
 }
 
-/// Word-aware wrapping: preserves styles, respects hyperlink guards,
-/// splits at word boundaries (space) and falls back to char chunk for long words.
 pub(crate) fn wrap_styled_line(line: Line<'static>, max_w: usize) -> Vec<Line<'static>> {
     wrap_styled_line_with_ranges(line, max_w)
         .into_iter()
@@ -99,21 +75,18 @@ pub(crate) fn wrap_styled_line(line: Line<'static>, max_w: usize) -> Vec<Line<'s
         .collect()
 }
 
-/// Same as [`wrap_styled_line`] but also returns each output row's source
-/// byte range on the original (unwrapped) flat line, so callers can map
-/// absolute columns (hyperlinks) onto wrapped rows.
 pub(crate) fn wrap_styled_line_with_ranges(
     line: Line<'static>,
     max_w: usize,
 ) -> Vec<(Line<'static>, Range<usize>)> {
-    // Don't wrap lines with OSC 8 hyperlinks
+
     if line.spans.iter().any(|s| s.content.contains("\x1b]8;;")) {
         return vec![(line, 0..usize::MAX)];
     }
     if line.width() <= max_w {
         return vec![(line, 0..usize::MAX)];
     }
-    // Flatten line for word analysis
+
     let mut flat = String::new();
     let mut span_bounds: Vec<(Range<usize>, Style)> = Vec::new();
     let mut acc = 0usize;
@@ -128,7 +101,6 @@ pub(crate) fn wrap_styled_line_with_ranges(
         return vec![(line, 0..usize::MAX)];
     }
 
-    // Detect if this line has a gutter prefix (e.g. " 12 | " or "    | ")
     let gutter_info = if let Some(bar_idx) = flat.find(" | ") {
         if bar_idx <= 24
             && flat[..bar_idx]
@@ -172,7 +144,6 @@ pub(crate) fn wrap_styled_line_with_ranges(
             (0, None, None, max_w)
         };
 
-    // Tokenize content into words (non-whitespace runs) with byte ranges
     let mut words: Vec<Range<usize>> = Vec::new();
     let mut i = content_start;
     while i < flat.len() {
@@ -194,14 +165,13 @@ pub(crate) fn wrap_styled_line_with_ranges(
         words.push(start..i);
     }
     if words.is_empty() {
-        // column mapping is approximate here; word-split lines are the norm.
+
         return char_chunk_fallback(line, max_w)
             .into_iter()
             .map(|l| (l, 0..usize::MAX))
             .collect();
     }
 
-    // Build wrapped ranges word-aware
     let mut out_ranges: Vec<Range<usize>> = Vec::new();
     let mut cur_start: Option<usize> = None;
     let mut cur_end: usize = 0;
@@ -252,7 +222,6 @@ pub(crate) fn wrap_styled_line_with_ranges(
         return vec![(Line::from("").style(line.style), 0..0)];
     }
 
-    // Convert ranges to Lines preserving styles and prepending gutter
     let mut result: Vec<(Line<'static>, Range<usize>)> = Vec::new();
     for (row_idx, r) in out_ranges.into_iter().enumerate() {
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -331,13 +300,6 @@ fn char_chunk_fallback(line: Line<'static>, max_w: usize) -> Vec<Line<'static>> 
     result
 }
 
-/// Split raw thinking-run source into `\n`-separated logical lines.
-/// `ThinkingRun` stores `\n`-drained lines with their terminator and live
-/// word-cut continuations bare, so concatenating the run reproduces the
-/// live logical lines exactly. Drops the trailing empty piece of a
-/// terminal `\n` (a terminator, never a painted row) and blank-on-blank
-/// pieces (live `stream_thinking` parity), threading `tail_blank` through
-/// so reflow replays the live guard against the rebuilt transcript.
 pub(crate) fn split_thinking_run(text: &str, mut tail_blank: bool) -> Vec<String> {
     let mut pieces: Vec<&str> = text.split('\n').collect();
     if text.ends_with('\n') {
@@ -359,10 +321,6 @@ pub(crate) fn split_thinking_run(text: &str, mut tail_blank: bool) -> Vec<String
     out
 }
 
-/// Display rows for a thinking run at `max_w`: one word-aware wrap per
-/// logical line (same wrapper + left pad as the live insert path), so a
-/// resize re-flows from source and widening actually widens. Pure for
-/// testability (`Tui` needs a TTY).
 pub(crate) fn thinking_run_rows(text: &str, max_w: usize, tail_blank: bool) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for logical in split_thinking_run(text, tail_blank) {
@@ -377,14 +335,6 @@ pub(crate) fn thinking_run_rows(text: &str, max_w: usize, tail_blank: bool) -> V
     out
 }
 
-/// Cut point for flushing the live thinking buffer: the last space within
-/// the first `max_w` cells so rows break between words, never mid-word
-/// ("r|espond"). Falls back to a hard cut at the cell budget when there is
-/// no space (single overlong word) — same as the wrapper's long-word path.
-///
-/// When the window ends exactly on a word boundary, the whole window is the
-/// row and the boundary spaces ride with it: left on the remainder they
-/// would open the next row with a stray space (" changed and…").
 pub(crate) fn word_flush_cut(chars: &[char], max_w: usize) -> usize {
     let fit = fit_char_count(chars, max_w).min(chars.len());
     if fit > 0 && chars.get(fit) == Some(&' ') {
@@ -397,12 +347,6 @@ pub(crate) fn word_flush_cut(chars: &[char], max_w: usize) -> usize {
     word_window_end(chars, 0, max_w)
 }
 
-/// Text to paint for a flushed thinking fragment. A fragment that continues
-/// a word-cut row (`mid_line`) drops its leading spaces: they separate it
-/// from the row above, not indent it. A continuation that is only the
-/// cut line's terminator paints nothing (`None`), so the row break never
-/// reads as a paragraph gap that reflow would not draw. The stored run
-/// text keeps every byte either way.
 pub(crate) fn thinking_paint_text(fragment: &str, mid_line: bool) -> Option<&str> {
     if !mid_line {
         return Some(fragment);
@@ -411,10 +355,6 @@ pub(crate) fn thinking_paint_text(fragment: &str, mid_line: bool) -> Option<&str
     (!rest.trim().is_empty()).then_some(rest)
 }
 
-/// Replay rendering for a persisted thinking block: one dim+italic row per
-/// source line, mirroring the live `stream_thinking` style (minus the
-/// `Thought for` timing, which only exists live). Blank blocks yield no
-/// rows so resume never paints empty italic gaps.
 pub(crate) fn thinking_replay_lines(text: &str) -> Vec<Line<'static>> {
     if text.trim().is_empty() {
         return Vec::new();
@@ -434,16 +374,13 @@ pub(crate) fn format_user_prompt_lines(
     let text_primary = crate::theme::theme().text_body;
     let dim_color = crate::theme::theme().text_muted;
     let bg_style = Style::default().bg(crate::theme::theme().surface_bg);
-    // One painted padding row top and bottom, same as a tool card. The
-    // padding is part of the card; the unpainted gap that separates it from
-    // its neighbours is `ensure_gap`'s, outside the card.
+
     let margin_row = || -> Line<'static> {
         Line::from(Span::styled(" ".repeat(width.max(1)), bg_style)).style(bg_style)
     };
     let mut lines = Vec::new();
     lines.push(margin_row());
-    // `❯` sits in the gutter column, under the tool card's `●` and level
-    // with the prose around it; text starts two columns later.
+
     let hang = " ".repeat(GUTTER + 2);
     let arrow_span = Span::styled(
         format!("{}❯ ", " ".repeat(GUTTER)),
@@ -466,8 +403,7 @@ pub(crate) fn format_user_prompt_lines(
             let mut start = 0usize;
             let mut first_row = true;
             while start < chars.len() {
-                // Prefer a word boundary (last space in the window) over a
-                // mid-word char cut; hard-cut only a single overlong word.
+
                 let end = word_window_end(&chars, start, max_w);
                 let row_prefix = if first_row {
                     prefix.clone()

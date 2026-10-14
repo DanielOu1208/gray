@@ -1,6 +1,3 @@
-//! Declared provider profiles: wire choice, credential binding, headers, and
-//! the exact request policy a plugin can consume.
-
 use reqwest::Url;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -3,8 +3,7 @@ use std::time::Duration;
 
 #[test]
 fn format_thought_line_is_just_verb_elapsed_and_turn_toks() {
-    // `N tokens` is billed output (exact, reasoning included — never split
-    // out); backed by the TurnEnd report instead of chars/4.
+
     let line = format_thought_line("Thought for", "1m 17s", Some(4_045), Some(52));
     assert_eq!(line, "✻ Thought for 1m 17s · 4,045 tokens · 52 tps");
     assert_eq!(line.matches("1m 17s").count(), 1);
@@ -18,7 +17,7 @@ fn format_thought_line_no_ctx_is_bare() {
 
 #[test]
 fn format_thought_line_never_splits_reasoning() {
-    // Reasoning is a subset of output — one united count, no suffix.
+
     let line = format_thought_line("Thought for", "59s", Some(2_973), None);
     assert_eq!(line, "✻ Thought for 59s · 2,973 tokens");
     assert!(!line.contains("reasoning"));
@@ -26,9 +25,7 @@ fn format_thought_line_never_splits_reasoning() {
 
 #[test]
 fn turn_footer_line_is_the_single_thought_line_with_billed_tokens() {
-    // Per-run summaries are gone: exactly one Thought line per turn, and it
-    // carries the billed output (exact TurnEnd usage, reasoning included —
-    // never split out, never a chars/4 estimate).
+
     let line = turn_footer_line(true, Duration::from_millis(77_000), Some(4_045), 1200);
     assert_eq!(line, "✻ Thought for 1m 17s · 4,045 tokens · 3371 tps");
     assert_eq!(line.matches("1m 17s").count(), 1);
@@ -43,17 +40,14 @@ fn turn_footer_line_without_thinking_works() {
 
 #[test]
 fn turn_footer_line_without_usage_is_bare_elapsed() {
-    // Cancelled/errored before any usage report: no estimate, just the
-    // clock (a zero streaming span means no rate either).
+
     let line = turn_footer_line(true, Duration::from_millis(5800), None, 0);
     assert_eq!(line, "✻ Thought for 5.8s");
 }
 
 #[test]
 fn pill_clock_ignores_tool_status_restamps() {
-    // Every tool event re-stamps the status (`Preparing tool:` ->
-    // `Working`); the visible clock must keep counting from the turn
-    // start instead of restarting at 0.0s per tool call.
+
     let turn_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(14));
     let restamped = std::time::Instant::now();
     let elapsed = super::pill_elapsed(turn_started, restamped, true);

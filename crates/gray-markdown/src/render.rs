@@ -1,8 +1,3 @@
-//! Markdown renderer - transforms parsed markdown buffers into styled output.
-//!
-//! After parsing with `MarkdownParser`, use `ParsedMarkdown` to render
-//! to either ratatui Lines or ANSI strings.
-
 use std::borrow::Cow;
 
 use ratatui::text::{Line, Span};
@@ -20,7 +15,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
         if self.buffers.transforms.is_empty() {
             return Cow::Borrowed(text);
         }
-        // Raw mode applies only `force` transforms (e.g. soft-break collapse).
+
         if !pretty && !self.buffers.transforms.iter().any(|t| t.force) {
             return Cow::Borrowed(text);
         }
@@ -38,17 +33,15 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                 continue;
             }
             applied = true;
-            // Clamp transform range to our text range
+
             let t_start = transform.range.start.max(start);
             let t_end = transform.range.end.min(end);
 
-            // Copy text before transform
             if t_start > pos {
                 let before = &text[(pos - start)..(t_start - start)];
                 result.push_str(before);
             }
 
-            // Apply transform
             result.push_str(&transform.to);
 
             pos = t_end;
@@ -57,7 +50,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
         if !applied {
             Cow::Borrowed(text)
         } else {
-            // Copy remaining text
+
             if pos < end {
                 result.push_str(&text[(pos - start)..]);
             }
@@ -65,12 +58,11 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
         }
     }
 
-    /// Build sorted render events.
     fn build_render_events(&self) -> Vec<RenderEvent> {
         let mut events = Vec::new();
         let capacity = self.buffers.highlights.len() * 2
             + self.buffers.replaces.len() * 2
-            + self.buffers.table_replaces.len() * 2; // mermaid removed
+            + self.buffers.table_replaces.len() * 2;
         events.reserve(capacity);
 
         for (i, hl) in self.buffers.highlights.iter().enumerate() {
@@ -115,21 +107,13 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                 is_end: true,
             });
         }
-        // mermaid removed: fences render as code blocks
+
         events.sort_unstable();
         events
     }
 
-    /// Render to ANSI-styled string.
-    ///
-    /// If `pretty` is true, syntax markers are hidden.
-    /// Returns the rendered string and a source map for copy-paste support.
-    /// Render to ratatui Lines.
-    ///
-    /// If `pretty` is true, syntax markers are hidden.
-    /// Returns rendered lines, line source map, and optional checkpoint.
     pub fn render_ratatui(&mut self, pretty: bool) -> (MarkdownRenderOutput, Option<Checkpoint>) {
-        // Build render events
+
         let render_events = self.build_render_events();
 
         self.buffers.current_spans.clear();
@@ -145,13 +129,12 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
         let mut skip_leading_newline = false;
         let mut in_hidden_code_block = false;
         let mut next_link_idx: usize = 0;
-        // Running display-column tracker for the in-progress line.
+
         let mut cur_col_in_line: usize = 0;
 
         let checkpoint_info = self.last_checkpoint;
         let mut checkpoint_output_lines: Option<usize> = None;
 
-        // Style already adapted - no need to call adapt_style again
         let code_bg_style: ratatui::style::Style =
             anstyle_to_ratatui_style(self.ms.code_background);
 
@@ -172,9 +155,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
             }
             let to = to.min(text.len());
             let from = from.min(to);
-            // Use as_bytes() to avoid panicking on non-char-boundary offsets.
-            // This is safe because '\n' (0x0A) is a single-byte ASCII value
-            // that can never appear as a UTF-8 continuation byte (0x80..0xBF).
+
             text.as_bytes()[from..to]
                 .iter()
                 .filter(|&&b| b == b'\n')
@@ -183,9 +164,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
 
         for ev in &render_events {
             if replace.is_none() && table_replace.is_none() && ev.pos > last_pos {
-                // Check if we need to split text processing at the checkpoint boundary.
-                // If last_pos < cp_byte <= ev.pos, we process in two parts:
-                // 1. Process [last_pos..cp_byte], capture lines.len(), process [cp_byte..ev.pos]
+
                 let split_at_checkpoint = checkpoint_output_lines.is_none()
                     && checkpoint_info
                         .map(|(_, cp_byte)| last_pos < cp_byte && cp_byte <= ev.pos)
@@ -193,14 +172,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
 
                 let cp_byte = checkpoint_info.map(|(_, cp)| cp).unwrap_or(0);
 
-                // Snap cp_byte to the nearest char boundary.  Checkpoint byte
-                // offsets come from pulldown-cmark event ranges which should
-                // always be char-aligned, but in edge cases (e.g., thematic
-                // breaks followed by headings with multi-byte chars) the
-                // position can land mid-character.  Snapping forward is safe
-                // because it only affects where we split the text for line
-                // counting — a few extra or fewer newlines in the first vs
-                // second range doesn't change the total count.
                 let cp_byte = {
                     let mut b = cp_byte;
                     while b < self.text.len() && !self.text.is_char_boundary(b) {
@@ -209,21 +180,16 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                     b
                 };
 
-                // Determine ranges to process
                 let ranges: &[(usize, usize)] = if split_at_checkpoint {
-                    // Process in two parts, capturing checkpoint between them
+
                     &[(last_pos, cp_byte), (cp_byte, ev.pos)]
                 } else {
-                    // Process as single range
+
                     &[(last_pos, ev.pos)]
                 };
 
                 for (range_idx, &(range_start, range_end)) in ranges.iter().enumerate() {
-                    // After processing the first range when splitting, capture checkpoint.
-                    // Flush any pending spans to `lines` first — content like a thematic
-                    // break (`───`) may sit in `current_spans` without a trailing newline
-                    // to flush it.  Without this flush, the checkpoint's `output_lines`
-                    // count would be too low, causing the line to vanish on re-render.
+
                     if split_at_checkpoint && range_idx == 1 {
                         if !self.buffers.current_spans.is_empty() {
                             line_source_map.push(current_source_line);
@@ -238,7 +204,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                         continue;
                     }
 
-                    // Update source line counter
                     if range_start > last_line_count_pos {
                         current_source_line +=
                             count_newlines_in_range(last_line_count_pos, range_start, self.text);
@@ -257,18 +222,13 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                         let at_line_start = range_start == 0
                             || self.text.as_bytes().get(range_start - 1) == Some(&b'\n');
                         if at_line_start {
-                            // Check if this hidden block is a code fence (``` or ~~~).
-                            // Only code fences need separator handling — heading markers
-                            // (#) are also hidden at line start but are unpaired.
+
                             let hidden_text = self.text[range_start..range_end].trim_start();
                             let is_code_fence =
                                 hidden_text.starts_with("```") || hidden_text.starts_with("~~~");
 
                             if is_code_fence {
-                                // Emit a blank separator before an OPENING fence (not
-                                // closing). Prevents adjacent blocks (e.g., list → code)
-                                // from collapsing their visual boundary when the hidden
-                                // fence markers are removed in pretty mode.
+
                                 if !in_hidden_code_block
                                     && lines.last().is_some_and(|l| l.width() > 0)
                                 {
@@ -305,11 +265,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                             let chunk_src_start = text_start;
                             let chunk_src_end = text_start + text.len();
 
-                            // Advance the cursor past links that ended before
-                            // this chunk starts, then check if any remaining
-                            // link overlaps the chunk.  Skip all hyperlink
-                            // bookkeeping when none does — keeps the no-link
-                            // hot path identical to the pre-feature renderer.
                             while next_link_idx < self.buffers.link_targets.len()
                                 && self.buffers.link_targets[next_link_idx].source_range.end
                                     <= chunk_src_start
@@ -393,7 +348,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                         replace = Some(ev.index);
                         let repl = &self.buffers.replaces[ev.index];
 
-                        // Update source line to code start
                         if repl.range.start > last_line_count_pos {
                             current_source_line += count_newlines_in_range(
                                 last_line_count_pos,
@@ -461,20 +415,12 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                         table_replace = Some(ev.index);
                         let trepl = &self.buffers.table_replaces[ev.index];
 
-                        // Flush any in-progress inline spans first. Tables
-                        // always start at a line boundary (no-op), but a
-                        // display-math block replacement can occur
-                        // mid-paragraph (`text $$x$$ more`): without the
-                        // flush, the pending "text " spans would be emitted
-                        // AFTER the block lines.
                         if !self.buffers.current_spans.is_empty() {
                             line_source_map.push(current_source_line);
                             lines.push(Line::from(std::mem::take(&mut self.buffers.current_spans)));
-                            // cur_col_in_line is reset unconditionally after
-                            // the block lines are emitted below.
+
                         }
 
-                        // Update source line to table start
                         if trepl.range.start > last_line_count_pos {
                             current_source_line += count_newlines_in_range(
                                 last_line_count_pos,
@@ -495,8 +441,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                             line_source_map.push(current_source_line);
                             lines.push(styled_line.clone());
                         }
-                        // Translate table-local hyperlink coordinates into
-                        // absolute line indices and append to the global list.
+
                         for link in &trepl.hyperlinks {
                             hyperlinks.push(HyperlinkTarget {
                                 line_index: table_base_line + link.line_offset,
@@ -505,8 +450,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                                 id: link.id,
                             });
                         }
-                        // Table emits whole pre-rendered lines; reset col so
-                        // any subsequent inline content starts at column 0.
+
                         cur_col_in_line = 0;
 
                         last_pos = trepl.range.end;
@@ -533,13 +477,9 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
             }
         }
 
-        // Handle remaining text
         let len = self.text.len();
         if last_pos < len {
-            // Apply force transforms only; non-force transforms have
-            // never been applied in this trailing path and force
-            // transforms preserve byte length so source offsets below
-            // stay valid.
+
             let raw = &self.text[last_pos..len];
             let transformed = self.apply_transforms(raw, last_pos, false);
             debug_assert_eq!(transformed.len(), raw.len());
@@ -555,8 +495,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                 let chunk_src_start = last_pos;
                 let chunk_src_end = last_pos + text.len();
 
-                // Same cursor-skip pattern as the main path: keep the no-link
-                // hot path identical to the pre-feature renderer.
                 while next_link_idx < self.buffers.link_targets.len()
                     && self.buffers.link_targets[next_link_idx].source_range.end <= chunk_src_start
                 {
@@ -565,8 +503,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                 let chunk_has_links = next_link_idx < self.buffers.link_targets.len()
                     && self.buffers.link_targets[next_link_idx].source_range.start < chunk_src_end;
 
-                // Trailing text bypasses apply_transforms (it's emitted raw),
-                // so transformed offsets equal source offsets within the chunk.
                 let chunk_links: Vec<ChunkLinkRange> = if chunk_has_links {
                     chunk_link_offsets(
                         &self.buffers.link_targets,
@@ -629,9 +565,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
             }
         }
 
-        // Emit final line. Use the membership of the chunk that produced these spans:
-        // an unterminated bare fence ends its range exactly at last_pos (EOF) and the
-        // range check is end-exclusive, so recomputing here would drop the code bg.
         if !self.buffers.current_spans.is_empty() {
             line_source_map.push(current_source_line);
             let final_is_code = pending_line_is_code;
@@ -643,39 +576,15 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
             });
         }
 
-        // If checkpoint wasn't captured during event processing, compute it based on
-        // the number of newlines in the text up to checkpoint byte.
-        // This handles cases where there are no events past the checkpoint (e.g., incomplete list items).
         if checkpoint_output_lines.is_none()
             && let Some((_, cp_byte)) = checkpoint_info
         {
-            // Count newlines in text before the checkpoint byte.
-            // Each newline ENDS a line, so N newlines = N complete lines.
-            // However, we need to account for blank lines that are absorbed
-            // into the block separator. The checkpoint is at the start of
-            // the NEXT block, so lines from the frozen content should not
-            // include any content that starts at or after cp_byte.
-            //
-            // More precise approach: count how many output lines have their
-            // content entirely before cp_byte. This is tricky without tracking
-            // each line's byte range.
-            //
-            // Logic:
-            // - Each newline ENDS a line
-            // - Use line_source_map to find output lines before checkpoint
-            // - line_source_map[i] is the source line at which output line i was created
-            // - source_line_at_cp is the source line containing cp_byte
-            // - Output lines with source_line < source_line_at_cp are complete before checkpoint
 
             let source_line_at_cp = self.text[..cp_byte.min(self.text.len())]
                 .bytes()
                 .filter(|&b| b == b'\n')
                 .count();
 
-            // When the checkpoint is at or past the end of the text, ALL output
-            // lines belong to the frozen content (the entire input was consumed
-            // by the checkpointed block).  Otherwise, output lines created at
-            // source lines strictly before the checkpoint source line are frozen.
             let complete_lines = if cp_byte >= self.text.len() {
                 lines.len()
             } else {
@@ -708,7 +617,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
     }
 }
 
-/// Tests for HTML character-entity decoding in prose (`&lt;` → `<`, etc.).
 #[path = "entity_tests.rs"]
 #[cfg(test)]
 mod entity_tests;

@@ -27,10 +27,9 @@ fn repro_soft_break_space_across_chunks() {
 
 #[test]
 fn torn_hyperlink_brackets_across_chunks_preserve_hyperlink_offset() {
-    // `[click](url)` split inside `](` — pretty mode rewrites `[`/`](` so
-    // column ranges must still land on the visible "click" glyphs.
+
     let full = "See [click](https://example.com) here.\n\n";
-    let split = full.find("](").unwrap() + 1; // after `]`, before `(`
+    let split = full.find("](").unwrap() + 1;
     let (a, b) = full.split_at(split);
     assert!(a.ends_with(']'), "a={a:?}");
     assert!(b.starts_with('('), "b={b:?}");
@@ -43,7 +42,6 @@ fn torn_hyperlink_brackets_across_chunks_preserve_hyperlink_offset() {
 
     assert_eq!(lines_text(&view.lines), lines_text(&expected.lines));
 
-    // Parser-produced link-text hyperlink must cover exactly "click" (4 cells)
     let line0: String = view.lines[0]
         .spans
         .iter()

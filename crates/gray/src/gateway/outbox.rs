@@ -1,12 +1,3 @@
-//! `outbox/`: replies the agent produced that a surface has not confirmed.
-//!
-//! At-least-once custody (OpenClaw delivery queue, Hermes obligation
-//! ledger): an adapter `pull`s intents for its platform, which leases them
-//! for [`LEASE_SECS`]; it posts, then `ack`s. An intent whose lease runs out
-//! is offered again; after [`MAX_ATTEMPTS`] it moves to `outbox/dead/` and the
-//! activity log says so. Nothing produced is silently lost, including across
-//! a gateway restart: the files are the queue.
-
 use std::path::{Path, PathBuf};
 
 use super::event::Kind;
@@ -14,10 +5,9 @@ use crate::cron::store::Origin as Route;
 
 pub const LEASE_SECS: i64 = 60;
 pub const MAX_ATTEMPTS: u32 = 8;
-/// Platform for output with no surface to go to: `gray gateway inbox` reads it.
+
 pub const LOCAL: &str = "local";
 
-/// Serializes lease/ack read-modify-writes between socket tasks and the loop.
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -74,8 +64,6 @@ fn load_all(dir: &Path) -> Vec<(PathBuf, Intent)> {
         .collect()
 }
 
-/// Lease up to `limit` deliverable intents for `platform`, oldest first.
-/// Intents past their last attempt are buried instead of offered.
 pub fn pull(dir: &Path, platform: &str, now: i64, limit: usize) -> Vec<Intent> {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::new();
@@ -113,7 +101,6 @@ fn bury(dir: &Path, path: &Path, intent: &Intent) {
     );
 }
 
-/// Confirm delivery: the intents are removed. Returns how many matched.
 pub fn ack(dir: &Path, ids: &[String]) -> usize {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut n = 0;

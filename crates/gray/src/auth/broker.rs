@@ -1,5 +1,3 @@
-//! Agent/shared credential source for plugin-backed providers.
-
 use std::sync::Arc;
 
 use gray_core::credential::{
@@ -13,19 +11,15 @@ use crate::providers::registry::{InstalledProvider, ProviderRpc};
 
 const REFRESH_MARGIN_SECS: u64 = 60;
 
-/// Agent-lifetime source for one installed provider/auth-method pair.
 pub struct PluginCredentialSource {
     installed: InstalledProvider,
     store: CredentialStore,
     rpc: Arc<dyn ProviderRpc>,
     refresh: Mutex<()>,
-    /// Model id for the per-turn relay handshake (`provider/chat`); `None`
-    /// preserves the stored-credential flow for providers without a relay.
+
     model: Option<String>,
 }
 
-/// Process-wide handle so the broker, agent, setup, and model discovery share
-/// one credential source and cannot run a second rotation beside it.
 pub fn shared_plugin_source(
     installed: InstalledProvider,
     store: CredentialStore,
@@ -34,9 +28,6 @@ pub fn shared_plugin_source(
     shared_plugin_source_with_model(installed, store, rpc, None)
 }
 
-/// Same as [`shared_plugin_source`], plus the model id the per-turn relay
-/// handshake (`provider/chat`) needs. `None` preserves the stored-credential
-/// flow for providers without a relay.
 pub fn shared_plugin_source_with_model(
     installed: InstalledProvider,
     store: CredentialStore,
@@ -169,10 +160,7 @@ impl gray_core::credential::CredentialSource for PluginCredentialSource {
                 metadata: stored.credential.metadata.clone(),
             });
         }
-        // An expired access token is still renewable while the refresh token
-        // lives (hour-long tokens are routinely dead after a laptop sleeps):
-        // only a method that cannot refresh fails closed on expiry. A dead
-        // refresh token comes back as a terminal rotation error instead.
+
         if !self
             .installed
             .auth_method
@@ -188,8 +176,6 @@ impl gray_core::credential::CredentialSource for PluginCredentialSource {
             return Err(CredentialError::ReauthRequired(identity));
         }
 
-        // One rotation at a time: the second caller waits, then re-reads the
-        // already-rotated entry instead of calling refresh a second time.
         let _guard = self.refresh.lock().await;
         if let Some(saved) = self
             .store
@@ -216,14 +202,7 @@ impl gray_core::credential::CredentialSource for PluginCredentialSource {
 }
 
 impl PluginCredentialSource {
-    /// Per-turn relay handshake: the sidecar opens a loopback relay and hands
-    /// back its URL + bearer. Core stays agnostic — a URL plus a secret,
-    /// never the relay wire shape. The per-turn bearer goes in
-    /// `secrets[relay_token]` (the manifest's declared `secret_name`); the
-    /// URL rides in `metadata[relay_url]` for the dynamic POST override.
-    /// Marker envelope proving `/connect` verified this login: a relay-only
-    /// login has no stored credential, so `connect_dynamic_provider` calls this
-    /// after a successful `provider/chat` and the row counts as connected.
+
     pub async fn mark_relay_verified(&self) -> Result<(), CredentialError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -258,10 +237,7 @@ impl PluginCredentialSource {
             model: self.model.clone().unwrap_or_default(),
         };
         let result = self.rpc.chat(request).await.map_err(|e| match e {
-            // `provider/chat` reporting Unavailable means the sidecar has no
-            // usable login ("run agy once and complete the Google sign-in") —
-            // the stored row is stale, so prompt for reauth rather than retry.
-            // Carry the sidecar's hint so `/connect` can show the fix.
+
             gray_plugin::ProviderRpcError::Unavailable(message) => {
                 CredentialError::ReauthRequired(message)
             }

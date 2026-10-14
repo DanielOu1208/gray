@@ -32,7 +32,7 @@ fn load_refuses_a_text_file_before_decoding() {
     let err = load(&path).expect_err("a text file is not an image");
     let text = err.to_string();
     assert!(text.contains("not an image or video file"), "{text}");
-    // Names bash's role rather than blaming a decoder.
+
     assert!(text.contains("use cat for text files"), "{text}");
 }
 
@@ -49,7 +49,6 @@ fn load_fails_loudly_on_a_text_file_named_png() {
     let path = dir.path().join("liar.png");
     std::fs::write(&path, "definitely not a png").unwrap();
 
-    // Magic bytes decide, so this never reaches a provider.
     let err = load(&path).expect_err("undecodable bytes must fail");
     assert!(err.to_string().contains("view failed"), "{err}");
 }
@@ -77,8 +76,7 @@ fn load_keeps_native_resolution() {
 fn video_extension_passes_the_gate_and_becomes_a_sheet() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("clip.mp4");
-    // ffmpeg is the decoder; a box that is not a real clip must still reach
-    // it and come back as its refusal, not as a "not an image" gate error.
+
     std::fs::write(&path, b"not really a video").unwrap();
 
     let err = load(&path).expect_err("garbage bytes must fail");
@@ -102,7 +100,7 @@ fn video_extension_gate_covers_the_common_containers() {
             "{ext} must be video"
         );
     }
-    // A text file stays text.
+
     assert!(!crate::images::is_viewable_extension(std::path::Path::new(
         "a.md"
     )));

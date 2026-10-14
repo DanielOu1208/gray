@@ -1,6 +1,3 @@
-//! Accounting around the provider seam: includes compaction calls as well as tool rounds.
-//! Stops subsequent requests at the cap. A request already sent can exceed its
-//! remaining allowance; only provider-side limits can guarantee an invoice cap.
 use futures::StreamExt;
 use gray_core::{ChatRequest, Provider, ProviderError, ProviderStream, StreamEvent, Usage};
 use std::sync::{Arc, Mutex};
@@ -101,12 +98,11 @@ impl Provider for Metered {
                 {
                     let mut state = meter.state.lock().unwrap();
                     state.usage.accumulate(usage);
-                    // A missing/zero usage report is unknown, not a free request.
+
                     state.usage_complete =
                         previous_complete && (usage.input_tokens > 0 || usage.output_tokens > 0);
                     if let Some((input, output)) = meter.rates {
-                        // USD per million tokens == micro-USD per token. Ignore cache
-                        // discounts conservatively; rates must cover reasoning/cache writes.
+
                         let cost = (usage.input_tokens as f64 * input
                             + usage.output_tokens as f64 * output)
                             .ceil() as u64;

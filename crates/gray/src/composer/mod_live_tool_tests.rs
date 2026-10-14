@@ -67,9 +67,9 @@ fn live_rows_mark_running_cards() {
 
 #[test]
 fn live_rows_update_in_place_without_reorder() {
-    // pi `updateArgs`: same id replaces the header, first-seen order kept.
+
     let mut tools = vec![live("a", "old", false), live("b", "bee", false)];
-    // mirror of `upsert_live_tool` ordering (pure, no Tui::new/TTY):
+
     if let Some(slot) = tools.iter_mut().find(|t| t.id == "a") {
         slot.header = vec![Line::from(vec![Span::raw("new".to_string())])];
         slot.running = true;
@@ -83,7 +83,7 @@ fn live_rows_update_in_place_without_reorder() {
 fn running_label_does_not_orphan_a_trailing_status() {
     for command in ["sleep 5", "echo café 日本語", &"x".repeat(100)] {
         let tool = bash_live(command, true);
-        // The replacement verb needs four more cells than "Ran", not a tail row.
+
         let width = tool.header[0].width() + 4;
         let rows = live_tool_rows(&[tool], Duration::ZERO, 80);
         let wrapped = crate::composer::transcript::wrap_styled_line(rows[0].clone(), width);
@@ -123,8 +123,7 @@ fn other_tools_keep_their_identity_and_empty_headers_are_safe() {
 
 #[test]
 fn template_second_line_stays_plain_under_a_running_headline() {
-    // A template preview's second line is its own row under the headline.
-    // The running shimmer marks the headline (the first row) only.
+
     let tool = LiveTool {
         id: "subagent".into(),
         name: "subagent_spawn".into(),
@@ -176,12 +175,6 @@ fn multi_line_card_draws_both_header_rows_then_body() {
     );
 }
 
-/// Emission order across one step: assistant text streamed between
-/// `ToolCallStart` and `ToolResult` is still in the reveal buffer / unfrozen
-/// markdown tail when the result card commits. `insert_tool_box_lines` must
-/// drain it first so `transcript` (live rows) and `history_entries` (reflow
-/// replay) both keep text-before-cards, and stay ordered when a later
-/// step's card arrives.
 #[test]
 fn tool_card_commit_keeps_emission_order_with_stream_text() {
     let mut tui = Tui::test_tui(80, 30);
@@ -206,19 +199,16 @@ fn tool_card_commit_keeps_emission_order_with_stream_text() {
         })
     };
 
-    // Prose, then the ToolCallStart arm (flush + boundary + live card).
     tui.stream_text("alpha paragraph\n\n");
     tui.flush_markdown();
     tui.end_thinking();
     tui.mark_stream_round_boundary();
     tui.upsert_live_tool("t1", "bash", card("one"), false);
-    // The same message keeps emitting text while the tool runs; it is still
-    // uncommitted when ToolResult pushes the scrollback card.
+
     tui.stream_text("beta paragraph");
     tui.remove_live_tool("t1");
     tui.push_tool_box_lines(card("one"), vec![Line::from("done")]);
 
-    // A later step repeats the shape; ordering must hold across both.
     tui.stream_text("gamma paragraph");
     tui.remove_live_tool("t2");
     tui.push_tool_box_lines(card("two"), vec![Line::from("done")]);

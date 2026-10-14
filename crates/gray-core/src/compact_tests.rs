@@ -7,9 +7,6 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
-/// Scripted provider for `complete_with_history`: returns one fixed
-/// summary text as `TextDelta` + `MessageComplete`, mirroring the
-/// production consumption of `StreamEvent::TextDelta`/`MessageComplete`.
 struct SummaryProvider {
     text: String,
 }
@@ -25,8 +22,6 @@ impl Provider for SummaryProvider {
     }
 }
 
-/// Provider that records every request it is handed. The compaction trigger
-/// is one such request, so a test can assert on what the summarizer saw.
 struct RecordingProvider {
     text: String,
     seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
@@ -47,7 +42,6 @@ impl Provider for RecordingProvider {
     }
 }
 
-/// An agent whose compaction trigger is recorded, plus the recorder.
 fn recording_agent(
     summary_text: &str,
 ) -> (Agent, std::sync::Arc<std::sync::Mutex<Vec<Vec<Message>>>>) {
@@ -85,25 +79,21 @@ fn test_agent(summary_text: &str) -> Agent {
     )
 }
 
-/// One ~100-token message by the estimator (bytes/4): 400 chars.
 fn sized_msg(tag: &str) -> Message {
     Message::user(format!("{tag}:{}", "x".repeat(400 - tag.len() - 1)))
 }
 
 #[tokio::test]
 async fn budgeted_compact_keeps_recent_tail() {
-    // pi order: [summary, retained...] (summary first, no ack).
+
     let mut agent = test_agent("FIXED-SUMMARY-123").with_context_window(Some(16_200));
     let bodies: Vec<String> = (1..=6).map(|i| format!("msg{i}")).collect();
     agent.set_messages(bodies.iter().map(|t| sized_msg(t)).collect());
-    // Retained budget = min(64k, 16_200−16_000) = 200 ≈ last 2 messages.
+
     let ok = agent.try_compact_budgeted().await.unwrap();
     assert!(ok);
     let msgs = agent.messages();
-    // arXiv:2512.22087 stable anchor: [anchor, summary, retained...].
-    // The anchor is charged against the retained budget (200 ≈ 2 messages
-    // here), so it displaces the oldest retained message rather than
-    // inflating the request: anchor + summary + newest message.
+
     assert_eq!(
         msgs.len(),
         3,
@@ -128,9 +118,7 @@ async fn budgeted_compact_keeps_recent_tail() {
 
 #[tokio::test]
 async fn recompaction_repins_the_same_anchor() {
-    // The anchor is recovered from the transcript (summary envelope at
-    // index 1), so a second compaction re-pins the SAME original intent
-    // instead of pinning the previous summary.
+
     let mut agent = test_agent("SUM").with_context_window(Some(16_200));
     let bodies: Vec<String> = (1..=8).map(|i| format!("msg{i}")).collect();
     agent.set_messages(bodies.iter().map(|t| sized_msg(t)).collect());
@@ -140,7 +128,7 @@ async fn recompaction_repins_the_same_anchor() {
         first_anchor.contains("msg1"),
         "anchor is the intent, not the summary"
     );
-    // Grow past the budget again and compact a second time.
+
     let mut grown = agent.messages().to_vec();
     for i in 0..8 {
         grown.push(sized_msg(&format!("later{i}")));
@@ -161,9 +149,7 @@ async fn recompaction_repins_the_same_anchor() {
 
 #[tokio::test]
 async fn tiny_history_keeps_the_anchor_unduplicated() {
-    // When the retained tail already holds the first message (small
-    // histories the budget fully covers never reach here, but the guard is
-    // real), the anchor is not duplicated.
+
     let mut agent = test_agent("SUM").with_context_window(Some(16_200));
     let bodies: Vec<String> = (1..=6).map(|i| format!("msg{i}")).collect();
     agent.set_messages(bodies.iter().map(|t| sized_msg(t)).collect());
@@ -178,17 +164,14 @@ async fn tiny_history_keeps_the_anchor_unduplicated() {
 
 #[tokio::test]
 async fn pipeline_summary_first_then_retained() {
-    // 4 messages over a small window, trigger call returns "S":
-    // assembly is [anchor, summary, retained...] (pi + the stable anchor),
-    // trigger nowhere in history.
+
     let mut agent = test_agent("S").with_context_window(Some(16_200));
     let bodies: Vec<String> = (1..=4).map(|i| format!("msg{i}")).collect();
     agent.set_messages(bodies.iter().map(|t| sized_msg(t)).collect());
     let ok = agent.try_compact_budgeted().await.unwrap();
     assert!(ok);
     let msgs = agent.messages();
-    // Anchor is charged against the 200-token budget, so the retained tail
-    // shrinks to the newest message.
+
     assert_eq!(
         msgs.len(),
         3,
@@ -219,9 +202,7 @@ async fn pipeline_summary_first_then_retained() {
 
 #[tokio::test]
 async fn compact_v2_caps_retained_under_ceiling() {
-    // Under a 400-token ceiling the kept tail is capped at ceiling/4 = 100,
-    // whatever the keep-recent setting says, so the next trigger stays far
-    // away: summary + at most one ~100-token message.
+
     let mut agent = test_agent("FIXED-SUMMARY-123")
         .with_context_window(Some(200_000))
         .with_compact_ceiling(Some(400), None);
@@ -268,9 +249,7 @@ async fn budgeted_compact_false_when_nothing_to_gain() {
 
 #[tokio::test]
 async fn budgeted_compact_false_when_summary_would_not_shrink() {
-    // Already-compact history (a prior summary) and a provider summary
-    // LONGER than what it would replace. The enforced shrink invariant must
-    // return Ok(false) with history byte-identical.
+
     let long = "z".repeat(2000);
     let mut agent = test_agent(&long);
     agent.set_messages(vec![summary_message("prior summary")]);
@@ -284,8 +263,6 @@ async fn budgeted_compact_false_when_summary_would_not_shrink() {
     );
 }
 
-/// Provider whose stream immediately fails: exercises the provider-error
-/// path of `try_compact_budgeted` (same pre-swap early return as cancel).
 struct FailingProvider;
 
 #[async_trait]
@@ -297,9 +274,6 @@ impl Provider for FailingProvider {
     }
 }
 
-/// Trimmable history: 3 × 2500-token tool results over a 5100 window, so
-/// an in-place pre-trim would rewrite the newest result before the
-/// summary call runs.
 fn trimmable_history() -> Vec<Message> {
     ["c1", "c2", "c3"]
         .into_iter()
@@ -350,12 +324,9 @@ async fn compact_blank_summary_leaves_history_byte_identical() {
 
 #[tokio::test]
 async fn anchor_leads_even_when_the_walk_circles_back() {
-    // Regression: the newest-first retained walk can circle all the way
-    // back to the oldest messages when the middle groups do not fit the
-    // budget, keeping the intent inside the tail. It must still be pinned
-    // exactly once, at the front (arXiv:2512.22087 fixed segment).
+
     let mut agent = test_agent("LIVE-SUM").with_context_window(Some(24_000));
-    let big = "y".repeat(40_000); // ~10k tokens of tool output per round
+    let big = "y".repeat(40_000);
     let mut msgs = vec![Message::user("ANCHOR-TOKEN-7742: cat these files")];
     for _ in 0..3 {
         msgs.push(Message::new(
@@ -403,20 +374,14 @@ async fn anchor_leads_even_when_the_walk_circles_back() {
 
 #[tokio::test]
 async fn a_repeated_prompt_survives_in_the_tail() {
-    // Regression: the pinned anchor was pulled out of the tail by *value*
-    // (`retain(|m| m != &anchor)`), so a later turn that legitimately
-    // repeated the prompt was deleted along with the copy the retained walk
-    // circled back to — and the request stopped ending on a user turn.
-    // Excluding `candidate[0]` by position keeps that later turn.
+
     let mut agent = test_agent("LIVE-SUM").with_context_window(Some(16_200));
     let intent = "ANCHOR-TOKEN-7742: cat these files";
-    // Budget = 200 ≈ the intent + the last two groups. The assistant turn is
-    // deliberately oversized so the walk must truncate it, and the transcript
-    // as a whole must overrun the budget or the cheap no-gain bail fires.
+
     agent.set_messages(vec![
         Message::user(intent),
         Message::assistant("m".repeat(3_000)),
-        Message::user(intent), // the repeat, newest
+        Message::user(intent),
     ]);
     assert!(agent.try_compact_budgeted().await.unwrap());
     let out = agent.messages();
@@ -433,7 +398,7 @@ async fn a_repeated_prompt_survives_in_the_tail() {
             .contains("compacted into the following summary"),
         "summary follows the anchor"
     );
-    // The pinned copy plus the later turn that said the same thing.
+
     assert_eq!(
         out.iter()
             .filter(|m| m.text_content().starts_with("ANCHOR-TOKEN-7742"))
@@ -455,23 +420,17 @@ async fn a_repeated_prompt_survives_in_the_tail() {
 
 #[tokio::test]
 async fn compaction_never_summarizes_a_contaminated_partial() {
-    // Regression: the overflow path compacted `self.messages` as-is, so a
-    // salvaged partial the scrub had flagged rode the compaction trigger in
-    // full and its text was baked into the summary — the failed trajectory
-    // reaching every later request, which arXiv:2605.08563 exists to prevent.
-    // The trigger must carry the marker, not the partial.
+
     let (mut agent, seen) = recording_agent("LIVE-SUM");
     agent = agent.with_context_window(Some(16_200));
     let partial = "BROKEN-TRAJECTORY-TOKEN: half a tool call that died mid-stream";
-    // Overrun the 200-token budget so compaction actually runs, and keep the
-    // contaminated partial outside the retained tail's budget so only the
-    // summary call could carry it.
+
     let mut msgs = vec![Message::user("ANCHOR: fix the flaky test")];
     msgs.push(Message::assistant(partial.to_string()));
     msgs.push(Message::assistant("m".repeat(6_000)));
     msgs.push(Message::user("and also check the lockfile"));
     agent.set_messages(msgs);
-    // Mark the salvaged partial (index 1) exactly as the overflow path does.
+
     agent.contaminated.insert(1);
 
     assert!(agent.try_compact_budgeted().await.unwrap());
@@ -491,7 +450,7 @@ async fn compaction_never_summarizes_a_contaminated_partial() {
         sent.contains(CONTAMINATED_SCRUB_MARKER),
         "the marker stands where the failure was:\n{sent}"
     );
-    // And the installed history is clean too: the marker, never the partial.
+
     let after = agent
         .messages()
         .iter()
@@ -506,10 +465,7 @@ async fn compaction_never_summarizes_a_contaminated_partial() {
 
 #[test]
 fn inline_media_attachment_is_priced_per_block_not_per_base64_byte() {
-    // An 8 MB raw PDF/voice note is ~10.7 MB of base64: bytes/4 read as
-    // ~2.7M tokens, which tripped pre-turn compaction and pinned the gauge
-    // at millions right after the user attached a file. Media must take the
-    // same capped per-block path images already do, on every estimator.
+
     let payload = "A".repeat(10_700_000);
     let msg = Message {
         role: Role::User,
@@ -529,10 +485,9 @@ fn inline_media_attachment_is_priced_per_block_not_per_base64_byte() {
         core < 10_000,
         "a single attachment must not look like a full window: {core}"
     );
-    // The compaction trigger agrees: a 200k window is not "full" because of
-    // one attachment.
+
     assert!(!needs_pre_turn_compact(core, Some(200_000), None, None));
-    // Image + Media in one message price both, still bounded.
+
     let both = Message {
         role: Role::User,
         injected: false,
@@ -553,6 +508,6 @@ fn soft_elide_fires_at_six_tenths_of_a_known_window_only() {
     );
     assert!(!needs_soft_elide(59_999, Some(100_000)));
     assert!(needs_soft_elide(60_000, Some(100_000)));
-    // Soft sits strictly below the hard pre-turn threshold (window - 16k).
+
     assert!(crate::compact::soft_elide_threshold(128_000) < 128_000 - 16_000);
 }

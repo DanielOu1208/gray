@@ -1,4 +1,3 @@
-//! Generic plugin-owned above-editor rows. No subagent dependency or layout here.
 use ratatui::text::Line;
 use std::time::{Duration, Instant};
 
@@ -8,8 +7,7 @@ pub(crate) struct Snapshot {
     pub text: String,
     #[serde(default)]
     pub shimmer_lines: Vec<usize>,
-    /// `(line, start, end)` char ranges to shimmer; wins over
-    /// `shimmer_lines` (whole-line) for the lines it names.
+
     #[serde(default)]
     pub shimmer_ranges: Vec<(usize, usize, usize)>,
 }
@@ -25,9 +23,7 @@ pub(crate) fn lines(
     }
     let dim = ratatui::style::Style::default().fg(crate::theme::theme().text_dim);
     let text = |chars: &[char]| chars.iter().collect::<String>();
-    // A band shorter than the widget keeps its top rows and spends its last
-    // row on how many lines it cut, so a short screen never hides agents
-    // without saying so.
+
     let total = snapshot.text.lines().count();
     let cut = total > max_rows;
     let keep = if cut { max_rows - 1 } else { total };
@@ -42,8 +38,7 @@ pub(crate) fn lines(
                 .filter(|ch| !ch.is_control())
                 .take(4096)
                 .collect();
-            // One column in, like the host's own status rows and prompt; a
-            // row wider than the band ends in `…` instead of being clipped.
+
             let room = width.saturating_sub(1);
             if width > 0 && crate::text_width::chars_width(&chars) > room {
                 chars.truncate(crate::text_width::fit_char_count(
@@ -133,8 +128,7 @@ impl Widget {
                                 }
                             }
                         } else if resolved_fresh {
-                            // The slot went away or was disabled: clear the
-                            // rows once instead of every tick.
+
                             active = false;
                             if tx.try_send(Snapshot::default()).is_err()
                                 && flag.load(std::sync::atomic::Ordering::Relaxed)
@@ -175,19 +169,10 @@ impl Drop for Widget {
     }
 }
 
-/// Poll cadence: file stats are per tick, subprocess spawns are gated below.
 const TICK: Duration = Duration::from_millis(500);
-/// How often an empty widget re-asks its plugin for rows. A widget showing
-/// rows keeps the per-tick refresh so live state stays live; an empty band
-/// only needs to notice work appearing, so it polls far slower — and the
-/// slot spec itself is mtime-gated either way, so idle ticks never touch
-/// `widgets.json` or the ~42KB lockfile.
+
 const IDLE_POLL: Duration = Duration::from_secs(5);
 
-/// The mtime gate in front of the widget's file reads and lockfile parses.
-/// The inputs that decide who runs the slot are `widgets.json` plus the
-/// user and project locks `enabled()` consults; while their mtimes stand,
-/// the resolved argv stands and the poll skips straight to the subprocess.
 struct SpecGate {
     stamps: [Option<std::time::SystemTime>; 3],
     argv: Option<Vec<String>>,
@@ -197,8 +182,7 @@ impl SpecGate {
     fn refresh(&mut self, home: &std::path::Path) -> bool {
         let mtime =
             |path: std::path::PathBuf| std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        // `enabled()` resolves the project lock against the live cwd, so
-        // the stamp follows it rather than the dir the widget started in.
+
         let project = std::env::current_dir()
             .ok()
             .map(|cwd| gray_plugin::lock::project_lock_path(&cwd));
@@ -220,10 +204,6 @@ impl SpecGate {
     }
 }
 
-/// The registered argv of the plugin that owns the widget slot:
-/// `widgets.json` selects the owner — never arbitrary argv edited into
-/// JSON, the lock entry supplies the command — and the owner must be
-/// `enabled`. Sync file reads only; `SpecGate` keeps it off the idle path.
 fn resolve_widget_argv(home: &std::path::Path) -> anyhow::Result<Vec<String>> {
     let raw = std::fs::read(home.join("plugins/widgets.json"))?;
     let spec: serde_json::Value = serde_json::from_slice(&raw)?;
@@ -242,8 +222,6 @@ fn resolve_widget_argv(home: &std::path::Path) -> anyhow::Result<Vec<String>> {
     Ok(entry.cli_argv.clone().unwrap_or_else(|| entry.argv.clone()))
 }
 
-/// `<argv> widget` emits one snapshot object and exits — the only source of
-/// widget content, so spawning stays the model.
 async fn spawn_widget(argv: &[String], cwd: &std::path::Path) -> anyhow::Result<Snapshot> {
     let (program, args) = argv
         .split_first()
@@ -292,10 +270,10 @@ mod tests {
             Duration::from_millis(900),
         ));
         assert_eq!(rows[1].spans, expected);
-        // A range shimmers only its slice: `⬡ Reviewer`, not the task.
+
         assert_eq!(rows[3].spans[1].content, "└─ ");
         assert_eq!(rows[3].spans.last().unwrap().content, "  Review");
-        // Too wide for the band: cut with an ellipsis, never clipped.
+
         let narrow = lines(&snapshot, Duration::ZERO, 12, 12);
         assert_eq!(narrow[1].to_string(), " ├─ ⬡ Scout…");
     }
@@ -327,9 +305,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].to_string().contains('\x1b'));
     }
-    /// The subagents plugin's text for eight running runs, as `lines()` reads
-    /// it: a blank lead row, the count header, five agents at two rows each,
-    /// the overflow line, a blank and the affordance (15 rows).
+
     fn eight_running() -> Snapshot {
         let mut rows = vec![String::new(), "8 subagents \u{b7} 8 running".to_string()];
         for n in 1..=5 {
@@ -351,7 +327,7 @@ mod tests {
         let rows = lines(&eight_running(), Duration::ZERO, 9, 80);
         assert_eq!(rows.len(), 9);
         assert_eq!(rows[1].to_string(), " 8 subagents \u{b7} 8 running");
-        // Eight rows of the widget are shown; the ninth names the other seven.
+
         assert_eq!(rows[8].to_string(), " \u{2193} 7 more lines");
         assert!(lines(&eight_running(), Duration::ZERO, 0, 80).is_empty());
     }
@@ -372,11 +348,11 @@ mod tests {
             text: format!("{}\n", "word ".repeat(30).trim_end()),
             ..Default::default()
         };
-        // 149 cells fit a 200-column band (one cell of inset): no cut.
+
         let wide = lines(&snapshot, Duration::ZERO, 4, 200)[0].to_string();
         assert!(wide.ends_with("word"), "{wide}");
         assert!(!wide.contains('\u{2026}'), "{wide}");
-        // At 80 columns the same row is cut to exactly the width.
+
         let narrow = lines(&snapshot, Duration::ZERO, 4, 80)[0].to_string();
         assert!(narrow.ends_with('\u{2026}'), "{narrow}");
         assert_eq!(crate::text_width::display_width(&narrow), 80);
@@ -400,7 +376,7 @@ fi
         crate::plugin_cli::register_native(home.path(), Some("sample"), &exe, false)
             .await
             .unwrap();
-        // Injected slot argv must never be executed; only the registered owner is.
+
         std::fs::write(
             home.path().join("plugins/widgets.json"),
             r#"{"name":"sample","argv":["/not/an/executable"]}"#,
@@ -438,12 +414,11 @@ fi
             stamps: [None; 3],
             argv: None,
         };
-        // First look resolves the slot; nothing moving means no re-resolve
-        // and no re-read of widgets.json or lock.json.
+
         assert!(gate.refresh(home.path()));
         assert!(gate.argv().is_some());
         assert!(!gate.refresh(home.path()));
-        // Disable bumps the lockfile: the argv is dropped on the next look.
+
         let lock_path = gray_plugin::lock::lock_path(home.path());
         let mut lock = gray_plugin::lock::LockFile::load(&lock_path).unwrap();
         lock.plugins.get_mut("sample").unwrap().enabled = false;

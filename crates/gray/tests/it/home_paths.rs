@@ -1,4 +1,3 @@
-//! Subprocess isolation: never mutate HOME while sibling tests run threads.
 use std::process::Command;
 
 #[test]
@@ -20,8 +19,7 @@ fn native_home_without_shell_environment() {
             gray_core::paths::user_home(),
             gray::setup::gray_home()
         );
-        // Exercise the package reader's real plugins/lock.json layout. The
-        // plugin host's separate plugins.json format is not this fixture.
+
         std::fs::create_dir_all(expected.join("plugins")).unwrap();
         std::fs::write(
             expected.join("plugins/lock.json"),
@@ -62,7 +60,7 @@ fn native_home_without_shell_environment() {
             .env("GRAY_PATH_TEST_PROFILE", dir.path())
             .env("USERPROFILE", dir.path())
             .env_remove("GRAY_HOME");
-        // A Windows installation launched from PowerShell has no Unix HOME.
+
         #[cfg(windows)]
         child.env_remove("HOME");
         #[cfg(not(windows))]

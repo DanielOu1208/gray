@@ -1,11 +1,7 @@
-//! Connect-a-provider modal: shell + event loop (render arms live in `connect_draw`;
-//! the model step is the shared `/model` picker in `model_modal`).
-
 use super::*;
 use anyhow::Context;
 use ratatui::style::Color;
 
-/// Shared palette for the connect-modal render arms.
 pub(crate) struct ConnectColors {
     pub box_bg: Color,
     pub input_bg: Color,
@@ -13,35 +9,25 @@ pub(crate) struct ConnectColors {
     pub text_dim: Color,
 }
 
-/// A row is removable when it holds a stored credential: the modal already
-/// counts it as connected (auth.json entry, or the active key in config), or
-/// a key is filed under its id — a custom endpoint keeps its key under
-/// `custom` even though that row never shows a check.
 pub(crate) fn is_removable(
     item: &ConnectItem,
     config: &Config,
     auth: &std::collections::BTreeMap<String, catalog::AuthEntry>,
 ) -> bool {
-    // A `custom:<slug>` row exists only because its endpoint entry does —
-    // always removable, keyed or keyless, active or not.
+
     if item.id.starts_with("custom:") {
         return true;
     }
     item.is_connected(config, auth) || auth.contains_key(&item.id)
 }
 
-/// Forgets `item`'s credential and returns its display name for the caller's
-/// feedback line. The auth-store entry goes away, and when the item is the
-/// active provider the saved config's *second* copy of the key goes too —
-/// without that the removal silently resurrects on the next start.
 fn forget_provider_at(
     item: &ConnectItem,
     config: &mut Config,
     auth_path: &std::path::Path,
     saved_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-    // Plugin credentials are namespaced (`plugin:<plugin>:<provider>:<auth>`),
-    // so removing by the display row id would silently leave the token behind.
+
     if let ConnectAuth::Plugin { auth_ref, .. } = &item.auth {
         let store = crate::auth::CredentialStore::new(auth_path.to_path_buf());
         let removed = store
@@ -79,8 +65,7 @@ fn forget_provider_at(
         config.api_key = None;
         let _cfg_lock = crate::setup::lock_saved_config_at(saved_path).ok();
         let mut saved = load_saved_config_at(saved_path);
-        // Only rewrite when there was something to drop: an untouched
-        // config file must stay untouched (mtime, unrelated fields).
+
         if saved.api_key.take().is_some() {
             saved.auth_mode = None;
             save_saved_config_at(saved_path, &saved)?;
@@ -98,33 +83,21 @@ pub(crate) fn forget_provider(item: &ConnectItem, config: &mut Config) -> anyhow
     )
 }
 
-/// Bracketed-paste insertion for the modal's single-line fields. Key and
-/// filter input is one line: strip line breaks (clipboards often trail
-/// `\n`) so a paste lands whole and never submits. Otherwise identical to
-/// typing the same text character by character.
 pub(crate) fn insert_paste(buf: &mut String, pasted: &str) {
-    // Strip escape sequences too: a paste that arrives still wrapped in
-    // bracketed-paste markers (gray nested in another terminal, or debris
-    // copied out of a rendered page) would otherwise type `^[[200~` into the
-    // API-key / ID field. Control chars other than CR/LF never belong there.
+
     buf.push_str(&crate::composer::input::strip_escape_sequences(pasted).replace(['\r', '\n'], ""));
 }
 
-/// What the connect modal did to `config`, so callers can react correctly:
-/// a removal must never be reported as a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectOutcome {
-    /// A provider was connected or switched to.
+
     Connected,
-    /// A stored provider credential was removed (payload: display name).
+
     Removed(String),
-    /// Dismissed with nothing changed.
+
     Dismissed,
 }
 
-/// Interactive "Connect a provider" GUI modal with clean colored box styling.
-/// Floating container block matching the composer prompt text box, live search filter,
-/// peach selection highlight, and in-modal API key entry.
 pub fn run_connect_modal(
     config: &mut Config,
     bg: Option<&BackgroundSnapshot>,
@@ -132,8 +105,6 @@ pub fn run_connect_modal(
     run_connect_modal_for(config, bg, None)
 }
 
-/// `run_connect_modal` that skips the provider menu and starts the login of
-/// the plugin provider `preselect` (`plugin:provider` id), e.g. `/claude`.
 pub fn run_connect_modal_for(
     config: &mut Config,
     bg: Option<&BackgroundSnapshot>,
@@ -145,7 +116,6 @@ pub fn run_connect_modal_for(
     outcome
 }
 
-/// Start a plugin login in the background; the modal drains its progress.
 fn spawn_plugin_login(
     installed: crate::providers::InstalledProvider,
 ) -> (
@@ -156,8 +126,7 @@ fn spawn_plugin_login(
     let cancel = tokio_util::sync::CancellationToken::new();
     let login_cancel = cancel.clone();
     tokio::spawn(async move {
-        // An early error (sidecar start, auth_start)
-        // must reach the dialog, or it waits forever.
+
         if let Err(err) = run_plugin_login(installed, login_cancel, progress_sender.clone()).await {
             let _ = progress_sender.send(PluginLoginProgress::Failed(err.to_string()));
         }
@@ -165,8 +134,6 @@ fn spawn_plugin_login(
     (cancel, progress_receiver)
 }
 
-/// Connect-modal id of the active provider: the plugin provider, else the
-/// catalog entry serving `base_url`. None for custom endpoints.
 pub fn active_connect_id(config: &Config) -> Option<String> {
     if !config.provider_id.is_empty() {
         return Some(config.provider_id.clone());
@@ -179,8 +146,6 @@ pub fn active_connect_id(config: &Config) -> Option<String> {
         .map(|(id, _)| id)
 }
 
-/// Suggestion rows matching the typed buffer (name or URL substring); an
-/// empty buffer shows every server the entry probe found.
 fn filter_local_suggestions<'a>(
     suggestions: &'a [context::LocalEndpointSuggestion],
     typed: &str,
@@ -196,11 +161,6 @@ fn filter_local_suggestions<'a>(
         .collect()
 }
 
-/// One-time bridge from the single legacy `custom` auth slot to named
-/// endpoints. It fires only when the *active* connection is a custom
-/// endpoint (no plugin identity, no catalog/popular base) — that is the
-/// one URL the old slot can belong to. The endpoint is registered
-/// keyless or keyed, and a filed key is moved under the slug id.
 fn migrate_legacy_custom(config: &Config, cat: &catalog::Catalog) {
     if !config.provider_id.is_empty() {
         return;
@@ -227,9 +187,7 @@ fn migrate_legacy_custom(config: &Config, cat: &catalog::Catalog) {
         Some(catalog::AuthEntry::Key(key)) => Some(key.clone()),
         _ => None,
     };
-    // Nothing to migrate when the endpoint is already registered and no
-    // legacy key waits — upserting again would rewrite `keyless` and flip
-    // a keyed endpoint keyless.
+
     let registered = catalog::load_custom_endpoints_at(&ep_path)
         .iter()
         .any(|e| normalize_custom_base_url(&e.base_url) == base);
@@ -265,26 +223,21 @@ fn connect_modal(
         EnteringBaseUrl {
             url_buf: String,
             status_msg: Option<String>,
-            /// Local servers offered one probe per screen-open (the
-            /// `EnteringBaseUrl` screen's pick list).
+
             suggestions: Vec<context::LocalEndpointSuggestion>,
             sel: usize,
-            /// A failed reachability probe arms this: the next Enter
-            /// connects without re-probing (offline dev boxes, odd
-            /// servers).
+
             probe_failed: bool,
         },
         EnteringKey {
             item: ConnectItem,
             key_buf: String,
             existing_key: Option<String>,
-            /// The env var `existing_key` came from: an env key is offered
-            /// like a stored one, but never takes the saved-key shortcut —
-            /// it has not been proven (or saved) yet.
+
             env_var: Option<&'static str>,
             status_msg: Option<String>,
         },
-        /// Marker: the loop hands this to the shared `/model` picker.
+
         SelectingModel {
             item: ConnectItem,
         },
@@ -304,13 +257,9 @@ fn connect_modal(
     let mut connected_name: Option<(String, String)> = None;
 
     let (_session, mut terminal) = super::open_modal()?;
-    // Bracketed paste is terminal-global (mode 2004): the composer asserts
-    // it every prompt turn, so a paste here arrives as `Event::Paste`.
-    // Re-assert for entries that never ran a prompt turn (e.g. onboarding).
+
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
-    // Shift+Enter is the removal binding here: without the same
-    // disambiguation the prompt uses, a terminal that collapses it to a bare
-    // Enter would connect the provider instead of confirming a removal.
+
     let _keyboard_enhancement = crate::composer::input::KeyboardEnhancementGuard::push();
 
     let colors = ConnectColors {
@@ -324,16 +273,9 @@ fn connect_modal(
         .cloned()
         .unwrap_or_else(BackgroundSnapshot::default_initial);
 
-    // Detection is a modal-open snapshot — an env scan plus one localhost
-    // probe. The item list rebuilds on every loop pass, far too often to
-    // re-run either of those.
     let detected =
         catalog::detect_connect_candidates(context::ollama_running(), |k| std::env::var(k).ok());
 
-    // The legacy `custom` auth slot held one key for one URL — the active
-    // connection's endpoint when that connection is no catalog or plugin
-    // provider. Refile it under the endpoint's slug so the endpoint shows
-    // up as its own saved row.
     migrate_legacy_custom(config, &catalog);
 
     let result = (|| -> anyhow::Result<ConnectOutcome> {
@@ -345,8 +287,7 @@ fn connect_modal(
             let customs = catalog::load_custom_endpoints();
             let mut all_items = build_connect_items(&catalog, &providers, &customs);
             catalog::sort_connect_items(&mut all_items, config, &auth, &detected);
-            // Detected rows say where the credential/runtime was found;
-            // connected rows keep their own label.
+
             for item in &mut all_items {
                 if !item.is_connected(config, &auth)
                     && let Some(d) = detected.get(&item.id)
@@ -367,8 +308,7 @@ fn connect_modal(
                         progress,
                     };
                 } else if matches!(item.auth, ConnectAuth::ApiKey) {
-                    // Reached after the provider rejected the saved key: ask
-                    // for a new one, since re-saving the old one can't help.
+
                     let existing_key = load_auth_keys().get(&item.id).cloned();
                     state = ModalState::EnteringKey {
                         item: item.clone(),
@@ -382,12 +322,6 @@ fn connect_modal(
                 }
             }
 
-            // The model step is the shared `/model` picker on this
-            // terminal — same rows, meters and commit path. `config`
-            // must already point at the connection being browsed: the
-            // non-plugin arms above set base_url/key at transition; a
-            // plugin item gets its credentials pointed here without a
-            // disk write (the picker's own commit lands first).
             if let ModalState::SelectingModel { item } = &state {
                 let item = item.clone();
                 let installed = match &item.auth {
@@ -410,9 +344,7 @@ fn connect_modal(
                         Some(installed)
                     }
                     _ => {
-                        // The picker runs before `select_api_key_connection`:
-                        // clear a stale plugin identity or `picker_scope`
-                        // would list the previous provider's models.
+
                         config.provider_id.clear();
                         config.credential_source.clear();
                         config.auth_ref.clear();
@@ -519,7 +451,7 @@ fn connect_modal(
                     ModalState::ConfirmingRemove { item } => {
                         super::connect_draw::render_confirm_remove(frame, area, item, &colors)
                     }
-                    // Intercepted above the draw; the shared picker owns it.
+
                     ModalState::SelectingModel { .. } => {}
                     ModalState::AuthorizingPlugin {
                         item,
@@ -537,8 +469,6 @@ fn connect_modal(
                 }
             })?;
 
-            // Login progress arrives from a background task, so the authorizing
-            // dialog must redraw on a timer, not only on a key press.
             if !matches!(state, ModalState::AuthorizingPlugin { .. })
                 && !poll(Duration::from_millis(100))?
             {
@@ -585,9 +515,7 @@ fn connect_modal(
                             }
                             _ => {}
                         },
-                        // Shift+Enter removes the highlighted provider; plain
-                        // Enter connects it. Guarded ahead of the generic key
-                        // arm, which would otherwise swallow it as Enter.
+
                         Event::Key(KeyEvent {
                             code: KeyCode::Enter,
                             modifiers,
@@ -666,11 +594,7 @@ fn connect_modal(
                                                     None
                                                 }
                                             });
-                                        // No stored key: a detected env key
-                                        // is offered pre-filled, tagged by
-                                        // its variable so it still goes
-                                        // through validation + the model
-                                        // step like a freshly typed key.
+
                                         let (existing_key, env_var) = match stored {
                                             Some(key) => (Some(key), None),
                                             None => detected
@@ -706,8 +630,7 @@ fn connect_modal(
                     sel,
                     probe_failed,
                 } => {
-                    // Typed text filters the suggestion list (name or URL);
-                    // an empty buffer shows every local server we probed.
+
                     let filtered = filter_local_suggestions(suggestions, url_buf);
                     if filtered.is_empty() {
                         *sel = 0;
@@ -750,8 +673,7 @@ fn connect_modal(
                                 *probe_failed = false;
                             }
                             KeyCode::Tab => {
-                                // Fill from the highlighted suggestion —
-                                // the user can still edit before Enter.
+
                                 if let Some(s) = filtered.get(*sel) {
                                     *url_buf = s.url.to_string();
                                     *status_msg = None;
@@ -774,12 +696,7 @@ fn connect_modal(
                                         Some("Enter a valid base URL (e.g. https://…/v1)".into());
                                     continue;
                                 }
-                                // Probe before the key screen: a reachable
-                                // endpoint (or one that answers 401 — it is
-                                // there, it just wants the key) proceeds; a
-                                // silent one warns once, and the next Enter
-                                // forces through anyway (offline boxes,
-                                // servers with no list route).
+
                                 let proceed = if *probe_failed {
                                     *probe_failed = false;
                                     true
@@ -886,8 +803,7 @@ fn connect_modal(
 
                             if final_key.is_empty() {
                                 if catalog::is_custom_id(&item.id) && existing_key.is_none() {
-                                    // Keyless custom endpoint (local models): skip
-                                    // auth save and go straight to model picking.
+
                                     config.base_url = item.base_url.clone();
                                     config.api_key = None;
                                     state = ModalState::SelectingModel { item: item.clone() };
@@ -898,10 +814,7 @@ fn connect_modal(
                                 }
                                 continue;
                             }
-                            // Prove the key before saving it: an explicit
-                            // rejection stays on this screen, and anything
-                            // inconclusive proceeds — an offline user or an
-                            // odd provider must not be blocked.
+
                             *status_msg = Some("Checking key…".into());
                             terminal.draw(|frame| {
                                 let area = frame.area();
@@ -936,9 +849,7 @@ fn connect_modal(
                                         connect_saved_key(config, &item.base_url, &final_key)?;
                                         return Ok(ConnectOutcome::Connected);
                                     }
-                                    // Fresh adds carry the add-row id: the
-                                    // key belongs under the endpoint's
-                                    // slug so several customs coexist.
+
                                     let pid = if item.id == "custom" {
                                         catalog::custom_key_id(&item.base_url)
                                     } else {
@@ -967,9 +878,7 @@ fn connect_modal(
                     cancel,
                     progress,
                 } => {
-                    // Drain login progress without ever blocking the render loop.
-                    // The transition is buffered because the loop owns the
-                    // receiver until every queued event has been consumed.
+
                     let mut next_state: Option<ModalState> = None;
                     while let Ok(progress) = progress.try_recv() {
                         match progress {
@@ -986,9 +895,7 @@ fn connect_modal(
                                 *status_msg = Some("Credential saved".into())
                             }
                             PluginLoginProgress::Models(models) => {
-                                // Cache under the plugin key: the picker
-                                // paints from it on open — the
-                                // placeholder base can never serve a list.
+
                                 super::context::save_provider_model_list(
                                     &super::catalog::plugin_models_key(&item.id),
                                     &models,
@@ -1060,7 +967,7 @@ fn connect_modal(
                     Event::Resize(_, _) => {}
                     _ => {}
                 },
-                // Intercepted above the draw; the picker owns this step.
+
                 ModalState::SelectingModel { .. } => {}
             }
         }

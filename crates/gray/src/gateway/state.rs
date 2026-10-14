@@ -1,10 +1,3 @@
-//! Runtime state snapshot: `$GRAY_HOME/gateway.state.json`.
-//!
-//! The PID file is the lock and dies with the process; this record survives
-//! (crash included), so `gateway status` can say *why* the last run ended
-//! while nothing is running. Hermes keeps the same split: pid record vs
-//! runtime status.
-
 use std::path::{Path, PathBuf};
 
 pub const STATE_STARTING: &str = "starting";
@@ -35,7 +28,6 @@ pub fn read(home: &Path) -> Option<RuntimeState> {
     serde_json::from_str(&body).ok()
 }
 
-/// Convenience constructor: now, this process, this version.
 pub fn record(gateway_state: &str, exit_reason: Option<&str>, started_at: i64) -> RuntimeState {
     RuntimeState {
         gateway_state: gateway_state.to_string(),

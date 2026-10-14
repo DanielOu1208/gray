@@ -1,4 +1,3 @@
-// UNRUN (cargo test banned under X): run in TTY/CI.
 use super::*;
 
 #[test]
@@ -58,13 +57,6 @@ fn transcript_collects_text_and_tool_names() {
     assert!(t.contains("hello world"));
 }
 
-/// Write an executable script fixture, staged and renamed into place so
-/// the path that gets exec'd is never one a writer still holds. ETXTBSY
-/// ("text file busy") means the executable was open for writing at the
-/// instant of the exec; it showed up here roughly 1 run in 5-20 with no
-/// process holding the file by the time it could be checked, so the real
-/// fix is the one retry in `run_pre_script_with_timeout`. This keeps the
-/// fixture out of that window too.
 #[cfg(unix)]
 fn write_script(path: &std::path::Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -102,8 +94,7 @@ async fn script_missing_file_is_not_ok() {
     let missing = dir.path().join("gone.sh");
     let out = run_pre_script(&missing, dir.path()).await;
     assert!(!out.ok);
-    // The failure names the script: an operator reading cron output must
-    // not have to guess which pre-script failed.
+
     assert!(
         out.stderr_tail.contains("gone.sh"),
         "spawn failure must name the script: {}",
@@ -166,7 +157,7 @@ async fn script_timeout_covers_execution() {
 
 #[test]
 fn mirror_message_is_clean_user_label() {
-    // Hermes `_cron_mirror_message`: labelled, no wrapper, no file path.
+
     let out = mirror_message("nightly", "hello output");
     assert_eq!(out, "[Cron delivery: nightly]\nhello output");
     assert!(!out.contains("Cronjob Response:"));

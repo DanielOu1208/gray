@@ -1,21 +1,3 @@
-//! The grep/rg shim, server side: answers `search_shim` requests from the
-//! session's index for one root. Every answer is either the real tool's argv
-//! plus the files it must read, or a decline. The index only prunes; the
-//! real tool produces the output.
-//!
-//! The candidate files for a query are the union of three sets, each a
-//! superset of what the real tool could match in its walk:
-//! - files the content index does not hold as they are (not eligible, or
-//!   changed since their sync), which every search reads directly;
-//! - held files whose content has a required literal of the pattern;
-//! - files changed since the server started (inotify), always.
-//!
-//! Each is then filtered by the walk the real tool would have done, and the
-//! survivors are listed in the order that walk reaches them.
-//!
-//! `gray search-serve --root DIR --sock PATH` runs this outside a session
-//! (the differential tester's entry point); a session runs the same server.
-
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
@@ -30,21 +12,17 @@ use serde_json::{Value, json};
 use crate::search_plan::{self, GrepPlan};
 use crate::search_watch::Watch;
 
-/// Everything one server answers from. The index directory is removed when
-/// the process exits.
 struct Server {
     root: PathBuf,
     engine: fsearch::Engine,
     watch: Arc<Watch>,
-    /// Directory listings behind walk-order keys, kept across requests and
-    /// dropped when the watch reports a change.
+
     order: Mutex<HashMap<PathBuf, Option<HashMap<OsString, usize>>>>,
-    /// Unheld paths under the root, cached until the watch reports a change.
+
     unheld: Mutex<Option<Arc<BTreeSet<Vec<u8>>>>>,
     _index_dir: tempfile::TempDir,
 }
 
-/// Serve queries for `root` on `sock` until the process dies.
 #[cfg(unix)]
 pub fn serve(root: &Path, sock: &Path) -> std::io::Result<()> {
     let root = root.canonicalize()?;
@@ -53,8 +31,7 @@ pub fn serve(root: &Path, sock: &Path) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::other("root is not UTF-8"))?
         .to_string();
     let index_dir = tempfile::Builder::new().prefix("gray-serve-").tempdir()?;
-    // The watch goes in before the engine scans: anything written after this
-    // point is reported, and anything before it is in the scan.
+
     let watch = Arc::new(Watch::new(&root)?);
     let drain = watch.clone();
     std::thread::spawn(move || drain.drain_forever());
@@ -90,7 +67,6 @@ pub fn serve(_root: &Path, _sock: &Path) -> std::io::Result<()> {
     Err(std::io::Error::other("search-serve needs a unix socket"))
 }
 
-/// One request line in, one reply line out.
 #[cfg(unix)]
 fn answer(server: &Server, mut stream: UnixStream) -> std::io::Result<()> {
     let mut line = String::new();
@@ -112,7 +88,6 @@ fn decide(server: &Server, line: &str) -> Value {
     reply
 }
 
-/// The real tool's argv and the display paths of the files it must read.
 type Answer = (Vec<String>, Vec<String>);
 
 fn serve_line(server: &Server, line: &str) -> Result<Answer, &'static str> {
@@ -185,15 +160,11 @@ fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static
         let key = walk_key(&mut order, &scope, rel).ok_or("walk order unknown")?;
         found.push((key, format!("{prefix}{name}")));
     }
-    // The real tool reads files in the order its walk reaches them; so do we.
+
     found.sort();
     Ok((plan.argv, found.into_iter().map(|(_, f)| f).collect()))
 }
 
-/// Where the real tool's walk reaches `rel` under `scope`: the position of
-/// each component in its directory's `readdir` order, outermost first. This
-/// is the order fts gives with no comparator. `order` caches one directory
-/// listing per directory.
 fn walk_key(
     order: &mut HashMap<PathBuf, Option<HashMap<OsString, usize>>>,
     scope: &Path,
@@ -212,8 +183,6 @@ fn walk_key(
     Some(key)
 }
 
-/// Names of `dir` in `readdir` order. `None` for a directory past fts's
-/// inode-sort threshold, whose order we do not reproduce.
 fn readdir_order(dir: &Path) -> Option<HashMap<OsString, usize>> {
     let names: Vec<OsString> = std::fs::read_dir(dir)
         .ok()?
@@ -226,12 +195,8 @@ fn readdir_order(dir: &Path) -> Option<HashMap<OsString, usize>> {
     Some(names.into_iter().enumerate().map(|(i, n)| (n, i)).collect())
 }
 
-/// gnulib fts sorts a directory by inode number past this many entries.
 const FTS_INODE_SORT_ENTRIES: usize = 10_000;
 
-/// The canonical directory the operand names under the root, and the prefix
-/// the real tool prints before each path under it (`operand/`, as given with
-/// any trailing slash removed).
 fn operand(root: &Path, cwd: &Path, plan: &GrepPlan) -> Result<(PathBuf, String), &'static str> {
     let raw = cwd.join(&plan.operand);
     if !raw.is_dir() {
@@ -256,9 +221,6 @@ fn operand(root: &Path, cwd: &Path, plan: &GrepPlan) -> Result<(PathBuf, String)
     Ok((scope, prefix))
 }
 
-/// Would the real tool's recursion under the operand visit this file?
-/// `rel` is the path under the operand; every directory on it must pass
-/// `--exclude-dir`, and the file its include and exclude rules.
 fn walked(plan: &GrepPlan, rel: &Path) -> bool {
     let mut comps = rel.components().peekable();
     while let Some(c) = comps.next() {

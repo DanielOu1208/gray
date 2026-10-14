@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// Role of a message sender in a conversation turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -19,19 +18,14 @@ impl std::fmt::Display for Role {
     }
 }
 
-/// A distinct content block within a conversation message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    /// Plain text content.
+
     Text { text: String },
-    /// Image content (base64-encoded).
+
     Image { media_type: String, data: String },
-    /// Non-image media (base64-encoded): video, audio, PDF. Providers send it
-    /// natively when the model takes that `media_type`, else they send
-    /// `fallback` instead (see [`resolve_media`]) — so a session keeps working
-    /// after switching to a model without that input. Old sessions stored
-    /// this as `"type": "video"` without a fallback.
+
     #[serde(alias = "video")]
     Media {
         media_type: String,
@@ -39,25 +33,20 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         fallback: Vec<ContentBlock>,
     },
-    /// A tool invocation requested by the model.
+
     ToolUse {
         id: String,
         name: String,
         args: serde_json::Value,
     },
-    /// The result of executing a tool invocation.
+
     ToolResult {
         id: String,
         content: String,
         #[serde(default)]
         is_error: bool,
     },
-    /// The model's reasoning / chain-of-thought for an assistant turn.
-    /// Displayed dim+italic in the REPL (mirrors pi's thinking blocks).
-    /// `encrypted_content`/`item_id` round-trip Responses-API reasoning items
-    /// (pi_agent_rust parity) so the server keeps its prompt-cache shard warm;
-    /// `model` gates replay to the model that produced them (a foreign model
-    /// cannot decrypt the blob). All optional → old session files still parse.
+
     Thinking {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,7 +56,7 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },
-    /// A host-validated structured input event retained as a typed session block.
+
     StructuredInput {
         protocol: String,
         version: u32,
@@ -77,12 +66,11 @@ pub enum ContentBlock {
 }
 
 impl ContentBlock {
-    /// Creates a new text block.
+
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
     }
 
-    /// Creates a new tool use block.
     pub fn tool_use(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -95,8 +83,6 @@ impl ContentBlock {
         }
     }
 
-    /// Creates a new thinking block (no replay data; the provider attaches
-    /// that when it captures a reasoning item from the stream).
     pub fn thinking(text: impl Into<String>) -> Self {
         Self::Thinking {
             text: text.into(),
@@ -106,7 +92,6 @@ impl ContentBlock {
         }
     }
 
-    /// Creates a new image block (base64 data).
     pub fn image(media_type: impl Into<String>, data: impl Into<String>) -> Self {
         Self::Image {
             media_type: media_type.into(),
@@ -114,8 +99,6 @@ impl ContentBlock {
         }
     }
 
-    /// Creates a new media block (base64 `data`, e.g. "video/mp4") with
-    /// what a model that can't take it sees instead.
     pub fn media(
         media_type: impl Into<String>,
         data: impl Into<String>,
@@ -128,7 +111,6 @@ impl ContentBlock {
         }
     }
 
-    /// Creates a new tool result block.
     pub fn tool_result(id: impl Into<String>, content: impl Into<String>, is_error: bool) -> Self {
         Self::ToolResult {
             id: id.into(),
@@ -137,7 +119,6 @@ impl ContentBlock {
         }
     }
 
-    /// Returns provider-facing text for blocks that have one.
     pub fn provider_text(&self) -> Option<String> {
         match self {
             ContentBlock::Text { text } => Some(text.clone()),
@@ -195,21 +176,17 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// A conversation turn message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
-    /// True when gray wrote this user-role turn itself — job notices, stall
-    /// nudges, context updates — rather than the human typing a prompt.
-    /// Injected entries replay as prompt cards but never enter Up/Down input
-    /// recall. Old transcripts omit the flag and default to real input.
+
     #[serde(default, skip_serializing_if = "is_false")]
     pub injected: bool,
 }
 
 impl Message {
-    /// Creates a new message with the given role and content blocks.
+
     pub fn new(role: Role, content: Vec<ContentBlock>) -> Self {
         Self {
             role,
@@ -218,7 +195,6 @@ impl Message {
         }
     }
 
-    /// Helper to create a user message containing a single text block.
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,
@@ -227,9 +203,6 @@ impl Message {
         }
     }
 
-    /// Helper to create an injected user message — a note gray appends to the
-    /// transcript on the user's behalf (background job notices, continuation
-    /// nudges, context updates). Skipped by Up/Down input recall.
     pub fn user_injected(text: impl Into<String>) -> Self {
         Self {
             injected: true,
@@ -237,7 +210,6 @@ impl Message {
         }
     }
 
-    /// Helper to create an assistant message containing a single text block.
     pub fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
@@ -246,7 +218,6 @@ impl Message {
         }
     }
 
-    /// Helper to create a system message containing a single text block.
     pub fn system(text: impl Into<String>) -> Self {
         Self {
             role: Role::System,
@@ -255,7 +226,6 @@ impl Message {
         }
     }
 
-    /// Creates a user message containing a typed structured input event.
     pub fn structured_input(input: crate::input::InputEnvelope) -> Self {
         Self {
             role: Role::User,
@@ -264,7 +234,6 @@ impl Message {
         }
     }
 
-    /// Concatenates all text blocks in the message.
     pub fn text_content(&self) -> String {
         self.content
             .iter()
@@ -276,19 +245,6 @@ impl Message {
             .join("\n")
     }
 
-    /// Everything in this message that the provider will bill as context —
-    /// not just its prose.
-    ///
-    /// [`text_content`](Self::text_content) is a *display* accessor: it keeps
-    /// `Text` blocks and drops tool results, tool arguments, replayed
-    /// reasoning blobs and image payloads. Those are precisely the blocks
-    /// that dominate a coding session, so any budgeting code that measures
-    /// with `text_content` scores a 50 KiB tool result as zero tokens.
-    /// Size-estimation callers must use this instead.
-    ///
-    /// Concatenation order and separators are irrelevant to callers: only the
-    /// resulting length is meaningful. Kept deliberately allocation-simple —
-    /// it runs once per message per compaction, not per token.
     pub fn context_text(&self) -> String {
         let mut out = String::new();
         for block in &self.content {
@@ -306,17 +262,13 @@ impl Message {
                     encrypted_content,
                     ..
                 } => {
-                    // The encrypted blob is replayed verbatim next turn to
-                    // keep the provider's cache shard warm, and is billed
-                    // like any other input token. It must be counted.
+
                     match encrypted_content {
                         Some(blob) => format!("{text}{blob}"),
                         None => text.clone(),
                     }
                 }
-                // Base64 payload length is the only size signal available
-                // here; providers re-encode, so this is an approximation in
-                // the same spirit as the chars/4 heuristic downstream.
+
                 ContentBlock::Image { data, .. } | ContentBlock::Media { data, .. } => data.clone(),
             };
             if !piece.is_empty() {
@@ -330,14 +282,8 @@ impl Message {
     }
 }
 
-/// Raw media bytes past this never go on the wire natively: base64 is ~1.33x,
-/// and an inline request over ~20MB is rejected by every provider we speak.
 pub const MAX_NATIVE_MEDIA_BYTES: usize = 8 * 1024 * 1024;
 
-/// Swap each [`ContentBlock::Media`] the model can't take (per `accepts`,
-/// given the media type) or that is over [`MAX_NATIVE_MEDIA_BYTES`] for its
-/// fallback, or a one-line note when it has none. Providers call this on a
-/// message's blocks right before mapping them to the wire.
 pub fn resolve_media(
     blocks: Vec<ContentBlock>,
     accepts: impl Fn(&str) -> bool,
@@ -365,31 +311,21 @@ pub fn resolve_media(
     out
 }
 
-/// Definition of a tool available to the agent model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDef {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
-    /// Display-only headline for transcripts (`None` = derive from the
-    /// wire name). Never reaches the model: both provider mappers project
-    /// `name`/`description`/`parameters` explicitly, and `None` skips
-    /// serialization so persisted payloads stay byte-stable.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// Display-only arg preview for transcripts: a dot path to the first
-    /// string worth showing (e.g. `"document.title"`), or a template
-    /// (e.g. `"{name} · {model|model}\n{prompt|firstline}"`) over several
-    /// args. The renderer resolves it against the call args at render time;
-    /// `None` = the renderer's built-in preview. Plugin-declared, never
-    /// model-visible (same projection as `label`). Wire args are never
-    /// changed.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
 }
 
 impl ToolDef {
-    /// Creates a new tool definition.
+
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -404,20 +340,17 @@ impl ToolDef {
         }
     }
 
-    /// Attaches a display headline (plugin manifests, tests).
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
         self
     }
 
-    /// Attaches a display-only arg preview path (plugin manifests, tests).
     pub fn with_preview(mut self, preview: impl Into<String>) -> Self {
         self.preview = Some(preview.into());
         self
     }
 }
 
-/// Request payload sent to an LLM provider.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -425,9 +358,7 @@ pub struct ChatRequest {
     pub messages: Vec<Message>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolDef>,
-    /// Output cap for this one request (`None` = the provider default). Set
-    /// only by the cache warmer, which replays a request under
-    /// [`crate::agent::Provider::warm_output_cap`].
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
 }

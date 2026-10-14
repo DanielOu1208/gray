@@ -1,17 +1,3 @@
-//! Tool-call latency baseline: paired wall-time benchmarks over gray's real tool
-//! dispatch paths (toolbench method: same workload, alternating samples,
-//! medians + p95s, no mocks).
-//!
-//! Purpose: lock in today's numbers. Any future fast path (grep envelope,
-//! parallel dispatch) must beat these or it doesn't ship. Run with:
-//! `cargo test -p gray-tools --test tool_bench -- --ignored --nocapture`
-//!
-//! `baseline_tool_bench` is a measurement, not a correctness check, so it is
-//! `#[ignore]`d and CI runs it once, in the Ubuntu test job.
-//!
-//! These are tool-operation wall times, NOT model-inclusive turn speed:
-//! tool-heavy turns move with these numbers, chat-heavy turns barely do.
-
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -36,7 +22,6 @@ fn stats(mut v: Vec<f64>) -> (f64, f64) {
     (med, p95)
 }
 
-/// Build a realistic fixture tree: 50 python-ish files x 400 lines.
 fn fixture() -> TempDir {
     let dir = TempDir::new().unwrap();
     let src = dir.path().join("src");
@@ -64,13 +49,11 @@ async fn baseline_tool_bench() {
     let find = FindTool;
     let bash = BashTool::default();
 
-    // Warm up (page cache, tokio runtime, rg binary).
     read.execute(&ctx, json!({"path": "src/file00.py", "limit": 100}))
         .await;
     grep.execute(&ctx, json!({"pattern": "needle_00", "path": "src"}))
         .await;
 
-    // Alternate read/grep samples so machine noise spreads evenly.
     let mut reads = Vec::with_capacity(SAMPLES);
     let mut greps = Vec::with_capacity(SAMPLES);
     for i in 0..SAMPLES {
@@ -110,8 +93,6 @@ async fn baseline_tool_bench() {
         bashes.push(t.elapsed().as_secs_f64() * 1000.0);
     }
 
-    // Repeat-read dedup lane: a fully-covered small file read twice.
-    // (limit:100 on a 400-line file is a partial window and must NOT stub.)
     std::fs::write(dir.path().join("small.txt"), "hello\n".repeat(50)).unwrap();
     let t = Instant::now();
     read.execute(&ctx, json!({"path": "small.txt", "limit": 100}))
@@ -123,9 +104,6 @@ async fn baseline_tool_bench() {
         .await;
     let second = t.elapsed().as_secs_f64() * 1000.0;
 
-    // Many-match lane: "needle" hits all 20,000 lines, forcing full parse
-    // of every match envelope (limit raised past the total). This is the
-    // shape where --json vs --vimgrep actually diverge, if at all.
     let mut manys = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         let t = Instant::now();
@@ -156,29 +134,16 @@ async fn baseline_tool_bench() {
         stubbed.content.len()
     );
 
-    // Negative-control shape: the suite must actually exercise the tools.
-    // If medians ever read 0.00ms, the harness is broken, not fast.
     assert!(
         rm > 0.0 && gm > 0.0 && fm > 0.0 && bm > 0.0,
         "zero medians = broken bench, not fast tools"
     );
 }
 
-/// Toolrush law: byte-identical output or the lane doesn't ship. The fast
-/// `--vimgrep` path must agree with `--json` on match-only searches across
-/// shapes that historically diverge (colons in text, case folding, globs,
-/// limits, no-match, unicode, CRLF). Context searches bypass the fast path.
-///
-/// rg's parallel walker emits files in nondeterministic order run-to-run,
-/// so multi-file searches that hit the match limit can legitimately return
-/// different *sets* from identical code. Those shapes compare notices +
-/// shape, not content. Shapes under the limit compare full sorted match-line
-/// multisets (slow output keeps its context lines; filtered, not compared).
 #[tokio::test]
 async fn fast_path_parity() {
     let dir = TempDir::new().unwrap();
-    // Small fixed-content tree (contents deterministic; rg's file *order*
-    // is not, hence sorted comparison below).
+
     let files: &[(&str, &str)] = &[
         ("a.txt", "alpha needle one\nnothing here\nbeta needle two\n"),
         ("b.txt", "nothing\nneedle three here\n"),
@@ -217,7 +182,7 @@ async fn fast_path_parity() {
                 })
         })
     }
-    // (sorted match lines, sorted non-context remainder incl. notices)
+
     fn split<'a>(s: &'a str, rels: &[&str]) -> (Vec<&'a str>, Vec<&'a str>) {
         let mut m = Vec::new();
         let mut rest = Vec::new();
@@ -233,8 +198,6 @@ async fn fast_path_parity() {
         (m, rest)
     }
 
-    // (args, rels visible in output, hits_limit?)
-    // Dir search ".": rels are root-relative. Single-file: rel = file_name.
     let dir_rels: &[&str] = &[
         "a.txt",
         "b.txt",
@@ -263,8 +226,7 @@ async fn fast_path_parity() {
             &["a.txt"],
             false,
         ),
-        // 8 total matches > limit 5: file order decides the set; compare
-        // notices + shape only.
+
         (json!({"pattern": "needle", "limit": 5}), dir_rels, true),
     ];
     for (args, rels, hits_limit) in shapes.iter() {
@@ -281,14 +243,12 @@ async fn fast_path_parity() {
         let (fm, frest) = split(&fast.content, rels);
         let (sm, srest) = split(&slow.content, rels);
         if *hits_limit {
-            // No matches at all means rg is missing (both lanes return the
-            // same "not installed" error and compare equal) — fail loud.
+
             assert!(
                 !fm.is_empty(),
                 "no matches at all for {args} — is rg installed?"
             );
-            // Same count (both stop at the limit), same notices; the *set*
-            // may differ by rg file order, so content is not compared.
+
             assert_eq!(fm.len(), sm.len(), "match count diverges for {args}");
             assert_eq!(frest, srest, "notices diverge for {args}");
             assert!(

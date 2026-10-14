@@ -1,8 +1,6 @@
 use super::*;
 use crate::repl::status::SessionTotals;
 
-/// Anthropic-ish cache-priced rate, seeded under this id like
-/// `repl/tests.rs` seeds `test-persist-model`.
 const MODEL: &str = "test-usage-panel-model";
 
 fn seed_rate() {
@@ -18,7 +16,6 @@ fn seed_rate() {
     crate::setup::parse_litellm_context_json(&v);
 }
 
-/// Turn usage with an explicit cache breakdown (input stays inclusive).
 fn cached_usage(input: usize, output: usize, read: usize, write: usize) -> gray_core::event::Usage {
     gray_core::event::Usage {
         input_tokens: input,
@@ -45,18 +42,18 @@ fn bar_cells(bar: &[Span<'static>]) -> usize {
 
 #[test]
 fn cache_bar_sums_to_24_and_nonzero_shares_keep_a_cell() {
-    // Proportional shares.
+
     let bar = cache_bar(1_670_000, 112_000, 58_000);
     assert_eq!(bar_cells(&bar), 24);
     assert_eq!(bar.len(), 3);
-    // A sliver still earns its cell.
+
     let bar = cache_bar(1, 1, 1_000);
     assert_eq!(bar.len(), 3);
     assert_eq!(bar_cells(&bar), 24);
     assert!(bar.iter().all(|s| !s.content.is_empty()));
-    // Zero input → no bar at all.
+
     assert!(cache_bar(0, 0, 0).is_empty());
-    // One share fills the whole bar.
+
     let bar = cache_bar(42, 0, 0);
     assert_eq!(bar.len(), 1);
     assert_eq!(bar[0].content.chars().count(), 24);
@@ -69,12 +66,11 @@ fn uncached_cost_prices_all_input_fresh() {
     let u = cached_usage(1_000, 100, 800, 100);
     let full = crate::setup::uncached_cost(&u, MODEL).expect("priced");
     let actual = crate::setup::turn_cost(&u, MODEL).expect("priced");
-    // uncached: 1000×$5e-6 + 100×$25e-6; cached: fresh 100×$5e-6 +
-    // read 800×$0.5e-6 + write 100×$6.25e-6 + output.
+
     let want_full = 1_000.0 * 5e-6 + 100.0 * 25e-6;
     assert!((full - want_full).abs() < 1e-12, "{full} vs {want_full}");
     assert!(full > actual, "cache must save: {full} vs {actual}");
-    // Unpriced model → None.
+
     assert_eq!(
         crate::setup::uncached_cost(&u, "definitely-unpriced-model"),
         None
@@ -97,7 +93,7 @@ fn totals_accumulate_cache_shares_and_saved() {
     assert!((t.saved - want).abs() < 1e-9, "{} vs {want}", t.saved);
     assert!(t.saved > 0.0);
     assert!(t.write_premium > 0.0);
-    // Legacy `cached_tokens` counts as a read.
+
     let mut t2 = SessionTotals::default();
     let mut legacy = gray_core::event::Usage::new(500, 50);
     legacy.cached_tokens = 400;
@@ -123,7 +119,7 @@ fn note_miss_buckets_by_cause() {
     assert_eq!(t.misses.idle, 1);
     assert_eq!(t.misses.model_switch, 1);
     assert_eq!(t.misses.other, 1);
-    // A model switch wins over a long idle gap.
+
     let mut t2 = SessionTotals::default();
     t2.note_miss(&miss(crate::cache::cache_ttl().as_secs() + 60, true));
     assert_eq!(t2.misses.model_switch, 1);
@@ -154,10 +150,10 @@ fn plain_render_shows_cache_rows_when_reported() {
     assert!(text.contains("idle 1"), "{text}");
     assert!(text.contains("Time"), "{text}");
     assert!(text.contains("Rate"), "{text}");
-    // Unknown warmth → no warm/cold suffix.
+
     assert!(!text.contains("warm"), "{text}");
     assert!(!text.contains("cold"), "{text}");
-    // Rows are the concatenated spans — headless needs no ANSI.
+
     assert!(!text.contains('\x1b'), "{text}");
 }
 
@@ -176,7 +172,7 @@ fn plain_render_hides_cache_rows_without_cache_activity() {
     assert!(!text.contains("Saved"), "{text}");
     assert!(!text.contains("Misses"), "{text}");
     assert!(!text.contains("hit"), "{text}");
-    // Rate + Time still render.
+
     assert!(text.contains("Rate"), "{text}");
     assert!(text.contains("cached"), "{text}");
 }
@@ -209,7 +205,7 @@ fn warmth_suffix_variants() {
 fn negative_saved_flips_to_write_premium_note() {
     seed_rate();
     let mut t = SessionTotals::default();
-    // All writes, no reads: the write premium outruns savings.
+
     t.add(&cached_usage(1_000, 100, 0, 900), MODEL, None);
     assert!(t.saved < 0.0, "saved should go negative: {}", t.saved);
     let text = usage_plain(&input_for(&t, Warmth::Unknown)).join("\n");
@@ -256,7 +252,7 @@ fn subscription_rows_render_windows_and_note() {
     assert!(text.contains("Session"), "{text}");
     assert!(text.contains("85%"), "{text}");
     assert!(text.contains("resets"), "{text}");
-    // A cap with no counter draws the hollow scale track + `cap N`.
+
     assert!(text.contains("cap 100 ACU"), "{text}");
     assert!(text.contains("\u{2591}".repeat(10).as_str()), "{text}");
     assert!(text.contains("100.10/100 USD"), "{text}");
@@ -274,7 +270,7 @@ fn subscription_rows_skip_empty_windows() {
         }],
         ..Default::default()
     };
-    // A label-only window still draws its row (it is data: the label).
+
     let text = subscription_plain(&limits).join("\n");
     assert!(text.contains("Empty"), "{text}");
 }

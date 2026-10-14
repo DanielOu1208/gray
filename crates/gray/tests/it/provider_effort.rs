@@ -1,4 +1,3 @@
-//! Exercise the actual startup path, not just the already-working clamp helper.
 use std::io::Write;
 use std::process::{Command, Stdio};
 

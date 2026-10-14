@@ -1,26 +1,3 @@
-//! Prompt templates: markdown files that become slash commands.
-//!
-//! `~/.gray/prompts/review.md` is `/review`. Typing `/review src/lib.rs`
-//! sends the file's body with the arguments filled in. The format and the
-//! placeholders match pi's prompt templates, so pi and Claude Code command
-//! files work unchanged:
-//!
-//! - `$1`, `$2`, … positional arguments (quotes group words)
-//! - `$@` / `$ARGUMENTS` all arguments
-//! - `${1:-default}`, `${@:-default}` with a fallback when empty
-//! - `${@:2}`, `${@:2:3}` bash-style slices
-//!
-//! A body with no placeholder gets the arguments appended on a new line, so
-//! a plain template still receives what was typed after it.
-//!
-//! Frontmatter is optional: `description:` (else the first body line) and
-//! `argument-hint:` show in the completion popup.
-//!
-//! Search order, first name wins: the project (cwd up to the git root,
-//! nearest first; `.gray/prompts`), then
-//! the user (`~/.gray/prompts`).
-//! Built-in slash commands always win over a template of the same name.
-
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -32,12 +9,10 @@ pub struct PromptTemplate {
     pub argument_hint: Option<String>,
     pub content: String,
     pub path: PathBuf,
-    /// "project" | "user"
+
     pub source: &'static str,
 }
 
-/// Split an argument string bash-style: whitespace separates, single or
-/// double quotes group (no escapes), matching pi's `parseCommandArgs`.
 #[must_use]
 pub fn parse_args(s: &str) -> Vec<String> {
     let mut args = Vec::new();
@@ -67,7 +42,7 @@ pub fn parse_args(s: &str) -> Vec<String> {
     if started || !cur.is_empty() {
         args.push(cur);
     }
-    // pi drops empty tokens (`""`); keep parity.
+
     args.retain(|a| !a.is_empty());
     args
 }
@@ -82,14 +57,11 @@ fn placeholder_re() -> &'static regex::Regex {
     })
 }
 
-/// True when `content` uses any argument placeholder.
 #[must_use]
 pub fn has_placeholders(content: &str) -> bool {
     placeholder_re().is_match(content)
 }
 
-/// Fill placeholders in one pass: values are never re-scanned, so an
-/// argument containing `$1` stays literal.
 #[must_use]
 pub fn substitute_args(content: &str, args: &[String]) -> String {
     let all = args.join(" ");
@@ -134,7 +106,6 @@ pub fn substitute_args(content: &str, args: &[String]) -> String {
         .into_owned()
 }
 
-/// The prompt a `/name <rest>` invocation sends.
 #[must_use]
 pub fn expand(template: &PromptTemplate, rest: &str) -> String {
     let args = parse_args(rest);
@@ -148,7 +119,6 @@ pub fn expand(template: &PromptTemplate, rest: &str) -> String {
     }
 }
 
-/// A template name is a plain file stem a slash command can carry.
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('.')
@@ -156,7 +126,6 @@ fn valid_name(name: &str) -> bool {
         && !name.chars().any(char::is_whitespace)
 }
 
-/// Load one template file; `None` when unreadable or badly framed.
 pub fn load_template(path: &Path, source: &'static str) -> Option<PromptTemplate> {
     let name = path.file_stem()?.to_str()?.to_string();
     if !valid_name(&name) {
@@ -186,7 +155,6 @@ pub fn load_template(path: &Path, source: &'static str) -> Option<PromptTemplate
     })
 }
 
-/// `*.md` files directly in `dir`, sorted by name (symlinks followed).
 fn load_dir(dir: &Path, source: &'static str, out: &mut Vec<PromptTemplate>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -206,7 +174,6 @@ fn load_dir(dir: &Path, source: &'static str, out: &mut Vec<PromptTemplate>) {
     }
 }
 
-/// Directories searched, highest precedence first.
 #[must_use]
 pub fn search_dirs(
     cwd: &Path,
@@ -218,7 +185,7 @@ pub fn search_dirs(
     let mut cur = Some(cwd.to_path_buf());
     while let Some(dir) = cur {
         dirs.push((dir.join(".gray").join("prompts"), "project"));
-        // Without a repo, only the cwd itself counts as the project.
+
         if git_root.as_ref().is_none_or(|r| *r == dir) {
             break;
         }
@@ -227,13 +194,12 @@ pub fn search_dirs(
     if let Some(gh) = gray_home {
         dirs.push((gh.join("prompts"), "user"));
     }
-    // A project dir that is also a user dir (cwd = $HOME) loads once.
+
     let mut seen = std::collections::HashSet::new();
     dirs.retain(|(d, _)| seen.insert(d.clone()));
     dirs
 }
 
-/// Every template visible from `dirs`, first name wins.
 #[must_use]
 pub fn discover_in(dirs: &[(PathBuf, &'static str)]) -> Vec<PromptTemplate> {
     let mut out = Vec::new();
@@ -246,8 +212,6 @@ pub fn discover_in(dirs: &[(PathBuf, &'static str)]) -> Vec<PromptTemplate> {
 type Cache = Option<(PathBuf, Instant, Vec<PromptTemplate>)>;
 static CACHE: Mutex<Cache> = Mutex::new(None);
 
-/// Every template visible from `cwd`, excluding names a built-in command
-/// owns. Cached for a moment: the completion popup asks on every keystroke.
 #[must_use]
 pub fn discover(cwd: &Path) -> Vec<PromptTemplate> {
     const TTL: Duration = Duration::from_secs(2);
@@ -261,7 +225,7 @@ pub fn discover(cwd: &Path) -> Vec<PromptTemplate> {
     let gray_home = crate::setup::gray_home().ok();
     let home = gray_core::paths::user_home();
     let mut dirs = search_dirs(cwd, gray_home.as_deref(), home.as_deref());
-    // Project templates are repo content: skip them until the project is trusted.
+
     if !crate::project_trust::is_trusted(&crate::skills::gray_agent_dir(), cwd) {
         dirs.retain(|(_, source)| *source != "project");
     }
@@ -275,16 +239,12 @@ pub fn discover(cwd: &Path) -> Vec<PromptTemplate> {
     list
 }
 
-/// Forgets the discovery cache so the next lookup re-reads the disk.
 pub fn invalidate_cache() {
     if let Ok(mut guard) = CACHE.lock() {
         *guard = None;
     }
 }
 
-/// Whether the last discovery (any cwd) saw a template called `name`. The
-/// completion popup's fill step has no cwd; the rows it fills came from
-/// that same discovery moments earlier.
 #[must_use]
 pub fn is_cached_name(name: &str) -> bool {
     CACHE
@@ -297,7 +257,6 @@ pub fn is_cached_name(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Find the template a `/name` invocation means (case-insensitive).
 #[must_use]
 pub fn find(cwd: &Path, name: &str) -> Option<PromptTemplate> {
     let name = name.strip_prefix('/').unwrap_or(name);

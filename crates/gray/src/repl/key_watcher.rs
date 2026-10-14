@@ -1,12 +1,7 @@
-//! Key watchers during agent turns: Ctrl-C cancels, Esc cancels, resize/typing handled (split from `repl`).
-
 type Cancel = tokio_util::sync::CancellationToken;
 type Stop = std::sync::Arc<std::sync::atomic::AtomicBool>;
 type TuiOpt = Option<crate::composer::SharedTui>;
 
-/// Local state a turn-time slash command may read. Nothing here borrows the
-/// running `Agent`, so handling these commands cannot interrupt or join the
-/// turn the way the normal queued-command path does.
 pub(crate) struct TurnLocalCommands {
     pub tui: crate::composer::SharedTui,
     pub cwd: std::path::PathBuf,
@@ -17,8 +12,6 @@ pub(crate) struct TurnLocalCommands {
     pub hooks: Vec<std::sync::Arc<dyn gray_core::agent::PluginHooks>>,
 }
 
-/// `/subagents` verbs that only read run state. Mutating verbs stay queued:
-/// they can wait for the turn instead of acting through a hidden side door.
 fn subagents_view_args(text: &str) -> Option<Vec<String>> {
     let (name, args) = super::split_plugin_command(text)?;
     if !name.eq_ignore_ascii_case("/subagents") {
@@ -33,14 +26,10 @@ fn subagents_view_args(text: &str) -> Option<Vec<String>> {
     .then_some(args)
 }
 
-/// Slash commands that are pure local operations — readouts, pickers, and
-/// config tweaks that never touch the running turn. Everything else keeps
-/// the existing behavior: queue it as a follow-up or cancel on Esc.
 fn is_turn_local_command(text: &str) -> bool {
     match super::parse_command(text) {
         super::ReplCommand::Usage | super::ReplCommand::Jobs | super::ReplCommand::Help => true,
-        // Local UI: pickers and toggles own the screen (via with_modal_sync)
-        // or write config; the running turn's snapshot is unaffected.
+
         super::ReplCommand::Theme(_)
         | super::ReplCommand::Plugins
         | super::ReplCommand::Keys(_)
@@ -144,8 +133,7 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
             let bg = ctx.tui.lock().expect("tui lock").snapshot();
             match super::with_modal_sync(tui, || crate::setup::run_plugins_manager(Some(&bg))) {
                 Ok(true) => super::say(tui, "plugins updated"),
-                // No card was echoed for a turn-local command, so an
-                // unchanged pick just repaints the composer.
+
                 Ok(false) => {
                     let _ = ctx.tui.lock().expect("tui lock").draw();
                 }
@@ -231,9 +219,7 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
                     Err(e) => super::say(tui, &format!("agents panel error: {e}")),
                 }
             } else {
-                // Plugin subprocesses can be slower than a keypress. Keep the
-                // watcher consuming Ctrl-C/typing; write the result when the
-                // lookup returns.
+
                 let shared = ctx.tui.clone();
                 std::thread::spawn(move || {
                     let tui = Some(&shared);
@@ -251,10 +237,6 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
     }
 }
 
-/// Non-blocking TUI lock that survives a poisoned mutex: a panic elsewhere
-/// must not permanently wedge the watcher (question overlay / typing dead).
-/// `WouldBlock` still yields `None` (skip this tick). Ctrl-C/Esc paths never
-/// touch the lock, so a bad mutex can never swallow a cancel.
 fn try_lock_tui<T>(
     shared: &std::sync::Arc<std::sync::Mutex<T>>,
 ) -> Option<std::sync::MutexGuard<'_, T>> {
@@ -265,13 +247,10 @@ fn try_lock_tui<T>(
     }
 }
 
-/// Once read() consumes input, renderer contention must not discard it.
-/// This watcher runs on a blocking thread, so waiting here does not stall Tokio.
 fn lock_tui<T>(shared: &std::sync::Arc<std::sync::Mutex<T>>) -> std::sync::MutexGuard<'_, T> {
     shared.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Full watcher (prompt turns): typing queues follow-ups, clipboard paste, popups.
 pub(crate) fn spawn_key_watcher_with_typing(
     watch_cancel: Cancel,
     watcher_stopped: Stop,
@@ -281,18 +260,14 @@ pub(crate) fn spawn_key_watcher_with_typing(
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read};
-        // The turn-time watcher owns stdin exactly like the idle prompt
-        // does, so it negotiates the same keyboard enhancement: without it
-        // Shift+Enter typed *during* a turn arrives as a bare Enter and
-        // submits instead of breaking the line. Popped with the task.
+
         let _keyboard_enhancement = crate::term_keys::KeyboardEnhancementGuard::push();
         crate::composer::input::watch_dead_stdin();
         loop {
             if watcher_stopped.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
-            // Dead tty: crossterm's poll would spin on EIO inside
-            // try_read and never return.
+
             if crate::composer::input::stdin_gone() {
                 return;
             }
@@ -303,10 +278,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
             let Ok(event) = read() else {
                 continue;
             };
-            // An ask modal owns the keys while live (digits/Tab/Enter/Esc
-            // belong to the question, not the turn): only resize + Ctrl-C
-            // pass through — Ctrl-C still cancels the turn (the ask
-            // resolves empty via the same token).
+
             let passthrough = matches!(event, Event::Resize(..))
                 || matches!(
                     event,
@@ -335,7 +307,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                     if ev.kind == KeyEventKind::Release {
                         continue;
                     }
-                    // Ctrl+C always cancels the turn, whatever the keymap.
+
                     if matches!(ev.code, KeyCode::Char('c') | KeyCode::Char('C'))
                         && ev.modifiers.contains(KeyModifiers::CONTROL)
                     {
@@ -353,8 +325,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                         }
                         continue;
                     };
-                    // Interrupt never waits on a busy renderer: a contended
-                    // lock still cancels, it just skips the popup/slash step.
+
                     let mut t = if interrupts {
                         match try_lock_tui(shared) {
                             Some(t) => t,
@@ -381,10 +352,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                             return;
                         }
                         KeyOutcome::Interrupt => {
-                            // A slash-command draft: cancel the turn and run
-                            // it locally, never fed to the AI (a local
-                            // command's echo is later retracted); else plain
-                            // cancel.
+
                             let mut text = t.textarea.text().to_string();
                             for (ph, full) in &t.pending_pastes {
                                 text = text.replace(ph, full);
@@ -400,9 +368,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                             return;
                         }
                         KeyOutcome::Command(cmd) => {
-                            // A completion-picked slash command is the same
-                            // kind of submit: run turn-local ones now instead
-                            // of queueing them behind the turn.
+
                             if t.attachments.is_empty()
                                 && let Some(locals) = turn_locals.as_ref()
                                 && is_turn_local_command(&cmd)
@@ -437,9 +403,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                                 && is_turn_local_command(&text)
                                 && turn_locals.is_some();
                             if local {
-                                // Clear the draft, then drop the TUI lock
-                                // before running it. Local readouts get no
-                                // command card — only their output lands.
+
                                 t.flush_markdown();
                                 t.end_thinking();
                                 t.textarea.set_text("");
@@ -457,8 +421,7 @@ pub(crate) fn spawn_key_watcher_with_typing(
                             }
                             let attached: Vec<std::path::PathBuf> =
                                 std::mem::take(&mut t.attachments);
-                            // Queued — fleeting, not transcript (becomes a
-                            // real prompt when dequeued).
+
                             t.queued_inputs.push_back((text, attached));
                             t.textarea.set_text("");
                             t.pending_pastes.clear();
@@ -487,7 +450,6 @@ pub(crate) fn spawn_key_watcher_with_typing(
     })
 }
 
-/// Refreshes the completion popup after the draft changed.
 fn sync_matches(t: &mut crate::composer::Tui, cwd: &std::path::Path) {
     let cur_text = t.textarea.text().to_string();
     t.matches = crate::repl::completion_matches_dyn(&cur_text, cwd);

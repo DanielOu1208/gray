@@ -1,5 +1,3 @@
-//! Secret-safe credential material shared by provider hosts and sidecars.
-
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -7,10 +5,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::Zeroizing;
 
-/// Maximum serialized credential material accepted by the host/private store.
 pub const MAX_CREDENTIAL_BYTES: usize = 128 * 1024;
 
-/// A string whose debug output never exposes its value.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct SecretString(Zeroizing<String>);
 
@@ -48,14 +44,12 @@ impl<'de> Deserialize<'de> for SecretString {
     }
 }
 
-/// Secret fields. Serialization is only for the private store and provider RPC.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SecretMap(BTreeMap<String, SecretString>);
 
 impl SecretMap {
-    // Deliberate constructor, not a FromIterator adapter: `SecretMap` is a
-    // redaction boundary and this keeps construction explicit at call sites.
+
     #[allow(clippy::should_implement_trait)]
     pub fn from_iter<I, K, V>(iter: I) -> Self
     where
@@ -139,8 +133,6 @@ impl fmt::Debug for CredentialMaterial {
     }
 }
 
-/// Host-populated identity plus credential material. The sidecar may read it
-/// for refresh/revoke/model RPCs, but cannot choose these ownership fields.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialEnvelope {
     pub version: u8,

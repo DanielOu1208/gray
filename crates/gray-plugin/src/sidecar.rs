@@ -1,48 +1,3 @@
-//! Sidecar plugin protocol (v1). See `docs/protocol-v1.md` for the
-//! versioned spec (methods, TTLs, gating, host-emission audit).
-//!
-//! Transport: newline-delimited JSON over child stdio. Requests the host
-//! sends are `{"id", "method", "params?"}`; sidecars reply with
-//! `{"id", "result"}` for request/response methods only:
-//! - `plugin/manifest` (request): no params, reply
-//!   `{"name","version","tools":[{"name","description","parameters"}],
-//!   "commands":["/x"],"hooks":[...]}`. Pre-v1 `"tools":["name"]` still parses.
-//! - `tool/call` (request): params `{"name","args"}`, reply `{"content","is_error?"}`.
-//! - `prompt/context` (request): params `{"cwd","session"}` (`session.id`
-//!   is the agent's session id, `""` anonymous), reply `{"text"}`.
-//! - `tool/before` (request): params `{"name","args"}`, reply allow/deny/modify.
-//! - `command/run` (request): params `{"name":"/x","argv"}`, reply `{"text"}`.
-//! - Protocol 2.0 mutating events (requests, each claims-gated by `hooks`):
-//!   `input/submit` params `{"text","session"}` → `{text}` rewrite or
-//!   `{handled: true}` swallow; `agent/before_start` params `{"session"}` →
-//!   `{text}` appended to history as a user message; `context/build` params
-//!   `{"messages","session"}` → `{"messages":[...]}` replacement outbound
-//!   list for that request only; `tool/after` params `{"name","content",
-//!   "is_error","session"}` → `{content?, is_error?}` result replacement.
-//! - `event/notify` (notification): NO `id`, NO reply expected. Params carry a
-//!   minimal tagged event `{"type", ...}` where type is one of
-//!   `pre_tool` | `post_tool` | `turn_end` with only the fields
-//!   the sidecar needs (tool name/args, output content, usage totals).
-//!
-//! Sidecar→host requests (string `id`, `method: "host/..."`) are served by
-//! the host handler: `host/run` (sub-agent turn), `host/say` (chat line),
-//! `host/ask` (blocking user question; see `HOST_ASK`). Each one is
-//! capability-gated (see [`crate::capabilities`]): the plugin declares the
-//! surfaces it wants, and the host grants or refuses them. An ungranted
-//! call gets a structured error, never the host's power. `host/ask` has an
-//! extended outer deadline (see `ASK_TTL`): everything else keeps the 30s
-//! TTL since only a human answer can legitimately take minutes.
-//!
-//! Unknown methods/lines are ignored.
-//!
-//! The three v1 request methods are only sent to sidecars claiming them in
-//! `hooks`/`commands`, so pre-v1 sidecars (which ignore unknown lines, hence
-//! would never reply) keep working.
-//!
-//! Concurrency: one reader task per sidecar routes replies by `id` into
-//! `pending`; writers take a short stdin lock only, so concurrent requests
-//! resolve out of order instead of serializing on one mutex.
-
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{
@@ -68,11 +23,6 @@ use crate::{
     ProviderRpcError, ToolBefore, manifest_tools,
 };
 
-/// Plugin→host request handler (`host/run`, `host/say`). Set by the host via
-/// [`SidecarPlugin::set_host_handler`]; without one the transport replies
-/// `{"error": ...}` so plugin-initiated turns fail loudly, never hang.
-/// Boxed-future shape (not `async_trait`) so the reader task can hold it
-/// behind a plain `Mutex` without an extra dependency.
 pub type HostHandler = Arc<
     dyn Fn(
             String,
@@ -83,63 +33,29 @@ pub type HostHandler = Arc<
         + Sync,
 >;
 
-/// Plugin→host **notification** handler (id-less `host/*` frames such as
-/// `host/tools_changed`). Fire-and-forget: no reply is written, the
-/// capability gate does not apply (a notification carries no privilege),
-/// and the handler must not block. Set via
-/// [`SidecarPlugin::set_notify_handler`]; unset = frames are dropped.
 pub type NotifyHandler = Arc<dyn Fn(String, serde_json::Value) + Send + Sync>;
 
-/// Host-side methods a sidecar may call (requests, unlike `event/notify`:
-/// they carry a sidecar-originated **string** `id` and expect a
-/// `{"id","result"}` reply). Host→sidecar ids stay numeric — the two
-/// namespaces never collide, so replies route unambiguously.
 pub const HOST_RUN: &str = "host/run";
 pub const HOST_SAY: &str = "host/say";
-/// Sidecar→host blocking user question (`params: {"questions","blocking"}`
-/// → `result: {"answers"}`). Claimed implicitly: any sidecar whose manifest
-/// has `protocol: "1.1"` may call it (the transport routes every `host/*`
-/// method already); the extended `ASK_TTL` below applies per requesting
-/// sidecar, keyed off its manifest.
+
 pub const HOST_ASK: &str = "host/ask";
 
-/// Default TTL for host→sidecar requests and plugin→host handler tasks.
-/// `host/ask` is the only exception: a human answer takes minutes, so both
-/// the handler task and the outer `tool/call`/`tool/before` wait use
-/// [`ASK_TTL`] when the requesting sidecar's manifest claims `host/ask`.
 pub const HOST_TTL: Duration = Duration::from_secs(30);
-/// Plugin→host notification (protocol 1.3): "my `plugin/tools` answer
-/// changed, re-ask". Id-less, so routed via [`NotifyHandler`].
+
 pub const HOST_TOOLS_CHANGED: &str = "host/tools_changed";
-/// Burst window for `host/tools_changed` before one `plugin/tools` refresh.
+
 pub const TOOLS_CHANGED_DEBOUNCE: Duration = Duration::from_millis(200);
-/// Outer deadline for `tool/call`/`tool/before` on sidecars that claim
-/// `host/ask` (300s human answer + 30s transport slack). The sidecar must
-/// enforce a SHORTER inner TTL (the reference plugins use 300s) so it
-/// reports its own timeout instead of surfacing this generic one.
+
 pub const ASK_TTL: Duration = Duration::from_secs(330);
-/// TTL for one plugin→host `host/ask` handler task (same budget as ASK_TTL:
-/// the modal owns the wait, this only bounds a wedged host task).
+
 pub const ASK_HANDLER_TTL: Duration = Duration::from_secs(300);
 
-/// Build the v1.1 `session` object: `{"id":<session_id or "">,"cwd":<cwd>}`.
-/// `tool/call` uses `ctx` (cwd + session_id); every other wire point uses
-/// the pinned boot cwd and `""` (no `ToolContext` there to read).
 fn session_json(id: &str, cwd: &str) -> Value {
     json!({"id": id, "cwd": cwd})
 }
 
-/// In-flight request senders, keyed by request id. `epoch` marks the child
-/// generation: a stale reader exiting late must not fail a new child's
-/// requests (bumped on every respawn).
-/// A torn frame poisons the child's stdin stream: no later request can be
-/// framed correctly. Every write therefore gets its own bound — a TTL
-/// expiry elsewhere must never cancel `write_all` mid-line, and a child
-/// that stopped reading must not park a caller (or, in the host-reply
-/// path, a concurrency permit) forever.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Outcome of one attempt to hand a whole frame to the child.
 enum FrameWrite {
     Ok,
     Failed(String),
@@ -154,10 +70,7 @@ enum RequestSensitivity {
 
 #[cfg(windows)]
 async fn try_write_frame(stdin: &std::sync::Arc<Mutex<ChildStdin>>, frame: &str) -> FrameWrite {
-    // Tokio's Windows ChildStdin write is backed by a blocking pipe write.
-    // A timeout cannot interrupt that operation while it is being polled, so
-    // run it on the blocking pool and bound the JoinHandle wait. The caller
-    // can then terminate the child and let the detached write unwind.
+
     let stdin = Arc::clone(stdin);
     let frame = frame.to_owned();
     let mut guard = stdin.lock_owned().await;
@@ -191,70 +104,37 @@ struct Pending {
     map: HashMap<u64, oneshot::Sender<Value>>,
 }
 
-/// Shared sidecar transport: child handle (respawn only), stdin (short
-/// writer lock), pending replies, id counter, spawn argv.
 struct Transport {
     child: Mutex<Child>,
     stdin: Arc<Mutex<ChildStdin>>,
     pending: Arc<Mutex<Pending>>,
     next_id: AtomicU64,
     argv: Vec<String>,
-    /// Plugin→host handler (`host/run`/`host/say`). `Arc` so respawned
-    /// readers keep the same slot; `None` = reply `{"error":...}`.
+
     host_handler: Arc<Mutex<Option<HostHandler>>>,
-    /// Plugin→host notification sink (id-less `host/*` frames). Shared
-    /// across respawns like `host_handler`; `None` = dropped.
+
     notify: Arc<std::sync::Mutex<Option<NotifyHandler>>>,
-    /// Bound on concurrent plugin→host handler tasks (shared across
-    /// respawns so a respawn storm can't multiply it).
+
     host_slots: Arc<tokio::sync::Semaphore>,
-    /// Capability ids the operator granted this plugin. Empty until the
-    /// host records them, which is also the default: an ungranted
-    /// `host/*` call is refused rather than trusted.
+
     grants: Arc<std::sync::Mutex<BTreeSet<String>>>,
 }
 
 pub struct SidecarPlugin {
     manifest: Manifest,
-    /// Current tool set. Static for protocol <= 1.2 (manifest `tools`);
-    /// for [`DYNAMIC_PROTOCOL`] sidecars it is replaced wholesale by
-    /// [`SidecarPlugin::refresh_tools`] (`plugin/tools`), which the
-    /// debounced `host/tools_changed` handler runs off-turn.
+
     tools: Arc<std::sync::RwLock<Vec<Arc<dyn Tool>>>>,
     transport: Arc<Transport>,
-    /// Pinned boot cwd (captured at spawn from the process cwd). Used for
-    /// the `session.cwd` of every wire point without a `ToolContext`
-    /// (`prompt/context` uses its `cwd` arg instead; `tool/call` uses `ctx.cwd`).
+
     cwd: String,
-    /// True when this sidecar may block on `host/ask` (manifest
-    /// `protocol: "1.1"`): `tool/call`/`tool/before` get [`ASK_TTL`]
-    /// instead of 30s. Protocol-gated (not hooks-gated): asking is a
-    /// sidecar→host request, not a host→sidecar hook, so `claims()` does
-    /// not apply. v1.1-only so a pre-v1 sidecar that never answers still
-    /// fails fast at 30s.
+
     asks: bool,
-    /// The agent's session id, pinned once at build
-    /// (`builder::build_agent`); carried as `session.id` on `prompt/context`
-    /// so a plugin can freeze a per-session answer (the memory plugin's
-    /// snapshot). A respawn keeps it — the field lives on the plugin, not
-    /// the child process. Empty = anonymous.
+
     session_id: std::sync::Mutex<String>,
-    /// A `global`-lock spawn (set by the builder): its `prompt/context`
-    /// survives the lean prompt.
+
     global: std::sync::atomic::AtomicBool,
 }
 
-/// ETXTBSY (os error 26) means the executable was open for writing at the
-/// instant we exec'd it. A plugin binary or script written moments earlier
-/// — a fresh install, a rebuild — is enough to trip it, and it is
-/// transient by definition: nobody holds the file once the write lands.
-/// One short retry turns a spurious "text file busy" into a non-event.
-/// Measured on this box: a test that exec'd a just-written script failed
-/// roughly 1 run in 5-20, with no process holding the file at the time.
-/// `FnMut`, not `Fn`: the Windows branch configures a `Command` in place
-/// (`.stdin()` takes `&mut self`), and a plain `Fn` closure cannot borrow
-/// its capture mutably. That branch is `#[cfg(windows)]`, so only the
-/// Windows CI job ever compiles it.
 fn spawn_retrying_etxtbsy(
     mut spawn: impl FnMut() -> std::io::Result<Child>,
 ) -> std::io::Result<Child> {
@@ -271,9 +151,7 @@ fn spawn_child(argv: &[String]) -> anyhow::Result<(Child, ChildStdin, ChildStdou
     let (prog, args) = argv
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("empty argv"))?;
-    // Windows cannot exec a shebang script directly (os error 193). Shell
-    // plugins documented for Git Bash go through the same POSIX shell the
-    // bash tool owns; native executables spawn directly as before.
+
     #[cfg(windows)]
     if prog.to_ascii_lowercase().ends_with(".sh") {
         let script = prog.replace('\\', "/");
@@ -303,10 +181,6 @@ fn spawn_child(argv: &[String]) -> anyhow::Result<(Child, ChildStdin, ChildStdou
     finish_spawn(child)
 }
 
-/// Append a sidecar's stderr to `~/.gray/logs/sidecar-stderr.log` instead of
-/// inheriting the terminal, so the reason a policy sidecar exits (the
-/// `gray-narrow: <error>` line, a panic message) survives. Best effort: if
-/// the file can't be opened the old behaviour (inherit) applies.
 fn sidecar_stderr(prog: &str) -> std::process::Stdio {
     use std::io::Write;
     let Some(home) = std::env::var_os("HOME") else {
@@ -339,18 +213,10 @@ fn finish_spawn(mut child: Child) -> anyhow::Result<(Child, ChildStdin, ChildStd
     Ok((child, stdin, stdout))
 }
 
-/// Route reply lines to their request by `id`; lines without a known `id`
-/// are ignored. On EOF (child gone) fail only our own generation's
-/// in-flight requests so callers report crash instead of hanging.
-/// Sidecar-originated requests (`method: "host/..."` + **string** `id`)
-/// dispatch to the host handler and get a `{"id","result"}` reply on the
-/// same stdio; anything else without a pending numeric id is dropped.
-/// Max wire frame: longer lines are skipped, never buffered whole.
 const MAX_FRAME: usize = 256 * 1024;
-/// Max concurrent plugin→host handler tasks; excess gets an overload
-/// error instead of spawning unbounded tasks.
+
 const MAX_HOST_TASKS: usize = 4;
-/// Max in-flight requests per transport; excess fails fast.
+
 const MAX_PENDING: usize = 64;
 
 #[allow(clippy::too_many_arguments)]
@@ -362,15 +228,13 @@ fn spawn_reader(
     notify: Arc<std::sync::Mutex<Option<NotifyHandler>>>,
     host_slots: Arc<tokio::sync::Semaphore>,
     grants: Arc<std::sync::Mutex<BTreeSet<String>>>,
-    // Plugin name, for the capability error the sidecar can act on.
+
     plugin_name: String,
     epoch: u64,
 ) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
-        // Consecutive over-cap chunks without a newline: a wedged child
-        // streaming garbage. Break so the loop can't spin forever; pending
-        // requests still fail via their own TTLs.
+
         let mut oversize_streak = 0u32;
         loop {
             let mut buf = Vec::new();
@@ -383,7 +247,7 @@ fn spawn_reader(
                 Err(_) => break,
             };
             if n == 0 {
-                break; // EOF
+                break;
             }
             if n > MAX_FRAME {
                 oversize_streak += 1;
@@ -396,7 +260,7 @@ fn spawn_reader(
             let Ok(v) = serde_json::from_slice::<Value>(&buf) else {
                 continue;
             };
-            // Plugin→host request: string id + host/ method.
+
             if let (Some(id), Some(method)) = (
                 v.get("id").cloned(),
                 v.get("method").and_then(|m| m.as_str()),
@@ -408,13 +272,10 @@ fn spawn_reader(
                 let stdin = stdin.clone();
                 let host_handler = host_handler.clone();
                 let host_slots = host_slots.clone();
-                // Consent gate: every host/* method maps to one capability,
-                // and the host only runs it when the operator granted it.
+
                 let grants = grants.clone();
                 let plugin_name = plugin_name.clone();
-                // `grants` is written once, right after spawn, so this
-                // lock is never contended; keeping it async avoids parking
-                // a worker thread on the read path.
+
                 let ungranted = {
                     let set = grants.lock().unwrap_or_else(|e| e.into_inner());
                     crate::capabilities::capability_for_host_method(&method_owned)
@@ -422,8 +283,7 @@ fn spawn_reader(
                         .map(|cap| cap.to_string())
                 };
                 if let Some(cap) = ungranted {
-                    // Fail closed with something the plugin can act on:
-                    // the capability, and the command that grants it.
+
                     let reply = json!({"id": id, "result": {
                         "error": format!("capability_not_granted: {cap}"),
                         "hint": format!("gray plugin capabilities {plugin_name}"),
@@ -436,13 +296,10 @@ fn spawn_reader(
                     }
                     continue;
                 }
-                // Bounded handler tasks: at capacity, reply overload
-                // instead of spawning unbounded work.
+
                 let Ok(_permit) = host_slots.try_acquire_owned() else {
                     let reply = json!({"id": id, "result": {"error": "host overloaded"}});
-                    // Bounded like every other frame: a wedged child must
-                    // not park the read loop itself (it would stall every
-                    // later reply behind the stuck one).
+
                     if !matches!(
                         try_write_frame(&stdin, &format!("{reply}\n")).await,
                         FrameWrite::Ok
@@ -451,8 +308,7 @@ fn spawn_reader(
                     }
                     continue;
                 };
-                // `host/ask` waits on a human: extended handler budget.
-                // Everything else keeps the 30s TTL.
+
                 let handler_ttl = if method_owned == HOST_ASK {
                     ASK_HANDLER_TTL
                 } else {
@@ -476,17 +332,14 @@ fn spawn_reader(
                             log::warn!("sidecar reply write failed ({e}); dropping the permit");
                         }
                         FrameWrite::TimedOut => {
-                            // A wedged child holds the permit for nothing:
-                            // end the task so the slot is reclaimed.
+
                             log::warn!("sidecar stopped reading stdin; dropping a host permit");
                         }
                     }
                 });
                 continue;
             }
-            // Plugin→host notification: no id + host/ method. Routed to
-            // the notify handler (protocol 1.3 `host/tools_changed`);
-            // never answered, never gated.
+
             if v.get("id").is_none()
                 && let Some(method) = v.get("method").and_then(|m| m.as_str())
                 && method.starts_with("host/")
@@ -514,9 +367,7 @@ fn spawn_reader(
 }
 
 impl Transport {
-    /// Best-effort plugin name for a capability error: the argv's basename
-    /// without an extension, which is how sidecars are installed
-    /// (`<home>/plugins/<name>/<bin>`).
+
     fn name_of(argv: &[String]) -> String {
         argv.first()
             .and_then(|p| Path::new(p).file_stem())
@@ -559,8 +410,6 @@ impl Transport {
         })
     }
 
-    /// Respawn a dead child (new stdio + reader; old generation's in-flight
-    /// requests fail fast). Lock order is always child → stdin → pending.
     async fn ensure_alive(&self) -> bool {
         let mut child = self.child.lock().await;
         let status = match child.try_wait() {
@@ -611,13 +460,6 @@ impl Transport {
         }
     }
 
-    /// Terminate the current child generation without waiting forever.
-    ///
-    /// Tokio's Windows child stdin uses a blocking pipe writer. If a shell
-    /// script has spawned a grandchild, killing only the direct child leaves
-    /// the pipe held open and the writer permanently blocked. `taskkill /T`
-    /// closes that whole tree; the timeout keeps this best-effort cleanup
-    /// from becoming a new lifecycle wait.
     async fn terminate_child_generation(&self) {
         let mut child = self.child.lock().await;
         #[cfg(windows)]
@@ -630,16 +472,12 @@ impl Transport {
         let _ = child.start_kill();
     }
 
-    /// Fire-and-forget notification: write one `{"method","params"}` line
-    /// (no `id`, no reply) with a 5s timeout. Shared by `event/notify` and
-    /// `plugin/shutdown` — pre-v1 sidecars already ignore unknown lines.
     async fn send_notification(&self, method: &str, params: Value) -> bool {
         let req = json!({"method": method, "params": params});
         if !self.ensure_alive().await {
             return false;
         }
-        // The write carries its own bound (WRITE_TIMEOUT): a torn
-        // notification would desync every later frame on this stdin.
+
         matches!(
             try_write_frame(&self.stdin, &format!("{req}\n")).await,
             FrameWrite::Ok
@@ -687,10 +525,7 @@ impl Transport {
             }
             return Err(error);
         }
-        // One deadline for the whole lifecycle (admission + write + reply):
-        // a dead child, a stuck stdin lock, or a child that stops reading
-        // must not wedge us past the advertised TTL. Insert the pending
-        // entry after ensure_alive: a respawn clears the pending map.
+
         let outcome = timeout(ttl, async {
             if !self.ensure_alive().await {
                 anyhow::bail!("sidecar child dead and respawn failed");
@@ -707,16 +542,13 @@ impl Transport {
                 FrameWrite::Ok => {}
                 FrameWrite::Failed(e) => {
                     self.pending.lock().await.map.remove(&id);
-                    // Do not await child exit here: on Windows a shell-wrapped
-                    // child may leave a grandchild alive, so `kill().await`
-                    // can outlive the write timeout and wedge the caller.
+
                     self.terminate_child_generation().await;
                     anyhow::bail!("sidecar write failed ({e}); killed this child generation");
                 }
                 FrameWrite::TimedOut => {
                     self.pending.lock().await.map.remove(&id);
-                    // Kill the complete Windows process tree without
-                    // waiting for the direct child to exit.
+
                     self.terminate_child_generation().await;
                     anyhow::bail!(
                         "sidecar stopped reading stdin; killed this child generation ({method})"
@@ -739,7 +571,6 @@ impl Transport {
     }
 }
 
-/// Manifest/`plugin/tools` `tools` array → wire tools bound to `transport`.
 fn build_tools(transport: &Arc<Transport>, tools: &Value, asks: bool) -> Vec<Arc<dyn Tool>> {
     manifest_tools(&json!({"tools": tools}))
         .into_iter()
@@ -747,9 +578,6 @@ fn build_tools(transport: &Arc<Transport>, tools: &Value, asks: bool) -> Vec<Arc
         .collect()
 }
 
-/// `plugin/tools` round trip that swaps the shared snapshot; shared by
-/// [`SidecarPlugin::refresh_tools`] and the debounce task (which has no
-/// `&SidecarPlugin`).
 async fn refresh_tools_into(
     transport: &Arc<Transport>,
     tools: &std::sync::RwLock<Vec<Arc<dyn Tool>>>,
@@ -809,21 +637,9 @@ impl SidecarPlugin {
             global: std::sync::atomic::AtomicBool::new(false),
         };
         if dynamic {
-            // Install the handler first: a `host/tools_changed` arriving
-            // during or right after the initial `plugin/tools` reply would
-            // otherwise be dropped, freezing the tools at their first set.
+
             plugin.install_tools_changed_handler();
-            // The first `plugin/tools` refresh runs off the spawn path: a
-            // sidecar whose upstream takes seconds (MCP servers coming up,
-            // a cold relay) otherwise stalls every agent build and reload
-            // by up to HOST_TTL each — one 30 s plugin serialized the whole
-            // spawn loop. The executor re-reads `live_defs` at every run
-            // start, so tools that land late still reach the agent on its
-            // next turn — the same end state the spawn wait produced, minus
-            // the wait.
-            // Weak captures, same discipline as the tools_changed handler:
-            // a plugin dropped mid-refresh frees its Transport instead of
-            // being kept alive by the detached task.
+
             let transport = Arc::downgrade(&plugin.transport);
             let tools = Arc::downgrade(&plugin.tools);
             let asks = plugin.asks;
@@ -840,14 +656,10 @@ impl SidecarPlugin {
         Ok(plugin)
     }
 
-    /// True for [`DYNAMIC_PROTOCOL`] sidecars (live tool set).
     pub fn is_dynamic(&self) -> bool {
         self.manifest.protocol.as_deref() == Some(DYNAMIC_PROTOCOL)
     }
 
-    /// Re-ask the sidecar for its tool set (`plugin/tools`) and replace the
-    /// current snapshot. Returns the new tool count. Protocol 1.3 only;
-    /// older sidecars never receive the request (they would hang on it).
     pub async fn refresh_tools(&self) -> anyhow::Result<usize> {
         if !self.is_dynamic() {
             return Ok(self.tools.read().unwrap_or_else(|e| e.into_inner()).len());
@@ -855,20 +667,11 @@ impl SidecarPlugin {
         refresh_tools_into(&self.transport, &self.tools, self.asks).await
     }
 
-    /// `host/tools_changed` → debounced (200 ms) `refresh_tools`. The
-    /// sidecar may fire a burst (one per server coming up); one refresh
-    /// per burst is enough, and it runs off-turn so a slow sidecar never
-    /// blocks the agent. The handles are `Arc`s so the task outlives
-    /// nothing it should not.
     fn install_tools_changed_handler(&self) {
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        // The handler lives inside `Transport` (`transport.notify`), and
-        // the tools hold an `Arc<Transport>` each. Strong captures here
-        // would cycle Transport → notify → handler → Transport and never
-        // free the child on drop, so everything captured is `Weak` and
-        // upgraded only around `refresh_tools_into`.
+
         let transport = Arc::downgrade(&self.transport);
         let tools = Arc::downgrade(&self.tools);
         let asks = self.asks;
@@ -903,16 +706,10 @@ impl SidecarPlugin {
         }));
     }
 
-    /// The pinned agent session id (`""` before the builder sets it).
     fn pinned_sid(&self) -> String {
         self.session_id.lock().expect("session_id").clone()
     }
 
-    /// Graceful lifecycle teardown: send `plugin/shutdown` (`reason:
-    /// `session_end`) to v1.1 sidecars only (pre-v1 `protocol: None` never
-    /// receives the line — they ignore unknown input anyway), then wait up
-    /// to `grace` for the child to exit voluntarily and `kill()` what remains.
-    /// Never waits for a reply (notification has no `id`).
     pub async fn shutdown(&self, grace: Duration) {
         if self.manifest.protocol.is_some() {
             let _ = self
@@ -924,14 +721,7 @@ impl SidecarPlugin {
         let _ = timeout(grace, child.wait()).await;
         let _ = child.kill().await;
     }
-    /// Install the plugin→host handler (`host/run`/`host/say`). The host
-    /// sets this once after spawn; sidecar requests then dispatch to it
-    /// with a 30s TTL each. Without a handler the transport replies
-    /// `{"error":...}` (loud failure, never a hang).
-    /// Record the capabilities the operator granted this plugin. Called
-    /// by the host right after spawn; until it is called the plugin has
-    /// none, which is also the correct default for a sidecar nobody asked
-    /// about.
+
     pub fn set_capabilities(&self, granted: Vec<String>) {
         let mut set = self
             .transport
@@ -944,7 +734,6 @@ impl SidecarPlugin {
             .collect();
     }
 
-    /// Capabilities this sidecar currently holds.
     pub fn capabilities(&self) -> Vec<String> {
         self.transport
             .grants
@@ -1076,9 +865,6 @@ impl SidecarPlugin {
             .map_err(|_| ProviderRpcError::Protocol("invalid provider model catalog".into()))
     }
 
-    /// `provider/usage` — subscription quota windows (5h/weekly/monthly
-    /// buckets). Longer TTL than the other probes: a sidecar may need to
-    /// spawn a native child to answer (~15s cold for `claude`).
     pub async fn provider_usage(
         &self,
         request: &crate::ProviderUsageRequest,
@@ -1108,7 +894,7 @@ impl SidecarPlugin {
     pub async fn set_host_handler(&self, handler: HostHandler) {
         *self.transport.host_handler.lock().await = Some(handler);
     }
-    /// Install the id-less `host/*` notification sink (see [`NotifyHandler`]).
+
     pub fn set_notify_handler(&self, handler: NotifyHandler) {
         *self
             .transport
@@ -1116,9 +902,7 @@ impl SidecarPlugin {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(handler);
     }
-    /// v1 request methods are gated on the manifest's `hooks`/`commands`:
-    /// pre-v1 sidecars ignore unknown lines and would never reply, so
-    /// sending them anything new would hang every turn to the full timeout.
+
     fn claims(&self, hook: &str) -> bool {
         self.manifest.hooks.iter().any(|h| h == hook)
     }
@@ -1167,8 +951,7 @@ fn parse_credential_material(value: Value) -> Result<CredentialMaterial, Provide
 
 #[async_trait]
 impl Plugin for SidecarPlugin {
-    /// Granted capabilities, for tool-assembly checks that run outside
-    /// async (`builder::from_plugins`).
+
     fn capabilities(&self) -> Vec<String> {
         SidecarPlugin::capabilities(self)
     }
@@ -1214,10 +997,7 @@ impl Plugin for SidecarPlugin {
             .transport
             .request("tool/before", Some(params.clone()), ttl)
             .await;
-        // The child can die (or be respawned by a concurrent call) after
-        // taking the request. A policy check is safe to ask again, and the
-        // next request respawns the child, so retry that one error once
-        // instead of failing the tool closed on a transient restart.
+
         if matches!(&res, Err(e) if e.to_string().contains("closed stdout")) {
             res = self
                 .transport
@@ -1244,8 +1024,7 @@ impl Plugin for SidecarPlugin {
             .await
         {
             Ok(v) => InputSubmit::from_result(&v),
-            // A failed rewrite hook must never eat the input: pass it
-            // through untouched.
+
             Err(e) => {
                 log::warn!(target: "gray_plugin", "sidecar input/submit failed: {e}");
                 InputSubmit::Pass
@@ -1272,10 +1051,7 @@ impl Plugin for SidecarPlugin {
         if !self.claims("context/build") {
             return None;
         }
-        // Media payloads are the frame-size failure mode (`sidecar request
-        // frame too large`): a plugin needs to know an image exists, not its
-        // bytes. Stub media for the wire, then graft the originals back into
-        // whatever list the plugin returns so the model keeps the pixels.
+
         let (mut wire, media) = scrub_media_for_frame(messages);
         let session = session_json(&self.pinned_sid(), &self.cwd);
         let text = scrub_text_for_frame(&mut wire, &session);
@@ -1294,7 +1070,7 @@ impl Plugin for SidecarPlugin {
                         None
                     }
                 },
-                // No `messages` key = keep the list unchanged.
+
                 None => None,
             },
             Err(e) => {
@@ -1330,8 +1106,7 @@ impl Plugin for SidecarPlugin {
         Some(out)
     }
     async fn run_command(&self, name: &str, argv: Vec<String>) -> Option<CommandOutcome> {
-        // `subcommands` (cron, …) forward argv over the same
-        // `command/run` wire as `commands` — one path, no special-casing.
+
         if !self.manifest.commands.iter().any(|c| c == name)
             && !self.manifest.subcommands.iter().any(|c| c == name)
         {
@@ -1346,7 +1121,7 @@ impl Plugin for SidecarPlugin {
         command_outcome(&v)
     }
     async fn on_event(&self, e: CoreEvent) {
-        // Minimal tagged JSON (see protocol v1 doc comment above) + v1.1 session.
+
         let session = session_json(&self.pinned_sid(), &self.cwd);
         let params = match &e {
             CoreEvent::PreTool { name, args } => {
@@ -1360,7 +1135,7 @@ impl Plugin for SidecarPlugin {
             }
         };
         let name = self.manifest.name.clone();
-        // True notification via shared helper: no id, never a reply.
+
         if !self
             .transport
             .send_notification("event/notify", params)
@@ -1374,10 +1149,6 @@ impl Plugin for SidecarPlugin {
     }
 }
 
-/// `context/build` wire scrub: `Image`/`Media` blocks become text stubs and
-/// the originals are collected per message index for [`restore_media`].
-/// Frames past `MAX_FRAME` were almost always base64 media; a stub keeps
-/// the shape so the plugin still knows media was there.
 fn scrub_media_for_frame(
     messages: &[Message],
 ) -> (
@@ -1409,10 +1180,6 @@ fn scrub_media_for_frame(
     (wire, pulled_all)
 }
 
-/// Graft the media blocks [`scrub_media_for_frame`] pulled back onto the
-/// plugin's reply. Only same-length replies are graftable — a plugin that
-/// restructures the list keeps its own shape (the stubs are plain text and
-/// stay truthful either way).
 fn restore_media(
     mut msgs: Vec<Message>,
     media: &[Vec<(usize, gray_core::message::ContentBlock)>],
@@ -1436,17 +1203,12 @@ fn restore_media(
     msgs
 }
 
-/// Smallest payload worth stubbing — smaller blocks cost bookkeeping
-/// without buying back meaningful frame room.
 const MIN_STUB_BYTES: usize = 256;
 
 fn serialized_len<T: serde::Serialize + ?Sized>(v: &T) -> usize {
     serde_json::to_string(v).map(|s| s.len()).unwrap_or(0)
 }
 
-/// The largest payload still in `wire` worth stubbing: (message index,
-/// block index). `Text`, tool-result output, and tool-call args carry the
-/// bulk once media is pulled.
 fn largest_scrubbable(wire: &[Message]) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize, usize)> = None;
     for (mi, m) in wire.iter().enumerate() {
@@ -1465,14 +1227,6 @@ fn largest_scrubbable(wire: &[Message]) -> Option<(usize, usize)> {
     best.map(|(mi, bi, _)| (mi, bi))
 }
 
-/// `context/build` wire scrub, part two: media stripping alone still
-/// leaves long sessions over `MAX_FRAME`, which failed the request
-/// outright — every context/build plugin silently went dead once the
-/// conversation grew past ~256 KiB, exactly when context engineering
-/// matters. Stub the largest remaining payloads until the frame fits;
-/// [`restore_text`] grafts the originals back onto the reply. Per-message
-/// pull list like [`scrub_media_for_frame`], plus the stub text so restore
-/// only reverts a stub the plugin passed through untouched.
 fn scrub_text_for_frame(
     wire: &mut Vec<Message>,
     session: &Value,
@@ -1480,7 +1234,7 @@ fn scrub_text_for_frame(
     let mut pulled: Vec<Vec<(usize, gray_core::message::ContentBlock, String)>> =
         wire.iter().map(|_| Vec::new()).collect();
     let mut frame_len = serialized_len(&json!({"messages": &*wire, "session": session}));
-    // 128 covers the `{"id","method","params":` envelope around params.
+
     while frame_len + 128 > MAX_FRAME {
         let Some((mi, bi)) = largest_scrubbable(wire) else {
             break;
@@ -1499,9 +1253,6 @@ fn scrub_text_for_frame(
     pulled
 }
 
-/// Graft [`scrub_text_for_frame`]'s pulled payloads back onto the plugin's
-/// reply. Same-length replies restore a stub only when the plugin passed
-/// it through untouched — an edit the plugin authored always wins.
 fn restore_text(
     mut msgs: Vec<Message>,
     pulled: &[Vec<(usize, gray_core::message::ContentBlock, String)>],
@@ -1524,7 +1275,7 @@ fn restore_text(
 struct SidecarTool {
     def: ToolDef,
     transport: Arc<Transport>,
-    /// Snapshot of the owning sidecar's `asks` flag (see [`SidecarPlugin`]).
+
     asks: bool,
 }
 
@@ -1563,8 +1314,7 @@ impl Tool for SidecarTool {
         };
         match self.transport.request("tool/call", Some(params), ttl).await {
             Ok(v) => {
-                // Route through the shared truncation (50 KiB cap with
-                // annotation): raw sidecar content must not bypass it.
+
                 let is_error = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
                 let content = v.get("content").and_then(|c| c.as_str());
                 match (is_error, content) {
@@ -1574,8 +1324,7 @@ impl Tool for SidecarTool {
                         attach_media(&name, &mut out, &v);
                         out
                     }
-                    // No empty-success fallback: a reply without content is a
-                    // protocol error, not a tool that returned nothing.
+
                     (false, None) => ToolOutput::error(format!(
                         "plugin protocol error: {name} reply missing content"
                     )),
@@ -1597,11 +1346,6 @@ impl Tool for SidecarTool {
     }
 }
 
-/// Protocol 1.3: a `tool/call` reply may carry `images` (`[{mime,
-/// data_base64}]`) and `media` (`[{mime, data_base64, fallback?}]`) next
-/// to `content`. Data stays base64 (that is what `AttachedImage::data`
-/// holds); an entry missing either field is dropped with a warning rather
-/// than failing the whole result.
 fn attach_media(name: &str, out: &mut ToolOutput, reply: &Value) {
     let entries = |key: &str| {
         reply
@@ -1637,10 +1381,6 @@ fn attach_media(name: &str, out: &mut ToolOutput, reply: &Value) {
     }
 }
 
-/// Parse a `command/run` reply: `{"agent_picker": "<plugin>"}` wins over
-/// `{"model_picker": "<row id>"}` wins over `{"prompt": …}`, which wins
-/// over `{"text": …}`; empty/missing → None. A picker reply may carry
-/// `text` too — a fallback for hosts that predate the outcome, ignored here.
 pub(crate) fn command_outcome(v: &Value) -> Option<CommandOutcome> {
     let field = |k: &str| v.get(k).and_then(|t| t.as_str()).filter(|t| !t.is_empty());
     if let Some(plugin) = field("subagent_settings") {

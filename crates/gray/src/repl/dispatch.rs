@@ -1,5 +1,3 @@
-//! REPL slash-command dispatch (split from `repl`).
-
 use super::*;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -9,7 +7,7 @@ pub(crate) enum Flow {
 }
 
 #[allow(clippy::too_many_arguments)]
-// Mechanical split of `run_repl_mode`: params are the loop state the arms borrow.
+
 pub(crate) async fn dispatch_command(
     cmd: ReplCommand,
     agent: &mut Option<Agent>,
@@ -99,8 +97,7 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
         ReplCommand::Help => {
-            // Build the registry lines once; the branches differ only in how
-            // they render (scrollback dim block vs stdout).
+
             let mut out = String::new();
             for d in REGISTRY.iter().chain(commands::TUI_COMMANDS) {
                 out.push_str(&commands::format_help_line(d));
@@ -140,10 +137,7 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
         ReplCommand::Hehe => {
-            // Local and instant: the TUI paints it as transcript rows; the
-            // piped path writes the same half-blocks straight to stdout.
-            // A toggle — pressing it again drops the art and leaves the
-            // default gray ASCII banner.
+
             let tui_shared = tui.as_ref().map(|(s, _)| s);
             let reverting = crate::mascot::mascot_shown();
             let shown = match tui_shared {
@@ -200,9 +194,7 @@ pub(crate) async fn dispatch_command(
                 if let Err(e) = store.create(meta).await {
                     log::warn!(target: "gray_session", "session create failed: {e}");
                 }
-                // Fresh id — always free; held so a second gray can't
-                // `-r` this session out from under us (see
-                // `ensure_session_state`).
+
                 let open_guard = match store.acquire_open(&session_id).await {
                     Ok(guard) => Some(guard),
                     Err(e) => {
@@ -220,13 +212,11 @@ pub(crate) async fn dispatch_command(
                     _open_guard: open_guard,
                 });
             }
-            // Build with the new session id so the prompt-cache shard
-            // survives future resumes of this session.
+
             *agent = build_agent(config, cwd, new_sid.as_ref().map(|s| s.as_str()))
                 .await
                 .ok();
-            // T3.4 lifecycle: the new session saw nothing yet (fresh builds
-            // start empty; clear anyway so shared state can't leak across).
+
             if let Some(ledger) = gray_plugin::builder::current_file_ledger() {
                 ledger.clear();
             }
@@ -273,7 +263,7 @@ pub(crate) async fn dispatch_command(
             )
             .await
             {
-                // `/retry` is `/undo` plus the same question again.
+
                 *pending_command = Some(ReplCommand::Prompt(text));
             }
             Flow::Continue
@@ -330,17 +320,14 @@ pub(crate) async fn dispatch_command(
         }
 
         ReplCommand::CronJobs(arg) => {
-            // A bare switch word flips the master switch (skills-shaped);
-            // the dashboard keeps the bare and `<id>` behavior. A command
-            // queued mid-turn still runs — a toggle is local, exactly like
-            // the dashboard itself.
+
             let tui_shared = tui.as_ref().map(|(s, _)| s);
             if let Some(on) = arg.as_deref().and_then(handlers::parse_on_off) {
                 let text = handlers::toggle_subsystem(handlers::Subsystem::Cron, on);
                 say(tui_shared, &text);
                 Flow::Continue
             } else if arg.is_none() && tui_shared.is_some() {
-                // Interactive picker: `space` pauses/resumes in place.
+
                 let home = crate::setup::gray_home()?;
                 let bg = tui_shared.map(|s| s.lock().expect("tui lock").snapshot());
                 let changed = with_modal_sync(tui_shared, || {
@@ -356,8 +343,7 @@ pub(crate) async fn dispatch_command(
                 let store = crate::cron::CronStore::open(crate::setup::gray_home()?.join("cron"))?;
                 let jobs = store.list()?;
                 let now = crate::cron::now_secs();
-                // Health is store-level (one ticker serves every job); a read
-                // failure only drops the liveness line, never the listing.
+
                 let health = store.health(now).ok();
                 let text = match arg {
                     None => super::cron::format_cron_dashboard(&jobs, health.as_ref(), now),
@@ -377,15 +363,13 @@ pub(crate) async fn dispatch_command(
         }
 
         ReplCommand::Restart => {
-            // Exits the process on success (it re-execs), so the Flow is only
-            // reached when the re-exec could not start.
+
             super::maintenance::handle_restart(tui).await;
             Flow::Continue
         }
 
         ReplCommand::Gateway(arg) => {
-            // A switch word flips the persisted master switch (same as
-            // `gray gateway on|off`); bare opens the connections picker.
+
             let tui_shared = tui.as_ref().map(|(s, _)| s);
             if let Some(on) = arg.as_deref().and_then(handlers::parse_on_off) {
                 let text = handlers::toggle_subsystem(handlers::Subsystem::Gateway, on);
@@ -399,7 +383,7 @@ pub(crate) async fn dispatch_command(
                 });
                 match changed {
                     Ok(true) => say(tui_shared, "connections updated"),
-                    // Nothing flipped: echo the state the picker showed.
+
                     Ok(false) => say(tui_shared, &super::gateway_panel::format_text()),
                     Err(e) => say(tui_shared, &format!("connections picker failed: {e}")),
                 }
@@ -489,8 +473,7 @@ pub(crate) async fn dispatch_command(
                     )
                     .await;
                 }
-                // A removal must rebuild the agent too: the old provider
-                // instance still holds the deleted key in memory.
+
                 Ok(crate::setup::ConnectOutcome::Removed(name)) => {
                     reload_agent(
                         &mut *agent,
@@ -506,8 +489,7 @@ pub(crate) async fn dispatch_command(
                     if let Some((shared, _)) = tui {
                         let mut t = shared.lock().expect("tui lock");
                         t.clear_draft();
-                        // Dismissed picker leaves the slash card with no
-                        // feedback: gap so it doesn't jam the input box.
+
                         t.ensure_gap();
                         let _ = t.draw();
                     }
@@ -528,7 +510,7 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
         ReplCommand::Skill(_) => {
-            // fully expanded into Prompt/Empty by expand_skill_command; defensive no-op
+
             Flow::Continue
         }
         ReplCommand::Plugin(raw) => {
@@ -561,9 +543,7 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
         ReplCommand::Unknown(cmd) => {
-            // Protocol v1 `command/run`: a claimed `/cmd` runs on its
-            // owning plugin; anything else keeps the unknown message.
-            // Plugins are local commands too: initialize before the first model turn.
+
             if agent.is_none() && config.model.is_some() {
                 super::session::ensure_session_state(session_state, config, cwd).await;
                 let sid = session_state.as_ref().map(|s| s.session_id.as_str());
@@ -594,21 +574,15 @@ pub(crate) async fn dispatch_command(
                     CommandOutcome::Say(text) => {
                         say(tui.as_ref().map(|(s, _)| s), &text);
                     }
-                    // Same path as a typed prompt: the next loop
-                    // iteration dispatches `ReplCommand::Prompt` (no
-                    // turn-running logic duplicated here).
+
                     CommandOutcome::Prompt(prompt) => {
                         *pending_command = Some(ReplCommand::Prompt(prompt));
                     }
-                    // A plugin asks for the model picker on one of its
-                    // rows (`/fusion`): same path as `/model`, focused.
+
                     CommandOutcome::ModelPicker(row) => {
                         *pending_command = Some(ReplCommand::ModelFocus(row));
                     }
-                    // A plugin asks for the interactive agents panel
-                    // (bare `/subagents`): rows/actions ride that
-                    // plugin's CLI; 'o' on a finished run resumes
-                    // straight into its child session via `handle_resume`.
+
                     CommandOutcome::AgentPicker(plugin) => {
                         let bg = tui
                             .as_ref()
@@ -637,10 +611,7 @@ pub(crate) async fn dispatch_command(
                                     &mut *hide_thinking,
                                 )
                                 .await;
-                                // The resume receipt names the session file;
-                                // this says the part that isn't obvious —
-                                // you're inside the subagent now, and your
-                                // prompts keep it going.
+
                                 let inside = session_state
                                     .as_ref()
                                     .is_some_and(|s| s.session_id.as_str() == sid);
@@ -669,8 +640,7 @@ pub(crate) async fn dispatch_command(
                             }
                         }
                     }
-                    // `/subagents settings` opens the settings modal;
-                    // reads/saves ride the plugin's `settings` CLI.
+
                     CommandOutcome::SubagentSettings(plugin) => {
                         let msg = match tui.as_ref().map(|(s, _)| s) {
                             Some(shared) => {

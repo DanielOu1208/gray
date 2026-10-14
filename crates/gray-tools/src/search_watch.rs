@@ -1,15 +1,3 @@
-//! Freshness for the shim index, Linux: one inotify watch per directory
-//! under the root. Every path reported changed since the server started is
-//! handed to the real tool whatever the index says, so an edit, a new file,
-//! or a deletion is never answered from a stale index. Queries drain the
-//! inotify queue first, so writes that finished before a query are seen;
-//! a background thread keeps the queue from overflowing between queries.
-//!
-//! A queue overflow, a watch that cannot be placed, an unreadable directory,
-//! or a name that is not UTF-8 (it cannot go into a reply) makes the watch
-//! unusable: the server declines for the rest of its life, and the real tool
-//! answers every call.
-
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::CString;
 use std::io;
@@ -31,11 +19,11 @@ const MASK: u32 = libc::IN_MODIFY
 
 struct Inner {
     fd: i32,
-    /// Watch descriptor → the directory it watches, as last seen.
+
     dirs: HashMap<i32, PathBuf>,
-    /// Paths reported changed, files and directories alike.
+
     touched: BTreeSet<Vec<u8>>,
-    /// Set once the watch can no longer be trusted.
+
     broken: bool,
 }
 
@@ -50,8 +38,7 @@ impl Drop for Inner {
 }
 
 impl Watch {
-    /// Watch `root` and everything under it. Fails if any directory cannot
-    /// be watched or read: the caller then serves nothing.
+
     pub fn new(root: &Path) -> io::Result<Watch> {
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         if fd < 0 {
@@ -69,7 +56,6 @@ impl Watch {
         })
     }
 
-    /// Keep the queue empty between queries. Never returns.
     pub fn drain_forever(&self) {
         loop {
             self.drain();
@@ -82,8 +68,6 @@ impl Watch {
         }
     }
 
-    /// Read what the kernel has queued, now. `None` if the watch is broken.
-    /// Otherwise the changed paths under `scope` (absolute, as watched).
     pub fn changed(&self, scope: &[u8]) -> Option<Vec<Vec<u8>>> {
         let mut inner = self.inner.lock().unwrap();
         read_events(&mut inner);
@@ -107,8 +91,6 @@ impl Watch {
     }
 }
 
-/// Add a watch on `dir` and on every directory below it, recording the
-/// paths. Symlinks are not followed, as grep's recursion does not.
 fn add_tree(inner: &mut Inner, dir: &Path) -> io::Result<()> {
     let c =
         CString::new(dir.as_os_str().as_bytes()).map_err(|_| io::Error::other("nul in path"))?;
@@ -129,13 +111,12 @@ fn add_tree(inner: &mut Inner, dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Every event queued right now, applied in order.
 fn read_events(inner: &mut Inner) {
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = unsafe { libc::read(inner.fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n <= 0 {
-            // EAGAIN: nothing more. Anything else is not a state we can trust.
+
             if n < 0 && io::Error::last_os_error().kind() != io::ErrorKind::WouldBlock {
                 inner.broken = true;
             }
@@ -173,8 +154,7 @@ fn apply(inner: &mut Inner, wd: i32, mask: u32, name: &[u8]) {
     } else {
         dir.join(std::ffi::OsStr::from_bytes(name))
     };
-    // A directory that appears (created, or moved in) may already hold files
-    // the watch never saw: watch it and report all of them.
+
     if mask & libc::IN_ISDIR != 0 && mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0 {
         if add_tree(inner, &path).is_err() {
             inner.broken = true;
@@ -199,7 +179,6 @@ fn apply(inner: &mut Inner, wd: i32, mask: u32, name: &[u8]) {
         }
         return;
     }
-    // A watched directory that moved has a new path; its watch follows it.
-    // Report the old path too, so anything cached under it is re-read.
+
     inner.touched.insert(path.as_os_str().as_bytes().to_vec());
 }

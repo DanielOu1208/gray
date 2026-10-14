@@ -1,41 +1,35 @@
 use serde::{Deserialize, Serialize};
 
-/// Token usage summary for a turn or response — opencode v2 style.
-///
-/// Inclusive totals: `input_tokens`+`output_tokens` include cache/reasoning.
-/// Breakdown (non-overlapping): `non_cached_input_tokens + cache_read + cache_write = input_tokens`,
-/// `reasoning_tokens ≤ output_tokens`. Mirrors `LLM.Usage` in opencode `packages/llm/src/schema/events.ts:51`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Usage {
-    /// Inclusive prompt tokens (includes cached reads/writes).
+
     #[serde(default)]
     pub input_tokens: usize,
-    /// Inclusive output tokens (includes reasoning).
+
     #[serde(default)]
     pub output_tokens: usize,
-    /// Tokens the model spent on reasoning / chain-of-thought (subset of
-    /// `output_tokens` when reported). 0 when the provider doesn't say.
+
     #[serde(default)]
     pub reasoning_tokens: usize,
-    /// Legacy: cache hits (equals `cache_read_input_tokens` for compat).
+
     #[serde(default)]
     pub cached_tokens: usize,
-    /// Fresh prompt tokens (input - read - write).
+
     #[serde(default)]
     pub non_cached_input_tokens: usize,
-    /// Input tokens served from cache (Anthropic `cache_read_input_tokens` / OpenAI `prompt_tokens_details.cached_tokens`).
+
     #[serde(default)]
     pub cache_read_input_tokens: usize,
-    /// Input tokens written to cache (Anthropic `cache_creation_input_tokens`).
+
     #[serde(default)]
     pub cache_write_input_tokens: usize,
-    /// Provider total if supplied, else `input+output`.
+
     #[serde(default)]
     pub total_tokens: usize,
 }
 
 impl Usage {
-    /// Creates a new usage record (inclusive).
+
     pub fn new(input_tokens: usize, output_tokens: usize) -> Self {
         Self {
             input_tokens,
@@ -49,12 +43,6 @@ impl Usage {
         }
     }
 
-    /// Synthetic context-size estimate for the TUI gauge before the first
-    /// real `StepUsage` lands (resume replay, post-compaction reseed).
-    ///
-    /// Shaped so every gauge consumer agrees: `total()`/`input_tokens` carry
-    /// the estimate, breakdown fields stay zero (unknown — not zero cache).
-    /// Real `StepUsage` overwrites it wholesale via `set_usage`.
     pub fn estimated_context(tokens: usize) -> Self {
         Self {
             input_tokens: tokens,
@@ -64,7 +52,6 @@ impl Usage {
         }
     }
 
-    /// Any counter non-zero — a real report, not an unmetered round.
     pub fn any(&self) -> bool {
         self.input_tokens != 0
             || self.output_tokens != 0
@@ -76,12 +63,6 @@ impl Usage {
             || self.total_tokens != 0
     }
 
-    /// One `request usage` log line per provider request, so per-request
-    /// context and billing survive runs killed before the final accounting.
-    /// Tagged with the agent's own session (not `GRAY_SESSION_ID`: a nested
-    /// `-p` run keeps that pointing at its owner) so cache misses in a
-    /// shared log can be traced to one conversation without timestamp
-    /// heuristics.
     pub fn log_request(&self, kind: &str, session: Option<&str>) {
         let mut u = *self;
         u.normalize();
@@ -97,10 +78,6 @@ impl Usage {
         );
     }
 
-    /// Add another report into this cumulative total (saturating).
-    /// Every provider request bills its full input, so billable turn
-    /// totals sum every round's report — unlike the context gauge, which
-    /// tracks only the latest request.
     pub fn accumulate(&mut self, other: &Usage) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
@@ -118,7 +95,6 @@ impl Usage {
         self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
     }
 
-    /// Computes the total tokens consumed — prefers provider `total_tokens` if set.
     pub fn total(&self) -> usize {
         if self.total_tokens != 0 {
             self.total_tokens
@@ -127,7 +103,6 @@ impl Usage {
         }
     }
 
-    /// Cache hit rate for prompt tokens (0.0–1.0) — uses cache_read.
     pub fn cache_hit_rate(&self) -> f64 {
         if self.input_tokens == 0 {
             0.0
@@ -136,40 +111,27 @@ impl Usage {
         }
     }
 
-    /// Normalize after filling breakdown fields — ensures invariants and legacy alias.
     pub fn normalize(&mut self) {
-        // legacy alias
+
         if self.cached_tokens == 0 && self.cache_read_input_tokens != 0 {
             self.cached_tokens = self.cache_read_input_tokens;
         } else if self.cache_read_input_tokens == 0 && self.cached_tokens != 0 {
             self.cache_read_input_tokens = self.cached_tokens;
         }
-        // derive non_cached if not set but input + caches known
+
         if self.non_cached_input_tokens == 0 && self.input_tokens != 0 {
             let known = self.cache_read_input_tokens + self.cache_write_input_tokens;
             if known <= self.input_tokens {
                 self.non_cached_input_tokens = self.input_tokens - known;
             }
         }
-        // derive total if not set
+
         if self.total_tokens == 0 && (self.input_tokens != 0 || self.output_tokens != 0) {
             self.total_tokens = self.input_tokens + self.output_tokens;
         }
     }
 }
 
-/// Appends one streamed thinking chunk, repairing sentence boundaries that
-/// arrive bare: some providers emit sentence-sized reasoning deltas with
-/// the inter-sentence space stripped (`truncated.Identifying`).
-///
-/// Hardcoded join rule — insert exactly one space when the buffer ends with
-/// sentence/clause punctuation (`.?!,:;`) and the chunk starts with a word
-/// character. Every other boundary is byte-concatenated, so:
-/// - a boundary that already carries whitespace is never doubled;
-/// - mid-word BPE splits (`Anal` + `yzing`, letter+letter) from
-///   well-behaved providers stay glued;
-/// - decimals / thousands / clock times stay glued (`3.14`, `1,000`,
-///   `12:30`), as does trailing closing/quoting punctuation.
 pub fn append_thinking_chunk(buf: &mut String, chunk: &str) {
     if let (Some(prev), Some(next)) = (buf.chars().next_back(), chunk.chars().next())
         && needs_thinking_boundary_space(prev, next)
@@ -186,21 +148,20 @@ fn needs_thinking_boundary_space(prev: char, next: char) -> bool {
     if !matches!(prev, '.' | '?' | '!' | ',' | ';' | ':') {
         return false;
     }
-    // Closing / quoting punctuation glues: `etc., and`, `word."Next"`.
+
     if matches!(
         next,
         '.' | '?' | '!' | ',' | ';' | ':' | ')' | ']' | '}' | '"' | '\'' | '`'
     ) {
         return false;
     }
-    // Decimals / thousands / clock times stay glued.
+
     if next.is_ascii_digit() && matches!(prev, '.' | ',' | ':') {
         return false;
     }
     true
 }
 
-/// Reason why a turn or generation completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
@@ -211,35 +172,32 @@ pub enum StopReason {
     Error,
 }
 
-/// High-level events emitted by the agent loop during turn execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-    /// Indicates that an agent run / turn has started.
+
     Start,
-    /// Incremental text delta generated by the model.
+
     TextDelta {
         #[serde(alias = "text")]
         delta: String,
     },
-    /// Incremental reasoning / thinking delta generated by the model.
+
     ThinkingDelta {
         #[serde(alias = "text")]
         delta: String,
     },
-    /// Notification that a tool call invocation has begun.
+
     ToolCallStart { id: String, name: String },
-    /// Live partial args while the model streams them (pi
-    /// `ToolExecutionComponent.updateArgs`): `args_so_far` is the raw
-    /// concatenated arguments delta buffer, usually partial JSON.
+
     ToolCallProgress {
         id: String,
         name: String,
         args_so_far: String,
     },
-    /// Complete tool call argument accumulation finished.
+
     ToolCallEnd { id: String, args: serde_json::Value },
-    /// Result returned after executing a tool call.
+
     ToolResult {
         id: String,
         #[serde(alias = "content")]
@@ -247,83 +205,65 @@ pub enum AgentEvent {
         #[serde(default)]
         is_error: bool,
     },
-    /// Intermediate token usage after a single step in a multi-step turn.
+
     StepUsage { usage: Usage },
-    /// Codex steal (`StreamErrorEvent`): a retryable transport/provider hiccup
-    /// the loop is handling (e.g. `Reconnecting... 1/3`). `message` is the
-    /// short header, `details` the underlying error. Rendered dim, never fatal.
+
     StreamError {
         message: String,
         #[serde(default)]
         details: String,
     },
-    /// A mid-turn injected note (a loop nudge, a finished-job follow-up)
-    /// ended the assistant message that was streaming: text deltas after
-    /// this boundary belong to a NEW message and render in their own block.
-    /// Truncation continuations resume mid-sentence and never emit it.
+
     MessageBoundary,
-    /// Mid-turn steer: user text queued while the turn was running was
-    /// appended as a user message at a model-request boundary.
+
     Steered { text: String },
-    /// The assistant reply that just streamed is withdrawn (it carried raw
-    /// tool-call markup and is being regenerated). Surfaces delete the
-    /// prose shown for it; the next deltas form a new segment.
+
     Retract,
-    /// Turn finished with a stop reason and token usage.
+
     TurnEnd {
         stop_reason: StopReason,
         usage: Usage,
     },
-    /// In-loop compaction rewrote history (pre-turn budget or overflow
-    /// recovery). Estimates before/after the rewrite — the accounting a
-    /// trajectory needs to reason about context management
-    /// (arXiv:2512.22087, arXiv:2601.16746: token spend per task, not just
-    /// the final score).
+
     Compacted {
         tokens_before: usize,
         tokens_after: usize,
         messages_before: usize,
         messages_after: usize,
-        /// Why this rewrite fired. Absent in older recordings = window bound.
+
         #[serde(default)]
         reason: CompactReason,
     },
 }
 
-/// Why an in-loop compaction fired, carried on [`AgentEvent::Compacted`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactReason {
-    /// `estimate + reserve` reached the context window (the only bound older
-    /// recordings knew).
+
     #[default]
     Window,
-    /// Overflow recovery after a provider context-length error.
+
     Overflow,
-    /// An explicit user ceiling fired (`--compact-at` / `GRAY_COMPACT_AT` /
-    /// `compact_at_tokens`), clamped to the window bound.
+
     UserCeiling,
-    /// The provider-declared price cliff's ceiling fired; `cliff` is the
-    /// prompt-token count above which the higher price tier bills.
+
     PriceCliff { cliff: usize },
 }
 
 impl AgentEvent {
-    /// Creates a text delta event.
+
     pub fn text_delta(delta: impl Into<String>) -> Self {
         Self::TextDelta {
             delta: delta.into(),
         }
     }
 
-    /// Creates a thinking delta event.
     pub fn thinking_delta(delta: impl Into<String>) -> Self {
         Self::ThinkingDelta {
             delta: delta.into(),
         }
     }
 
-    /// Creates a tool call start event.
     pub fn tool_call_start(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self::ToolCallStart {
             id: id.into(),
@@ -331,7 +271,6 @@ impl AgentEvent {
         }
     }
 
-    /// Creates a live tool-call progress event (partial streamed args).
     pub fn tool_call_progress(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -344,7 +283,6 @@ impl AgentEvent {
         }
     }
 
-    /// Creates a tool call end event.
     pub fn tool_call_end(id: impl Into<String>, args: serde_json::Value) -> Self {
         Self::ToolCallEnd {
             id: id.into(),
@@ -352,7 +290,6 @@ impl AgentEvent {
         }
     }
 
-    /// Creates a tool result event.
     pub fn tool_result(id: impl Into<String>, output: impl Into<String>, is_error: bool) -> Self {
         Self::ToolResult {
             id: id.into(),
@@ -361,12 +298,10 @@ impl AgentEvent {
         }
     }
 
-    /// Creates a turn end event.
     pub fn turn_end(stop_reason: StopReason, usage: Usage) -> Self {
         Self::TurnEnd { stop_reason, usage }
     }
 
-    /// Creates a compaction record for one history rewrite.
     pub fn compacted(
         tokens_before: usize,
         tokens_after: usize,
@@ -383,7 +318,6 @@ impl AgentEvent {
         }
     }
 
-    /// Creates a stream-error / retry notice (Codex `StreamErrorEvent`).
     pub fn stream_error(message: impl Into<String>, details: impl Into<String>) -> Self {
         Self::StreamError {
             message: message.into(),
@@ -392,28 +326,25 @@ impl AgentEvent {
     }
 }
 
-/// Provider-side stream event received during low-level model streaming.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
-    /// Text chunk streamed from the provider.
+
     TextDelta {
         #[serde(alias = "text")]
         delta: String,
     },
-    /// Reasoning chunk streamed from the provider (`reasoning_content`).
+
     ThinkingDelta {
         #[serde(alias = "text")]
         delta: String,
     },
-    /// A completed Responses-API reasoning item: its id + encrypted blob so
-    /// the agent can replay it verbatim next turn (server-side cache warmth).
-    /// The agent stamps the generating model (via `Provider::model_id`).
+
     ReasoningItem {
         item_id: String,
         encrypted_content: String,
     },
-    /// Partial tool call chunk streamed from the provider.
+
     ToolCallDelta {
         index: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -423,16 +354,14 @@ pub enum StreamEvent {
         #[serde(default, alias = "arguments", alias = "args_delta")]
         arguments_delta: String,
     },
-    /// Stream completed with an optional stop reason and usage metrics.
+
     MessageComplete {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_reason: Option<StopReason>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<Usage>,
     },
-    /// Codex steal (`StreamErrorEvent`): retryable hiccup the provider is
-    /// handling itself (emitted as Ok so the turn keeps going). Agent forwards
-    /// it as `AgentEvent::StreamError` for live `Reconnecting... n/m` display.
+
     StreamError {
         message: String,
         #[serde(default)]
@@ -441,21 +370,19 @@ pub enum StreamEvent {
 }
 
 impl StreamEvent {
-    /// Creates a stream text delta.
+
     pub fn text_delta(delta: impl Into<String>) -> Self {
         Self::TextDelta {
             delta: delta.into(),
         }
     }
 
-    /// Creates a stream thinking delta.
     pub fn thinking_delta(delta: impl Into<String>) -> Self {
         Self::ThinkingDelta {
             delta: delta.into(),
         }
     }
 
-    /// Creates a reasoning-item capture (id + encrypted blob).
     pub fn reasoning_item(
         item_id: impl Into<String>,
         encrypted_content: impl Into<String>,
@@ -466,7 +393,6 @@ impl StreamEvent {
         }
     }
 
-    /// Creates a stream tool call delta.
     pub fn tool_call_delta(
         index: usize,
         id: Option<String>,
@@ -481,12 +407,10 @@ impl StreamEvent {
         }
     }
 
-    /// Creates a message complete event.
     pub fn message_complete(stop_reason: Option<StopReason>, usage: Option<Usage>) -> Self {
         Self::MessageComplete { stop_reason, usage }
     }
 
-    /// Creates a stream-error / retry notice (Codex `StreamErrorEvent`).
     pub fn stream_error(message: impl Into<String>, details: impl Into<String>) -> Self {
         Self::StreamError {
             message: message.into(),

@@ -1,8 +1,7 @@
 use super::{ReplCommand, parse_command};
 #[test]
 fn continue_payload_routes_to_the_model() {
-    // Bare-Enter resume sends CONTINUE_PROMPT as a normal turn: it must
-    // never parse as Empty (would no-op) or a slash command (would dispatch).
+
     assert!(matches!(super::parse_command(""), ReplCommand::Empty));
     assert!(matches!(
         super::parse_command(super::super::CONTINUE_PROMPT),
@@ -12,7 +11,7 @@ fn continue_payload_routes_to_the_model() {
 
 #[test]
 fn slash_name_with_slash_is_plain_prompt_like_codex() {
-    // Reported bug: pasting Rust `///` doc comments said "unknown command".
+
     let pasted = "/// Default system prompt, shipped as markdown and materialized to `~/.gray/sys.md`\n/// on first run.";
     assert!(matches!(parse_command(pasted), ReplCommand::Prompt(_)));
     assert!(matches!(
@@ -21,12 +20,12 @@ fn slash_name_with_slash_is_plain_prompt_like_codex() {
     ));
     assert!(matches!(parse_command("/tmp/foo"), ReplCommand::Prompt(_)));
     assert!(matches!(parse_command("/"), ReplCommand::Prompt(_)));
-    // Genuinely unknown single-token commands still error.
+
     assert!(matches!(
         parse_command("/boguscmd"),
         ReplCommand::Unknown(_)
     ));
-    // Known commands unaffected.
+
     assert!(matches!(parse_command("/help"), ReplCommand::Help));
     assert!(matches!(
         parse_command("/models foo"),
@@ -64,7 +63,7 @@ fn usage_command_and_cost_alias() {
             .iter()
             .any(|(n, _)| n == "usage")
     );
-    // `cost` resolves through the alias table
+
     assert!(
         super::completion_matches("cost")
             .iter()
@@ -74,16 +73,13 @@ fn usage_command_and_cost_alias() {
 
 #[test]
 fn empty_prompt_hides_slash_popup_like_codex() {
-    // codex `command_under_cursor`: empty text / no leading slash / cursor
-    // past the command name → no popup. Deleting `/` must close it, not
-    // strand stale matches (ghost popup + double footer + scrollback growth).
+
     use std::path::Path;
     let cwd = Path::new(".");
     assert!(super::completion_matches_dyn("", cwd).is_empty());
     assert!(super::completion_matches_dyn("hello", cwd).is_empty());
     assert!(super::completion_matches_dyn("/ ", cwd).is_empty());
-    // bare `/` opens the popup with every command. Installed plugins add
-    // their own rows on a real machine, so assert coverage, not count.
+
     let dyn_matches = super::completion_matches_dyn("/", cwd);
     for d in super::REGISTRY {
         assert!(
@@ -142,7 +138,7 @@ fn registry_completion_covers_aliases() {
             "completion {alias} -> {target}"
         );
     }
-    // `/plug` surfaces `plugins`; bare `/plugin ` leads with itself + all 7 subcommands.
+
     use std::path::Path;
     let cwd = Path::new(".");
     assert!(
@@ -177,8 +173,7 @@ fn registry_parse_uses_canonical() {
         ReplCommand::Unknown(_)
     ));
     assert!(matches!(parse_command("/exit"), ReplCommand::Quit));
-    // /gateway is the connections panel again; /gw is its alias and both take
-    // the master-switch word as an argument.
+
     assert!(matches!(parse_command("/gw"), ReplCommand::Gateway(None)));
     assert!(matches!(
         parse_command("/gateway status"),
@@ -217,7 +212,7 @@ fn registry_parse_uses_canonical() {
     ));
     assert!(matches!(parse_command("/skills"), ReplCommand::Skill(None)));
     assert!(matches!(parse_command("/skill"), ReplCommand::Skill(None)));
-    // The `/skills:<name>` colon form is gone: now an unknown command.
+
     assert!(matches!(
         parse_command("/skills:commit"),
         ReplCommand::Unknown(_)
@@ -262,26 +257,26 @@ fn context_arg_completion_levels() {
     use super::{complete_command_args, completion_matches_dyn};
     use std::path::Path;
     let cwd = Path::new(".");
-    // bare suffix lists everything, led by the command itself
+
     let all = complete_command_args("context", "", cwd);
     assert_eq!(all[0].0, "context");
     assert!(all.iter().any(|(n, _)| n == "context reserve"));
     assert!(all.iter().any(|(n, _)| n == "context auto"));
-    // filtered L1 and L2 pages list suffixes only (bare row would wipe args on fill)
+
     let r = complete_command_args("context", "r", cwd);
     assert!(!r.iter().any(|(n, _)| n == "context"));
     assert!(r.iter().any(|(n, _)| n == "context reserve"));
-    // L2 after `reserve `
+
     let r2 = complete_command_args("context", "reserve ", cwd);
     assert!(!r2.iter().any(|(n, _)| n == "context"));
     assert!(r2.iter().any(|(n, _)| n == "context reserve 16k"));
-    // unknown command has no suffixes (universal hook default)
+
     assert!(complete_command_args("boguscmd", "", cwd).is_empty());
-    // dyn dispatch through the composer entry point
+
     let dyn_all = completion_matches_dyn("/context ", cwd);
     assert_eq!(dyn_all[0].0, "context");
     assert!(dyn_all.iter().any(|(n, _)| n == "context reserve"));
-    // command-name path unaffected
+
     assert!(
         completion_matches_dyn("/cont", cwd)
             .iter()
@@ -307,20 +302,20 @@ fn top_level_query_never_surfaces_skills() {
     use super::completion_matches_dyn;
     let dir = temp_skill_cwd("commit");
     let cwd = dir.path();
-    // sanity: the skill is discoverable
+
     assert!(
         crate::skills::discover_skills(cwd)
             .skills
             .iter()
             .any(|s| s.name == "commit")
     );
-    // top-level `/` completion must not surface it…
+
     let top = completion_matches_dyn("/com", cwd);
     assert!(
         !top.iter().any(|(n, _)| n == "commit"),
         "skill must not appear in / completion: {top:?}"
     );
-    // …but `/skills ` still completes it
+
     let scoped = completion_matches_dyn("/skills com", cwd);
     assert!(
         scoped.iter().any(|(n, _)| n == "skills commit"),
@@ -348,7 +343,7 @@ fn model_completes_cached_ids() {
     use super::complete_command_args;
     use std::path::Path;
     let cwd = Path::new(".");
-    // Discovery, not the global context/pricing cache, supplies completions.
+
     let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}/v1", server.local_addr().unwrap());
     let response = std::thread::spawn(move || {
@@ -367,7 +362,7 @@ fn model_completes_cached_ids() {
     crate::setup::set_active_model_provider(&base);
     runtime.block_on(async {
         let models = crate::setup::fetch_live_provider_models(&base, None);
-        // The fetched row plus the synthesized local-fusion composite.
+
         assert_eq!(models.len(), 2);
     });
     response.join().unwrap();
@@ -383,13 +378,12 @@ fn model_completes_cached_ids() {
             .iter()
             .any(|(n, _)| n == "models test-completion-model-xyz")
     );
-    // an impossible filter still yields nothing (deterministic even
-    // when other tests pollute the process-global cache)
+
     assert!(complete_command_args("model", "no-such-model-xyz-123", cwd).is_empty());
-    // Switching to an unfetched/offline provider clears the visible list.
+
     crate::setup::set_active_model_provider("http://127.0.0.1:1/v1");
     assert!(complete_command_args("models", "xyz", cwd).is_empty());
-    // Trailing slashes do not create a different connection scope.
+
     crate::setup::set_active_model_provider(&format!("{base}/"));
     assert!(
         complete_command_args("models", "xyz", cwd)
@@ -406,7 +400,7 @@ fn skill_singular_is_alias_for_skills_space() {
     use super::completion_matches_dyn;
     let dir = temp_skill_cwd("commit");
     let cwd = dir.path();
-    // Parse parity: identical payloads.
+
     assert_eq!(
         parse_command("/skill commit"),
         parse_command("/skills commit")
@@ -421,23 +415,22 @@ fn skill_singular_is_alias_for_skills_space() {
         parse_command("/SKILL commit"),
         parse_command("/skills commit")
     );
-    // Expansion parity: same Prompt out.
+
     let a = expand_skill_command(parse_command("/skill commit"), cwd, None, false);
     let b = expand_skill_command(parse_command("/skills commit"), cwd, None, false);
     assert!(matches!(a, ReplCommand::Prompt(_)));
     assert_eq!(a, b);
-    // Undeclared args pass through identically: both expand to the same
-    // Prompt carrying the raw arg text.
+
     let a = expand_skill_command(parse_command("/skill commit bogus-arg"), cwd, None, false);
     let b = expand_skill_command(parse_command("/skills commit bogus-arg"), cwd, None, false);
     assert!(matches!(a, ReplCommand::Prompt(_)));
     assert_eq!(a, b);
-    // Unknown skill fails identically.
+
     let a = expand_skill_command(parse_command("/skill nope"), cwd, None, false);
     let b = expand_skill_command(parse_command("/skills nope"), cwd, None, false);
     assert_eq!(a, ReplCommand::Empty);
     assert_eq!(a, b);
-    // `/skill <partial>` completes installed skill names…
+
     let rows = completion_matches_dyn("/skill com", cwd);
     assert!(
         rows.iter().any(|(n, _)| n == "skill commit"),
@@ -445,7 +438,7 @@ fn skill_singular_is_alias_for_skills_space() {
     );
     let rows = completion_matches_dyn("/skill ", cwd);
     assert!(rows.iter().any(|(n, _)| n == "skill commit"));
-    // …and so does the plural space form.
+
     let rows = completion_matches_dyn("/skills com", cwd);
     assert!(
         rows.iter().any(|(n, _)| n == "skills commit"),
@@ -453,7 +446,7 @@ fn skill_singular_is_alias_for_skills_space() {
     );
     let rows = completion_matches_dyn("/skills ", cwd);
     assert!(rows.iter().any(|(n, _)| n == "skills commit"));
-    // The colon form is gone.
+
     assert!(matches!(
         parse_command("/skills:commit"),
         ReplCommand::Unknown(_)
@@ -516,7 +509,7 @@ fn model_completion_does_not_offer_global_context_catalog() {
 fn hehe_parses_and_is_discoverable() {
     assert!(matches!(parse_command("/hehe"), ReplCommand::Hehe));
     assert!(matches!(parse_command("/HEHE"), ReplCommand::Hehe));
-    // Tab completion and /help read the same registry entry.
+
     assert!(
         super::completion_matches("he")
             .iter()
@@ -527,9 +520,6 @@ fn hehe_parses_and_is_discoverable() {
     assert!(help.contains("/hehe"), "help line: {help}");
 }
 
-/// `/update` and `/restart` are the two halves of landing a self-update: one
-/// installs, the other puts the running gray on it. Both have to be in the
-/// registry, or `/help` and completion would not know they exist.
 #[test]
 fn update_and_restart_parse_and_register() {
     for (typed, name) in [
@@ -548,7 +538,7 @@ fn update_and_restart_parse_and_register() {
         let help = super::format_help_line(def);
         assert!(help.contains(name), "help line: {help}");
     }
-    // Completion sees them, since they are how a user discovers the flow.
+
     assert!(
         super::completion_matches("rest")
             .iter()
@@ -561,8 +551,6 @@ fn update_and_restart_parse_and_register() {
     );
 }
 
-/// `/undo` and `/retry` are top-level commands: bare, with no argument that
-/// could be mistaken for a path or a plugin name.
 #[test]
 fn undo_and_retry_parse_bare() {
     assert_eq!(parse_command("/undo"), ReplCommand::Undo);
@@ -570,8 +558,6 @@ fn undo_and_retry_parse_bare() {
     assert_eq!(parse_command("/retry"), ReplCommand::Retry);
 }
 
-/// The registry is what `/help` and completion read, so both commands have to
-/// be in it or they parse but never appear.
 #[test]
 fn undo_and_retry_are_in_the_registry() {
     let names: Vec<&str> = super::REGISTRY.iter().map(|c| c.name).collect();
@@ -604,7 +590,7 @@ fn sessions_is_canonical_and_resume_stays_an_alias() {
             _ => panic!("{line} did not parse as the sessions command"),
         }
     }
-    // The alias completes the same suffixes under the name that was typed.
+
     let cwd = std::path::Path::new("/tmp");
     assert!(
         super::complete_command_args("sessions", "", cwd)

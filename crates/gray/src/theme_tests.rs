@@ -2,8 +2,7 @@ use super::*;
 
 #[test]
 fn every_role_name_maps_to_a_distinct_field() {
-    // All fields are `Color`, so the struct size counts them: a new role
-    // without a ROLE_NAMES / role_mut entry fails here.
+
     let fields = std::mem::size_of::<UiTheme>() / std::mem::size_of::<Color>();
     assert_eq!(ROLE_NAMES.len(), fields);
     for (i, name) in ROLE_NAMES.iter().enumerate() {
@@ -25,8 +24,7 @@ fn partial_theme_overrides_only_named_roles() {
     assert_eq!(t.accent, Color::Rgb(255, 0, 0));
     assert_eq!(t.surface_bg, Color::Reset);
     assert_eq!(t.text_body, GRAY_UI_THEME.text_body);
-    // A transparent surface has no color to derive a window from, so the
-    // window stays transparent as well.
+
     assert_eq!(t.window_bg, Color::Reset);
 }
 
@@ -49,12 +47,11 @@ fn window_bg_tracks_surface_unless_overridden() {
 
 #[test]
 fn derived_window_steps_away_from_the_surface() {
-    // Dark surface: the window sinks below the cards.
+
     let (dark, _) = parse_theme(r##"{"colors":{"surface_bg":"#202020"}}"##).unwrap();
     assert_ne!(dark.window_bg, dark.surface_bg);
     assert_eq!(dark.window_bg, Color::Rgb(18, 18, 18));
 
-    // Light surface: the window rises above the cards.
     let (light, _) = parse_theme(r##"{"colors":{"surface_bg":"#dfe4c4"}}"##).unwrap();
     assert_ne!(light.window_bg, light.surface_bg);
     assert_eq!(light.window_bg, Color::Rgb(241, 243, 228));
@@ -136,17 +133,16 @@ fn builtin_names() {
 
 #[test]
 fn derived_window_keeps_its_side_of_near_extreme_surfaces() {
-    // Blackgold's #0d0d0d used to come out #191919, lighter than its cards.
-    // Near-black surfaces sink further toward black, never above the cards.
+
     let (blackgold, _) = parse_theme(r##"{"colors":{"surface_bg":"#0d0d0d"}}"##).unwrap();
     assert_eq!(blackgold.window_bg, Color::Rgb(1, 1, 1));
     assert_eq!(derive_window(Color::Rgb(4, 4, 4)), Color::Rgb(0, 0, 0));
-    // Near-white surfaces rise toward white, never below the cards.
+
     assert_eq!(
         derive_window(Color::Rgb(0xfa, 0xfa, 0xfa)),
         Color::Rgb(255, 255, 255)
     );
-    // Pure black and white have no room on their far side.
+
     assert_eq!(derive_window(Color::Rgb(0, 0, 0)), Color::Rgb(0, 0, 0));
     assert_eq!(
         derive_window(Color::Rgb(255, 255, 255)),

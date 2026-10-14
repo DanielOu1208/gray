@@ -1,5 +1,3 @@
-//! Task 2.2: redact() unit-style integration tests (pure, no I/O).
-
 #[test]
 fn userinfo_query_stripped() {
     assert_eq!(

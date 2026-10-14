@@ -1,5 +1,3 @@
-//! Whole-disk FSEvents stream, directory granularity, replayable by event id.
-
 use std::ffi::{CStr, c_void};
 use std::sync::mpsc::Sender;
 
@@ -13,11 +11,10 @@ pub struct Event {
     pub path: Vec<u8>,
     pub flags: u32,
     pub id: u64,
-    /// Which `watch` delivered it (its `stream` number).
+
     pub stream: u32,
 }
 
-/// A stream's callback context.
 struct Info {
     tx: Sender<Vec<Event>>,
     stream: u32,
@@ -34,9 +31,6 @@ struct Context {
 
 type Callback = extern "C" fn(*mut c_void, *mut c_void, usize, *mut c_void, *const u32, *const u64);
 
-/// CoreServices (and the CoreFoundation it brings) are loaded on first use,
-/// not linked: CoreFoundation's initializer costs every process that links
-/// it ~1 ms at launch, and only the daemon watches the disk.
 struct Api {
     create: unsafe extern "C" fn(*const c_void, Callback, *const Context, *const c_void, u64, f64, u32) -> *mut c_void,
     set_queue: unsafe extern "C" fn(*mut c_void, *mut c_void),
@@ -51,7 +45,6 @@ struct Api {
     array_callbacks: *const c_void,
 }
 
-// Function pointers and a constant's address: fine to share.
 unsafe impl Send for Api {}
 unsafe impl Sync for Api {}
 
@@ -83,15 +76,12 @@ fn api() -> &'static Api {
     })
 }
 
-/// A symbol of a loaded image, as `T` (a function pointer, or a data
-/// symbol's address).
 unsafe fn sym<T>(h: *mut c_void, name: &CStr) -> T {
     let p = unsafe { libc::dlsym(h, name.as_ptr()) };
     assert!(!p.is_null(), "missing {name:?}");
     unsafe { std::mem::transmute_copy(&p) }
 }
 
-/// The newest event id on the system.
 pub fn current_id() -> u64 {
     unsafe { (api().current_id)() }
 }
@@ -118,10 +108,8 @@ extern "C" fn release_info(info: *const c_void) {
     }
 }
 
-/// A running stream; dropping it stops it.
 pub struct Stream(*mut c_void);
 
-// The stream is only started and stopped, never shared mid-call.
 unsafe impl Send for Stream {}
 unsafe impl Sync for Stream {}
 
@@ -136,8 +124,6 @@ impl Drop for Stream {
     }
 }
 
-/// Watch `/` from `since` (an event id). Batches of directory-level events,
-/// stamped with `stream`, arrive on `tx` until the returned stream is dropped.
 pub fn watch(since: u64, latency: f64, tx: Sender<Vec<Event>>, stream: u32) -> Stream {
     let a = api();
     unsafe {
@@ -150,15 +136,11 @@ pub fn watch(since: u64, latency: f64, tx: Sender<Vec<Event>>, stream: u32) -> S
             release: release_info as *const c_void,
             copy_description: std::ptr::null(),
         };
-        // Not IgnoreSelf: linked into an app, the app's own renames and moves
-        // are exactly what its search must see.
+
         let s = (a.create)(std::ptr::null(), on_events, &ctx, arr, since, latency, CREATE_FLAG_NO_DEFER);
         (a.cf_release)(arr);
         (a.cf_release)(root);
-        // The callback only copies paths out, but it must not queue behind
-        // busy threads (a first build runs on every core at user-initiated
-        // QoS): fseventsd drops what a client falls behind on, and the drop
-        // costs a relist of every folder changed since the last sync.
+
         let qos = libc::qos_class_t::QOS_CLASS_USER_INITIATED as u32;
         let q = dispatch_queue_create(c"fsearch.fsevents".as_ptr(), dispatch_queue_attr_make_with_qos_class(std::ptr::null(), qos, 0));
         (a.set_queue)(s, q);

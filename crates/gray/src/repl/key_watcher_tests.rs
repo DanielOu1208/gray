@@ -8,7 +8,7 @@ fn try_lock_recovers_poisoned_mutex() {
         let _g = clone.lock().unwrap();
         panic!("poison the mutex");
     }));
-    // Poisoned: still usable, value preserved.
+
     let g = try_lock_tui(&m).expect("poisoned mutex must recover");
     assert_eq!(*g, 1u32);
 }
@@ -34,7 +34,7 @@ fn consumed_key_is_not_lost_while_renderer_holds_tui() {
     std::thread::scope(|scope| {
         let state = state.clone();
         let reader = scope.spawn(move || {
-            // Event has already been consumed by crossterm::read().
+
             ready_tx.send(()).unwrap();
             let mut draft = lock_tui(&state);
             draft.push('x');
@@ -88,8 +88,7 @@ fn turn_local_commands_are_read_only() {
         "/subagents entries",
         "/subagents manifest",
         "/subagents e2e",
-        // Local UI and config: pickers and toggles that never touch the
-        // running turn, so they should not sit in the follow-up queue.
+
         "/theme",
         "/theme banish",
         "/plugins",

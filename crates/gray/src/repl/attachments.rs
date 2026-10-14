@@ -1,13 +1,5 @@
-//! Media attachments, opencode parity (`@opencode-ai/core` media parts +
-//! `Image.normalize`): MIME-driven kinds instead of an image-only allowlist,
-//! original-bytes passthrough for images. Video, PDF and audio go as native
-//! media with a fallback (contact sheet, pdftotext text, a note) that the
-//! provider swaps in when the model can't take the native part.
-
 use std::path::{Path, PathBuf};
 
-// Image validation lives in gray-tools (the `read` tool attaches vision
-// blocks too); re-exported so existing users keep working.
 pub use gray_tools::images::{MediaError, normalize_image_bytes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +12,7 @@ pub enum AttachmentKind {
 }
 
 impl AttachmentKind {
-    /// Human name for chips and markers.
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Image => "Image",
@@ -48,18 +40,10 @@ pub fn attachment_kind(path: &Path) -> AttachmentKind {
     }
 }
 
-/// Max inline file links auto-attached per turn (DoS cap on `fs::read` below).
 const MAX_INLINE_IMAGES: usize = 8;
-/// Inline attach skips files at/above this (mirrors composer paste cap).
+
 const MAX_INLINE_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
-/// Scan prompt text for image file links (`/tmp/a.png`, `./a.jpg`,
-/// `file:///tmp/a%20b.png`) and return existing image files resolved against
-/// `cwd`. Typed/piped `-p` links never go through paste-attach, so without
-/// this they stay plain text and the model never sees them.
-/// Typed file links in `text` that carry media: images, video, PDF, audio. The name
-/// predates video support; renaming it would churn every caller for no
-/// behavior change, so it stays.
 pub fn extract_inline_image_paths(text: &str, cwd: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for raw in text.split_whitespace() {
@@ -77,8 +61,7 @@ pub fn extract_inline_image_paths(text: &str, cwd: &Path) -> Vec<PathBuf> {
         if tok.is_empty() || tok.len() > 1024 {
             continue;
         }
-        // Strip file:// (+localhost) + percent-decode; raw paths pass through
-        // untouched so literal % in real filenames is never corrupted.
+
         let decoded: std::borrow::Cow<'_, str> = if tok.starts_with("file://") {
             match url::Url::parse(tok)
                 .ok()
@@ -95,10 +78,7 @@ pub fn extract_inline_image_paths(text: &str, cwd: &Path) -> Vec<PathBuf> {
         };
         tok = decoded.as_ref();
         let candidate = Path::new(tok);
-        // A typed link to a video, PDF or audio file is as valid as one to a
-        // screenshot: the builder sends it natively or as its fallback.
-        // Filtering this arm to images made a pasted video path silently
-        // arrive as nothing at all.
+
         if attachment_kind(candidate) == AttachmentKind::Unsupported {
             continue;
         }
@@ -138,7 +118,6 @@ pub fn attachment_label(path: &Path) -> String {
         .collect()
 }
 
-/// Lowercased `label()` of every kind; `attachment_marker` writes one of these.
 pub(crate) const MARKER_PREFIXES: [&str; 5] = ["image: ", "video: ", "audio: ", "pdf: ", "file: "];
 
 pub fn attachment_marker(path: &Path) -> String {

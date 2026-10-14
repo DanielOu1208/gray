@@ -51,9 +51,7 @@ fn canonical_key_unifies_dot_spelling() {
 #[test]
 fn full_view_flag_is_stored_verbatim() {
     let ledger = FileLedger::new();
-    // The ledger stores the flag verbatim; the caller computes it. Under
-    // the current contract only fully delivered reads set true — clamped
-    // or cut reads set false.
+
     ledger.record_read(Path::new("full-small.js"), entry(true));
     ledger.record_read(Path::new("cut-big.log"), entry(false));
     assert!(ledger.get(Path::new("full-small.js")).unwrap().full_view);
@@ -86,7 +84,7 @@ fn mark_written_is_full_view_and_disarms_dedup() {
     assert!(!got.dedup_armed, "next read must return full content");
     assert_eq!(got.size, 9);
     assert_eq!(got.last_line, 2);
-    // Missing file: falls back to the given bytes (no I/O to trust).
+
     ledger.mark_written(Path::new("no-such-file.txt"), b"ab");
     let missing = ledger.get(Path::new("no-such-file.txt")).unwrap();
     assert_eq!(missing.size, 2);

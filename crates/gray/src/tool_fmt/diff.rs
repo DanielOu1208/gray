@@ -1,8 +1,4 @@
-//! Diff rendering: hunk parsing, per-line highlight, wrapping (split from `tool_fmt`).
-
 use super::*;
-
-// ── Diff Line and Hunk Data Types ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffTag {
@@ -14,14 +10,13 @@ pub enum DiffTag {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffLine {
     pub text: String,
-    pub lo: usize, // old line number (1-based)
-    pub ln: usize, // new line number (1-based)
+    pub lo: usize,
+    pub ln: usize,
     pub tag: DiffTag,
 }
 
 pub type DiffHunk = Vec<DiffLine>;
 
-/// Parses a hunk header line like `@@ -10,5 +12,6 @@`.
 fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
     let parts: Vec<&str> = line.split("@@").collect();
     if parts.len() < 2 {
@@ -44,7 +39,6 @@ fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
     Some((old_start, new_start))
 }
 
-/// Parses unified diff text into structured [`DiffHunk`]s.
 pub fn parse_diff_hunks(diff_text: &str) -> Vec<DiffHunk> {
     let mut hunks = Vec::new();
     let mut current_hunk = Vec::new();
@@ -69,7 +63,7 @@ pub fn parse_diff_hunks(diff_text: &str) -> Vec<DiffHunk> {
             if line.starts_with("--- ") || line.starts_with("+++ ") {
                 continue;
             }
-            // Fallback for diffs without @@ header
+
             if line.starts_with('+') || line.starts_with('-') || line.starts_with(' ') {
                 in_hunk = true;
             } else {
@@ -133,9 +127,7 @@ pub(crate) fn highlight_line_spans(
             if text.is_empty() {
                 continue;
             }
-            // Reuse the markdown code-color conversion so diffs honor the
-            // same terminal adaptation (256/16-color downgrade, NO_COLOR,
-            // polarity-safe) instead of raw truecolor RGB.
+
             let mut st = gray_markdown::syntect_to_ratatui_fg(style);
             if let Some(bg_c) = bg {
                 st = st.bg(bg_c);
@@ -263,8 +255,6 @@ pub(crate) fn wrap_styled_spans(
     result
 }
 
-/// Renders unified diff hunks with Codex/Grok-style gutter line numbers,
-/// additions/removals summary, background colors, and Syntect syntax highlighting.
 pub fn render_diff_hunks(
     hunks: &[DiffHunk],
     path: Option<&Path>,

@@ -18,7 +18,7 @@ fn clipboard_chain_reads_through_fake_xclip() {
     std::fs::write(&shim, "#!/bin/sh\nprintf 'pasted-text'").expect("write shim");
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let paths = dir.path().to_string_lossy().into_owned();
-    // wl-paste is absent so the chain must fall through to the xclip shim.
+
     assert_eq!(
         read_system_clipboard_text_with_paths(&paths),
         Some("pasted-text".to_string())

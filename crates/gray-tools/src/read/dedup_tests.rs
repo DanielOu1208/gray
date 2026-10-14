@@ -50,7 +50,7 @@ fn hit_stubs_once_then_misses_until_rearmed() {
         check(&ledger, &p, "a.txt", 1, None, true).is_none(),
         "consumed arm misses"
     );
-    // A normal read re-arms (what read/mod.rs does on the miss path)…
+
     record(&ledger, &p, true, (1, None), true);
     assert!(
         check(&ledger, &p, "a.txt", 1, None, true).is_some(),
@@ -62,7 +62,7 @@ fn hit_stubs_once_then_misses_until_rearmed() {
 fn partial_offset_one_read_is_never_stubbed() {
     let (_dir, p) = fixture();
     let ledger = FileLedger::new();
-    // lockfile shape: lines 1-2000 shown, cut before the end.
+
     record(&ledger, &p, false, (1, None), true);
     assert!(check(&ledger, &p, "a.txt", 1, None, true).is_none());
     assert!(
@@ -85,7 +85,7 @@ fn window_mismatch_and_kill_switch_miss() {
 fn changed_mtime_or_size_misses() {
     let (_dir, p) = fixture();
     let ledger = FileLedger::new();
-    // Same size on disk, forged-old mtime in the entry: stale.
+
     let meta = std::fs::metadata(&p).unwrap();
     let bytes = std::fs::read(&p).unwrap();
     ledger.record_read(
@@ -103,7 +103,7 @@ fn changed_mtime_or_size_misses() {
         },
     );
     assert!(check(&ledger, &p, "a.txt", 1, None, true).is_none());
-    // Bigger file, fresh entry, then grow again: stale by size.
+
     std::fs::write(&p, b"one\ntwo\nthree\n").unwrap();
     record(&ledger, &p, true, (1, None), true);
     std::fs::write(&p, b"one\ntwo\nthree\nfour\n").unwrap();

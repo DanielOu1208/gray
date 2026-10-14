@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""Bounded user-line extractor for the daily memory ingest.
-
-Prints only the USER's own message text from session transcripts whose header
-cwd matches --cwd: newest first, capped by --max-sessions and --max-bytes.
-The ingest job runs this instead of reading whole transcripts. The bound lives
-in code because prompt-level read bounds leaked: one dry run spent 1.06M tokens
-"following" a 200 KB instruction. Stdlib only; no writes; never reads
-~/.gray/sessions/<id>.jsonl beyond the user lines it prints.
-
-Usage:
-  python3 scripts/memory-ingest-read.py --cwd /home/vstaln/gray
-"""
 from __future__ import annotations
 
 import argparse
@@ -20,11 +7,10 @@ import sys
 import time
 from pathlib import Path
 
-
 def user_texts(path: Path) -> list[str]:
     out: list[str] = []
     with path.open(encoding="utf-8", errors="replace") as handle:
-        handle.readline()  # header: {version,id,timestamp,cwd,model}
+        handle.readline()
         for line in handle:
             if '"role":"user"' not in line:
                 continue
@@ -45,7 +31,6 @@ def user_texts(path: Path) -> list[str]:
             if text:
                 out.append(text)
     return out
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -73,7 +58,7 @@ def main() -> None:
             break
         try:
             if path.stat().st_mtime < cutoff:
-                break  # newest-first: everything older is outside the window
+                break
             with path.open(encoding="utf-8", errors="replace") as handle:
                 header = json.loads(handle.readline() or "{}")
         except (OSError, json.JSONDecodeError):
@@ -84,8 +69,7 @@ def main() -> None:
         if not texts:
             continue
         matched += 1
-        # The header's `timestamp` is a monotonic counter, not an epoch; the
-        # file's mtime is the wall clock we can format.
+
         stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))
         block = f"=== {path.stem} {stamp} ===\n" + "\n---\n".join(texts) + "\n"
         room = args.max_bytes - used
@@ -94,7 +78,6 @@ def main() -> None:
 
     if not matched:
         print(f"(no user messages in the last {args.hours}h for {args.cwd})")
-
 
 if __name__ == "__main__":
     main()

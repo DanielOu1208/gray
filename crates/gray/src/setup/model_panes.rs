@@ -1,24 +1,3 @@
-//! Two-pane model picker (bare `/model`): a provider rail on the left, the
-//! highlighted provider's model list on the right. The rail reuses the
-//! `/connect` item set and its connected checks, so every provider gray
-//! knows about is visible — connected, detected, or just installed.
-//!
-//! Capabilities mirror the scoped picker where they fit the panes:
-//!
-//! - **Live refresh**: each provider's list lazily re-fetches in the
-//!   background the first time it is highlighted (plugin providers run
-//!   their sidecar catalog RPC, HTTP providers hit `/models`).
-//! - **Effort rows**: ←/→ in the model pane steps the highlighted row's
-//!   level — remembered per provider+model, committed on Enter through
-//!   [`commit_row_effort`] like the scoped picker.
-//! - **Composite rows** (fusion): Enter sets the provider's identity and
-//!   hands the same terminal to [`model_picker_loop`], which owns slot
-//!   selects, parts, and its own commit — the delegation `/connect`'s
-//!   model step already proves.
-//!
-//! Auth stays `/connect`'s job: Enter on an unconnected row closes the
-//! panes and hands that provider to its login.
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, poll, read};
@@ -46,8 +25,6 @@ use super::provider_auth::activate_plugin_connection;
 use super::ui::{BackgroundSnapshot, render_dimmed_background};
 use super::variants::{Parts, effort_word};
 
-/// How the panes closed: a committed pick, a dismissal, or Enter on an
-/// unconnected provider — its id goes to `/connect`'s login.
 pub(crate) enum PanesOutcome {
     Picked,
     Dismissed,
@@ -55,16 +32,12 @@ pub(crate) enum PanesOutcome {
     Removed(String),
 }
 
-/// Which pane owns ↑/↓ and Enter.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Rail,
     Models,
 }
 
-/// A rail row: the connect item plus the list key its models cache under
-/// and the resolved adopt path. `installed` is `Some` only for plugin
-/// providers — the only kind whose commit needs the registry entry.
 struct PaneProvider {
     item: ConnectItem,
     list_key: String,
@@ -74,9 +47,7 @@ struct PaneProvider {
 }
 
 impl PaneProvider {
-    /// `provider_models.json` slot for this row: plugin providers list
-    /// under their `plugin:` pseudo-key, everything else under its base
-    /// URL — the same keys `picker_scope` produces.
+
     fn list_key(item: &ConnectItem) -> String {
         match &item.auth {
             ConnectAuth::Plugin { .. } => plugin_models_key(&item.id),
@@ -84,15 +55,10 @@ impl PaneProvider {
         }
     }
 
-    /// Whether this row can commit today: connected, or keyless, or a
-    /// stored key exists for it (env-detected keys count via `keys`).
     fn adoptable(&self, keys: &BTreeMap<String, String>) -> bool {
         self.connected || self.item.no_auth || keys.contains_key(&self.item.id)
     }
 
-    /// The key this row authenticates with: its stored key, else the live
-    /// session's key when the row is the active endpoint (env or saved
-    /// config keys never reach the auth store).
     fn key(&self, keys: &BTreeMap<String, String>, config: &Config) -> Option<String> {
         keys.get(&self.item.id)
             .cloned()
@@ -105,7 +71,6 @@ impl PaneProvider {
     }
 }
 
-/// The rail's data, built once per modal open like `/connect` does.
 fn build_rail(config: &Config) -> (Vec<PaneProvider>, BTreeMap<String, String>) {
     let catalog = catalog::load_catalog().unwrap_or_default();
     let providers = crate::setup::catalog::gray_home()
@@ -118,7 +83,7 @@ fn build_rail(config: &Config) -> (Vec<PaneProvider>, BTreeMap<String, String>) 
         detect_connect_candidates(super::context::ollama_running(), |k| std::env::var(k).ok());
     sort_connect_items(&mut items, config, &auth, &detected);
     let keys = load_auth_keys();
-    // The bare `custom` row is an add-endpoint action, not a provider.
+
     let rail = items
         .into_iter()
         .filter(|item| item.id != "custom")
@@ -142,16 +107,12 @@ fn build_rail(config: &Config) -> (Vec<PaneProvider>, BTreeMap<String, String>) 
     (rail, keys)
 }
 
-/// The active provider's rail position: the one the live config resolves
-/// to. Plugin rows match on provider id, keyed/custom rows on base URL.
 fn active_rail_index(rail: &[PaneProvider], config: &Config) -> usize {
     rail.iter()
         .position(|p| provider_is_active(p, config))
         .unwrap_or(0)
 }
 
-/// Whether `p` is the provider the live config currently resolves to —
-/// the pane marks its model `✓` only then.
 fn provider_is_active(p: &PaneProvider, config: &Config) -> bool {
     if config.credential_source == "plugin" || matches!(p.item.auth, ConnectAuth::Plugin { .. }) {
         return config.credential_source == "plugin" && config.provider_id == p.item.id;
@@ -161,9 +122,6 @@ fn provider_is_active(p: &PaneProvider, config: &Config) -> bool {
             == normalize_custom_base_url(&config.base_url)
 }
 
-/// `config` rescoped to `p`'s identity: the effort-memory helpers key on
-/// `provider_id`/`base_url`, so every per-provider read or write needs a
-/// config that already names the provider being browsed.
 fn scoped_config(config: &Config, p: &PaneProvider, keys: &BTreeMap<String, String>) -> Config {
     let mut scoped = config.clone();
     if !provider_is_active(p, config) {
@@ -185,10 +143,6 @@ fn scoped_config(config: &Config, p: &PaneProvider, keys: &BTreeMap<String, Stri
     scoped
 }
 
-/// Per-provider effort state: stepped levels keyed `list_key\u{1f}model`
-/// so the same model id on two providers never shares a pick. Only the
-/// highlighted provider's rows show levels — a scoped config built per
-/// pane keeps the helpers provider-correct.
 #[derive(Default)]
 struct PaneEfforts {
     stepped: HashMap<String, &'static str>,
@@ -199,10 +153,6 @@ impl PaneEfforts {
         format!("{}\u{1f}{model}", p.list_key)
     }
 
-    /// The level `model` shows on `p`'s pane (and Enter commits):
-    /// stepped pick, else the standard initial (live on the active
-    /// connection, remembered elsewhere, `high` default), clamped to
-    /// what the row offers. `None` = the row has no effort knob at all.
     fn shown(
         &self,
         scoped: &Config,
@@ -224,13 +174,10 @@ impl PaneEfforts {
         }
     }
 
-    /// Whether the row was stepped this session — Enter then applies it
-    /// even under `GRAY_THINKING_EFFORT` (same rule as the scoped picker).
     fn was_stepped(&self, p: &PaneProvider, model: &str) -> bool {
         self.stepped.contains_key(&Self::key(p, model))
     }
 
-    /// One level up (`forward`) or down, clamped at the ends.
     fn step(
         &mut self,
         scoped: &Config,
@@ -259,15 +206,10 @@ impl PaneEfforts {
     }
 }
 
-/// A model row is composite (fusion) when its declared shape has slots —
-/// those Enter-delegate to the scoped picker rather than committing here.
 fn is_composite(model: &str) -> bool {
     super::variants::row_shape(model).is_some_and(|s| s.is_composite())
 }
 
-/// Where the model cursor starts: the active model when it is listed, else
-/// the first row that is not a composite. Fusion leads the list, so plain
-/// `0` would start on it; the cursor starts there only when it is active.
 fn start_row(models: &[(String, String)], active: Option<&str>) -> usize {
     active
         .and_then(|cur| models.iter().position(|(id, _)| id == cur))
@@ -275,7 +217,6 @@ fn start_row(models: &[(String, String)], active: Option<&str>) -> usize {
         .unwrap_or(0)
 }
 
-/// Models for one rail row, loaded lazily and cached for the modal's life.
 fn models_for<'a>(
     p: &PaneProvider,
     cache: &'a mut HashMap<String, Vec<(String, String)>>,
@@ -295,8 +236,6 @@ fn models_for<'a>(
         .as_slice()
 }
 
-/// Saved fields of an API-key or keyless connection, the set `/connect`'s
-/// model step writes once a model is chosen.
 fn save_key_connection(config: &Config, saved: &mut SavedConfig) {
     saved.base_url = Some(config.base_url.clone());
     saved.api_key = config.api_key.clone();
@@ -314,11 +253,6 @@ fn save_key_connection(config: &Config, saved: &mut SavedConfig) {
     saved.model = config.model.clone();
 }
 
-/// Commit a plain model pick on `p`: provider adopt (the same writes
-/// `/connect`'s model step performs), then the row's shown effort through
-/// the shared commit — a stepped level lands in `config` and the
-/// provider-keyed `effort_memory`, an untouched row adopts that
-/// connection's own remembered level.
 fn commit_pick(
     config: &mut Config,
     p: &PaneProvider,
@@ -328,8 +262,7 @@ fn commit_pick(
     stepped: bool,
     toggles: PickerToggles,
 ) -> anyhow::Result<()> {
-    // A plain model pick drops any composite parts the previous row
-    // carried (fusion slot selects stay `/model`'s richer surface).
+
     config.model_parts.clear();
     match &p.installed {
         Some(installed) => activate_plugin_connection(config, installed, model)?,
@@ -348,10 +281,6 @@ fn commit_pick(
     save_saved_config_at(&path, &saved)
 }
 
-/// A composite row's pick: provider identity first, then the scoped
-/// picker on the same terminal — it owns slot selects, parts, effort and
-/// its own commit. For a plugin provider the picker's commit leaves the
-/// saved provider fields for [`activate_plugin_connection`] to finalize.
 fn delegate_pick(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     config: &mut Config,
@@ -385,7 +314,6 @@ fn delegate_pick(
 
 const RAIL_W: u16 = 22;
 
-/// One frame's state: everything [`draw`] reads.
 struct PaneView<'a> {
     rail: &'a [PaneProvider],
     rail_sel: usize,
@@ -421,8 +349,6 @@ impl PaneView<'_> {
     }
 }
 
-/// The wire id fast mode would send for `model` at `effort`: a declared
-/// fast variant, else the catalog-spelled fast sibling.
 fn fast_wire(model: &str, effort: Option<&str>, models: &[(String, String)]) -> Option<String> {
     match super::variants::row_shape(model) {
         Some(shape) if !shape.variants.is_empty() => {
@@ -440,7 +366,6 @@ fn model_label<'a>(id: &'a str, name: &'a str) -> &'a str {
     if name.is_empty() { id } else { name }
 }
 
-/// `filter`'s first case-insensitive occurrence in `label`, as a char range.
 fn match_range(label: &str, filter: &str) -> Option<(usize, usize)> {
     let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
     let needle: Vec<char> = filter.chars().map(lower).collect();
@@ -454,7 +379,6 @@ fn match_range(label: &str, filter: &str) -> Option<(usize, usize)> {
         .map(|i| (i, i + needle.len()))
 }
 
-/// `label` in `style`, the filter match underlined.
 fn underline_match(label: &str, filter: &str, style: Style) -> Vec<Span<'static>> {
     let Some((i, j)) = match_range(label, filter) else {
         return vec![Span::styled(label.to_string(), style)];
@@ -753,19 +677,14 @@ fn draw(frame: &mut Frame, bg: &BackgroundSnapshot, v: &PaneView) {
     );
 }
 
-/// Whether the box is tall enough for a gap between detail and key line.
 fn roomy(inner_h: u16) -> bool {
     inner_h >= 12
 }
 
-/// List rows inside the box: the header, a gap, the lists, a gap, the
-/// detail line, a gap when [`roomy`], and the key line.
 fn list_rows(inner_h: u16) -> usize {
     inner_h.saturating_sub(if roomy(inner_h) { 6 } else { 5 }) as usize
 }
 
-/// [`list_rows`] for a terminal `term_h` rows tall — the box geometry
-/// [`draw`] uses.
 fn list_height(term_h: u16) -> usize {
     let h = term_h.clamp(10, 24).min(term_h.saturating_sub(2));
     list_rows(h.saturating_sub(2))
@@ -775,7 +694,6 @@ fn clamp_sel(sel: usize, len: usize) -> usize {
     sel.min(len.saturating_sub(1))
 }
 
-/// Bare `/model`: the two-pane provider×model picker.
 pub(crate) fn run_model_panes(
     config: &mut Config,
     bg: Option<&BackgroundSnapshot>,
@@ -802,7 +720,6 @@ pub(crate) fn run_model_panes(
     let mut notice: Option<String> = None;
     let mut removed: Option<String> = None;
 
-    // Lazy live refresh: one fetch per provider per modal session.
     let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<(String, Vec<(String, String)>)>();
     let mut fetching: HashSet<String> = HashSet::new();
     let kick = |p: &PaneProvider,
@@ -833,8 +750,7 @@ pub(crate) fn run_model_panes(
             })
             .unwrap_or_default();
         loop {
-            // A finished refresh replaces the cached list in place; the
-            // pane was already usable from the disk copy.
+
             while let Ok((list_key, live)) = refresh_rx.try_recv() {
                 if !live.is_empty()
                     && let Some(p) = rail.iter().find(|p| p.list_key == list_key)
@@ -893,7 +809,6 @@ pub(crate) fn run_model_panes(
                 .map(|p| scoped_config(config, p, &keys))
                 .unwrap_or_else(|| config.clone());
 
-            // Scroll windows.
             let list_h = list_height(terminal.size()?.height);
             if rail_sel < rail_top {
                 rail_top = rail_sel;

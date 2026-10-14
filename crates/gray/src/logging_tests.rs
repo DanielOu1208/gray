@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn redact_sk_key() {
     assert_eq!(redact("key sk-abcDEF123-_xyz done"), "key [REDACTED] done");
-    // Short suffixes are not keys.
+
     assert_eq!(redact("sk-abc"), "sk-abc");
 }
 
@@ -32,7 +32,6 @@ fn redact_leaves_plain_text_alone() {
     assert_eq!(redact("my x-api-key is secret"), "my x-api-key is secret");
 }
 
-// UNRUN (cargo test banned under X per AGENTS.md; verify in TTY/CI).
 #[test]
 fn runtime_rotation_threshold_matches_boot_cap() {
     assert!(!should_rotate(0));

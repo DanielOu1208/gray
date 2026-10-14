@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 #[test]
 fn should_compact_ceiling() {
-    // Haiku-like: 200k window, 100k cliff, 12.5k reserve → ceiling 87.5k.
+
     let (ceiling, _) = ceiling_for(None, 200_000, 12_500, Some(100_000));
     let s = CompactionSettings {
         reserve_tokens: 12_500,
@@ -18,7 +18,7 @@ fn should_compact_ceiling() {
         Some(CompactReason::PriceCliff { cliff: 100_000 })
     );
     assert_eq!(binding_reason(87_499, &s), None);
-    // Window bound still fires past it regardless of the ceiling.
+
     assert!(should_compact(190_000, 200_000, &s));
     assert_eq!(
         binding_reason(190_000, &s),
@@ -29,20 +29,19 @@ fn should_compact_ceiling() {
 #[test]
 fn ceiling_for_math() {
     use crate::setup::CompactAt;
-    // Haiku-like auto: margin = max(10% of cliff, reserve) → 100k − 12.5k.
+
     assert_eq!(
         ceiling_for(None, 200_000, 12_500, Some(100_000)),
         (Some(87_500), Some(100_000))
     );
-    // Opus-like: no declared cliff → no ceiling, the window bound stands.
+
     assert_eq!(ceiling_for(None, 200_000, 12_500, None), (None, None));
-    // 1M window + 100k cliff: the cliff still wins over the far window
-    // bound — margin is the (large) reserve here, 100k − 62.5k.
+
     assert_eq!(
         ceiling_for(Some(CompactAt::Auto), 1_000_000, 62_500, Some(100_000)),
         (Some(37_500), Some(100_000))
     );
-    // Explicit value is the user's choice — it may sit above the cliff…
+
     assert_eq!(
         ceiling_for(
             Some(CompactAt::Tokens(150_000)),
@@ -52,7 +51,7 @@ fn ceiling_for_math() {
         ),
         (Some(150_000), None)
     );
-    // …but never above window − reserve.
+
     assert_eq!(
         ceiling_for(
             Some(CompactAt::Tokens(1_000_000)),
@@ -62,7 +61,7 @@ fn ceiling_for_math() {
         ),
         (Some(187_500), None)
     );
-    // Degenerate: a window smaller than its reserve yields no ceiling.
+
     assert_eq!(
         ceiling_for(Some(CompactAt::Tokens(50_000)), 10_000, 12_500, None),
         (None, None)
@@ -78,7 +77,7 @@ fn parse_compact_at_grammar() {
     assert_eq!(parse_compact_at("1.5m"), Some(CompactAt::Tokens(1_500_000)));
     assert_eq!(parse_compact_at("90000"), Some(CompactAt::Tokens(90_000)));
     assert_eq!(parse_compact_at("garbage"), None);
-    // config.json accepts the number or the string forms.
+
     assert_eq!(
         serde_json::from_str::<CompactAt>("90000").unwrap(),
         CompactAt::Tokens(90_000)
@@ -93,17 +92,14 @@ fn parse_compact_at_grammar() {
 fn summary_envelope_matches_core_helper_byte_for_byte() {
     let m1 = gray_core::agent::summary_message("  shared summary  ");
     assert!(m1.text_content().contains("shared summary"));
-    // Both compact paths build via the same helper, so envelopes are identical.
+
     let m2 = gray_core::agent::summary_message("shared summary");
     assert_eq!(m1.text_content().as_bytes(), m2.text_content().as_bytes());
 }
 
-/// A message holding one capped tool result (`truncate.rs` allows 50 KiB)
-/// must not measure as free. Regression guard for `estimate_tokens`
-/// measuring with a display accessor.
 #[test]
 fn estimate_counts_tool_results() {
-    // 4 KiB of tool output => 4096/4 = 1024 tokens.
+
     let big = Message::new(
         Role::User,
         vec![ContentBlock::tool_result("t1", "x".repeat(4096), false)],
@@ -116,10 +112,6 @@ fn estimate_counts_tool_results() {
     );
 }
 
-/// With no provider `Usage` (resumed session, or an OpenAI-compatible
-/// endpoint that omits usage on streaming), the estimator is the only
-/// signal deciding whether to compact. A tool-heavy history must cross
-/// the reserve line.
 #[test]
 fn tool_heavy_history_trips_threshold_without_provider_usage() {
     let msgs: Vec<Message> = (0..10)
@@ -135,7 +127,6 @@ fn tool_heavy_history_trips_threshold_without_provider_usage() {
         })
         .collect();
 
-    // 10 x 8 KiB = 80 KiB => 20480 tokens. Before the fix: 0.
     let tokens = estimate_context_tokens(&msgs, None);
     assert_eq!(tokens, 20_480, "80 KiB of tool output measured as {tokens}");
 
@@ -144,7 +135,7 @@ fn tool_heavy_history_trips_threshold_without_provider_usage() {
         ceiling_tokens: None,
         price_cliff_tokens: None,
     };
-    // 32k window, 16384 reserve => threshold 15616. 20480 is over it.
+
     assert!(
         should_compact(tokens, 32_000, &s),
         "tool-heavy history must auto-compact; before the fix it measured \
@@ -166,7 +157,7 @@ fn is_context_overflow_error_detects() {
     assert!(is_context_overflow_error(&CoreError::Provider(
         "max_tokens exceeded".into()
     )));
-    // Generic "length" truncation is NOT overflow via this helper (handled via stopReason by the caller)
+
     assert!(!is_context_overflow_error(&CoreError::Provider(
         "length truncation: output was cut off".into()
     )));
@@ -193,7 +184,7 @@ fn repl_threshold_120k_128k_triggers_compact() {
         price_cliff_tokens: None,
     };
     assert!(should_compact(tokens, window, &s));
-    // 100k should NOT trigger
+
     let usage2 = Usage {
         input_tokens: 90_000,
         output_tokens: 10_000,
@@ -204,7 +195,7 @@ fn repl_threshold_120k_128k_triggers_compact() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // serializes against switch-flipping tests for the whole test
+#[allow(clippy::await_holding_lock)]
 async fn auto_compact_triggers_on_threshold() {
     let _serial = COMPACT_SWITCH_SERIAL.lock().unwrap();
     let _home = TempGrayHome::set();
@@ -256,8 +247,7 @@ async fn auto_compact_triggers_on_threshold() {
     };
     let executor = NoopExecutor;
     crate::setup::set_user_keep_recent_tokens(Some(0));
-    // Large enough that the summary strictly shrinks history (the
-    // enforced shrink invariant refuses toy histories).
+
     let mut agent = Agent::new(Box::new(provider), Arc::new(executor)).with_messages(vec![
         Message::user("hello ".repeat(500)),
         Message::assistant("hi there ".repeat(500)),
@@ -276,9 +266,6 @@ async fn auto_compact_triggers_on_threshold() {
     );
 }
 
-/// Redirects `GRAY_HOME` at a test-private dir (restored on drop) so
-/// checkpoint writes never touch the real home. Mutates process env:
-/// hold `COMPACT_SWITCH_SERIAL` for the whole test.
 struct TempGrayHome {
     prev: Option<String>,
     _dir: tempfile::TempDir,
@@ -300,7 +287,6 @@ impl Drop for TempGrayHome {
     }
 }
 
-/// Scripted provider returning one fixed summary text.
 fn scripted_agent(summary_text: &str) -> Agent {
     use async_trait::async_trait;
     use futures::stream::BoxStream;
@@ -349,7 +335,6 @@ fn scripted_agent(summary_text: &str) -> Agent {
     )
 }
 
-/// One ~100-token message by the estimator (bytes/4): 400 chars.
 fn sized(tag: &str) -> Message {
     Message::user(format!("{tag}:{}", "x".repeat(400 - tag.len() - 1)))
 }
@@ -368,9 +353,7 @@ async fn compact_with_keep_rejects_blank_summary() {
 
 #[tokio::test]
 async fn compact_refuses_non_shrinking_replacement() {
-    // One tiny message vs a huge summary: the replacement is bigger, so
-    // compaction must leave history byte-identical (mirrors core's
-    // `budgeted_compact_false_when_summary_would_not_shrink`).
+
     let long = "z".repeat(2000);
     let mut ag = scripted_agent(&long);
     ag.set_messages(vec![Message::user("hi")]);
@@ -385,23 +368,19 @@ async fn compact_refuses_non_shrinking_replacement() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // serial guard must cover the whole test (env + gray home)
+#[allow(clippy::await_holding_lock)]
 async fn compact_retains_newest_and_boundary_truncates_oldest() {
     let _serial = COMPACT_SWITCH_SERIAL.lock().unwrap();
     let _home = TempGrayHome::set();
     let mut ag = scripted_agent("S");
     ag.set_messages(vec![sized("m1"), sized("m2"), sized("m3"), sized("m4")]);
-    // V2 budget walk (keep=250): m4 + m3 fit (200), m2 is the boundary
-    // group → middle-truncated into the remaining ~50, m1 dropped.
+
     let out = compact_with_keep(&mut ag, None, 250)
         .await
         .expect("compact must succeed");
     assert!(out.is_some());
     let msgs = ag.messages();
-    // arXiv:2512.22087 stable anchor: the pinned intent leads, and its
-    // ~100 tokens come out of the keep budget (250 → ~150 retained), so
-    // the boundary group moves one message older: m3 is the truncated
-    // boundary now, not m2.
+
     assert_eq!(
         msgs.len(),
         4,
@@ -430,13 +409,12 @@ async fn compact_retains_newest_and_boundary_truncates_oldest() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // see compact_retains_newest_and_boundary_truncates_oldest
+#[allow(clippy::await_holding_lock)]
 async fn compact_drops_tool_pair_atomically() {
     let _serial = COMPACT_SWITCH_SERIAL.lock().unwrap();
     let _home = TempGrayHome::set();
     let mut ag = scripted_agent("S");
-    // Tool-use-only assistant group: v2 drops it together with its
-    // result — never an orphaned call or result in the replacement.
+
     let use_msg = Message::new(
         Role::Assistant,
         vec![ContentBlock::tool_use(
@@ -478,7 +456,7 @@ async fn compact_drops_tool_pair_atomically() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // serial guard must cover the whole test (env + gray home)
+#[allow(clippy::await_holding_lock)]
 async fn manual_compact_passes_instructions_to_trigger() {
     use async_trait::async_trait;
     use futures::stream::BoxStream;
@@ -588,8 +566,6 @@ fn checkpoint_is_private_unpredictable_and_rotated() {
     assert_eq!(count, 5, "rotation keeps newest 5, kept {count}");
 }
 
-/// Serializes tests that flip the global auto-compact switch; also guards
-/// the flag back to enabled even when an assertion panics.
 static COMPACT_SWITCH_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 struct EnableGuard;
 impl Drop for EnableGuard {
@@ -599,7 +575,7 @@ impl Drop for EnableGuard {
 }
 
 mod switch_tests {
-    #![allow(clippy::await_holding_lock)] // serial guard must cover each whole test (global switch + env)
+    #![allow(clippy::await_holding_lock)]
     use super::*;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
@@ -644,8 +620,7 @@ mod switch_tests {
     }
 
     fn agent() -> Agent {
-        // Large enough that the summary strictly shrinks history
-        // (the enforced shrink invariant refuses toy histories).
+
         Agent::new(Box::new(FakeProvider), Arc::new(NoopExecutor)).with_messages(vec![
             Message::user("hello ".repeat(500)),
             Message::assistant("hi there ".repeat(500)),
@@ -700,8 +675,7 @@ mod switch_tests {
         let prev = std::env::var("GRAY_NO_AUTO_COMPACT").ok();
         unsafe { std::env::remove_var("GRAY_NO_AUTO_COMPACT") };
         init_auto_compact_from_env();
-        // Zero keep: with the default 20k keep budget the tail would hold
-        // everything and the shrink invariant would (correctly) refuse.
+
         crate::setup::set_user_keep_recent_tokens(Some(0));
         let mut ag = agent();
         let out = auto_compact_if_needed(&mut ag)

@@ -1,12 +1,5 @@
-//! `gray.ui` v1 documents — the vendored subset channel adapters compile
-//! (GRAY-CMD-CONTRACT.md). The wire shape is frozen: `type`-tagged
-//! snake_case nodes; the doc body drops into the discord plugin's
-//! `component_compile` unchanged.
-
 use serde::{Deserialize, Serialize};
 
-/// The document adapters compile: `protocol`/`version` identify the wire,
-/// `surface` is always `"message"` in v1.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct UiDoc {
     pub(crate) protocol: String,
@@ -19,7 +12,7 @@ pub(crate) struct UiDoc {
 }
 
 impl UiDoc {
-    /// A message-surface doc with the v1 constants filled in.
+
     pub(crate) fn message(
         document_id: &str,
         visibility: Visibility,
@@ -45,9 +38,6 @@ pub(crate) enum Visibility {
     Public,
 }
 
-/// Core-enforced lifecycle: `one_shot` consumes the token on first
-/// interact, `editable` revises against the pending record until a submit
-/// consumes it. (`repeatable`/`static` exist on the wire; unused in v1.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Lifecycle {
@@ -67,7 +57,6 @@ pub(crate) enum ButtonStyle {
     Link,
 }
 
-/// One component in a [`UiDoc`] — the contract's v1 subset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum MessageNode {
@@ -99,7 +88,6 @@ pub(crate) enum MessageNode {
     },
 }
 
-/// A `string_select` option (`default` only appears when set).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SelectOption {
     pub(crate) label: String,

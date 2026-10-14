@@ -1,19 +1,6 @@
-//! Shared `pulldown-cmark` parser configuration and strikethrough filter.
-//!
-//! [`offset_events`] is the single entry point for the parser event stream:
-//! the GFM + strikethrough + math + tasklist + table option set, with
-//! single-tilde pairs (`~text~`) demoted to literal `~` text so only
-//! `~~…~~` counts as strikethrough (LLM output like `~**10%**` must not
-//! strike).
-
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 
-/// The `pulldown-cmark` option set used for both analysis and rendering.
-///
-/// With `ENABLE_STRIKETHROUGH`, pulldown treats both `~~…~~` and single-`~`
-/// pairs as strike. Events must be consumed via [`offset_events`] so only
-/// double-tilde strikethrough is retained.
 fn parser_options() -> Options {
     Options::ENABLE_GFM
         | Options::ENABLE_STRIKETHROUGH
@@ -22,10 +9,6 @@ fn parser_options() -> Options {
         | Options::ENABLE_TABLES
 }
 
-/// Offset event stream with single-tilde strikethrough demoted.
-///
-/// Prefer this over `Parser::new_ext(...).into_offset_iter()` so analysis and
-/// rendering agree on what counts as strikethrough.
 pub fn offset_events(text: &str) -> impl Iterator<Item = (Event<'_>, Range<usize>)> + '_ {
     DoubleTildeOnlyStrike {
         text,
@@ -33,20 +16,15 @@ pub fn offset_events(text: &str) -> impl Iterator<Item = (Event<'_>, Range<usize
     }
 }
 
-/// Stackless filter: Start and End share the same byte span in pulldown, so both
-/// are classified by whether that span opens with `~~`. Single-tilde frames emit
-/// delimiter `Text` instead of strike tags (delimiters are not separate events).
 struct DoubleTildeOnlyStrike<'a, I> {
     text: &'a str,
     events: I,
 }
 
-/// True when the strike span at `range.start` is the double-tilde form.
 fn is_double_tilde_strike(text: &str, range: &Range<usize>) -> bool {
     text.get(range.start..).is_some_and(|s| s.starts_with("~~"))
 }
 
-/// Opening or closing delimiter byte as `Text`, with the matching source range.
 fn strike_delim_text<'a>(
     text: &'a str,
     range: &Range<usize>,

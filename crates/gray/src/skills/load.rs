@@ -1,22 +1,15 @@
-//! Skill file parsing + directory loading (split from `skills`).
-
 use super::*;
-
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct SkillFrontmatter {
     name: Option<String>,
     pub(crate) description: Option<String>,
-    /// `argument-hint:` (prompt templates; skills ignore it).
+
     pub(crate) argument_hint: Option<String>,
     disable_model_invocation: bool,
     args: Vec<String>,
 }
 
-/// Split a frontmatter `args:`/`arguments:` value into declared arg names.
-/// Accepts comma- and/or whitespace-separated (`foo, bar`, `foo bar`,
-/// `[foo, bar]`); surrounding quotes already stripped by the caller.
 pub(crate) fn parse_declared_args(val: &str) -> Vec<String> {
     let t = val.trim();
     let t = t.strip_prefix('[').unwrap_or(t);
@@ -36,12 +29,12 @@ pub(crate) fn parse_declared_args(val: &str) -> Vec<String> {
 pub(crate) fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), String> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
-        // no frontmatter → empty, body is whole file
+
         return Ok((SkillFrontmatter::default(), content.to_string()));
     }
-    // find closing ---
+
     let after_open = &trimmed[3..];
-    // skip first newline after opening
+
     let after_open = after_open
         .strip_prefix("\r\n")
         .or_else(|| after_open.strip_prefix('\n'))
@@ -86,11 +79,7 @@ fn parse_yaml_like(s: &str) -> SkillFrontmatter {
         };
         let key = line[..colon].trim().trim_matches('"').trim_matches('\'');
         let mut val = line[colon + 1..].trim().to_string();
-        // Block scalars (`description: >` / `|` with optional chomping
-        // `+`/`-`): gather the indented continuation lines YAML folds into
-        // the value. Without this a folded description parses as the bare
-        // marker (`">"`), silently breaking skill discovery text.
-        // chomping nuances ignored, descriptions are trimmed downstream.
+
         let folded = val == ">" || val == ">-" || val == ">+";
         let literal = val == "|" || val == "|-" || val == "|+";
         if folded || literal {
@@ -115,7 +104,7 @@ fn parse_yaml_like(s: &str) -> SkillFrontmatter {
         } else if (val.starts_with('"') && val.ends_with('"') && val.len() >= 2)
             || (val.starts_with('\'') && val.ends_with('\'') && val.len() >= 2)
         {
-            // strip quotes
+
             val = val[1..val.len() - 1].to_string();
         }
         match key {
@@ -133,10 +122,6 @@ fn parse_yaml_like(s: &str) -> SkillFrontmatter {
     }
     fm
 }
-
-// ---------------------------------------------------------------------------
-// Core loaders
-// ---------------------------------------------------------------------------
 
 fn is_skill_md_file(path: &Path) -> bool {
     path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md")
@@ -192,7 +177,6 @@ pub(crate) fn load_skill_from_file(file_path: &Path, source: &str) -> Option<Ski
     })
 }
 
-// internal walker
 pub(crate) fn load_skills_from_dir_internal(
     dir: &Path,
     source: &str,
@@ -202,10 +186,7 @@ pub(crate) fn load_skills_from_dir_internal(
     visited: &mut std::collections::HashSet<PathBuf>,
 ) -> LoadSkillsResult {
     let mut skills = Vec::new();
-    // Audit #11: symlinked directories are followed, and nothing kept the
-    // walk from re-entering a directory it was already inside (a symlink
-    // back to an ancestor). Canonical paths make the cycle a set lookup:
-    // a repeat reads as already-visited and yields nothing.
+
     let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     if !visited.insert(canon) {
         return LoadSkillsResult { skills };
@@ -224,7 +205,6 @@ pub(crate) fn load_skills_from_dir_internal(
         }
     };
 
-    // Collect entries to allow two-phase scan (SKILL.md first, then others)
     let mut entry_list: Vec<(PathBuf, fs::FileType, bool)> = Vec::new();
     for e in entries.flatten() {
         let p = e.path();
@@ -236,7 +216,6 @@ pub(crate) fn load_skills_from_dir_internal(
         entry_list.push((p, ft, is_symlink));
     }
 
-    // Phase 1: if any SKILL.md exists, treat dir as skill root
     for (full_path, ft, is_symlink) in &entry_list {
         let name = full_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if name != "SKILL.md" {
@@ -260,7 +239,6 @@ pub(crate) fn load_skills_from_dir_internal(
         return LoadSkillsResult { skills };
     }
 
-    // Phase 2: scan children
     for (full_path, ft, is_symlink) in entry_list {
         let file_name = full_path
             .file_name()

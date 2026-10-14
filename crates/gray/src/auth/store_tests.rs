@@ -109,9 +109,6 @@ fn malformed_store_fails_closed() {
     assert!(CredentialStore::new(path).load().is_err());
 }
 
-/// Two gray processes (two terminals, or a REPL plus a cron fire) updating
-/// `auth.json` at once. The lock used to cover only the final write, so the
-/// second writer's stale map erased the first one's credential.
 #[test]
 fn concurrent_plugin_writes_keep_every_entry() {
     let dir = tempfile::tempdir().unwrap();

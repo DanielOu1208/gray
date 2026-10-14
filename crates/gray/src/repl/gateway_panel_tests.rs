@@ -73,17 +73,13 @@ fn an_app_without_setup_gets_no_hint_and_no_invented_commands() {
 
 #[test]
 fn the_panel_is_apps_only() {
-    // The gateway picker lists the apps and nothing else: daemon/cron/memory
-    // own their commands (`gray gateway status`, `/cron`, `/memory`) and this
-    // panel narrates none of them — no rule, no pointer lines.
+
     let home = tempfile::tempdir().unwrap();
     let rows = [row("myapp", true)];
     let items = app_rows_with(&rows, Some(home.path()));
     assert_eq!(items.len(), 1);
     assert!(items[0].row.contains("myapp"));
 
-    // With no apps there are no rows either; the hint is the spec's only
-    // fallback, and nothing decorative rides alongside it.
     assert!(app_rows_with(&[], Some(home.path())).is_empty());
     assert!(GATEWAY_SPEC.empty_hint.contains("no apps installed"));
     assert!(GATEWAY_SPEC.empty_hint.contains("gray plugin install"));

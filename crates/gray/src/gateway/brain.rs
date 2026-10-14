@@ -1,17 +1,3 @@
-//! The brain: the gateway's event loop. Events in, turns out, replies to
-//! the outbox. See `docs/always-on/DESIGN.md`.
-//!
-//! One [`Brain`] owns the lanes: at most one turn per session key, at most
-//! `max_turns` at once. Every event that arrives for a busy key waits, and
-//! when the key frees all of its waiting events run as one turn (OpenClaw
-//! `collect`). Before a turn starts, its events move from `events/` into a
-//! `running/<turn>.json` admission record; the record is removed when the
-//! turn's reply has been handed to delivery. A record still there at boot is
-//! a turn a crash or restart cut short: it is re-admitted (bounded) instead
-//! of lost. The record carries the turn child's pid, so a child that outlived
-//! the daemon is killed first rather than left to finish the turn alongside
-//! its re-run.
-
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,40 +10,34 @@ use super::settings::Settings;
 use super::turn::{TurnOutcome, TurnRequest, TurnRunner};
 use crate::cron::store::Origin as Route;
 
-/// Times a cut-short turn is retried before the owner is told instead.
 pub const MAX_RECOVERY: u32 = 3;
-/// How long boot waits for a killed orphan to be gone before re-queueing.
+
 const ORPHAN_GRACE: Duration = Duration::from_secs(2);
 
-/// Admission record for a turn in flight.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Running {
     pub turn: String,
     pub key: String,
     pub events: Vec<Event>,
     pub started_at: i64,
-    /// The turn's child, stamped once it spawns; `None` before that and in
-    /// records from older builds.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child: Option<ChildProc>,
 }
 
-/// A spawned turn child: enough to find it again after a restart without
-/// mistaking a recycled pid for it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChildProc {
     pub pid: u32,
-    /// The process group the child leads (unix `setpgid(0, 0)`).
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pgid: Option<u32>,
-    /// Start tick (see [`super::pid::proc_start_time`]); `None` where the
-    /// platform has none.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<u64>,
 }
 
 impl ChildProc {
-    /// A child just spawned as the leader of its own group.
+
     pub fn leader(pid: u32) -> Self {
         Self {
             pid,
@@ -66,8 +46,6 @@ impl ChildProc {
         }
     }
 
-    /// Still running and still the same process. A start time that was
-    /// recorded but can no longer be read means it is gone; a zombie is dead.
     pub fn alive(&self) -> bool {
         if !super::pid::pid_alive(self.pid) || zombie(self.pid) {
             return false;
@@ -79,8 +57,6 @@ impl ChildProc {
     }
 }
 
-/// Stamp a spawned child into its turn's admission record. Best-effort: an
-/// unstamped record is re-queued at boot exactly as before.
 pub fn stamp_child(record: &Path, child: ChildProc) {
     let Some(mut running) = std::fs::read(record)
         .ok()
@@ -97,7 +73,6 @@ pub fn stamp_child(record: &Path, child: ChildProc) {
     }
 }
 
-/// A finished turn, sent back from its task to the loop.
 #[derive(Debug)]
 pub struct Done {
     pub turn: String,
@@ -113,7 +88,7 @@ pub struct Brain {
     pub settings: Settings,
     sessions: Sessions,
     runner: Arc<dyn TurnRunner>,
-    /// Session key → turn id (and its task, aborted on shutdown).
+
     busy: HashMap<String, (String, tokio::task::JoinHandle<()>)>,
     done_tx: tokio::sync::mpsc::UnboundedSender<Done>,
     done_rx: Option<tokio::sync::mpsc::UnboundedReceiver<Done>>,
@@ -138,8 +113,6 @@ impl Brain {
         }
     }
 
-    /// The completion channel; the loop owns it so `finish` can borrow
-    /// the brain mutably.
     pub fn take_done(&mut self) -> tokio::sync::mpsc::UnboundedReceiver<Done> {
         self.done_rx.take().expect("take_done called once")
     }
@@ -148,11 +121,6 @@ impl Brain {
         self.busy.len()
     }
 
-    /// Boot: every `running/` record is a turn that never finished. A child
-    /// of it still alive is killed first, so it cannot finish the turn on
-    /// disk while the turn runs again. Its events go back in the queue with
-    /// `attempt + 1`; past [`MAX_RECOVERY`] they are dropped and the owner
-    /// is told.
     pub fn recover(&mut self) {
         for path in event::spool_files(&self.dir.join("running")) {
             let record = std::fs::read(&path)
@@ -201,19 +169,14 @@ impl Brain {
         }
     }
 
-    /// One pass: start every turn that can start. Cheap enough
-    /// to run on every poll.
     pub fn step(&mut self, now: i64) {
         self.settings = Settings::load(&self.dir);
         self.dispatch(now);
     }
 
-    /// Start a turn for every free key with waiting events, oldest key first,
-    /// up to the global cap. While paused only user events start.
     fn dispatch(&mut self, now: i64) {
         let paused = super::paused(&self.dir);
-        // Keyed by first position in the (ms-ordered) spool: `created_at` is
-        // whole seconds, so it would tie and fall back to key name.
+
         let mut by_key: BTreeMap<(usize, String), Vec<(PathBuf, Event)>> = BTreeMap::new();
         let mut first_seen: HashMap<String, usize> = HashMap::new();
         for (path, ev) in event::pending(&self.dir) {
@@ -257,10 +220,9 @@ impl Brain {
             let _ = std::fs::remove_file(path);
         }
         let kind = turn_kind(&events);
-        // A reply goes back where the newest message came from; autonomous
-        // turns use the key's last route (decided at delivery).
+
         let route = events.iter().rev().find_map(|e| e.route.clone());
-        // The CLI inbox is not a place to send autonomous output back to.
+
         if let Some(r) = route
             .as_ref()
             .filter(|r| r.platform != super::outbox::LOCAL)
@@ -269,8 +231,7 @@ impl Brain {
         }
         let request = TurnRequest {
             key: key.to_string(),
-            // Autonomous turns start fresh: they usually outlive the prompt
-            // cache, so resuming would re-bill the whole transcript.
+
             session_id: (!kind.autonomous())
                 .then(|| self.sessions.session_id(key))
                 .flatten(),
@@ -308,8 +269,6 @@ impl Brain {
         self.busy.insert(key.to_string(), (turn, task));
     }
 
-    /// A turn ended: remember its session, decide on its reply, drop the
-    /// admission record.
     pub fn finish(&mut self, done: Done) {
         if self
             .busy
@@ -369,8 +328,6 @@ impl Brain {
         let _ = std::fs::remove_file(self.dir.join("running").join(format!("{}.json", done.turn)));
     }
 
-    /// Shutdown: stop every turn in flight. Their admission records stay,
-    /// so the next boot resumes them.
     pub fn abort_all(&mut self) {
         for (key, (turn, task)) in self.busy.drain() {
             log::info!("gateway: interrupting turn {turn} ({key}); it resumes on next start");
@@ -379,9 +336,6 @@ impl Brain {
     }
 }
 
-/// A turn child that outlived its daemon keeps appending to its session and
-/// can finish the turn on disk: SIGKILL it (and its group) before the turn is
-/// re-queued. A dead or recycled pid is left alone.
 fn reap_orphan(dir: &Path, record: &Running) {
     let Some(child) = record.child.as_ref().filter(|c| c.alive()) else {
         return;
@@ -406,16 +360,13 @@ fn reap_orphan(dir: &Path, record: &Running) {
     );
 }
 
-/// The group goes only while the child still leads it and it is not the
-/// daemon's own; otherwise just the child.
 #[cfg(unix)]
 fn kill_child(child: &ChildProc) -> bool {
     if child.pid <= 1 || child.pid > i32::MAX as u32 || child.pid == std::process::id() {
         return false;
     }
     let pid = child.pid as libc::pid_t;
-    // SAFETY: plain signal syscalls on a pid whose start time was just matched
-    // to this turn's child.
+
     unsafe {
         let group = child
             .pgid
@@ -433,8 +384,6 @@ fn kill_child(_child: &ChildProc) -> bool {
     false
 }
 
-/// Killed but not yet reaped by its new parent: dead, though its pid still
-/// answers. Reads `/proc`; where there is none nothing is a zombie.
 fn zombie(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
@@ -449,8 +398,6 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// A batch is a user turn if a person wrote any of it (strict silence,
-/// never held); otherwise it carries the first event's provenance.
 pub fn turn_kind(events: &[Event]) -> Kind {
     if events.iter().any(|e| e.kind == Kind::User) {
         Kind::User
@@ -459,10 +406,6 @@ pub fn turn_kind(events: &[Event]) -> Kind {
     }
 }
 
-/// The text the model sees. A lone user message is passed as typed;
-/// anything else is labelled with why it
-/// woke the agent, so the model never mistakes a trigger
-/// for the owner speaking.
 pub fn compose_prompt(events: &[Event], now: i64) -> String {
     let interrupted = events.iter().any(|e| e.attempt > 0);
     let mut parts: Vec<String> = Vec::new();

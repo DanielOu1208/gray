@@ -59,8 +59,7 @@ fn unsupported_model_500_maps_to_bad_request_and_preserves_cf_ray() {
 
 #[test]
 fn unsupported_model_401_body_outranks_auth_status() {
-    // OpenRouter reported an unknown model as 401 + ModelError. An Auth
-    // verdict sends the user to re-auth for a model problem; the body wins.
+
     let err = classify_http_error(
         reqwest::StatusCode::UNAUTHORIZED,
         r#"{"type":"error","error":{"type":"ModelError","message":"Model deepseek/deepseek-chat is not supported"}}"#,
@@ -88,9 +87,7 @@ fn auth_401_insufficient_balance_is_not_retryable() {
 
 #[test]
 fn cloudflare_edge_403_is_retryable_not_auth() {
-    // GMI-style edge: 403 + cf-ray + plain-text "error code: 1010" is
-    // Cloudflare's bot page — the key was never evaluated. ServerError
-    // (retryable), not Auth (would send the user to rotate a good key).
+
     let err = classify_http_error(
         reqwest::StatusCode::FORBIDDEN,
         "error code: 1010",
@@ -103,8 +100,7 @@ fn cloudflare_edge_403_is_retryable_not_auth() {
 
 #[test]
 fn real_api_403_stays_auth() {
-    // Provider's own JSON 403 (no cf-ray, JSON body) is a genuine auth
-    // failure — must not be swallowed by the edge-block arm.
+
     let err = classify_http_error(
         reqwest::StatusCode::FORBIDDEN,
         r#"{"error":{"message":"invalid api key"}}"#,
@@ -129,7 +125,7 @@ fn plain_500_without_model_hint_is_server_error_retryable() {
 
 #[test]
 fn retry_notice_uses_codex_reconnecting_format() {
-    // Codex steal: `Reconnecting... n/m` header + short underlying error.
+
     let err = ProviderError::ServerError("status 503: backend overloaded".to_string());
     let ev = retry_notice_event(1, 3, &err);
     match ev {
@@ -143,9 +139,7 @@ fn retry_notice_uses_codex_reconnecting_format() {
 
 #[tokio::test]
 async fn retry_burst_emits_a_single_reconnect_notice() {
-    // Screenshot bug: attempts 1/3, 2/3 each pushed a `⚠ Reconnecting`
-    // cell so the transcript showed the same failure twice. One burst =
-    // one notice; the burst still ends with the terminal error.
+
     use futures::StreamExt;
     use gray_core::message::ChatRequest;
     let server = wiremock::MockServer::start().await;
@@ -175,8 +169,7 @@ async fn retry_burst_emits_a_single_reconnect_notice() {
 
 #[tokio::test]
 async fn session_header_sent_on_chat_post() {
-    // Console Go 400s without `x-opencode-session`: every POST in the
-    // default retry burst must carry the configured session id.
+
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
         .respond_with(wiremock::ResponseTemplate::new(500).set_body_string("boom"))
@@ -243,7 +236,7 @@ fn responses_include_and_replay_round_trip() {
         Some("high"),
     );
     let v = serde_json::to_value(&body).expect("serializes");
-    // encrypted-content include rides with reasoning
+
     let include = v
         .get("include")
         .and_then(|i| i.as_array())
@@ -259,7 +252,7 @@ fn responses_include_and_replay_round_trip() {
             .and_then(|s| s.as_str())
             == Some("auto")
     );
-    // same-model reasoning item replayed verbatim ahead of text
+
     let input = v.get("input").and_then(|i| i.as_array()).expect("input");
     let reason = input
         .iter()
@@ -287,7 +280,7 @@ fn responses_replay_drops_foreign_model_thinking() {
             .iter()
             .all(|i| i.get("type").and_then(|t| t.as_str()) != Some("reasoning"))
     );
-    // prose still sent
+
     assert!(
         input
             .iter()
@@ -327,7 +320,7 @@ fn previous_response_id_serializes_only_when_set() {
 
 #[test]
 fn resume_carries_tool_prefix_on_id_drops_on_none() {
-    // Simulated mid-tool interruption: `{"q":"x"` arrived, suffix pending.
+
     let prefix = || {
         let mut tools: BTreeMap<String, (usize, String, String)> = BTreeMap::new();
         tools.insert(
@@ -338,11 +331,7 @@ fn resume_carries_tool_prefix_on_id_drops_on_none() {
         index.insert(0, "call_1".to_string());
         (tools, index)
     };
-    // Some(id): continuation — prefix carried for suffix appends, id stamped.
-    // NOTE: `map_chat_to_responses(..., "high")` sets reasoning, and the
-    // provider rejects `previous_response_id` with encrypted reasoning —
-    // so `resume_body_and_tool_prefix` drops the id here. Pass `None`
-    // effort to exercise the id-carrying path.
+
     let (tools, index) = prefix();
     let (body, kept_tools, kept_index) = resume_body_and_tool_prefix(
         map_chat_to_responses(empty_chat_req(), "m1", Some("sess"), None),
@@ -362,7 +351,7 @@ fn resume_carries_tool_prefix_on_id_drops_on_none() {
         v.get("previous_response_id").and_then(|s| s.as_str()),
         Some("resp_9")
     );
-    // None: true full replay — stale prefix dropped, no id sent.
+
     let (tools, index) = prefix();
     let (body, dropped_tools, dropped_index) = resume_body_and_tool_prefix(
         map_chat_to_responses(empty_chat_req(), "m1", Some("sess"), Some("high")),
@@ -376,7 +365,7 @@ fn resume_carries_tool_prefix_on_id_drops_on_none() {
 
 #[test]
 fn responses_usage_maps_input_tokens_details_cached() {
-    // Responses API shape: input_tokens_details.cached_tokens (not prompt_tokens_details)
+
     let v = serde_json::json!({
         "input_tokens": 1000,
         "output_tokens": 200,
@@ -394,7 +383,7 @@ fn responses_usage_maps_input_tokens_details_cached() {
 
 #[test]
 fn chat_usage_prefers_explicit_cache_miss_tokens() {
-    // DeepSeek-style: explicit miss count beats prompt-minus-cached subtraction.
+
     let v = serde_json::json!({
         "prompt_tokens": 1000,
         "completion_tokens": 50,
@@ -447,7 +436,7 @@ fn content_filter_bodies_map_to_non_retryable_bad_request() {
         assert!(!is_retryable_error(&err), "must not retry: {body}");
         assert!(!err.should_compress());
     }
-    // Narrowed: hyphen form still counts (500 proves filter path, not generic 400).
+
     for body in ["content-filter triggered", "content_filter triggered"] {
         let err = classify_http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, body, None, None);
         assert!(
@@ -455,8 +444,7 @@ fn content_filter_bodies_map_to_non_retryable_bad_request() {
             "filter must win over 500: {body} -> {err}"
         );
     }
-    // Bare violates/flagged/safety without a filter qualifier are NOT filters:
-    // 500 must stay retryable ServerError, not BadRequest.
+
     for body in [
         "request violates policy",
         "response was flagged",
@@ -468,7 +456,7 @@ fn content_filter_bodies_map_to_non_retryable_bad_request() {
             "bare hint must not filter: {body} -> {err}"
         );
     }
-    // Bare max_tokens without a context qualifier is NOT overflow.
+
     {
         let err = classify_http_error(
             reqwest::StatusCode::BAD_REQUEST,
@@ -481,7 +469,7 @@ fn content_filter_bodies_map_to_non_retryable_bad_request() {
             "bare max_tokens: {err}"
         );
     }
-    // max_tokens needs a context qualifier to count as overflow.
+
     for body in [
         "max_tokens exceeded: context too long",
         "max_tokens context exceeded",
@@ -524,7 +512,7 @@ fn empty_chat_req() -> gray_core::message::ChatRequest {
 
 #[tokio::test]
 async fn sampling_params_are_sent_when_configured() {
-    // GRAY_TEMPERATURE / GRAY_TOP_P passthrough: set -> present in the body.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -543,7 +531,7 @@ async fn sampling_params_are_sent_when_configured() {
         Some(1.0),
         "temperature sent: {body}"
     );
-    // f32 -> JSON f64 widens (0.95f32 != 0.95f64), so compare in f32 space.
+
     assert_eq!(
         body.get("top_p").and_then(|v| v.as_f64()),
         Some(f64::from(0.95f32)),
@@ -553,8 +541,7 @@ async fn sampling_params_are_sent_when_configured() {
 
 #[tokio::test]
 async fn sampling_params_are_omitted_by_default() {
-    // Unset -> the keys stay out of the body entirely, so the server default
-    // applies exactly as before this option existed.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -592,8 +579,7 @@ fn chat_mapping_off_sends_thinking_disabled_only() {
 
 #[test]
 fn a_capped_chat_request_leaves_out_a_budget_it_cannot_fit() {
-    // The cache warmer's 1-token replay at an effort: the effort fields go
-    // out unchanged, a 1024-token budget over a 1-token cap does not.
+
     let req = gray_core::message::ChatRequest {
         max_tokens: Some(1),
         ..empty_chat_req()
@@ -684,8 +670,7 @@ fn reasoning_400_with_extra_inputs_retries_without_reasoning() {
 
 #[test]
 fn thinking_only_400_retries_without_reasoning_when_params_were_sent() {
-    // glm at off sends `thinking: disabled`; a thinking-only model 400s.
-    // Stripping the disable lets the provider fall back to default thinking.
+
     assert!(
         should_retry_without_reasoning(400, "thinking-only model", true),
         "off-path 400 must retry stripped"
@@ -748,8 +733,7 @@ fn reasoning_conflict_error_names_model_and_conflict() {
 
 #[test]
 fn chat_mapping_user_and_system_roles_map_without_panic() {
-    // Wave 5: the old `unreachable!()` on a novel role is now a
-    // `BadRequest` error; user/system roles keep mapping.
+
     let req = gray_core::message::ChatRequest {
         system: None,
         messages: vec![
@@ -766,8 +750,7 @@ fn chat_mapping_user_and_system_roles_map_without_panic() {
 
 #[test]
 fn serialize_body_maps_failure_to_bad_request() {
-    // Wave 5: the old `to_value().expect()` on the send hot path is now
-    // an `Err`; prove the mapping with a value JSON cannot represent.
+
     let bad: std::collections::BTreeMap<(), u8> = [((), 1)].into_iter().collect();
     let err = serialize_body(&bad, "test body").expect_err("unit keys must fail");
     assert!(
@@ -776,7 +759,6 @@ fn serialize_body_maps_failure_to_bad_request() {
     );
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn quota_429_surfaces_immediately_as_non_retryable() {
     for body in [
@@ -803,14 +785,12 @@ fn quota_429_surfaces_immediately_as_non_retryable() {
     }
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn plain_429_without_quota_hints_stays_retryable() {
     for body in [
         "Rate limit reached for model",
         "rate_limit_exceeded: slow down",
-        // Upsell copy mentions billing but is still a rate limit: the
-        // quota phrases stay narrow so this keeps retrying.
+
         "Rate limit exceeded. Upgrade your billing plan for higher limits.",
     ] {
         let err = classify_http_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body, None, None);
@@ -822,7 +802,6 @@ fn plain_429_without_quota_hints_stays_retryable() {
     }
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn http_413_maps_to_context_overflow_never_retried() {
     let err = classify_http_error(
@@ -839,7 +818,6 @@ fn http_413_maps_to_context_overflow_never_retried() {
     assert!(err.should_compress(), "must flag compression: {err}");
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn retry_after_accepts_ms_and_http_date_and_caps_at_60s() {
     let mut headers = reqwest::header::HeaderMap::new();
@@ -862,7 +840,7 @@ fn retry_after_accepts_ms_and_http_date_and_caps_at_60s() {
         Some(Duration::from_secs(60)),
         "seconds capped at 60s"
     );
-    // Fixed far-future date: delay is huge, cap pins it at 60s.
+
     headers.insert(
         reqwest::header::RETRY_AFTER,
         "Sun, 06 Nov 2033 08:49:37 GMT".parse().unwrap(),
@@ -872,7 +850,7 @@ fn retry_after_accepts_ms_and_http_date_and_caps_at_60s() {
         Some(Duration::from_secs(60)),
         "HTTP-date capped at 60s"
     );
-    // Fixed past date: already due, retry now.
+
     headers.insert(
         reqwest::header::RETRY_AFTER,
         "Sun, 06 Nov 1994 08:49:37 GMT".parse().unwrap(),
@@ -884,7 +862,7 @@ fn retry_after_accepts_ms_and_http_date_and_caps_at_60s() {
     );
     headers.insert(reqwest::header::RETRY_AFTER, "not-a-date".parse().unwrap());
     assert_eq!(parse_retry_after(&headers), None, "garbage stays None");
-    // Millis wins when both headers are present (more precise).
+
     headers.insert(reqwest::header::RETRY_AFTER, "45".parse().unwrap());
     headers.insert("retry-after-ms", "2000".parse().unwrap());
     assert_eq!(
@@ -894,12 +872,9 @@ fn retry_after_accepts_ms_and_http_date_and_caps_at_60s() {
     );
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn long_body_quota_signal_survives_snippet_cap() {
-    // Mirrors the `take(4000)` snippet cap in `send_json_once`: the quota
-    // phrase sits past char 500 (the old cap cut it off and the 429 fell
-    // through to retryable RateLimited).
+
     let snippet = |body: &str| -> String { body.chars().take(4000).collect() };
     let pad = "x".repeat(600);
     let body = format!("{pad} insufficient_quota: billing exhausted");
@@ -926,12 +901,9 @@ fn long_body_quota_signal_survives_snippet_cap() {
     );
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[tokio::test]
 async fn quota_429_body_past_500_chars_terminal_end_to_end() {
-    // Server puts `insufficient_quota` past the old 500-char cut: the
-    // turn must end with one terminal Auth Err (no `Reconnecting...`
-    // notice, no retry POSTs).
+
     use futures::StreamExt;
     use gray_core::message::ChatRequest;
     let server = wiremock::MockServer::start().await;
@@ -961,13 +933,9 @@ async fn quota_429_body_past_500_chars_terminal_end_to_end() {
     assert_eq!(received.len(), 1, "no retry POST burns quota: {received:?}");
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[tokio::test]
 async fn dropped_stream_fires_no_retry_post_after_backoff() {
-    // Cancel-abort contract: `Retry-After: 2` parks the retry behind a 2s
-    // sleep; dropping the stream mid-backoff must abort it — no second
-    // POST may escape after the drop. (A broken abort would fire retry
-    // POST #2 at ~2s, so the ~3s wait below fails iff abort regresses.)
+
     use futures::StreamExt;
     use gray_core::message::ChatRequest;
     let server = wiremock::MockServer::start().await;
@@ -996,9 +964,7 @@ async fn dropped_stream_fires_no_retry_post_after_backoff() {
         matches!(first, Ok(StreamEvent::StreamError { .. })),
         "one reconnect notice: {first:?}"
     );
-    // The retry now sleeps 2s; abort it via drop (this is what the
-    // consumer's cancel `select!` does on Esc), then wait past the
-    // 2s mark: a surviving sleep would have fired POST #2 by then.
+
     let pending = tokio::time::timeout(Duration::from_millis(300), stream.next()).await;
     assert!(pending.is_err(), "backoff still sleeping at 300ms");
     drop(stream);
@@ -1011,11 +977,9 @@ async fn dropped_stream_fires_no_retry_post_after_backoff() {
     );
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[tokio::test]
 async fn chat_post_carries_prompt_cache_key_body() {
-    // Chat turns must pin the cache shard in the BODY (the
-    // `x-opencode-session` header alone left chat rotating shards).
+
     use futures::StreamExt;
     use gray_core::message::ChatRequest;
     let server = wiremock::MockServer::start().await;
@@ -1052,11 +1016,9 @@ async fn chat_post_carries_prompt_cache_key_body() {
     );
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn chat_affinity_omitted_when_unset() {
-    // No-op elsewhere: unset session sends no `prompt_cache_key`, so
-    // transports that don't understand it never see the field.
+
     let body = map_chat_request(empty_chat_req(), "test-model", None).expect("maps");
     let v = serde_json::to_value(&body).expect("serializes");
     assert!(
@@ -1065,10 +1027,9 @@ fn chat_affinity_omitted_when_unset() {
     );
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn unknown_resume_id_retries_stripped_once() {
-    // (2) a rejected `previous_response_id` replays once, not terminal.
+
     assert!(
         should_retry_without_previous_response(
             400,
@@ -1097,7 +1058,7 @@ fn unknown_resume_id_retries_stripped_once() {
         !should_retry_without_previous_response(500, "previous_response_not_found", true),
         "only 400/404 retry"
     );
-    // The retry arm clears the id, so the replay omits the field.
+
     let mut resumed = map_chat_to_responses(empty_chat_req(), "m1", Some("sess"), Some("high"));
     resumed.previous_response_id = Some("resp_stale".to_string());
     resumed.previous_response_id = None;
@@ -1105,11 +1066,9 @@ fn unknown_resume_id_retries_stripped_once() {
     assert!(v.get("previous_response_id").is_none(), "stripped: {v}");
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn deepseek_assistant_messages_always_carry_reasoning_content() {
-    // (3) DeepSeek expects the reasoning field on every assistant
-    // message; other models keep today's omit-when-empty.
+
     use gray_core::message::Message;
     let plain_assistant = || ChatRequest {
         system: None,
@@ -1138,7 +1097,7 @@ fn deepseek_assistant_messages_always_carry_reasoning_content() {
         last_msg(&v).get("reasoning_content").is_none(),
         "non-deepseek still omits: {v}"
     );
-    // With thinking: deepseek keeps the chain like everyone else.
+
     let thinking_req = ChatRequest {
         system: None,
         messages: vec![Message {
@@ -1168,11 +1127,9 @@ fn deepseek_assistant_messages_always_carry_reasoning_content() {
     );
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn tool_error_flag_survives_chat_wire_encoding() {
-    // (4) `is_error` has no wire slot on either transport: errors ride
-    // as an `Error:`-prefixed body, successes pass through untouched.
+
     use gray_core::message::Message;
     let req = ChatRequest {
         system: None,
@@ -1225,7 +1182,7 @@ fn tool_error_flag_survives_chat_wire_encoding() {
         Some("ok"),
         "success untouched: {v}"
     );
-    // User-arm tool results keep the flag too.
+
     let req = ChatRequest {
         system: None,
         messages: vec![Message {
@@ -1256,7 +1213,6 @@ fn tool_error_flag_survives_chat_wire_encoding() {
     );
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn tool_error_flag_survives_responses_wire_encoding() {
     use gray_core::message::Message;
@@ -1299,9 +1255,7 @@ fn tool_error_flag_survives_responses_wire_encoding() {
 
 #[tokio::test]
 async fn oversize_tool_index_is_forwarded_not_silently_dropped() {
-    // The agent owns the index guard (hard error); the provider must not
-    // silently drop the call first — that loses model intent with a
-    // clean EndTurn. Index 5000 must arrive downstream.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let chunk = serde_json::json!({
@@ -1339,10 +1293,7 @@ async fn oversize_tool_index_is_forwarded_not_silently_dropped() {
 
 #[tokio::test]
 async fn responses_twin_ids_require_confirmed_completion() {
-    // Server sends output_item.added with BOTH call_id and item_id (OpenAI's
-    // real shape); args deltas land on the item_id twin. The stream then
-    // drops before response.completed: no call may execute (#68/#72).
-    // Confirmed completion must merge both IDs and keep the full arguments.
+
     use futures::StreamExt;
     for confirmed in [false, true] {
         let server = wiremock::MockServer::start().await;
@@ -1357,7 +1308,7 @@ async fn responses_twin_ids_require_confirmed_completion() {
             "item_id": "fc_1",
             "delta": r#"{"command":"ls"}"#
         });
-        // Body ends without [DONE] and without response.completed → EOF path.
+
         let mut body = format!("data: {added}\n\ndata: {delta}\n\n");
         if confirmed {
             body.push_str("data: {\"type\":\"response.completed\"}\n\n");
@@ -1417,9 +1368,7 @@ async fn responses_twin_ids_require_confirmed_completion() {
 
 #[tokio::test]
 async fn responses_text_only_eof_without_completed_completes() {
-    // A gateway that closes SSE after output text but omits
-    // `response.completed` is still a usable text turn. The old EOF path
-    // failed the whole turn even though the user-visible text was complete.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let delta = serde_json::json!({
@@ -1480,9 +1429,7 @@ async fn responses_text_only_eof_without_completed_completes() {
 
 #[tokio::test]
 async fn responses_text_parts_get_a_blank_line_between_them() {
-    // Two output_text parts in one response must not glue into
-    // `…now.Sorry…`: a delta on a new (output_index, content_index) opens
-    // a new visible block and needs the paragraph break.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let ev = |output_index, content_index, delta| {
@@ -1533,8 +1480,7 @@ async fn responses_text_parts_get_a_blank_line_between_them() {
 
 #[tokio::test]
 async fn responses_failure_event_is_an_error_not_endturn() {
-    // response.failed must not fall through the catch-all into a successful
-    // EndTurn: the turn must surface the failure (#71).
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let failed = serde_json::json!({
@@ -1684,10 +1630,7 @@ async fn responses_incomplete_and_top_level_error_are_not_success() {
 
 #[tokio::test]
 async fn empty_tool_call_padding_deltas_are_dropped() {
-    // Some gateways pad the final chunk with tool_call entries carrying no
-    // id, name, or args. They must not materialize ghost fragments (the
-    // agent loop used to WARN `dropping tool call index N with empty name`
-    // every turn) and must not disturb the real call on index 0.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let real = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]}}]});
@@ -1722,8 +1665,7 @@ async fn empty_tool_call_padding_deltas_are_dropped() {
 
 #[tokio::test]
 async fn chat_eof_keeps_complete_tool_calls() {
-    // Zen closes the stream right after the last delta (no finish chunk): a
-    // COMPLETE tool call is still usable, so it survives with a warning.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let chunk = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{\"command\":\"ls -la\"}"}}]}}]});
@@ -1776,8 +1718,7 @@ async fn chat_eof_never_executes_unconfirmed_tools() {
 
 #[tokio::test]
 async fn zen_500_retry_hardening_recovers_on_fifth_attempt() {
-    // Zen provider-side 500 blip: 500x4 then 200 must recover within the
-    // hardened budget (5 attempts) with one reconnect notice + MessageComplete.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -1819,7 +1760,7 @@ async fn zen_500_retry_hardening_recovers_on_fifth_attempt() {
 
 #[test]
 fn zen_500_retry_budget_constants() {
-    // Opencode parity: 1s base x5 retries vs old ~150ms over 3 attempts.
+
     assert_eq!(MAX_ATTEMPTS, 5, "retry budget is 5 attempts");
     assert_eq!(
         INITIAL_BACKOFF,
@@ -1827,17 +1768,17 @@ fn zen_500_retry_budget_constants() {
         "initial backoff is 1s"
     );
     assert_eq!(MAX_BACKOFF, Duration::from_secs(30), "backoff caps at 30s");
-    // Exponential growth must cap at 30s (attempt 20 would be hours uncapped).
+
     assert!(
         backoff_delay(INITIAL_BACKOFF, 20, None) <= Duration::from_secs(30),
         "backoff caps at 30s"
     );
-    // Server-asked delay still wins over the cap.
+
     assert!(
         backoff_delay(INITIAL_BACKOFF, 1, Some(Duration::from_secs(60))) >= Duration::from_secs(60),
         "Retry-After wins over the cap"
     );
-    // 5xx is provider-side: request was valid, keep routing clues.
+
     let err = classify_http_error(
         reqwest::StatusCode::INTERNAL_SERVER_ERROR,
         "boom",
@@ -1887,10 +1828,7 @@ fn cached_turn_req() -> gray_core::message::ChatRequest {
 
 #[test]
 fn anthropic_cache_control_rides_content_parts() {
-    // pi `applyAnthropicCacheControl`: Claude caches only at `cache_control`
-    // breakpoints (it ignores `prompt_cache_key`), and OpenRouter/Anthropic
-    // read the marker on content blocks only. Breakpoints: system, last tool,
-    // last message.
+
     let model = "anthropic/claude-sonnet-4.5";
     let body = map_chat_request(cached_turn_req(), model, None).expect("maps");
     let v = serde_json::to_value(&body).expect("serializes");
@@ -1927,10 +1865,7 @@ fn non_anthropic_models_carry_no_cache_control() {
 
 #[test]
 fn session_affinity_header_is_host_independent() {
-    // The per-host `x-session-id` sticky-routing header was removed: the only
-    // session header is `x-opencode-session` (required by Console Go), sent for
-    // every non-empty session regardless of upstream, and dropped entirely when
-    // there is no session.
+
     let openrouter = Url::parse("https://openrouter.ai/api/v1").expect("url");
     let commandcode = Url::parse("https://api.commandcode.ai/provider/v1").expect("url");
     let other = Url::parse("https://api.deepseek.com/v1").expect("url");
@@ -1946,10 +1881,6 @@ fn session_affinity_header_is_host_independent() {
     assert!(session_affinity_headers(Some("")).is_empty());
 }
 
-/// Truncated body: the server opens a chunked SSE response and drops the
-/// socket before terminating it. reqwest reports that as
-/// "error decoding response body", which today is terminal even when
-/// nothing has been shown to the user yet.
 async fn serve_truncated_then_good() -> (String, tokio::task::JoinHandle<()>) {
     use tokio::io::AsyncWriteExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1960,7 +1891,7 @@ async fn serve_truncated_then_good() -> (String, tokio::task::JoinHandle<()>) {
             let Ok((mut sock, _)) = listener.accept().await else {
                 return;
             };
-            // Drain the request head so the client sees a clean reset.
+
             let mut buf = [0u8; 4096];
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(500),
@@ -1969,8 +1900,7 @@ async fn serve_truncated_then_good() -> (String, tokio::task::JoinHandle<()>) {
             .await;
             served += 1;
             if served == 1 {
-                // Head + one chunk, then the socket dies: the chunked body
-                // never gets its terminating `0\r\n\r\n`.
+
                 let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
                 if sock.write_all(head.as_bytes()).await.is_err() {
                     return;
@@ -1979,7 +1909,7 @@ async fn serve_truncated_then_good() -> (String, tokio::task::JoinHandle<()>) {
                 drop(sock);
                 continue;
             }
-            // A complete stream: one delta, then [DONE].
+
             let chunk =
                 "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"recovered\"}}]}\n\n";
             let done = "data: [DONE]\n\n";
@@ -2005,9 +1935,7 @@ async fn serve_truncated_then_good() -> (String, tokio::task::JoinHandle<()>) {
 
 #[tokio::test]
 async fn a_truncated_body_retries_when_nothing_was_emitted() {
-    // The bug: a body that dies before its first delta ended the turn with
-    // "agent error: stream broken: Transport error: error decoding response
-    // body". Nothing reached the user yet, so the retry is invisible.
+
     use futures::StreamExt;
     use gray_core::message::ChatRequest;
     let (base, server) = serve_truncated_then_good().await;
@@ -2105,9 +2033,6 @@ async fn a_truncated_body_after_delta_completes_with_a_notice() {
     server.abort();
 }
 
-/// Clean EOF with no finish chunk (a gateway's empty 200): the same
-/// transient failure as a truncated body, so the retry rule from
-/// `a_truncated_body_retries_when_nothing_was_emitted` must cover it.
 async fn serve_empty_then_good() -> (String, tokio::task::JoinHandle<()>) {
     use tokio::io::AsyncWriteExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2126,8 +2051,7 @@ async fn serve_empty_then_good() -> (String, tokio::task::JoinHandle<()>) {
             .await;
             served += 1;
             let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
-            // First body is a well-formed, complete chunked response with no
-            // SSE chunks at all: EOF, no finish_reason, no delta.
+
             let mut body = String::new();
             if served > 1 {
                 for part in [
@@ -2363,10 +2287,6 @@ async fn relay_url_override_posts_to_lease_url() {
     use futures::StreamExt;
     use gray_core::message::{ChatRequest, ContentBlock, Message, Role};
 
-    // Two loopbacks: the declared base (must see NOTHING) and the relay URL
-    // the lease carries (must see the POST). The relay single-admission rule
-    // means a second POST would 400; the test asserts exactly one POST lands
-    // on the relay and zero on the declared base.
     let declared = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let declared_addr = declared.local_addr().unwrap();
     let declared_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2376,8 +2296,7 @@ async fn relay_url_override_posts_to_lease_url() {
             .await
             .is_ok()
         {
-            // A connection arrived: the provider wrongly POSTed to the
-            // declared base instead of the relay URL.
+
             declared_hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     });
@@ -2463,8 +2382,7 @@ async fn relay_url_override_posts_to_lease_url() {
 
 #[test]
 fn admission_consumed_400_is_terminal_bad_request() {
-    // Section 4 checkpoint: the relay's single-admission 400 must surface as
-    // a terminal BadRequest, never a retried ServerError/RateLimited.
+
     let err = classify_http_error(
         reqwest::StatusCode::BAD_REQUEST,
         r#"{"type":"error","error":{"type":"invalid_request_error","message":"ANTIGRAVITY_MODEL_ADMISSION_CONSUMED"}}"#,
@@ -2481,7 +2399,7 @@ fn model_accepts_video_is_gemini_only() {
     assert!(model_accepts_video("gemini-3-pro"));
     assert!(model_accepts_video("google/gemini-2.5-flash"));
     assert!(model_accepts_video("gemma-3-27b"));
-    // Everything else gets the contact sheet instead of a 400.
+
     for m in [
         "gpt-5.1",
         "claude-opus-5",
@@ -2525,7 +2443,6 @@ fn media_goes_native_where_the_wire_takes_it_else_its_fallback() {
             .clone()
     };
 
-    // Gemini: native video_url and input_audio parts.
     let parts = chat(video(), "gemini-3-pro");
     assert!(
         parts[0]["video_url"]["url"]
@@ -2539,12 +2456,11 @@ fn media_goes_native_where_the_wire_takes_it_else_its_fallback() {
         serde_json::json!({"data": "V0FW", "format": "wav"})
     );
 
-    // No native input: the fallback, never a 400.
     let parts = chat(video(), "step-5-preview");
     assert_eq!(parts[0]["text"], "(contact sheet of clip.mp4)");
     assert_eq!(parts[1]["type"], "image_url");
     assert_eq!(chat(audio(), "gpt-5.1"), "(no audio)");
-    // Chat has no base64 PDF part anywhere.
+
     assert!(
         chat(pdf(), "gemini-3-pro")
             .as_str()
@@ -2552,7 +2468,6 @@ fn media_goes_native_where_the_wire_takes_it_else_its_fallback() {
             .contains("hello")
     );
 
-    // Responses: PDFs as input_file on OpenAI models, text elsewhere.
     let body =
         serde_json::to_value(map_chat_to_responses(req(pdf()), "gpt-5.1", None, None)).unwrap();
     let part = &body["input"][0]["content"][0];
@@ -2570,8 +2485,7 @@ fn media_goes_native_where_the_wire_takes_it_else_its_fallback() {
 
 #[test]
 fn chat_tool_result_fallback_text_follows_all_tool_results() {
-    // A tool result whose media fell back to text+image must not split the
-    // tool-message run (that 400s); it moves after the whole run.
+
     let req = ChatRequest {
         system: None,
         messages: vec![
@@ -2622,14 +2536,13 @@ fn http_errors_show_the_providers_sentence_not_its_json() {
         msg,
         "status 429 Too Many Requests: Rate limit reached for requests per min (RPM). Please try again in 1s."
     );
-    // Classification still reads the whole body: a quota code in the JSON is
-    // terminal even when the sentence does not say so.
+
     let quota = r#"{"error": {"message": "slow down", "code": "insufficient_quota"}}"#;
     assert!(matches!(
         classify_http_error(reqwest::StatusCode::TOO_MANY_REQUESTS, quota, None, None).class(),
         ProviderError::Auth(_)
     ));
-    // Plain-text bodies pass through unchanged.
+
     let plain = classify_http_error(
         reqwest::StatusCode::BAD_GATEWAY,
         "upstream down",
@@ -2641,23 +2554,22 @@ fn http_errors_show_the_providers_sentence_not_its_json() {
 
 #[test]
 fn should_retry_request_allows_one_bare_403_retry() {
-    // Transient gateway-edge 403: one same-key re-POST, then terminal.
+
     let auth = || ProviderError::Auth("status 403: Authentication failed".to_string());
     assert!(should_retry_request(&auth(), 403, 1));
     assert!(!should_retry_request(&auth(), 403, 2));
     assert!(!should_retry_request(&auth(), 401, 1));
-    // Quota-flavored 403s stay terminal (re-POSTing burns zero quota).
+
     let quota = ProviderError::Auth("status 403: insufficient quota".to_string());
     assert!(!should_retry_request(&quota, 403, 1));
-    // Ordinary retryable errors are unchanged.
+
     let server_err = ProviderError::ServerError("status 500: boom".to_string());
     assert!(should_retry_request(&server_err, 500, 3));
 }
 
 #[tokio::test]
 async fn transient_403_retries_once_then_surfaces_auth() {
-    // commandcode.ai edge: a valid key intermittently gets a bare 403 that
-    // clears on the next POST. Exactly one retry, then the Auth surfaces.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -2689,7 +2601,7 @@ async fn transient_403_retries_once_then_surfaces_auth() {
 
 #[tokio::test]
 async fn auth_401_is_single_attempt() {
-    // 401 is a real auth failure: no re-POST, no notice, terminal Auth.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -2717,8 +2629,7 @@ async fn auth_401_is_single_attempt() {
 
 #[tokio::test]
 async fn quota_403_is_single_attempt() {
-    // A 403 naming quota exhaustion stays terminal: re-POSTing burns zero
-    // quota, so the transient-403 carve-out must not catch it.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -2732,8 +2643,6 @@ async fn quota_403_is_single_attempt() {
     assert_eq!(received.len(), 1, "quota 403 must not retry: {events:?}");
 }
 
-/// A plugin-declared Responses provider (the shape a Sign in with ChatGPT
-/// sidecar declares) pointed at `base_url`.
 fn plan_usage_provider(base_url: String) -> OpenAiProvider {
     let profile = OpenAiProviderProfile {
         base_url: format!("{base_url}/v1").parse().unwrap(),
@@ -2768,9 +2677,7 @@ fn plan_usage_provider(base_url: String) -> OpenAiProvider {
 
 #[tokio::test]
 async fn plan_usage_limit_429_is_single_attempt() {
-    // ChatGPT plan usage: the per-app/plan cap answers 429 with its own code.
-    // Retrying cannot succeed until the user raises the cap, so it is terminal
-    // like any other quota exhaustion.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let body = r#"{"error": {"message": "You have reached your usage limit for this app.", "type": "usage_limit", "code": "subscription_sharing_usage_limit_exceeded"}}"#;
@@ -2790,8 +2697,7 @@ async fn plan_usage_limit_429_is_single_attempt() {
 
 #[tokio::test]
 async fn plan_usage_limit_mid_stream_is_single_attempt() {
-    // The same cap can land after the stream opened, as `response.failed`
-    // carrying the code (and a message that does not name it).
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let failed = serde_json::json!({
@@ -2821,11 +2727,7 @@ async fn plan_usage_limit_mid_stream_is_single_attempt() {
 
 #[tokio::test]
 async fn relay_quota_429_in_server_error_code_is_terminal() {
-    // claude-sub's relay reports every turn failure as
-    // `response.failed` with code `server_error` — the quota verdict
-    // lives only in the message. It must still classify terminal: a
-    // retried window-limit request re-bills the whole prompt into a
-    // quota that resets hours later.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let failed = serde_json::json!({
@@ -2855,8 +2757,7 @@ async fn relay_quota_429_in_server_error_code_is_terminal() {
 
 #[tokio::test]
 async fn responses_transient_403_then_success_delivers_text() {
-    // Same carve-out on the Responses path: first POST 403s, the retry gets
-    // the SSE body and the turn delivers text with no error events.
+
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let delta = serde_json::json!({
@@ -2865,8 +2766,7 @@ async fn responses_transient_403_then_success_delivers_text() {
         "delta": "hello"
     });
     let body = format!("data: {delta}\n\n");
-    // wiremock serves the first-mounted matching mock: the one-shot 403
-    // answers POST 1, then burns out and the SSE mock answers the retry.
+
     wiremock::Mock::given(wiremock::matchers::any())
         .respond_with(
             wiremock::ResponseTemplate::new(403)

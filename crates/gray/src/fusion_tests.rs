@@ -1,21 +1,14 @@
-//! `synthesize_row` is pure; the tool-side paths run against tempdir homes
-//! (`provider_models.json`, `config.json`, `auth.json`) and `#!/bin/sh`
-//! fake grays — the NDJSON contract is the real `print.rs` one. Scripts
-//! and process groups make this file unix-only.
 #![cfg(unix)]
 
 use super::*;
 use crate::setup::variants::RowShape;
 
-/// `GRAY_HOME` and [`ENV_SIDEKICK`] are process-global: env-touching tests
-/// take a lock rather than repointing each other's home mid-run.
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn pair(id: &str, name: &str) -> CachedRow {
     CachedRow::Pair(id.to_string(), name.to_string())
 }
 
-/// A declared composite row (any slots makes it one).
 fn composite(id: &str) -> CachedRow {
     CachedRow::Full(CachedModel {
         id: id.to_string(),
@@ -57,8 +50,6 @@ fn shape(model: &CachedModel) -> RowShape {
     }
 }
 
-// --- row synthesis ---------------------------------------------------------
-
 #[test]
 fn cross_product_variants_with_qualified_sidekicks() {
     let own = vec![pair("opus", "Opus 5"), pair("sonnet", "Sonnet 4")];
@@ -70,13 +61,12 @@ fn cross_product_variants_with_qualified_sidekicks() {
     let m = synthesize_row("http://lead.test/v1", &own, &all).unwrap();
     assert_eq!(m.id, "fusion");
     assert_eq!(m.name, "Fusion");
-    // Lead options are the provider's own rows, bare ids.
+
     let leads: Vec<&str> = m.slots[0].options.iter().map(|o| o.id.as_str()).collect();
     assert_eq!(leads, ["opus", "sonnet"]);
     assert_eq!(m.slots[0].key, "lead");
     assert_eq!(m.slots[1].key, "sidekick");
-    // Sidekick options are qualified `provider:model`, own provider first:
-    // the custom-endpoint slug for HTTP lists, the provider id for plugins.
+
     let sks: Vec<&str> = m.slots[1].options.iter().map(|o| o.id.as_str()).collect();
     assert_eq!(
         sks,
@@ -87,7 +77,7 @@ fn cross_product_variants_with_qualified_sidekicks() {
             "custom-sk-test:haiku"
         ]
     );
-    // One variant per pairing; the wire id is the lead's row id.
+
     assert_eq!(m.variants.len(), 2 * sks.len());
     let v = m
         .variants
@@ -103,7 +93,7 @@ fn cross_product_variants_with_qualified_sidekicks() {
 fn a_native_composite_row_blocks_synthesis() {
     let own = vec![pair("a", "A"), composite("fusion")];
     assert!(synthesize_row("http://x.test/v1", &own, &BTreeMap::new()).is_none());
-    // Any composite does — not just one named `fusion`.
+
     let own = vec![composite("trio"), pair("a", "A")];
     assert!(synthesize_row("http://x.test/v1", &own, &BTreeMap::new()).is_none());
 }
@@ -122,11 +112,11 @@ fn variant_resolution_picks_the_lead_wire_id() {
         ),
     ]);
     assert!(shape.serves(&parts));
-    // Effort is free-floating: every variant wins regardless of level.
+
     let v = crate::setup::variants::resolve_variant(&shape.variants, Some("high"), false, &parts)
         .unwrap();
     assert_eq!(v.id, "sonnet");
-    // Unserved parts settle on the catalog default (first variant).
+
     assert_eq!(shape.settle_parts(None), shape.variants[0].parts);
 }
 
@@ -147,21 +137,16 @@ fn the_footer_label_is_fusion_lead_effort_times_sidekick() {
     assert_eq!(flat, "Fusion · Opus 5 High × Haiku");
 }
 
-// --- the marker ------------------------------------------------------------
-
 #[test]
 fn the_marker_is_a_colon_in_the_sidekick_part() {
     let local = Parts::from([("sidekick".to_string(), "custom-x:m".to_string())]);
     assert!(is_local_parts(&local));
-    // Native composite parts are bare ids — no colon, no tool.
+
     let native = Parts::from([("sidekick".to_string(), "swe-2".to_string())]);
     assert!(!is_local_parts(&native));
     assert!(!is_local_parts(&Parts::new()));
 }
 
-// --- sidekick resolution ----------------------------------------------------
-
-/// Saves and restores mutated env vars on drop.
 struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
 impl EnvGuard {
@@ -219,7 +204,7 @@ fn an_http_sidekick_resolves_to_base_url_and_stored_key() {
         .collect();
     assert_eq!(env["GRAY_BASE_URL"], "http://sk.test/v1");
     assert_eq!(env["GRAY_API_KEY"], "KEY42");
-    // The lead's plugin identity is explicitly cleared.
+
     assert_eq!(env["GRAY_PROVIDER_ID"], "");
     assert_eq!(env["GRAY_CREDENTIAL_SOURCE"], "");
     assert_eq!(env["GRAY_AUTH_REF"], "");
@@ -254,11 +239,9 @@ fn an_unknown_provider_token_resolves_to_nothing() {
         r#"{"http://sk.test/v1": [["sk-1", "Side"]]}"#,
     );
     assert!(resolve_sidekick(dir.path(), "nope:sk-1").is_none());
-    // A plugin token without an installed provider also fails cleanly.
+
     assert!(resolve_sidekick(dir.path(), "dev:sk-1").is_none());
 }
-
-// --- injection condition -----------------------------------------------------
 
 #[test]
 fn handoff_exists_exactly_while_a_local_fusion_is_selected() {
@@ -283,15 +266,11 @@ fn handoff_exists_exactly_while_a_local_fusion_is_selected() {
     assert_eq!(local_sidekick().as_deref(), Some("custom-sk-test:sk-1"));
     let plugin = FusionPlugin::default();
     let tools = plugin.tools();
-    // Both wire aliases resolve to the same tool: `handoff` is the
-    // canonical name, `native__handoff` the one Devin-trained leads emit.
+
     assert_eq!(tools.len(), 2);
     assert_eq!(tools[0].def().name, "handoff");
     assert_eq!(tools[1].def().name, "native__handoff");
 
-    // A native (bare-id) parts selection resolves against the lead's own
-    // provider — the bare option id qualified under its token — and gets
-    // the tool too: no provider runs a client-side sidekick for you.
     write(
         dir.path(),
         "config.json",
@@ -304,7 +283,6 @@ fn handoff_exists_exactly_while_a_local_fusion_is_selected() {
     );
     assert_eq!(plugin.tools().len(), 2);
 
-    // Nor inside a sidekick's own process.
     let _env2 = EnvGuard::apply(&[(ENV_SIDEKICK, Some("1"))]);
     write(
         dir.path(),
@@ -316,9 +294,6 @@ fn handoff_exists_exactly_while_a_local_fusion_is_selected() {
     assert!(plugin.tools().is_empty());
 }
 
-// --- the child runner --------------------------------------------------------
-
-/// An executable `#!/bin/sh` script in `dir` named `name`.
 fn fake_gray(dir: &Path, name: &str, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
@@ -360,8 +335,7 @@ async fn first_call_pools_the_session_and_later_calls_resume_it() {
     let dir = tempfile::tempdir().unwrap();
     let _env = EnvGuard::apply(&[("GRAY_HOME", Some(dir.path().to_str().unwrap()))]);
     provider_file(dir.path());
-    // The fake can't echo `$*` back in JSON (the contract carries raw
-    // newlines), so it logs args to a file the test inspects instead.
+
     let bin = fake_gray(
         dir.path(),
         "gray-sess",
@@ -377,9 +351,9 @@ printf '%s\n' '{"type":"result","text":"ok","session_id":"sid-9"}'
     let logged = args_log();
     assert!(logged.contains("--model haiku"), "{logged}");
     assert!(!logged.contains("--session"), "{logged}");
-    // A fresh session opens with the sidekick contract once.
+
     assert_eq!(logged.matches("<sidekick_contract>").count(), 1);
-    // The reported session id is pooled for next time.
+
     let files: Vec<_> = std::fs::read_dir(dir.path().join("fusion"))
         .unwrap()
         .collect();
@@ -388,7 +362,7 @@ printf '%s\n' '{"type":"result","text":"ok","session_id":"sid-9"}'
         std::fs::read_to_string(files[0].as_ref().unwrap().path()).unwrap(),
         "sid-9\n"
     );
-    // Second call resumes it — and does not re-brief the contract.
+
     let out = t.execute(&ctx(dir.path()), args).await;
     assert!(!out.is_error, "{}", out.content);
     let logged = args_log();
@@ -403,7 +377,7 @@ async fn a_dead_pooled_session_retries_fresh_once() {
     let dir = tempfile::tempdir().unwrap();
     let _env = EnvGuard::apply(&[("GRAY_HOME", Some(dir.path().to_str().unwrap()))]);
     provider_file(dir.path());
-    // Fails only when a session flag is passed — the stored id is dead.
+
     let bin = fake_gray(
         dir.path(),
         "gray-dead",

@@ -22,8 +22,7 @@ fn kind_map_covers_media() {
 
 #[test]
 fn normalize_keeps_long_side() {
-    // Resolution passes through untouched — only the provider's 5MB byte
-    // cap may still shrink an image.
+
     let img = image::RgbaImage::from_pixel(3000, 100, image::Rgba([9, 9, 9, 255]));
     let mut buf = Vec::new();
     image::DynamicImage::ImageRgba8(img)
@@ -60,7 +59,7 @@ fn jpeg_exif_passes_through_byte_identical() {
         .write_to(&mut encoded, image::ImageFormat::Jpeg)
         .unwrap();
     let jpeg = encoded.into_inner();
-    // EXIF little-endian IFD with Orientation=6 (90 degrees clockwise).
+
     let exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
     let mut oriented = jpeg[..2].to_vec();
     oriented.extend_from_slice(b"\xff\xe1");
@@ -110,9 +109,7 @@ fn inline_relative_resolves_against_cwd() {
 
 #[test]
 fn a_typed_video_path_is_media_too() {
-    // Regression: this arm used to accept only AttachmentKind::Image, so a
-    // video path in a headless prompt was dropped and arrived as nothing at
-    // all — no attachment, no note, just silence.
+
     let dir = tempfile::tempdir().unwrap();
     let clip = dir.path().join("clip.mp4");
     std::fs::write(&clip, b"fake mp4").unwrap();
@@ -125,8 +122,7 @@ fn label_names_every_kind_and_markers_round_trip() {
     assert_eq!(AttachmentKind::Video.label(), "Video");
     assert_eq!(AttachmentKind::Pdf.label(), "PDF");
     assert_eq!(AttachmentKind::Unsupported.label(), "File");
-    // A video marker must parse back to its name, or the chip is stripped
-    // from the draft and the attachment is orphaned.
+
     let clip = Path::new("/tmp/clip.mp4");
     let marker = attachment_marker(clip);
     assert_eq!(marker, "[video: clip.mp4]");

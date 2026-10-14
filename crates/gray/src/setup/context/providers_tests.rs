@@ -20,7 +20,7 @@ fn spark_levels_exclude_max_deepseek_v4_keeps_it() {
 
 #[test]
 fn clamp_max_to_xhigh_on_spark_keeps_supported_levels() {
-    // The footer bug: deepseek-v4(max) -> spark must show `xhigh`.
+
     assert_eq!(
         clamp_thinking_level("muse-spark-1.3-contributor", "max"),
         "xhigh"
@@ -38,7 +38,7 @@ fn clamp_max_to_xhigh_on_spark_keeps_supported_levels() {
         "off"
     );
     assert_eq!(clamp_thinking_level("deepseek-v4", "max"), "max");
-    // Off is always valid; unknown family keeps the level.
+
     assert_eq!(clamp_thinking_level("some-unknown-model-xyz", "max"), "max");
     assert_eq!(
         clamp_thinking_level("muse-spark-1.3-contributor", ""),
@@ -46,7 +46,6 @@ fn clamp_max_to_xhigh_on_spark_keeps_supported_levels() {
     );
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn merged_cache_skips_write_when_unchanged() {
     let disk: std::collections::HashMap<String, usize> =
@@ -55,7 +54,6 @@ fn merged_cache_skips_write_when_unchanged() {
     assert!(merged_models_cache(disk, mem).is_none());
 }
 
-// UNRUN (cargo test banned under X — verified via check + clippy only).
 #[test]
 fn merged_cache_returns_map_on_new_or_changed() {
     let disk: std::collections::HashMap<String, usize> =
@@ -80,8 +78,6 @@ fn deepseek_flash_clamps_carried_xhigh_to_max() {
     }
 }
 
-// ── provider model-list disk cache ──
-
 fn cached_list() -> Vec<(String, String)> {
     vec![
         ("zai/glm-5.2".to_string(), "GLM 5.2".to_string()),
@@ -91,10 +87,7 @@ fn cached_list() -> Vec<(String, String)> {
 
 #[test]
 fn loopback_bases_get_no_disk_entry() {
-    // The leak this closes: a loopback endpoint's port changes on every start
-    // (and a unit test's is random), the fetch is sub-millisecond anyway, and
-    // nothing evicts old keys — so each one is a permanent dead entry in
-    // `~/.gray/provider_models.json`.
+
     let dir = tempfile::TempDir::new().expect("temp home");
     save_provider_model_list_at(dir.path(), "http://127.0.0.1:35757/v1", &cached_list());
     save_provider_model_list_at(dir.path(), "http://[::1]:1234/v1", &cached_list());
@@ -103,7 +96,7 @@ fn loopback_bases_get_no_disk_entry() {
         !dir.path().join("provider_models.json").exists(),
         "no cache file at all for a loopback-only session"
     );
-    // A real host still persists, so the picker keeps painting instantly.
+
     save_provider_model_list_at(dir.path(), "https://api.x.ai/v1", &cached_list());
     assert_eq!(
         load_provider_model_list_at(dir.path(), "https://api.x.ai/v1").len(),
@@ -116,7 +109,7 @@ fn model_list_round_trips_through_disk() {
     let dir = tempfile::TempDir::new().expect("temp home");
     save_provider_model_list_at(dir.path(), "https://api.x.ai/v1/", &cached_list());
     assert_eq!(
-        // No trailing slash on load: normalization must not split the cache.
+
         load_provider_model_list_at(dir.path(), "https://api.x.ai/v1"),
         cached_list()
     );
@@ -153,7 +146,7 @@ fn friendly_model_name_restores_version_dots() {
     assert_eq!(friendly_model_name("gpt-5-2"), "GPT 5.2");
     assert_eq!(friendly_model_name("swe-2"), "SWE 2");
     assert_eq!(friendly_model_name("swe-1-6"), "SWE 1.6");
-    // Not digit runs: dates, build stamps, and size suffixes stay apart.
+
     assert_eq!(friendly_model_name("gpt-5-2025-08-07"), "GPT 5 2025 08 07");
     assert_eq!(friendly_model_name("deepseek-v3-0324"), "Deepseek v3 0324");
     assert_eq!(friendly_model_name("qwen3-30b-a3b"), "Qwen3 30b A3b");
@@ -176,7 +169,7 @@ fn loopback_hosts_are_recognized_with_and_without_brackets() {
 fn a_legacy_pair_cache_still_loads_and_objects_keep_their_metadata() {
     use crate::setup::variants::{CachedModel, CachedRow};
     let dir = tempfile::TempDir::new().expect("temp home");
-    // A file written by an older gray: pairs only.
+
     std::fs::write(
         dir.path().join("provider_models.json"),
         br#"{"plugin:devin-subscription":[["swe-2","SWE-2"],["gpt-6-sol","GPT-6 Sol"]]}"#,
@@ -189,8 +182,7 @@ fn a_legacy_pair_cache_still_loads_and_objects_keep_their_metadata() {
             ("gpt-6-sol".to_string(), "GPT-6 Sol".to_string()),
         ]
     );
-    // A plugin catalog saves objects; a later bare-pair refresh of the same
-    // id keeps the metadata and takes the new name.
+
     let rich = CachedRow::Full(CachedModel {
         id: "gpt-6-sol".into(),
         name: "GPT-6 Sol".into(),
@@ -219,23 +211,19 @@ fn a_legacy_pair_cache_still_loads_and_objects_keep_their_metadata() {
     assert_eq!(m.variants.len(), 1);
 }
 
-// ── connect-modal key check ──
-// UNRUN (cargo test banned under X — verified via check + clippy only).
-
 #[test]
 fn key_check_request_picks_each_providers_probe() {
-    // OpenRouter's /models is public, so it validates nothing — the probe
-    // is its /key endpoint under Bearer.
+
     let (url, style, r400) = key_check_request("https://openrouter.ai/api/v1/");
     assert_eq!(url, "https://openrouter.ai/api/v1/key");
     assert_eq!(style, AuthStyle::Bearer);
     assert!(!r400);
-    // Anthropic is the x-api-key exception, on its exact host only.
+
     let (url, style, r400) = key_check_request("https://api.anthropic.com");
     assert_eq!(url, "https://api.anthropic.com/models");
     assert_eq!(style, AuthStyle::Anthropic);
     assert!(!r400);
-    // A lookalike host stays Bearer, and trailing slashes are trimmed.
+
     let (url, style, r400) = key_check_request("https://api.anthropic.com.evil.example/v1//");
     assert_eq!(url, "https://api.anthropic.com.evil.example/v1/models");
     assert_eq!(style, AuthStyle::Bearer);
@@ -248,7 +236,7 @@ fn key_check_request_picks_each_providers_probe() {
 
 #[test]
 fn key_check_marks_400_as_rejection_only_on_measured_hosts() {
-    // Google and xAI answer a bad Bearer with 400, not 401.
+
     for base in [
         "https://generativelanguage.googleapis.com/v1beta/openai",
         "https://api.x.ai/v1",
@@ -257,7 +245,7 @@ fn key_check_marks_400_as_rejection_only_on_measured_hosts() {
         assert!(r400, "{base}");
         assert_eq!(classify_key_status(400, r400), KeyCheck::Rejected(400));
     }
-    // Everywhere else 400 stays inconclusive.
+
     let (_, _, r400) = key_check_request("https://api.openai.com/v1");
     assert!(!r400);
     assert_eq!(classify_key_status(400, r400), KeyCheck::Unknown);
@@ -269,8 +257,7 @@ fn key_check_status_only_an_auth_refusal_rejects() {
     assert_eq!(classify_key_status(204, false), KeyCheck::Valid);
     assert_eq!(classify_key_status(401, false), KeyCheck::Rejected(401));
     assert_eq!(classify_key_status(403, false), KeyCheck::Rejected(403));
-    // Everything inconclusive — 5xx, redirects, odd statuses — is Unknown,
-    // never a block.
+
     for s in [301, 404, 418, 500, 503] {
         assert_eq!(
             classify_key_status(s, false),
@@ -292,8 +279,7 @@ fn model_list_candidates_cover_v1_and_bare_bases() {
     assert!(v1.iter().any(|u| u.ends_with("/tags")));
     let bare = model_list_candidates("http://localhost:8080");
     assert!(bare.iter().any(|u| u == "http://localhost:8080/v1/models"));
-    // OpenRouter is pinned to its real route: its /models is public and
-    // validates nothing.
+
     assert_eq!(
         model_list_candidates("https://openrouter.ai/api/v1"),
         vec!["https://openrouter.ai/api/v1/models".to_string()]

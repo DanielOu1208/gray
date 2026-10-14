@@ -1,12 +1,3 @@
-//! Index-vs-spawn tax: wall-time of the fsearch index lane against the
-//! legacy fd/rg/walk lanes on identical trees (toolrush method —
-//! alternating samples, medians + p95s, real tool dispatch, no mocks).
-//!
-//! Two fixture twins: one inside the index's root (the index lane serves
-//! it), one outside (the index declines → the old lanes serve it). fsearch
-//! is unix-only, so the whole bench is. Run with:
-//! `cargo test -p gray-tools --test index_bench -- --nocapture`
-
 #![cfg(unix)]
 
 use std::sync::Arc;
@@ -23,11 +14,6 @@ const FILES: usize = 500;
 const LINES: usize = 200;
 const SAMPLES: usize = 15;
 
-/// Hard bound per phase, naming the phase when it lapses. The Windows CI hang
-/// (2026-09-29) burned a 60-minute job on this test with zero output because
-/// its only deadline assert sat inside a poll loop that never got to run —
-/// the call it waited on was blocked for good. A phase that wedges now fails
-/// this test within its bound instead of hanging the runner.
 async fn bounded<T>(secs: u64, phase: &str, fut: impl std::future::Future<Output = T>) -> T {
     match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
         Ok(v) => v,
@@ -63,14 +49,12 @@ fn write_tree(root: &std::path::Path) {
 
 #[tokio::test]
 async fn index_vs_spawn_tax() {
-    // Twin trees: identical content, only one inside the index's root.
+
     let indexed_dir = TempDir::new().unwrap();
     let legacy_dir = TempDir::new().unwrap();
     write_tree(indexed_dir.path());
     write_tree(legacy_dir.path());
 
-    // The indexed lane is `gray find`/`gray grep`; the legacy lane is the
-    // tool the model would otherwise run, in a tree the index declines.
     let pool = Arc::new(FsearchPool::with_options(fsearch::Options {
         dir: indexed_dir.path().join("index"),
         home: indexed_dir.path().to_string_lossy().into_owned(),
@@ -82,15 +66,12 @@ async fn index_vs_spawn_tax() {
     let lfind = FindTool;
     let lgrep = GrepTool;
 
-    // Cold-start: first index call pays the scan. Report it separately.
     let args = |pattern: String| SearchArgs {
         pattern,
         limit: Some(SAMPLES),
         ..Default::default()
     };
-    // First call in a process has no index, so it answers from the tool and
-    // starts the build in the background. That is the whole policy: a fresh
-    // process never pays a scan to answer a question fd answers in ~20ms.
+
     let t = Instant::now();
     let out = bounded(
         120,
@@ -102,7 +83,6 @@ async fn index_vs_spawn_tax() {
     let cold_call_ms = t.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(pool.lane_hits(), 0, "a cold call must not be index-served");
 
-    // Warm the legacy lane too (page cache) so the comparison is warm-vs-warm.
     bounded(
         120,
         "legacy find warm-up",
@@ -136,7 +116,7 @@ async fn index_vs_spawn_tax() {
     let mut old_grep = Vec::with_capacity(SAMPLES);
 
     for i in 0..SAMPLES {
-        // Alternate lanes so machine noise spreads evenly.
+
         let pat = format!("*file{:03}.rs", i % 10);
         let t = Instant::now();
         let out = bounded(

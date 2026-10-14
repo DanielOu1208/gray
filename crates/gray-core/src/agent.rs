@@ -1,6 +1,3 @@
-//! Shared execution contracts: the seams between gray-core and the
-//! provider/tools leaves. The binary wires implementations together.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +12,6 @@ use crate::error::CoreError;
 use crate::event::{StreamEvent, Usage, append_thinking_chunk};
 use crate::message::ChatRequest;
 
-/// Errors surfaced by a provider implementation.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     #[error("rate limited: {0}")]
@@ -35,10 +31,6 @@ pub enum ProviderError {
     #[error("stream broken: {0}")]
     Stream(String),
 
-    /// A failure carrying the response's structured fields — same
-    /// taxonomy wrap as [`crate::error::CoreError::Detailed`]: `class` is
-    /// one of the flat variants (message text unchanged), `detail` is the
-    /// parsed response fields. See through it with [`ProviderError::class`].
     #[error("{class}")]
     Detailed {
         class: Box<ProviderError>,
@@ -47,7 +39,7 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
-    /// The innermost failure class — `Detailed` unwraps to a flat variant.
+
     pub fn class(&self) -> &ProviderError {
         let mut cur = self;
         while let Self::Detailed { class, .. } = cur {
@@ -56,7 +48,6 @@ impl ProviderError {
         cur
     }
 
-    /// Structured fields when this failure carries them.
     pub fn detail(&self) -> Option<&crate::error::ProviderDetail> {
         if let Self::Detailed { detail, .. } = self {
             Some(detail)
@@ -65,15 +56,10 @@ impl ProviderError {
         }
     }
 
-    /// True when the transcript should be compacted before retrying.
     pub fn should_compress(&self) -> bool {
         matches!(self.class(), Self::ContextOverflow(_))
     }
 
-    /// True when re-running the same request can plausibly succeed: the
-    /// provider or network failed, not the request. Mirrors
-    /// [`CoreError::retryable`](crate::error::CoreError::retryable) so the
-    /// agent loop can decide on the raw provider class before conversion.
     pub fn retryable(&self) -> bool {
         matches!(
             self.class(),
@@ -86,39 +72,29 @@ impl ProviderError {
     }
 }
 
-/// Output of a tool execution. Errors are data for the model, not crashes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
-    /// Vision attachments (opencode `read` parity: "Image read successfully"
-    /// + file part). Empty for every other tool.
-    ///
-    /// `#[serde(default)]` keeps old transcripts parsing.
+
     #[serde(default)]
     pub images: Vec<AttachedImage>,
-    /// Non-image media riding with a tool result (bash `cat` of a clip,
-    /// PDF or audio file). Each carries what a model that can't take it
-    /// sees instead; the provider picks via [`crate::message::resolve_media`].
+
     #[serde(default, alias = "videos")]
     pub media: Vec<AttachedMedia>,
 }
 
-/// One image riding with a tool result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachedImage {
     pub media_type: String,
     pub data: String,
 }
 
-/// One base64 video/audio/PDF riding with a tool result. Not re-encoded, so
-/// the producer keeps it under [`crate::message::MAX_NATIVE_MEDIA_BYTES`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachedMedia {
     pub media_type: String,
     pub data: String,
-    /// What a model without this input sees instead (contact sheet, PDF
-    /// text, a note). The tool cannot know the model.
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback: Vec<ContentBlock>,
 }
@@ -140,7 +116,7 @@ impl ToolOutput {
             media: Vec::new(),
         }
     }
-    /// Image read success: text note + one vision block (opencode parity).
+
     pub fn image(content: impl Into<String>, media_type: String, data: String) -> Self {
         Self {
             content: content.into(),
@@ -149,10 +125,7 @@ impl ToolOutput {
             media: Vec::new(),
         }
     }
-    /// Message blocks for this result: the text result first, then one
-    /// vision block per attached image, then one media block per attachment.
-    /// Image blocks in user-role messages already serialize as vision parts
-    /// on every provider path; media resolves per model there.
+
     pub fn message_blocks(&self, id: &str) -> Vec<ContentBlock> {
         let mut blocks = vec![ContentBlock::ToolResult {
             id: id.to_string(),
@@ -173,7 +146,6 @@ impl ToolOutput {
     }
 }
 
-/// Per-execution context handed to tools.
 #[derive(Debug, Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
@@ -191,37 +163,21 @@ impl Default for ToolContext {
     }
 }
 
-/// A streaming LLM provider (wire protocol behind this seam).
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn stream(&self, req: ChatRequest) -> BoxStream<'static, Result<StreamEvent, ProviderError>>;
 
-    /// Model id behind this provider ("" when unknown). Used to stamp
-    /// captured reasoning items so replay stays same-model-only.
     fn model_id(&self) -> &str {
         ""
     }
 
-    /// The output cap a cache-warming replay of `req` must carry for the
-    /// replay to land on the same cache entry the request wrote (the
-    /// warmer's usual `max_tokens: 1`). A provider that derives a
-    /// cache-keyed field from the cap — Anthropic derives
-    /// `thinking.budget_tokens` — returns the smallest cap preserving
-    /// that field instead.
     fn warm_output_cap(&self, _req: &ChatRequest) -> u32 {
         1
     }
 }
 
-/// Host callback polled before each model request of a turn. Returns text the
-/// user typed while the turn was running; the agent appends it as a user
-/// message, so it joins the turn rather than replacing it.
 pub type SteerHook = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
-/// Host callback awaited at every step boundary of a turn, with the whole
-/// history (consistent there: each tool call has its result) and the current
-/// [`Agent::history_revision`]. Lets the host persist a turn as it goes, so a
-/// process that dies mid-turn loses at most the step in flight.
 pub type CheckpointHook = std::sync::Arc<
     dyn Fn(&[Message], u64) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         + Send
@@ -257,49 +213,30 @@ pub(crate) async fn scope_tool_output<T>(
     TOOL_OUTPUT.scope(sink, fut).await
 }
 
-/// A single agent-callable tool.
 #[async_trait]
 pub trait Tool: Send + Sync {
-    /// Static definition surfaced to the model (name, description, schema).
+
     fn def(&self) -> crate::message::ToolDef;
 
-    /// Downcast hook for executor-level introspection (the completion-wake
-    /// path finds the bash tool's job registry without a registry-wide
-    /// redesign). Every tool returns `self`.
     fn as_any(&self) -> &dyn std::any::Any;
 
-    /// Drain completed background notices without waiting. Called only at safe
-    /// transcript boundaries, never in the middle of tool-result placement.
     fn drain_notifications(&self, _ctx: &ToolContext) -> Vec<String> {
         Vec::new()
     }
 
-    /// Executes the tool. Failures are data ([`ToolOutput::error`]), never panics.
     async fn execute(&self, ctx: &ToolContext, args: serde_json::Value) -> ToolOutput;
 }
 
-/// Executes named tools. The registry lives behind this seam so core
-/// never knows what tools exist.
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
     fn drain_notifications(&self, _ctx: &ToolContext) -> Vec<String> {
         Vec::new()
     }
 
-    /// Current tool definitions when the executor's tool set can change
-    /// between turns (protocol-1.3 plugins). `Some(defs)` replaces the
-    /// agent's advertised tools at the start of every run; the default
-    /// `None` keeps the static set from [`Agent::with_tools`].
     fn live_defs(&self) -> Option<Vec<crate::message::ToolDef>> {
         None
     }
 
-    /// Bounded wait until at least one background notification is ready (or
-    /// `None` when the timeout elapsed with nothing to deliver). The loop
-    /// calls this at turn end with unfinished background jobs instead of
-    /// ending the run: headless invocations would otherwise exit and kill
-    /// every job. Default `None` — executors without background work answer
-    /// instantly, so callers cannot hang on it.
     fn wait_for_notification(
         &self,
         _ctx: &ToolContext,
@@ -308,34 +245,20 @@ pub trait ToolExecutor: Send + Sync {
         Box::pin(std::future::ready(None))
     }
 
-    /// Whether any background job is still running for this session — the
-    /// gate that decides whether turn-end waits ([`wait_for_notification`]).
     fn has_pending_background(&self, _ctx: &ToolContext) -> bool {
         false
     }
 
-    /// Re-pin the owning session id on session-aware tools (plugin
-    /// sidecars pin it at build time; a session ensured after the build —
-    /// first turn, `/new` — must reach them too). No-op for executors
-    /// without live plugins.
     fn repin_session(&self, _id: &str) {}
 
-    /// This session's still-running background jobs, oldest first, for a
-    /// host that shows them (footer count, `/jobs`). Default: none.
     fn background_jobs(&self, _ctx: &ToolContext) -> Vec<BackgroundJob> {
         Vec::new()
     }
 
-    /// What the MODEL should know about this session's still-running jobs
-    /// (one line each: id, elapsed, log, stop command), or `None` when none
-    /// run. The loop shows it at the start of every turn and after every
-    /// compaction, so a job outlives any context the model loses.
     fn running_jobs_note(&self, _ctx: &ToolContext) -> Option<String> {
         None
     }
 
-    /// Ask one of this session's running jobs to stop; `false` when no such
-    /// job is running. The job's finish still arrives as a notification.
     fn cancel_background(&self, _ctx: &ToolContext, _id: &str) -> bool {
         false
     }
@@ -348,34 +271,29 @@ pub trait ToolExecutor: Send + Sync {
     ) -> BoxFuture<'static, ToolOutput>;
 }
 
-/// A running background job as a host shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundJob {
-    /// The job id the model uses (`cargo-check`).
+
     pub id: String,
     pub elapsed: Duration,
-    /// Cancellation was requested and the job has not settled yet.
+
     pub stopping: bool,
 }
 
-/// Convenience alias used by Agent wiring.
 pub type ProviderStream = BoxStream<'static, Result<StreamEvent, ProviderError>>;
 
-/// Verdict of a `tool/before` plugin hook (protocol v1) for one tool call.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolBefore {
-    /// Run the call with the args the model sent.
+
     Allow,
-    /// Run the call with rewritten args.
+
     Modify(serde_json::Value),
-    /// Skip the executor; the reason becomes an `is_error` tool result.
+
     Deny(String),
 }
 
 impl ToolBefore {
-    /// Parse a `tool/before` result. Strict: only documented verdicts
-    /// authorize or rewrite; anything else denies (a claimed hook's
-    /// confusion must not become permission).
+
     pub fn from_result(v: &serde_json::Value) -> Self {
         match v.get("decision").and_then(|d| d.as_str()) {
             Some("deny") => Self::Deny(
@@ -389,33 +307,25 @@ impl ToolBefore {
                 Some(a) if a.is_object() => Self::Modify(a.clone()),
                 _ => Self::Deny("plugin modify verdict missing object args".to_string()),
             },
-            // A claimed hook's verdict must be explicit: anything but a
-            // documented "allow" denies rather than silently authorizing.
+
             Some("allow") => Self::Allow,
             _ => Self::Deny("plugin returned an unrecognized policy verdict".to_string()),
         }
     }
 }
 
-/// Verdict of an `input/submit` plugin hook (protocol 2.0) for one
-/// submitted user message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputSubmit {
-    /// Deliver the input to the agent unchanged.
+
     Pass,
-    /// Deliver it with the text replaced (pi `input` event returning
-    /// `{text}`).
+
     Rewrite(String),
-    /// The plugin handled the input itself: no turn runs and nothing is
-    /// recorded (pi `input` event returning `{handled: true}`).
+
     Handled,
 }
 
 impl InputSubmit {
-    /// Parse an `input/submit` result. Lenient on purpose: unlike
-    /// `tool/before` there is no security boundary here, and a malformed
-    /// reply must never eat the user's input — anything unrecognized
-    /// passes through untouched.
+
     pub fn from_result(v: &serde_json::Value) -> Self {
         if v.get("handled").and_then(|h| h.as_bool()) == Some(true) {
             return Self::Handled;
@@ -427,86 +337,65 @@ impl InputSubmit {
     }
 }
 
-/// A slash command (`/x`) claimed by a plugin for `/help` + REPL routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginCommand {
-    /// Command name with leading slash, as on the wire (`commands:["/x"]`).
+
     pub name: String,
     pub description: String,
 }
 
-/// Outcome of a plugin `command/run`: text to say, a prompt to run, or the
-/// host's model picker opened on one of the plugin's model rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandOutcome {
     Say(String),
     Prompt(String),
-    /// Open the `/model` picker focused on this row id; a composite row
-    /// opens straight into its first slot.
+
     ModelPicker(String),
-    /// Open the interactive agents panel fed by this plugin's CLI
-    /// (`<plugin> entries` rows; `open`/`view`/`stop`/`chat` verbs drive
-    /// the actions). Carries the plugin name the panel should query.
+
     AgentPicker(String),
-    /// Open the subagent-settings modal fed by this plugin's CLI
-    /// (`<plugin> settings` reads current values; `settings --model/
-    /// --effort/--context/--max-running` writes). Carries the plugin name.
+
     SubagentSettings(String),
 }
 
-/// Host-side view of a plugin's hooks: protocol-v1 (`prompt/context`,
-/// `tool/before`, `command/run`) plus the 2.0 mutating events
-/// (`input/submit`, `agent/before_start`, `context/build`, `tool/after`). All methods are no-ops by default, so an
-/// agent without plugins behaves exactly as before. The sidecar transport
-/// behind these (Task 1) maps each method to its wire request.
 #[async_trait]
 pub trait PluginHooks: Send + Sync {
-    /// Text from `prompt/context`, appended to the turn's system prompt.
+
     async fn prompt_context(&self) -> Option<String> {
         None
     }
-    /// Verdict from `tool/before`, consulted before the executor runs.
+
     async fn tool_before(&self, _name: &str, _args: &serde_json::Value) -> ToolBefore {
         ToolBefore::Allow
     }
-    /// Slash commands this plugin claims (shown in `/help`).
+
     fn commands(&self) -> Vec<PluginCommand> {
         Vec::new()
     }
-    /// Runs `command/run`; `None` means "not handled".
+
     async fn run_command(&self, _name: &str, _argv: Vec<String>) -> Option<CommandOutcome> {
         None
     }
-    /// `input/submit` verdict (protocol 2.0), consulted before the
-    /// submitted user message reaches history. Default passes it through.
+
     async fn input_submit(&self, _text: &str) -> InputSubmit {
         InputSubmit::Pass
     }
-    /// `agent/before_start` (protocol 2.0): text a hook wants appended to
-    /// history as a user message before the turn's first request
-    /// (pi `before_agent_start` returning a context message).
+
     async fn agent_before_start(&self) -> Option<String> {
         None
     }
-    /// `context/build` (protocol 2.0): a replacement outbound message list
-    /// for this request (pi `context`). Hooks chain — each sees the
-    /// previous hook's output. `None` keeps the list unchanged.
+
     async fn context_build(&self, _messages: &[Message]) -> Option<Vec<Message>> {
         None
     }
-    /// `tool/after` (protocol 2.0): a replacement tool result. Hooks chain
-    /// like `context/build`; `None` keeps the executor output. The final
-    /// output is what `post_tool` observers and history see.
+
     async fn tool_after(&self, _name: &str, _output: &ToolOutput) -> Option<ToolOutput> {
         None
     }
     async fn pre_tool(&self, _name: &str, _args: &serde_json::Value) {}
     async fn post_tool(&self, _name: &str, _output: &ToolOutput) {}
     async fn turn_end(&self, _usage: &Usage) {}
-    /// Graceful teardown (`plugin/shutdown` on sidecars). Default no-op.
+
     async fn shutdown(&self) {}
-    /// A `global`-lock plugin: its `prompt/context` still runs under the
-    /// lean prompt. Default false.
+
     fn is_global(&self) -> bool {
         false
     }
@@ -514,8 +403,7 @@ pub trait PluginHooks: Send + Sync {
 
 impl From<ProviderError> for CoreError {
     fn from(e: ProviderError) -> Self {
-        // 1:1 with the provider taxonomy so the failure class survives the
-        // boundary (harnesses branch on `CoreError::code`, not message text).
+
         match e {
             ProviderError::RateLimited(msg) => CoreError::RateLimited(msg),
             ProviderError::Auth(msg) => CoreError::Auth(msg),
@@ -539,112 +427,57 @@ use crate::message::{ContentBlock, Message, Role, ToolDef};
 
 pub use super::agent_compact::{estimate_message_tokens, summary_message};
 
-/// The agent loop: drives a conversation against a [`Provider`], executing
-/// tool calls through a [`ToolExecutor`] until the model stops requesting
-/// tools or cancellation fires.
-///
-/// The loop terminates when a turn ends without tool calls (`TurnEnd`) or when
-/// cancellation fires. A lightweight stall
-/// guard (3 identical consecutive tool calls) aborts runaway loops; provider
-/// context errors and user cancellation remain the other natural bounds.
-///
-/// `run` is in *collecting* form: it buffers all [`AgentEvent`]s and returns
-/// them once the run finishes, rather than invoking a callback or yielding
-/// through a channel. This keeps the core loop synchronous-in-shape (single
-/// value out, single error path), trivially unit-testable, and free of
-/// back-pressure concerns; a streaming façade can be layered on top later by
-/// draining these events (or by swapping the return type for a receiver).
 pub struct Agent {
-    /// Shared so a cache-warming task can replay a request while tools run.
+
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) executor: std::sync::Arc<dyn ToolExecutor>,
     pub(crate) system: String,
-    /// Effective prefix captured once per turn. Plugin `prompt/context`
-    /// text deliberately stays out: it rides a deduped transcript note so
-    /// this prefix can stay byte-stable across turns (relay sidecars match
-    /// their pooled session on it).
+
     pub(crate) turn_system: Option<String>,
     pub(crate) tools: Vec<ToolDef>,
-    /// Display-only headlines per tool name, consulted by transcript
-    /// renderers (`tool_fmt` reads the entry through injected args).
-    /// Never reaches the model: provider mappers project
-    /// name/description/parameters only. Empty by default.
+
     pub(crate) tool_labels: std::collections::HashMap<String, String>,
-    /// Display-only arg preview paths per tool name, consulted by the same
-    /// renderers (`tool_fmt` reads the entry through injected args).
-    /// Same visibility contract as `tool_labels`. Empty by default.
+
     pub(crate) tool_previews: std::collections::HashMap<String, String>,
     pub(crate) messages: Vec<Message>,
     pub(crate) tool_timeout: Duration,
     pub(crate) hooks: Vec<Arc<dyn PluginHooks>>,
     pub(crate) context_window: Option<usize>,
-    /// Pre-turn compaction reserve and retained-tail budget overrides
-    /// (`GRAY_CONTEXT_RESERVE` / `GRAY_CONTEXT_KEEP`); `None` = core defaults.
+
     pub(crate) compact_reserve: Option<usize>,
     pub(crate) compact_keep: Option<usize>,
-    /// Model price cliff (prompt tokens above which the provider bills a higher
-    /// tier) and the pre-turn ceiling derived from it. See `with_price_cliff`.
+
     pub(crate) price_cliff: Option<usize>,
     pub(crate) compact_ceiling: Option<usize>,
-    /// Estimate at which the soft elision stage re-arms after a pass that
-    /// changed history (hysteresis; see `Agent::soft_elide`). Zero = armed.
+
     pub(crate) soft_elide_rearm: usize,
-    /// Latest provider-reported context size and the history length it
-    /// covered (pi `getLastAssistantUsage`). Cleared on every history
-    /// rewrite: a pre-rewrite report describes a context that no longer exists.
+
     context_usage: Option<(usize, usize)>,
     history_revision: u64,
     history_rewrite_hook: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// Polled before every model request of a turn: `Some(text)` steers the
-    /// turn in flight by appending a user message the model reads on its next
-    /// request. `None` (no hook, or nothing typed) leaves the turn alone.
+
     pub(crate) steer: Option<SteerHook>,
-    /// See [`CheckpointHook`]. Set per turn by the host.
+
     pub(crate) checkpoint: Option<CheckpointHook>,
     pub(crate) tool_output_hook: Option<ToolOutputHook>,
-    /// Session this transcript persists to, when known — woven into
-    /// compaction citation stubs (arXiv:2607.25066). Captured from each
-    /// run's [`ToolContext`].
+
     pub(crate) session_id: Option<String>,
-    /// Indices of salvaged partial-assistant messages left by a mid-stream
-    /// error. They stay in `messages` (the persisted transcript must match
-    /// what the user saw on screen) but are replaced with a one-line marker
-    /// in outbound requests: a failed attempt left in context measurably
-    /// contaminates the retry (arXiv:2605.08563 CCRM — cascade ratio
-    /// ε1/ε0 ≈ 7.1 on SWE-bench Verified; clean restart dominates).
-    /// Cleared by every history rewrite — compaction subsumes the failure.
+
     pub(crate) contaminated: std::collections::BTreeSet<usize>,
-    /// Stale-output mask watermark: every at-threshold `ToolResult` in
-    /// `messages[..masked_prefix]` rides outbound requests as a citation
-    /// stub. Advanced only when the cache is already cold (see
-    /// `agent_loop::mask_stale_tool_output`) and reset by every history
-    /// rewrite, which invalidates the index.
+
     pub(crate) masked_prefix: usize,
-    /// Prompt-cache warming during long rounds; `None` = off.
+
     pub(crate) cache_warm: Option<crate::cache_warm::CacheWarmPolicy>,
-    /// Detects outbound prefixes that changed instead of grew — every
-    /// announced rewrite goes through `history_rewritten` or the stale
-    /// mask; anything else is a cache miss nobody asked for.
+
     pub(crate) prefix_guard: crate::prefix_guard::PrefixGuard,
-    /// Sticky: some request this session reported cache activity. Feeds
-    /// `worth_refreshing`'s no-prices path — a provider that never reports
-    /// caching gains nothing from a replay. The warmer needs the flag
-    /// before the in-flight request reports, so it persists across rounds
-    /// and survives `history_rewritten` (it describes the provider, not
-    /// one cache entry).
+
     pub(crate) warm_cache_reported: bool,
-    /// Whether the host may rewrite already-sent history (the cold-cache
-    /// stale-output mask shortens old tool results). Relay providers spawn
-    /// a per-turn child off a native session: rewriting the prefix there
-    /// throws the session away, so masking stays off even on a cold cache.
+
     pub(crate) prefix_rewrite_ok: bool,
-    /// Lean prompt: plugin `prompt_context` hooks contribute nothing, so a
-    /// turn's system prefix stays the stored prompt alone (no skills list,
-    /// project rules, or plugin docs injected per turn).
+
     pub(crate) lean_prompt: bool,
 }
 
-/// Lends a shared provider to a `Box` decorator ([`Agent::map_provider`]).
 struct SharedProvider(Arc<dyn Provider>);
 
 impl Provider for SharedProvider {
@@ -662,7 +495,7 @@ impl Provider for SharedProvider {
 }
 
 impl Agent {
-    /// Creates an agent over the given provider and tool executor.
+
     pub fn new(provider: Box<dyn Provider>, executor: std::sync::Arc<dyn ToolExecutor>) -> Self {
         Self {
             provider: Arc::from(provider),
@@ -698,15 +531,11 @@ impl Agent {
         }
     }
 
-    /// Keep the provider's prompt cache warm through long rounds — the
-    /// stream and its tool phase alike (pi cache warming, streaming mode).
-    /// `None` turns it off.
     pub fn with_cache_warm(mut self, policy: Option<crate::cache_warm::CacheWarmPolicy>) -> Self {
         self.cache_warm = policy;
         self
     }
 
-    /// Decorate all provider requests, including compaction, with host policy.
     pub fn map_provider(
         mut self,
         wrap: impl FnOnce(Box<dyn Provider>) -> Box<dyn Provider>,
@@ -715,8 +544,6 @@ impl Agent {
         self
     }
 
-    /// The provider behind this agent, policy wrappers included, for a
-    /// one-off side request that must stay out of the transcript.
     pub fn provider_handle(&self) -> Arc<dyn Provider> {
         self.provider.clone()
     }
@@ -725,33 +552,22 @@ impl Agent {
         self.history_revision
     }
 
-    /// Whether the host may rewrite already-sent history (the cold-cache
-    /// stale-output mask). Relay providers that resume a native session per
-    /// turn get `false`: rewriting the prefix would throw it away.
     pub fn prefix_rewrite_ok(&self) -> bool {
         self.prefix_rewrite_ok
     }
 
-    /// See [`Agent::prefix_rewrite_ok`]. Set by the host at build time.
     pub fn set_prefix_rewrite_ok(&mut self, ok: bool) {
         self.prefix_rewrite_ok = ok;
     }
 
-    /// Lean prompt: no plugin `prompt_context` text is injected per turn
-    /// (the skills list, project rules and sidecar docs stay out). Set by
-    /// the host at build time.
     pub fn set_lean_prompt(&mut self, lean: bool) {
         self.lean_prompt = lean;
     }
 
-    /// Install the mid-turn steer hook (see [`Agent::steer`]). Set per turn by
-    /// the host, which is where the queue lives. The hook runs on the turn's
-    /// own task and must not block: the model's next request waits on it.
     pub fn set_steer(&mut self, hook: SteerHook) {
         self.steer = Some(hook);
     }
 
-    /// Install the step-boundary checkpoint hook (see [`CheckpointHook`]).
     pub fn set_checkpoint(&mut self, hook: Option<CheckpointHook>) {
         self.checkpoint = hook;
     }
@@ -774,13 +590,11 @@ impl Agent {
 
     pub(crate) fn history_rewritten(&mut self) {
         self.context_usage = None;
-        // A rewrite (compaction, soft elision, host edit) changes what is
-        // stale; the soft stage measures afresh from here.
+
         self.soft_elide_rearm = 0;
-        // A rewrite subsumes whatever the contaminated partials were part
-        // of; the indices would point at the wrong messages anyway.
+
         self.contaminated.clear();
-        // Indices into the old history are meaningless after a rewrite.
+
         self.masked_prefix = 0;
         self.prefix_guard.expect_change("history rewrite");
         self.history_revision = self.history_revision.wrapping_add(1);
@@ -789,38 +603,27 @@ impl Agent {
         }
     }
 
-    /// Sets the system prompt sent with every request.
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
         self.system = system.into();
         self.turn_system = None;
         self
     }
 
-    /// Sets the tools advertised to the model.
     pub fn with_tools(mut self, tools: Vec<ToolDef>) -> Self {
         self.tools = tools;
         self
     }
 
-    /// Re-reads the tool set from the executor when it is live
-    /// ([`ToolExecutor::live_defs`]); a static executor leaves the
-    /// current defs untouched. Called at the start of every run.
     pub fn refresh_tools(&mut self) {
         if let Some(defs) = self.executor.live_defs() {
             self.tools = defs;
         }
     }
 
-    /// Push the session id to live plugin tools that pin it for their wire
-    /// calls (see [`ToolExecutor::repin_session`]). Cheap — call it
-    /// whenever the owning session is established or switched.
     pub fn repin_session_id(&self, id: &str) {
         self.executor.repin_session(id);
     }
 
-    /// Display-only headlines per tool name (plugin `label` support).
-    /// Renderers inject the entry as `args.label`; the executor and both
-    /// providers keep using the wire name, and events stay unchanged.
     pub fn with_tool_labels(
         mut self,
         labels: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
@@ -832,8 +635,6 @@ impl Agent {
         self
     }
 
-    /// Display-only arg preview paths per tool name (plugin `preview`
-    /// support). Same merge/render contract as [`Self::with_tool_labels`].
     pub fn with_tool_previews(
         mut self,
         previews: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
@@ -845,30 +646,16 @@ impl Agent {
         self
     }
 
-    /// Attaches plugin hooks (protocol v1). Empty by default: no hooks
-    /// means the loop behaves exactly as before.
     pub fn with_hooks(mut self, hooks: Vec<Arc<dyn PluginHooks>>) -> Self {
         self.hooks = hooks;
         self.turn_system = None;
         self
     }
 
-    /// Plugin hooks attached via [`with_hooks`](Self::with_hooks) (REPL
-    /// slash-command routing reads these).
     pub fn hooks(&self) -> &[Arc<dyn PluginHooks>] {
         &self.hooks
     }
 
-    /// Sets the initial conversation messages (useful for resumed sessions).
-    /// Takes over `donor`'s tool surface: executor, advertised tools,
-    /// display labels/previews, plugin hooks and the history-rewrite hook.
-    /// Everything model-side (provider, system prompt, context window,
-    /// cache policy, compaction budget) stays this agent's, and the
-    /// transcript is the caller's to carry (`with_messages`).
-    ///
-    /// A model switch only changes the provider, so it builds a plugin-free
-    /// agent for the new model and moves the running plugins across instead
-    /// of respawning every sidecar (one slow MCP server alone cost ~3s).
     pub fn with_tool_surface_of(mut self, donor: Agent) -> Self {
         self.executor = donor.executor;
         self.tools = donor.tools;
@@ -885,36 +672,22 @@ impl Agent {
         self
     }
 
-    /// Bounds per-tool execution (default 120s); timeouts become error results.
     pub fn with_tool_timeout(mut self, timeout: Duration) -> Self {
         self.tool_timeout = timeout;
         self
     }
 
-    /// Known model context window in tokens (`None` = unknown: only
-    /// overflow-recovery compaction runs). Set via
-    /// [`with_context_window`](Self::with_context_window) from
-    /// `resolve_model_context_length` at build surfaces.
     pub fn with_context_window(mut self, window: Option<usize>) -> Self {
         self.context_window = window;
         self
     }
 
-    /// Overrides the pre-turn compaction reserve and the retained-tail
-    /// budget of automatic compaction; `None` keeps the core default.
     pub fn with_compaction_budget(mut self, reserve: Option<usize>, keep: Option<usize>) -> Self {
         self.compact_reserve = reserve;
         self.compact_keep = keep;
         self
     }
 
-    /// Sets the pre-turn compaction ceiling: the estimate at which
-    /// auto-compaction fires besides `window − reserve`. Callers pass an
-    /// explicit `--compact-at`/`GRAY_COMPACT_AT`/config choice, or the ceiling
-    /// `crate::compact::price_cliff_ceiling` derives from a declared cliff.
-    /// `price_cliff` should be `Some` only when the ceiling derives from such
-    /// a cliff — it powers the "why" on compaction notices. `None` ceiling
-    /// clears both.
     pub fn with_compact_ceiling(
         mut self,
         ceiling: Option<usize>,
@@ -925,23 +698,14 @@ impl Agent {
         self
     }
 
-    /// The provider-declared price cliff behind [`compact_ceiling`](Self::compact_ceiling),
-    /// when there is one.
     pub fn price_cliff(&self) -> Option<usize> {
         self.price_cliff
     }
 
-    /// The pre-turn compaction ceiling, when one is declared.
     pub fn compact_ceiling(&self) -> Option<usize> {
         self.compact_ceiling
     }
 
-    /// Context size in tokens, pi `estimateContextTokens`: the latest
-    /// provider-reported total (which already includes the system prompt and
-    /// tool definitions) plus a bytes/4 estimate of the messages appended
-    /// since. Without a report (fresh, resumed or just-rewritten history) it
-    /// falls back to bytes/4 over the whole transcript, via the shared
-    /// `agent_compact::est_tokens` owner so the estimators can never drift.
     pub(crate) fn estimate_tokens(&self) -> usize {
         match self.context_usage {
             Some((tokens, covered)) if covered <= self.messages.len() => {
@@ -951,9 +715,6 @@ impl Agent {
         }
     }
 
-    /// Anchors [`estimate_tokens`](Self::estimate_tokens) on one provider
-    /// report covering the current history. Rounds without usage keep the
-    /// previous anchor; the trailing estimate covers what came after it.
     pub(crate) fn record_context_usage(&mut self, usage: &crate::event::Usage) {
         let tokens = usage.total();
         if tokens > 0 {
@@ -961,49 +722,31 @@ impl Agent {
         }
     }
 
-    /// A shared handle on the tool executor, for a host task that watches
-    /// background work while a turn holds the agent (`&mut`).
     pub fn executor_handle(&self) -> std::sync::Arc<dyn ToolExecutor> {
         std::sync::Arc::clone(&self.executor)
     }
 
-    /// This session's running background jobs (see
-    /// [`ToolExecutor::background_jobs`]).
     pub fn background_jobs(&self, ctx: &ToolContext) -> Vec<BackgroundJob> {
         self.executor.background_jobs(ctx)
     }
 
-    /// Stop one running background job; `false` when it is not running.
     pub fn cancel_background(&self, ctx: &ToolContext, id: &str) -> bool {
         self.executor.cancel_background(ctx, id)
     }
 
-    /// Takes finished background-job notices for an idle host, which turns
-    /// them into the next turn's input (the loop drains them only mid-run).
     pub fn drain_background_notifications(&self, ctx: &ToolContext) -> Vec<String> {
         self.executor.drain_notifications(ctx)
     }
 
-    /// Read-only view of the accumulated conversation so far.
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
 
-    /// Updates or replaces the accumulated conversation messages (e.g. after compaction).
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
         self.history_rewritten();
     }
 
-    /// Repairs a turn the caller had to drop mid-flight: its bounded cancel grace
-    /// expired (a plugin hook, compaction or tool that ignores cancellation), so
-    /// none of the loop's own cancel arms ran. This restores the two invariants
-    /// they guarantee, and only appends what is missing — a run that finished on
-    /// its own never needs it:
-    /// 1. every `tool_use` carries a `tool_result`. Strict providers 400 on an
-    ///    orphaned call, which bricks the saved session for good.
-    /// 2. text the user already saw on screen is not silently dropped from the
-    ///    transcript a resumed session replays.
     pub fn repair_dropped_cancel(&mut self, thinking: &str, text: &str) {
         let mut answered = std::collections::HashSet::new();
         let mut orphaned: Vec<String> = Vec::new();
@@ -1021,8 +764,7 @@ impl Agent {
         for id in orphaned.into_iter().filter(|id| !answered.contains(id)) {
             crate::agent_tools::push_synthetic(self, &id, "cancelled by user");
         }
-        // Same text the loop already finalized (identical delta stream) must not
-        // be appended twice.
+
         let already_recorded = self.messages[current_turn_start(&self.messages)..]
             .iter()
             .any(|m| {
@@ -1051,25 +793,14 @@ impl Agent {
         }
     }
 
-    /// Effective system prompt captured for the current/last turn, or the base
-    /// prompt before any turn. `pub(crate)` because the
-    /// compaction-v2 trigger call (sibling module `compact`) reuses it
-    /// verbatim: private fields are visible only in the defining module, so
-    /// the sibling cannot read `self.system` directly.
     pub(crate) fn system_text(&self) -> &str {
         self.turn_system.as_deref().unwrap_or(&self.system)
     }
 
-    /// Tools advertised to the model. `pub` (not `pub(crate)`): headless
-    /// and REPL surfaces seed display-only labels from these defs, and the
-    /// compaction-v2 trigger call reuses them verbatim.
     pub fn tool_defs(&self) -> &[ToolDef] {
         &self.tools
     }
 
-    /// Single-turn completion over `history` + `tools`: streams one assistant
-    /// reply and returns its prose. The compaction-v2 in-band trigger call
-    /// passes the live system + tools so the request prefix stays cache-hot.
     pub async fn complete_with_history(
         &self,
         system: Option<&str>,
@@ -1086,10 +817,6 @@ impl Agent {
     }
 }
 
-/// Single-turn reply drain behind [`Agent::complete_with_history`]: collects
-/// `Text`/`Thinking` prose only and drops tool calls — the compaction trigger
-/// reply must never execute tools (codex v2 likewise collects only the
-/// compaction output item).
 async fn drain_reply_text(
     mut stream: ProviderStream,
     session: Option<&str>,
@@ -1113,9 +840,6 @@ async fn drain_reply_text(
     Ok(result)
 }
 
-/// Builds the finalized Thinking block, attaching captured Responses
-/// reasoning replay data when present. `model` stamps the generating model
-/// so replay stays same-model-only (a foreign model cannot decrypt the blob).
 pub(crate) fn thinking_block(
     text: String,
     pending_reasoning: &Option<(String, String)>,
@@ -1135,9 +859,6 @@ pub(crate) fn thinking_block(
     }
 }
 
-/// Index just past the last genuine user message: the boundary of the turn
-/// currently being built. Synthetic `tool_result` messages are user-role but
-/// never start a turn, so they cannot hide earlier output.
 fn current_turn_start(messages: &[Message]) -> usize {
     messages
         .iter()
@@ -1150,9 +871,6 @@ fn current_turn_start(messages: &[Message]) -> usize {
         .map_or(0, |i| i + 1)
 }
 
-/// Push streamed-so-far thinking + text so the transcript matches what the
-/// user already saw on screen. Shared by the cancel and mid-stream-error arms
-/// (the end-of-turn finalize differs: it also appends tool calls).
 pub(crate) fn salvage_partial_text(
     messages: &mut Vec<Message>,
     thinking: String,

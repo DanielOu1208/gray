@@ -16,7 +16,7 @@ fn glob_detection_is_star_question_only() {
     assert!(is_glob("a?.txt"));
     assert!(!is_glob("README.md"));
     assert!(!is_glob("src/a.rs"));
-    // `[...]`/`{...}` are literals here (matcher is `*`/`?`/`**` only).
+
     assert!(!is_glob("[abc].txt"));
     assert!(!is_glob("{a,b}.txt"));
 }
@@ -34,13 +34,13 @@ fn default_excludes_with_literal_and_dir_bypass() {
         assert!(is_excluded(rel, &[]), "{rel}");
     }
     assert!(!is_excluded("src/a.rs", &[]));
-    // Exact literal always wins (dirs and locks alike).
+
     assert!(!is_excluded(
         "node_modules/x.js",
         &["node_modules/x.js".to_string()]
     ));
     assert!(!is_excluded("Cargo.lock", &["Cargo.lock".to_string()]));
-    // Naming the dir in a glob keeps its files (spec test).
+
     assert!(!is_excluded(
         "node_modules/x.js",
         &["node_modules/**/*.js".to_string()]
@@ -49,7 +49,7 @@ fn default_excludes_with_literal_and_dir_bypass() {
         "node_modules/x.js",
         &["src/**/*.js".to_string()]
     ));
-    // …but a lock still needs its own literal.
+
     assert!(is_excluded(
         "node_modules/f.lock",
         &["node_modules/**/*.js".to_string()]
@@ -66,12 +66,12 @@ fn matches(pattern: &str, rel: &str) -> bool {
 
 #[test]
 fn pattern_matching_basics() {
-    assert!(matches("*.rs", "src/a.rs")); // basename rule
-    assert!(matches("src/**/*.rs", "src/a.rs")); // ** eats zero
+    assert!(matches("*.rs", "src/a.rs"));
+    assert!(matches("src/**/*.rs", "src/a.rs"));
     assert!(matches("src/**/*.rs", "src/sub/a.rs"));
-    assert!(!matches("src/*.rs", "src/sub/a.rs")); // * no cross-/
-    assert!(!matches("src/**/*.rs", "other/a.rs")); // anchored
-    assert!(matches("target/", "target/a.rmeta")); // dir prefix
+    assert!(!matches("src/*.rs", "src/sub/a.rs"));
+    assert!(!matches("src/**/*.rs", "other/a.rs"));
+    assert!(matches("target/", "target/a.rmeta"));
 }
 
 #[test]

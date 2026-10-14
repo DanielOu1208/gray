@@ -1,4 +1,3 @@
-// UNRUN (cargo test banned under X): run in TTY/CI.
 use super::*;
 
 impl CronStore {
@@ -35,7 +34,7 @@ fn claim_is_at_most_once_across_handles() {
     let id = store
         .add("ping", "every 1h", "say hi", Deliver::Local)
         .unwrap();
-    // force due:
+
     store.set_next_run_for_test(&id, 1).unwrap();
     let cron_dir = store.cron_dir.clone();
     let a = CronStore::open(&cron_dir).unwrap();
@@ -54,8 +53,7 @@ fn live_claim_never_reclaimed_within_ttl() {
     let t0 = 1_700_000_000;
     store.set_next_run_for_test(&id, 1).unwrap();
     assert_eq!(store.claim_due(t0, "owner-a").unwrap().len(), 1);
-    // Force the job due again while the claim is still live: the live
-    // claim must still block re-fire (at-most-once).
+
     store.set_next_run_for_test(&id, 1).unwrap();
     let second = store.claim_due(t0 + 10, "owner-b").unwrap();
     assert!(second.is_empty(), "live claim must not re-fire");
@@ -70,14 +68,14 @@ fn stale_claim_is_reclaimed_with_warning_and_refires_once() {
     let t0 = 1_700_000_000;
     store.set_next_run_for_test(&id, 1).unwrap();
     assert_eq!(store.claim_due(t0, "owner-a").unwrap().len(), 1);
-    // Crashed worker: the job is due, the claim is past the TTL.
+
     store.set_next_run_for_test(&id, 1).unwrap();
     let due = store
         .claim_due(t0 + FIRE_CLAIM_TTL_SECS + 1, "owner-b")
         .unwrap();
     assert_eq!(due.len(), 1, "stale claim must be reclaimed past the TTL");
     assert_eq!(due[0].fire_claim.as_ref().unwrap().by, "owner-b");
-    // The reclaim is a single winner: the new claim is live for others.
+
     let third = store
         .claim_due(t0 + FIRE_CLAIM_TTL_SECS + 2, "owner-c")
         .unwrap();
@@ -91,7 +89,7 @@ fn corrupt_store_fails_loads_and_mutations() {
     assert!(store.list().is_err());
     assert!(store.claim_due(1_700_000_000, "o").is_err());
     assert!(store.add("x", "every 1h", "hi", Deliver::Local).is_err());
-    // Missing store still reads empty and accepts the first add.
+
     std::fs::remove_file(dir.path().join("jobs.json")).unwrap();
     assert!(store.list().unwrap().is_empty());
     store.add("x", "every 1h", "hi", Deliver::Local).unwrap();
@@ -148,7 +146,7 @@ fn add_rejects_bad_specs() {
             )
             .is_err()
     );
-    // benign prompt mentioning no lifecycle shape passes
+
     let id = store
         .add("ok", "every 1h", "check CI and report", Deliver::Local)
         .unwrap();
@@ -196,7 +194,7 @@ fn stale_recurring_fast_forwards_but_fires_once() {
     let job = store.get(&id).unwrap().unwrap();
     assert!(job.next_run_at.unwrap() > now_secs(), "advanced past now");
     assert!(job.fire_claim.unwrap().by == "owner");
-    // second tick finds nothing due (already advanced + claimed)
+
     assert!(store.claim_due(now_secs(), "owner2").unwrap().is_empty());
 }
 
@@ -221,7 +219,7 @@ fn mark_done_clears_claim_and_records_status() {
     assert!(job.fire_claim.is_none());
     assert_eq!(job.last_status, Some(RunStatus::Ok));
     assert!(job.last_run_at.is_some());
-    // one-shot completion goes terminal
+
     let dir2 = tempfile::tempdir().unwrap();
     let s2 = CronStore::open(dir2.path()).unwrap();
     let oid = s2.add("once", "in 10m", "hi", Deliver::Local).unwrap();
@@ -372,7 +370,7 @@ fn malformed_record_does_not_abort_scan() {
     let due = store.claim_due(now_secs(), "owner").unwrap();
     assert_eq!(due.len(), 1, "good record still fires past a bad one");
     assert_eq!(due[0].id, id);
-    // bad record survives the save pass
+
     let raw2: Vec<serde_json::Value> =
         serde_json::from_str(&std::fs::read_to_string(store.jobs_path()).unwrap()).unwrap();
     assert!(
@@ -498,8 +496,7 @@ fn a_reminder_round_trips_and_old_stores_default_to_a_task() {
         .unwrap();
     assert!(store.get(&id).unwrap().unwrap().reminder);
     assert_eq!(store.get(&id).unwrap().unwrap().prompt, "clean my roo");
-    // A store written before --reminder existed still loads: the field is
-    // `#[serde(default)]`, so an absent key means an ordinary agent job.
+
     let mut v = serde_json::to_value(store.list().unwrap()).unwrap();
     for job in v.as_array_mut().unwrap() {
         job.as_object_mut().unwrap().remove("reminder");
@@ -581,7 +578,7 @@ fn update_reschedules_active_jobs_and_revalidates() {
     let after = store.get(&id).unwrap().unwrap();
     assert_eq!(after.prompt, "daily digest");
     assert!(after.next_run_at.unwrap() > before + 3600);
-    // invalid edits are rejected and leave the job untouched
+
     assert!(
         store
             .update(&id, |j| {

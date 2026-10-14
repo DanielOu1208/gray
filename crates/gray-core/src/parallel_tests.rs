@@ -20,9 +20,7 @@ fn known() -> HashSet<String> {
 }
 #[test]
 fn planner_groups_only_contiguous_batchable_runs() {
-    // The `bash` call (`ls`: passes the screen) now batches with the
-    // surrounding reads; `mystery` (unknown) and the non-object `read`
-    // stay barriers.
+
     assert_eq!(
         plan_segments(&whole_case(), &known()),
         vec![
@@ -81,7 +79,7 @@ fn planner_demotes_bash_without_parsable_command() {
 #[test]
 fn planner_batches_disjoint_mutating_bash_calls() {
     let known: HashSet<String> = ["bash"].iter().map(|s| s.to_string()).collect();
-    // Non-interference: two removals of different files batch.
+
     let u = vec![
         (
             "a".into(),
@@ -98,7 +96,7 @@ fn planner_batches_disjoint_mutating_bash_calls() {
         plan_segments(&u, &known),
         vec![Segment::Parallel(vec![0, 1])]
     );
-    // Overlapping targets (rm + mv of the same file) split.
+
     let u = vec![
         (
             "a".into(),
@@ -136,7 +134,7 @@ fn planner_batches_disjoint_redirect_writes() {
         plan_segments(&u, &known),
         vec![Segment::Parallel(vec![0, 1])]
     );
-    // A reader of the redirected file interferes with its writer.
+
     let u = vec![
         (
             "a".into(),
@@ -158,7 +156,7 @@ fn planner_batches_disjoint_redirect_writes() {
 #[test]
 fn unenumerable_writes_stay_barriers() {
     let known: HashSet<String> = ["bash", "read"].iter().map(|s| s.to_string()).collect();
-    // Build tools write shared state that cannot be enumerated.
+
     let u = vec![
         ("a".into(), "bash".into(), json!({"command": "cargo test"})),
         ("b".into(), "bash".into(), json!({"command": "cargo build"})),
@@ -167,7 +165,7 @@ fn unenumerable_writes_stay_barriers() {
         plan_segments(&u, &known),
         vec![Segment::Single(0), Segment::Single(1)]
     );
-    // Dynamic operands are unenumerable even for a plain mutator.
+
     let u = vec![
         ("a".into(), "bash".into(), json!({"command": "rm $(ls)"})),
         ("b".into(), "read".into(), json!({"path": "a.txt"})),
@@ -331,8 +329,7 @@ async fn join_cancel_marks_unfinished_none() {
 
 #[test]
 fn archive_extractors_never_batch_as_reads() {
-    // Extraction writes files the command line never names, so it must not
-    // share a lane with concurrent readers (GC-4).
+
     for command in [
         "tar xf a.tar",
         "tar -xzf release.tgz -C /tmp/x",
@@ -347,26 +344,23 @@ fn archive_extractors_never_batch_as_reads() {
             "extractor batched as read-only: {command}"
         );
     }
-    // Plain reads still batch.
+
     assert!(bash_is_batchable("git diff --stat"));
 }
 
 #[test]
 fn rewrite_conflicts_demotes_only_the_rewritten_offender() {
-    // GC-6: a hook rewrote the second call into a write to the first call's
-    // path. The run must not execute it concurrently with the read.
+
     let read = json!({"path": "a.rs"});
     let rewritten_write = json!({"path": "a.rs", "content": "x"});
     let calls: Vec<(&str, &Value)> = vec![("read", &read), ("write", &rewritten_write)];
     assert_eq!(rewrite_conflicts(&calls), vec![1]);
 
-    // Untouched, non-interfering reads all stay in the lane.
     let r1 = json!({"path": "a.rs"});
     let r2 = json!({"path": "b.rs"});
     let calls: Vec<(&str, &Value)> = vec![("read", &r1), ("read", &r2)];
     assert!(rewrite_conflicts(&calls).is_empty());
 
-    // A batchable tool rewritten into an unenumerable bash command is demoted.
     let grep = json!({"pattern": "y"});
     let bash = json!({"command": "rm -rf build"});
     let calls: Vec<(&str, &Value)> = vec![("grep", &grep), ("bash", &bash)];

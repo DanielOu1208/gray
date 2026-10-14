@@ -1,11 +1,3 @@
-//! Markdown parser - transforms markdown text into styled highlight ranges.
-//!
-//! The parser processes markdown events and populates buffers with:
-//! - Highlights: Style ranges for inline formatting
-//! - Replaces: Syntax-highlighted code blocks
-//! - Transforms: Character substitutions (bullets, etc.)
-//! - Table replaces: Formatted table content
-
 use std::ops::Range;
 
 use anstyle::Style;
@@ -23,7 +15,6 @@ use crate::colors::anstyle_to_ratatui_style;
 use crate::style::{MarkdownStyle, TableBorders};
 use crate::syntax::{Syntect, syntax_highlight_raw};
 
-/// Find a substring within a haystack, optionally searching outside or using rfind.
 fn find_substring(
     haystack: &str,
     needle: &CowStr,
@@ -35,11 +26,7 @@ fn find_substring(
     }
     if !allow_outside {
         if let CowStr::Borrowed(needle) = needle {
-            // Integer-address comparison: `<`/`<=` on raw pointers from
-            // potentially different allocations, and `offset_from` across
-            // allocations, are both UB (Strict Provenance). Addresses as
-            // `usize` carry no provenance, and the byte-equality guard turns
-            // a coincidental address overlap into `None`, never a bad range.
+
             let hp = haystack.as_ptr().addr();
             let np = needle.as_ptr().addr();
             let (he, ne) = (hp + haystack.len(), np + needle.len());
@@ -62,21 +49,9 @@ fn find_substring(
     }
 }
 
-/// Decode a single HTML character entity reference (`entity` includes the
-/// leading `&` and trailing `;`) into its replacement string.
-///
-/// Delegates to [`html_escape`] for the full HTML5 named set plus numeric
-/// references (decimal `&#NN;` and hexadecimal `&#xNN;`), matching what
-/// pulldown-cmark decodes in table cells so prose and tables stay consistent.
-///
-/// Returns `None` when:
-/// - the reference is unrecognized (`html_escape` leaves it unchanged), or
-/// - it decodes to a control character (`&#27;`, `&#0;`, …). Substituting raw
-///   control bytes would let untrusted markdown inject terminal escape
-///   sequences, so the raw source is left literal instead.
 fn decode_html_entity(entity: &str) -> Option<String> {
     let decoded = html_escape::decode_html_entities(entity);
-    // Unchanged output means `html_escape` did not recognize the reference.
+
     if decoded.as_ref() == entity {
         return None;
     }
@@ -86,14 +61,8 @@ fn decode_html_entity(entity: &str) -> Option<String> {
     Some(decoded.into_owned())
 }
 
-/// Decode every HTML entity reference in `text`, returning the decoded
-/// string. Same bounded scan as [`MarkdownParser::scan_inline_html_entities`]
-/// (MAX_ENTITY_LEN 33, ASCII-only entity chars) for callers that need the
-/// decoded text rather than transform ranges — e.g. tool output cards for
-/// `web_search`/`web_fetch` bodies. Unrecognized references and references
-/// decoding to control characters stay literal.
 pub fn decode_html_entities_text(text: &str) -> String {
-    // Longest HTML5 named entity reference is 33 bytes including `&`/`;`.
+
     const MAX_ENTITY_LEN: usize = 33;
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -132,7 +101,6 @@ pub fn decode_html_entities_text(text: &str) -> String {
     out
 }
 
-/// Check if there's a blank line (empty line) after the given position.
 fn has_blank_line_after(text: &str, pos: usize) -> bool {
     text.as_bytes()[pos..]
         .iter()
@@ -141,48 +109,24 @@ fn has_blank_line_after(text: &str, pos: usize) -> bool {
         == Some(b'\n')
 }
 
-/// Markdown parser that processes events and populates buffers.
-///
-/// After calling `parse()`, the transient state (tag_stack, table_state, depth)
-/// is dropped and a `ParsedMarkdown` is returned for rendering.
 pub struct MarkdownParser<'a, 'b, 'syn> {
     text: &'a str,
     ms: MarkdownStyle,
     buffers: &'b mut MarkdownBuffers,
     syntect: Option<&'syn Syntect>,
-    // Transient state (dropped after parse)
+
     tag_stack: Vec<Tag<'a>>,
     table_state: Option<TableState>,
     depth: usize,
-    /// Current blockquote nesting depth (0 = not in any blockquote).
-    /// Used to determine which `>` on a line belongs to the current level.
+
     bq_depth: usize,
     last_checkpoint: Option<(CheckpointKind, usize)>,
-    /// Maximum width for rendered tables (in display columns).
-    /// When `Some(w)`, column widths are shrunk proportionally so the table
-    /// fits within `w` columns.  When `None`, columns use natural widths.
+
     max_table_width: Option<usize>,
-    /// Monotonically increasing counter for assigning stable link IDs.
-    /// Persisted across `rerender_tail` calls via the streaming renderer.
+
     link_id_counter: u32,
 }
 
-/// Custom word separator for table cells.
-///
-/// Like `AsciiSpace`, but also treats punctuation and symbol characters as
-/// break opportunities when followed by a letter.  This lets tables break
-/// lines at e.g. `foo/bar` or `hello-world` without ever splitting mid-word.
-///
-/// For each break point, the punctuation character is attached to whichever
-/// side produces the shorter maximum segment — e.g. `ABCD-EFG` becomes
-/// `ABCD` + `-EFG` (max 4) rather than `ABCD-` + `EFG` (max 5).
-///
-/// Only `,` and `.` between digits suppress the break — these are number
-/// formatting (e.g. `$145,000`, `3.14`).  All other punctuation can break
-/// even between digits, so phone numbers (`555-0101`), dates (`2019-03-15`)
-/// etc. become breakable.
-///
-/// Returns `true` for `<br>`, `<br/>`, `<br />`, etc. (case-insensitive).
 fn is_br_tag(html: &str) -> bool {
     let Some(inner) = html
         .trim()
@@ -196,51 +140,29 @@ fn is_br_tag(html: &str) -> bool {
     tag.eq_ignore_ascii_case("br")
 }
 
-/// URLs (validated via `url::Url::parse`) are treated as unbreakable
-/// words — no break points are placed within a URL so that terminal
-/// hyperlink detection (Cmd+Click) continues to work when cells wrap.
 pub(crate) fn cell_word_separator<'a>(
     line: &'a str,
 ) -> Box<dyn Iterator<Item = textwrap::core::Word<'a>> + 'a> {
-    // Pass 1: find break-point byte positions.
-    // A break point sits between a punctuation/symbol char and the alphabetic
-    // char that follows it.  We record (break_byte_idx, punct_byte_start)
-    // where break_byte_idx is where the next word would start if we attach
-    // the punct char to the left, and punct_byte_start is where the punct
-    // char begins (for attaching it to the right instead).
+
     let mut breaks: Vec<(usize, usize)> = Vec::new();
     {
         let mut in_whitespace = false;
         let mut after_break_char = false;
-        let mut prev_is_digit = false; // was the *previous* char a digit?
-        let mut digit_before_break = false; // was the char before the break char a digit?
+        let mut prev_is_digit = false;
+        let mut digit_before_break = false;
         let mut last_break_ch: char = '\0';
         let mut break_char_start: usize = 0;
         for (idx, ch) in line.char_indices() {
             let is_space = ch == ' ';
             let is_break_char = !is_space && !ch.is_alphanumeric();
 
-            // After a break char, decide if we should split here.
-            //
-            // Two cases allow a break:
-            //  a) Followed by a letter → always break (new word boundary).
-            //  b) Followed by a digit AND the char before the punct was
-            //     also a digit → break, UNLESS the punct is `,` or `.`
-            //     (number formatting like `$145,000` or `3.14`).
-            //
-            // This means:
-            //  - `foo/bar` breaks (letter after punct)           ✓
-            //  - `555-0101` breaks (digit-hyphen-digit)          ✓
-            //  - `$145,000` stays (digit-comma-digit)            ✓
-            //  - `$145` stays (no digit before `$`)              ✓
-            //  - `EMP-1001` breaks at hyphen (letter before it)  ✓
             let should_break = if in_whitespace && !is_space {
                 true
             } else if after_break_char {
                 if ch.is_alphabetic() {
                     true
                 } else if ch.is_ascii_digit() && digit_before_break {
-                    // digit-punct-digit: only break for non-formatting punct
+
                     last_break_ch != ',' && last_break_ch != '.'
                 } else {
                     false
@@ -268,9 +190,6 @@ pub(crate) fn cell_word_separator<'a>(
         }
     }
 
-    // Filter out break points that fall inside a URL.
-    // Each whitespace-delimited token is tested with `url::Url::parse`;
-    // tokens that parse as valid URLs are protected from splitting.
     let url_ranges: Vec<Range<usize>> = {
         let mut ranges = Vec::new();
         let mut pos = 0;
@@ -290,21 +209,18 @@ pub(crate) fn cell_word_separator<'a>(
             .any(|r| break_pos > r.start && break_pos < r.end)
     });
 
-    // Pass 2: decide attachment for each break point.
-    // For punct breaks, choose the side that minimizes max(left_len, right_len).
     let mut split_positions: Vec<usize> = Vec::with_capacity(breaks.len());
     {
         let len = line.len();
         for (i, &(attach_left, attach_right)) in breaks.iter().enumerate() {
             if attach_left == attach_right {
-                // Whitespace break — no choice.
+
                 split_positions.push(attach_left);
             } else {
-                // Determine segment boundaries for this break.
+
                 let seg_start = if i == 0 { 0 } else { split_positions[i - 1] };
                 let seg_end = if i + 1 < breaks.len() {
-                    // Use the leftward attachment of the next break as a
-                    // conservative estimate of the right segment end.
+
                     breaks[i + 1].0
                 } else {
                     len
@@ -327,7 +243,6 @@ pub(crate) fn cell_word_separator<'a>(
         }
     }
 
-    // Pass 3: emit Words at the chosen split positions.
     let mut pos = 0usize;
     let mut idx = 0usize;
     Box::new(std::iter::from_fn(move || {
@@ -347,16 +262,15 @@ pub(crate) fn cell_word_separator<'a>(
     }))
 }
 
-/// Output of [`MarkdownParser::format_table`]: the rendered lines of a single table.
 #[derive(Default)]
 struct FormattedTable {
-    /// Plain-text lines (for ANSI rendering).
+
     lines: Vec<String>,
-    /// Styled lines (for ratatui rendering).
+
     styled_lines: Vec<Line<'static>>,
-    /// Per-line source offset within the table (0 = header, 1 = separator, 2+ = body rows).
+
     line_source_offsets: Vec<usize>,
-    /// Hyperlinks (in table-local line coordinates) for links inside cells.
+
     hyperlinks: Vec<TableHyperlink>,
 }
 
@@ -382,28 +296,16 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
         }
     }
 
-    /// Set the maximum width for rendered tables.
-    ///
-    /// When set, column widths are shrunk proportionally so the table
-    /// fits within the given number of display columns.
     pub fn max_table_width(mut self, width: Option<usize>) -> Self {
         self.max_table_width = width;
         self
     }
 
-    /// Set the starting link ID counter (for streaming renderer continuity).
-    ///
-    /// Internal: only the in-crate streaming renderer needs to manage the
-    /// link counter across `rerender_tail` calls.  Consumers should use
-    /// `StreamingMarkdownRenderer` instead of touching the parser directly.
     pub(crate) fn link_id_start(mut self, id: u32) -> Self {
         self.link_id_counter = id;
         self
     }
 
-    /// Parse markdown and return a ParsedMarkdown ready for rendering.
-    ///
-    /// Consumes self, dropping transient parsing state.
     pub fn parse(mut self) -> ParsedMarkdown<'a, 'b> {
         self.tag_stack.clear();
         self.buffers.clear();
@@ -436,22 +338,13 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
     fn on_event(&mut self, event: Event<'a>, range: Range<usize>) {
         let mut parent_code_block = None;
 
-        // Apply ALL ancestors' inner styles to non-marker events.
         let skip_inner_style = matches!(
             event,
             Event::Start(_) | Event::End(_) | Event::Code(_) | Event::InlineMath(_)
         );
 
-        // Collect ancestor styles first (to avoid borrow issues)
         let ancestor_styles: Vec<Option<Style>> = if !skip_inner_style {
-            // Inside a link, inline-format ancestors (strong/emphasis/
-            // strikethrough) must not recolor the link text: their inner
-            // styles carry the theme's default text fg, and these highlights
-            // land *after* the link_text highlight pushed at Tag::Link start
-            // — merge_styles is last-wins on fg, so keeping the fg would
-            // clobber the link color (e.g. `**[bold link](url)**`). Only the
-            // fg competes with link_text today, so effects (and any bg) pass
-            // through.
+
             let in_link = self
                 .tag_stack
                 .iter()
@@ -467,12 +360,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                     Tag::Emphasis => Some(Some(strip_fg_in_link(self.ms.emphasis_inner))),
                     Tag::Strong => Some(Some(strip_fg_in_link(self.ms.strong_inner))),
                     Tag::Strikethrough => Some(Some(strip_fg_in_link(self.ms.strikethrough_inner))),
-                    // Link/Image already push their own inner-style highlight
-                    // (link_text) during on_start.  We just need ancestor_styles
-                    // to be non-empty so the Event::Text branch below skips
-                    // pushing ms.text — which would otherwise override the
-                    // link_text foreground color via merge_styles' last-wins
-                    // ordering.
+
                     Tag::Link { .. } | Tag::Image { .. } => Some(None),
                     Tag::CodeBlock(block) => {
                         parent_code_block = Some(match block {
@@ -504,15 +392,14 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             Event::Start(tag) => self.on_start(tag, range),
             Event::End(tag_end) => self.on_end(tag_end, range),
             Event::Text(text) => {
-                // Capture text into table cell if we're inside a table
+
                 if let Some(ref mut state) = self.table_state {
                     state.push_text(&text);
                 }
 
                 if let Some(parent_code_block) = parent_code_block {
                     let highlighted = match parent_code_block {
-                        // incremental open-block cache removed;
-                        // the tail re-highlights from scratch (unnoticeable).
+
                         Some(lang) => syntax_highlight_raw(self.syntect, &lang, &text),
                         None => None,
                     };
@@ -527,9 +414,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                     }
                 } else {
                     if ancestor_styles.is_empty() {
-                        // Apply the default text style only when no ancestor
-                        // (heading, strong, emphasis, etc.) already provides a
-                        // color — otherwise ms.text would override them.
+
                         self.push_highlight(Some(self.ms.text), &range);
                     } else {
                         self.push_highlight(None, &range);
@@ -540,7 +425,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 }
             }
             Event::Code(code) => {
-                // Capture code content into table cell if we're inside a table
+
                 if let Some(ref mut state) = self.table_state {
                     let prev_code = state.cell_code;
                     state.cell_code = true;
@@ -550,8 +435,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 self.style_inline_code_span(&code, &range);
             }
             Event::InlineMath(math) => {
-                // `$...$` inline math: passthrough as inline code.
-                // latex-to-unicode stack removed; raw TeX shows.
+
                 if let Some(ref mut state) = self.table_state {
                     let prev_code = state.cell_code;
                     state.cell_code = true;
@@ -562,13 +446,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 self.style_inline_code_span(&math, &range);
             }
             Event::SoftBreak => {
-                // Collapse soft breaks to spaces unless the next source
-                // byte is a list-item indent or blockquote `>` marker
-                // (the byte immediately after pulldown's SoftBreak range),
-                // in which case the line ending belongs to a block
-                // continuation and the renderer surfaces it as its own
-                // visual line. The transform spans the full range so CRLF
-                // (`\r\n`, 2 bytes) preserves byte length.
+
                 if let Some(ref mut state) = self.table_state {
                     state.push_text(" ");
                 } else {
@@ -593,9 +471,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 self.push_highlight(None, &range);
             }
             Event::Html(_) => {
-                // Render HTML block content as regular text (not code).
-                // pulldown-cmark treats XML-like tags (e.g. <example>) as HTML
-                // blocks, which previously got code-block styling via Replace.
+
                 self.push_highlight(Some(self.ms.text), &range);
             }
             Event::InlineHtml(html) => {
@@ -623,8 +499,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 }
             }
             Event::DisplayMath(math) => {
-                // `$$...$$` display math: passthrough, TeX source as code.
-                // latex-to-unicode stack removed; raw TeX shows.
+
                 if let Some(ref mut state) = self.table_state {
                     let prev_code = state.cell_code;
                     state.cell_code = true;
@@ -652,18 +527,18 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 self.push_highlight(Some(self.ms.link_outer), &range);
             }
             Event::Rule => {
-                // Style and transform "---" to "───" (horizontal rule)
+
                 self.push_highlight(Some(self.ms.rule), &range);
                 let rule_text = &self.text[range.clone()];
                 if let Some(marker_end) = rule_text.find('\n') {
-                    // Transform only up to the newline
+
                     self.buffers.transforms.push(Transform {
                         range: range.start..range.start + marker_end,
                         to: "───".to_string(),
                         force: false,
                     });
                 } else {
-                    // No trailing newline, transform the whole range
+
                     self.buffers.transforms.push(Transform {
                         range: range.clone(),
                         to: "───".to_string(),
@@ -686,7 +561,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
     }
 
     fn on_start(&mut self, tag: Tag<'a>, range: Range<usize>) {
-        // Track nesting depth for checkpoint detection
+
         match &tag {
             Tag::BlockQuote(_) | Tag::List(_) | Tag::Item | Tag::Table(_) => {
                 self.depth += 1;
@@ -715,29 +590,15 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 }
             }
             Tag::BlockQuote(_) => {
-                // Transform the `>` belonging to THIS blockquote level to `│`.
-                //
-                // For nested blockquotes (`> > inner`), pulldown-cmark emits nested
-                // BlockQuote events.  The outer event's range covers all lines,
-                // so each line in the outer range has `>` at position 0.  The inner
-                // event's range starts mid-line on the first line (after `> `) but
-                // at column 0 on subsequent lines.  On those subsequent lines, the
-                // outer `>` is included in the inner range, so we must skip it.
-                //
-                // Strategy: on each line, determine how many `>` characters belong
-                // to outer blockquote levels (by checking if the line starts at a
-                // real line boundary in the source).  If it does, skip (bq_depth-1)
-                // `>`s.  If it starts mid-line (first fragment), skip none.
+
                 let bq_text = &self.text[range.clone()];
                 let mut pos = range.start;
 
                 for line in bq_text.split_inclusive('\n') {
-                    // Does this fragment start at a source line boundary?
+
                     let at_line_start =
                         pos == 0 || self.text.as_bytes().get(pos - 1) == Some(&b'\n');
-                    // If at a line start, outer levels already have `>`s that
-                    // we must skip.  If mid-line (first fragment of range),
-                    // the outer `>`s are before the range so skip 0.
+
                     let skip = if at_line_start { self.bq_depth - 1 } else { 0 };
 
                     let mut found = 0usize;
@@ -763,22 +624,10 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                     pos += line.len();
                 }
 
-                // Return None - we've handled the styling via per-line highlights
                 None
             }
             Tag::CodeBlock(code) => {
-                // pulldown-cmark reports the code-block range starting at the
-                // fence marker (```), excluding any leading indentation on the
-                // opening-fence line. That indentation is present whenever the
-                // block is indented at the top level or nested inside a list.
-                // Extend the hidden `code_outer` highlight back over it so the
-                // whole fence line is hidden in pretty mode. Without this, the
-                // indentation leaks onto the first rendered code line, and the
-                // renderer's fence-start detection (which checks that the byte
-                // before the fence is a newline) misfires — mistaking the
-                // closing fence for an opening one and emitting a spurious
-                // blank line. Only extend when the prefix is pure whitespace so
-                // structural prefixes (e.g. a blockquote `> `) are left intact.
+
                 let line_start = self.text[..range.start].rfind('\n').map_or(0, |p| p + 1);
                 let fence_start = if self.text[line_start..range.start]
                     .bytes()
@@ -809,12 +658,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 None
             }
             Tag::HtmlBlock => {
-                // Don't syntax-highlight HTML blocks as code. In LLM output,
-                // these are typically XML-like structural tags (e.g. <example>)
-                // from system prompts, not actual HTML. Treating them as code
-                // blocks (with background styling) causes visual inconsistency
-                // because pulldown-cmark ends HTML blocks at blank lines,
-                // making the first part look like code and the rest like text.
+
                 None
             }
             Tag::List(_) => None,
@@ -901,17 +745,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             | Tag::Image {
                 dest_url, title, ..
             } => {
-                // Links inside a table cell go through the table renderer's
-                // own hyperlink path (TableHyperlink in TableReplace).  The
-                // paragraph link path (LinkTarget + chunk_link_offsets) can't
-                // project links onto rendered table cells because the table
-                // replace consumes the entire source range — no text chunk
-                // ever covers the cell's link text.
-                //
-                // We still want a stable link `id` so terminal UIs can group
-                // wrapped link fragments; assign one from the same counter
-                // used by paragraph links and stash it in `cell_link` so the
-                // following `Event::Text`s tag their CellSpans with it.
+
                 if let Some(ref mut state) = self.table_state {
                     let id = self.link_id_counter;
                     self.link_id_counter += 1;
@@ -934,18 +768,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                     }
                 }
 
-                // We intentionally use allow_outside=true here (instead of the previous
-                // pointer-based allow_outside=false) and then do an rfind on the prefix
-                // before the (last) dest_url occurrence. This is required because dest_url
-                // may be a CowStr::Owned (after percent-decoding or HTML entity expansion)
-                // and therefore may not be a sub-slice of tag_str. The rfind on the strict
-                // prefix guarantees we find the *structural* `](` closer even when the link
-                // text, title, or the dest literal itself contains the byte sequence `](`.
-                // The destination is already reachable through the stored
-                // LinkTarget (terminal OSC 8 hyperlink), so printing it inline
-                // is noise: `[label](url)` renders as just the underlined,
-                // clickable label. Images keep the visible `alt (url)` form
-                // since there is no picture to click.
                 let hide_dest = !tag_str.starts_with("![");
                 let url_rel_opt = find_substring(tag_str, dest_url, true, true);
                 if !hide_dest && let Some(r) = &url_rel_opt {
@@ -956,8 +778,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                     });
                 }
 
-                // The structural `](` search still needs the URL position
-                // even when hidden, so the locator runs unconditionally.
                 let bracket_pos_opt = url_rel_opt
                     .as_ref()
                     .and_then(|r| tag_str[..r.start].rfind("](").map(|p| p..p + 2));
@@ -995,9 +815,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                         to: "".to_string(),
                         force: false,
                     });
-                    // Hide the entire destination (including any title).
-                    // Start after the label so its source range still maps to
-                    // the visible text and the terminal keeps the real target.
+
                     self.buffers.transforms.push(Transform {
                         range: bracket_abs..if hide_dest {
                             range.end
@@ -1042,38 +860,36 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
     fn on_end(&mut self, tag_end: TagEnd, range: Range<usize>) {
         self.tag_stack.pop();
 
-        // Handle tag-specific end logic and determine if we need to push a style
         let style = match &tag_end {
             TagEnd::Emphasis => {
-                // Reset italic for table cells (no highlight pushed)
+
                 if let Some(ref mut state) = self.table_state {
                     state.cell_italic = false;
                 }
                 None
             }
             TagEnd::Strong => {
-                // Reset bold for table cells (no highlight pushed)
+
                 if let Some(ref mut state) = self.table_state {
                     state.cell_bold = false;
                 }
                 None
             }
-            TagEnd::Strikethrough => None, // No highlight pushed
+            TagEnd::Strikethrough => None,
             TagEnd::Link | TagEnd::Image => {
-                // Clear link state for table cells so subsequent text in
-                // the same cell isn't tagged as part of this link.
+
                 if let Some(ref mut state) = self.table_state {
                     state.cell_link = None;
                 }
                 None
             }
             TagEnd::TableCell => {
-                // Finish current cell
+
                 if let Some(ref mut state) = self.table_state {
                     state
                         .current_row
                         .push(std::mem::take(&mut state.current_cell));
-                    // Reset cell styles
+
                     state.cell_bold = false;
                     state.cell_italic = false;
                     state.cell_code = false;
@@ -1082,7 +898,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 None
             }
             TagEnd::TableRow => {
-                // Finish body row (if not in header)
+
                 if let Some(ref mut state) = self.table_state
                     && !state.in_header
                 {
@@ -1092,7 +908,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 None
             }
             TagEnd::TableHead => {
-                // Finish header row
+
                 if let Some(ref mut state) = self.table_state {
                     state.header = std::mem::take(&mut state.current_row);
                     state.in_header = false;
@@ -1100,7 +916,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 None
             }
             TagEnd::Table => {
-                // Finish table: format and store the replacement
+
                 if let Some(mut state) = self.table_state.take() {
                     state.range.end = range.end;
                     let FormattedTable {
@@ -1126,7 +942,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             self.push_highlight(Some(style), &range);
         }
 
-        // Track depth and checkpoints
         match &tag_end {
             TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Item | TagEnd::Table => {
                 self.depth = self.depth.saturating_sub(1);
@@ -1137,7 +952,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             self.bq_depth = self.bq_depth.saturating_sub(1);
         }
 
-        // Record checkpoint at depth=0 block boundaries
         if self.depth == 0 {
             let kind = match &tag_end {
                 TagEnd::Paragraph => Some(CheckpointKind::Paragraph),
@@ -1157,10 +971,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 let code_block_properly_closed = is_code_block && !at_eof;
 
                 if has_blank || code_block_properly_closed {
-                    // For code blocks, include one newline to properly close the block.
-                    // For other blocks (paragraphs, headings, blockquotes, lists),
-                    // DON'T include the trailing newline so that when the next chunk
-                    // is added, the blank line separator is re-rendered.
+
                     let checkpoint_pos = if is_code_block && has_blank {
                         range.end + 1
                     } else {
@@ -1172,27 +983,23 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
         }
     }
 
-    /// Apply inline-code styling to a code/math span: dim the delimiters,
-    /// style the content. Shared by `Event::Code` and the inline-math
-    /// fallback path.
     fn style_inline_code_span(&mut self, code: &CowStr<'_>, range: &Range<usize>) {
-        // Find the actual content range (excluding the delimiters).
+
         let outer_text = &self.text[range.clone()];
         if let Some(inner_range) = find_substring(outer_text, code, false, false)
             .or_else(|| find_substring(outer_text, code, true, false))
         {
             let absolute_inner = (range.start + inner_range.start)..(range.start + inner_range.end);
 
-            // Left delimiter
             if inner_range.start > 0 {
                 self.push_highlight(
                     Some(self.ms.inline_code_outer),
                     &(range.start..absolute_inner.start),
                 );
             }
-            // Inner code
+
             self.push_highlight(Some(self.ms.inline_code_inner), &absolute_inner);
-            // Right delimiter
+
             if range.end > absolute_inner.end {
                 self.push_highlight(
                     Some(self.ms.inline_code_outer),
@@ -1204,28 +1011,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
         }
     }
 
-    /// Scan a prose `Event::Text` source range for HTML character entity
-    /// references (`&lt;`, `&gt;`, `&amp;`, numeric, …) and decode each via a
-    /// pretty-mode transform, so e.g. `&lt;` displays as `<`.
-    ///
-    /// The source-faithful renderer renders the raw source bytes for prose,
-    /// which would otherwise leave entities undecoded (table cells already
-    /// decode through the cell-text path at `Event::Text` → `push_text`). The
-    /// transform is non-`force`, so raw mode still shows the verbatim source.
-    ///
-    /// A `None`-style highlight is pushed over each entity's byte range so the
-    /// renderer splits a chunk exactly there: this keeps the substitution from
-    /// straddling a chunk boundary (which would emit the replacement twice)
-    /// while leaving the surrounding text/ancestor styling untouched. Code
-    /// spans and fenced blocks never reach here, so entities inside code stay
-    /// literal.
-    ///
-    /// Panic-safety: pulldown-cmark guarantees `range` is a valid sub-slice
-    /// of `self.text`; even so, the access goes through `str::get` and
-    /// `slice::get` so a future invariant violation degrades to a no-op rather
-    /// than panicking. The inner loop only advances over ASCII bytes
-    /// (`#`/`a-z`/`A-Z`/`0-9`/`;`), guaranteeing `i` and `end` stay on UTF-8
-    /// char boundaries.
     fn scan_inline_html_entities(&mut self, range: &Range<usize>) {
         let Some(slice) = self.text.get(range.clone()) else {
             debug_assert!(false, "pulldown-cmark text range out of bounds");
@@ -1234,9 +1019,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
         if !slice.contains('&') {
             return;
         }
-        // Longest HTML5 named entity reference (`&CounterClockwiseContourIntegral;`)
-        // is 33 bytes including the leading `&` and trailing `;`. Bounding the
-        // scan keeps a run of bare `&` characters from degrading to O(n²).
+
         const MAX_ENTITY_LEN: usize = 33;
         let bytes = slice.as_bytes();
         let mut i = 0;
@@ -1245,10 +1028,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 i += 1;
                 continue;
             }
-            // An entity reference contains only ASCII name/numeric characters
-            // and no internal `;`, so the first `;` reached while consuming
-            // valid characters closes it. Stopping on any other byte avoids
-            // both quadratic scans and slicing through a multi-byte char.
+
             let max = (i + MAX_ENTITY_LEN).min(bytes.len());
             let mut j = i + 1;
             let end = loop {
@@ -1266,10 +1046,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 && let Some(decoded) = decode_html_entity(entity)
             {
                 let abs = (range.start + i)..(range.start + end + 1);
-                // An earlier scan (e.g. `\(...\)` math) may have already claimed
-                // these bytes with its own transform. Overlapping transforms
-                // would each emit their replacement, so leave the entity to the
-                // existing transform rather than double-substituting.
+
                 let overlaps = self
                     .buffers
                     .transforms
@@ -1290,12 +1067,10 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
         }
     }
 
-    /// Format a buffered table into lines with box-drawing borders.
     fn format_table(&self, state: &TableState) -> FormattedTable {
         let borders = TableBorders::BOX;
         let padding = 1;
 
-        // Style already adapted - no need to call adapt_style again
         let border_style: ratatui::style::Style = anstyle_to_ratatui_style(self.ms.rule).dim();
 
         let all_rows: Vec<&Vec<StyledCell>> = std::iter::once(&state.header)
@@ -1327,24 +1102,15 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             }
         }
 
-        // Constrain column widths to fit within max_table_width if set.
-        // Table width = 1 (left border) + sum(col_width + 2*padding) + (num_cols-1) separators + 1 (right border)
-        //             = 1 + sum(col_width) + num_cols * 2 * padding + (num_cols - 1) + 1
-        //             = num_cols * (2 * padding + 1) + sum(col_width) + 2 - 1
         if let Some(max_width) = self.max_table_width {
-            let overhead = num_cols * (2 * padding + 1) + 1; // borders + padding
+            let overhead = num_cols * (2 * padding + 1) + 1;
             let content_budget = max_width.saturating_sub(overhead);
             let total_content: usize = col_widths.iter().sum();
 
             if total_content > content_budget && total_content > 0 {
-                // Compute per-column minimum widths: the longest unbreakable
-                // word across all cells in each column.  The word separator
-                // determines what counts as unbreakable (e.g. "LongalphaToken",
-                // "$145,000", "ID-AA1001").
+
                 let mut min_col_widths: Vec<usize> = vec![1; num_cols];
-                // Per-column hard floors: the widest single grapheme (0 for
-                // empty columns) — the narrowest width at which cell text can
-                // still reflow without losing content.
+
                 let mut hard_floors: Vec<usize> = vec![0; num_cols];
                 for row in &all_rows {
                     for (col, cell) in row.iter().enumerate() {
@@ -1372,12 +1138,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 let min_total: usize = min_col_widths.iter().sum();
                 let hard_total: usize = hard_floors.iter().sum();
 
-                // Grow from the word minimums toward natural widths when the
-                // word minimums fit the budget; otherwise restart from the
-                // grapheme floors so long unbreakable tokens reflow inside
-                // their cells instead of pushing the table past the budget.
-                // When even the grapheme floors cannot fit, keep the word
-                // minimums: downstream clipping remains the safety net.
                 let (base_widths, target_widths) =
                     if min_total > content_budget && hard_total <= content_budget {
                         (hard_floors, min_col_widths)
@@ -1387,7 +1147,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 let base_total: usize = base_widths.iter().sum();
                 let extra_budget = content_budget.saturating_sub(base_total);
 
-                // How much each column *wants* above its base.
                 let extra_wants: Vec<usize> = target_widths
                     .iter()
                     .zip(&base_widths)
@@ -1397,20 +1156,18 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
 
                 let mut new_widths = base_widths.clone();
                 if total_extra_want > 0 && extra_budget > 0 {
-                    // Distribute proportionally.
+
                     for (width, &want) in new_widths.iter_mut().zip(&extra_wants) {
                         let share = (want as f64 * extra_budget as f64 / total_extra_want as f64)
                             .floor() as usize;
                         *width += share;
                     }
 
-                    // Hand out any remaining columns (from floor rounding)
-                    // to columns with the most unmet want, one at a time.
                     let used: usize = new_widths.iter().sum();
                     let mut remaining = content_budget.saturating_sub(used);
                     if remaining > 0 {
                         let mut indices: Vec<usize> = (0..num_cols).collect();
-                        // Sort by unmet want descending.
+
                         let unmet = |i: usize| {
                             target_widths
                                 .get(i)
@@ -1423,7 +1180,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                             if remaining == 0 {
                                 break;
                             }
-                            // Don't grow beyond this pass's target width.
+
                             let target = target_widths.get(idx).copied().unwrap_or(0);
                             if let Some(width) = new_widths.get_mut(idx)
                                 && *width < target
@@ -1449,9 +1206,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             })
             .collect();
 
-        // Cramped-grid fallback (codex parity): when squeezed columns fragment
-        // tokens or starve expansive cells, render vertical key/value records
-        // instead of a box grid.
         if crate::table_records::should_render_records(&state.header, &state.rows, &col_widths) {
             let label_style: ratatui::style::Style = anstyle_to_ratatui_style(self.ms.rule).bold();
             let rec = crate::table_records::render_records(
@@ -1474,14 +1228,9 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
         let mut line_source_offsets: Vec<usize> = Vec::new();
         let mut hyperlinks: Vec<TableHyperlink> = Vec::new();
 
-        // Source line layout within a table:
-        //   offset 0: header row   (| Col A | Col B |)
-        //   offset 1: separator    (|-------|-------|)
-        //   offset 2+: body rows   (| val1  | val2  |)
         let header_offset = 0usize;
         let separator_offset = 1usize;
 
-        // Top border — belongs to the header line
         let top_border = self.format_border_line(
             &col_widths,
             padding,
@@ -1494,7 +1243,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
         lines.push(top_border);
         line_source_offsets.push(header_offset);
 
-        // Header row
         if !state.header.is_empty() {
             let (row_plains, row_styleds, row_links) = self.format_styled_content_lines(
                 &state.header,
@@ -1516,7 +1264,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 hyperlinks.push(link);
             }
 
-            // Header separator
             let sep = self.format_border_line(
                 &col_widths,
                 padding,
@@ -1530,9 +1277,8 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             line_source_offsets.push(separator_offset);
         }
 
-        // Body rows
         for (i, row) in state.rows.iter().enumerate() {
-            let row_offset = separator_offset + 1 + i; // offset 2, 3, ...
+            let row_offset = separator_offset + 1 + i;
 
             let (row_plains, row_styleds, row_links) = self.format_styled_content_lines(
                 row,
@@ -1554,7 +1300,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 hyperlinks.push(link);
             }
 
-            // Row divider between body rows (not after last row)
             if i < state.rows.len().saturating_sub(1) {
                 let row_sep = self.format_border_line(
                     &col_widths,
@@ -1570,7 +1315,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             }
         }
 
-        // Bottom border — belongs to the last body row
         let last_row_offset = separator_offset + state.rows.len();
         let bottom_border = self.format_border_line(
             &col_widths,
@@ -1592,23 +1336,10 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
         }
     }
 
-    /// Word-wrap a cell's plain text into lines of at most `width` display columns.
-    /// Returns a Vec of Strings, one per visual line (never an empty Vec).
-    ///
-    /// Delegates to `textwrap::wrap` with a custom word separator that allows
-    /// line breaks after spaces, punctuation, and symbol characters — but never
-    /// mid-word.  A single word wider than `width` is then hard-split on
-    /// grapheme boundaries so no visual line exceeds the column width.
     pub(crate) fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
         wrap_cell_text(text, width)
     }
 
-    /// Format a table row that may span multiple visual lines (when cells wrap).
-    ///
-    /// Returns `(plain_lines, styled_lines, hyperlinks)` — one plain + styled
-    /// entry per visual line, plus any hyperlinks discovered in cell spans.
-    /// Hyperlink `line_offset`s are relative to the first visual line of
-    /// this row (caller adds the absolute base to embed in the table).
     #[allow(clippy::too_many_arguments)]
     fn format_styled_content_lines(
         &self,
@@ -1620,7 +1351,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
         border_style: ratatui::style::Style,
         is_header: bool,
     ) -> (Vec<String>, Vec<Line<'static>>, Vec<TableHyperlink>) {
-        // 1. Wrap each cell's text into lines constrained to col_widths[i].
+
         let wrapped_cells: Vec<Vec<String>> = (0..col_widths.len())
             .map(|i| {
                 let text = cells.get(i).map(|c| c.plain_text()).unwrap_or_default();
@@ -1628,25 +1359,18 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             })
             .collect();
 
-        // 2. Determine the number of visual lines (max wrapped lines across cells).
         let num_visual_lines = wrapped_cells.iter().map(|c| c.len()).max().unwrap_or(1);
 
-        // 3. Build each visual line.
         let mut all_plains = Vec::with_capacity(num_visual_lines);
         let mut all_styled = Vec::with_capacity(num_visual_lines);
         let mut all_links: Vec<TableHyperlink> = Vec::new();
 
-        // Monotonic per-column source cursors: each fragment is searched for
-        // strictly after the previous fragment's match end, so repeated
-        // substrings (e.g. a linked "aa" followed by a plain "aa") can never
-        // re-match earlier bytes once textwrap has eaten boundary whitespace.
         let mut source_cursors: Vec<usize> = vec![0; col_widths.len()];
 
         for vis_line in 0..num_visual_lines {
             let mut plain = String::new();
             let mut spans: Vec<Span<'static>> = Vec::new();
-            // Running display column on this visual line; used to record
-            // hyperlink column ranges in the table-local coordinate system.
+
             let mut display_col: usize = 0;
 
             plain.push(v);
@@ -1676,25 +1400,17 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                     }
                 };
 
-                // Left padding
                 let left_space = " ".repeat(padding + left_pad);
                 let left_space_width = unicode_display_width(&left_space);
                 plain.push_str(&left_space);
                 spans.push(Span::raw(left_space));
                 display_col += left_space_width;
 
-                // Cell text — slice original styled spans to match this
-                // visual line's character range, preserving per-span formatting
-                // (bold, italic, code, link) across wrap boundaries.
                 if !cell_line_text.is_empty() {
                     if let Some(cell) = cells.get(i) {
-                        // Find the byte offset of this visual line within the full
-                        // cell plain text, then emit styled spans covering that range.
+
                         let full_text = cell.plain_text();
-                        // Search from the previous fragment's match end so
-                        // whitespace textwrap ate cannot make `.find`
-                        // re-match an earlier overlapping occurrence of
-                        // this fragment.
+
                         let cursor = full_text
                             .floor_char_boundary(source_cursors.get(i).copied().unwrap_or(0));
                         let line_start = full_text
@@ -1707,15 +1423,12 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                             *next_cursor = line_end;
                         }
 
-                        // Walk the cell's spans, emitting the slice that overlaps
-                        // [line_start..line_end].
                         let mut offset = 0usize;
                         for cell_span in &cell.spans {
                             let span_start = offset;
                             let span_end = offset + cell_span.text.len();
                             offset = span_end;
 
-                            // Intersect [span_start..span_end] with [line_start..line_end]
                             let start = span_start.max(line_start);
                             let end = span_end.min(line_end);
                             if start >= end {
@@ -1741,11 +1454,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                                 style = anstyle_to_ratatui_style(self.ms.inline_code_inner);
                             }
                             if let Some((url, id)) = &cell_span.link {
-                                // Apply link styling additively (preserves
-                                // bold/italic if combined).  link_text style
-                                // typically adds underline + accent color so
-                                // the cell visually matches paragraph link
-                                // rendering.
+
                                 let link_style: ratatui::style::Style =
                                     anstyle_to_ratatui_style(self.ms.link_text);
                                 style = style.patch(link_style);
@@ -1770,14 +1479,12 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                     }
                 }
 
-                // Right padding
                 let right_space = " ".repeat(right_pad + padding);
                 let right_space_width = unicode_display_width(&right_space);
                 plain.push_str(&right_space);
                 spans.push(Span::raw(right_space));
                 display_col += right_space_width;
 
-                // Column separator
                 plain.push(v);
                 spans.push(Span::styled(v.to_string(), border_style));
                 display_col += unicode_display_width(&v.to_string());
@@ -1815,13 +1522,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
     }
 }
 
-/// Word-wrap a cell's plain text into lines of at most `width` display columns.
-/// Returns a Vec of Strings, one per visual line (never an empty Vec).
-///
-/// Delegates to `textwrap::wrap` with a custom word separator that allows
-/// line breaks after spaces, punctuation, and symbol characters — but never
-/// mid-word.  A single word wider than `width` is then hard-split on
-/// grapheme boundaries so no visual line exceeds the column width.
 pub(crate) fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![String::new()];
@@ -1838,10 +1538,7 @@ pub(crate) fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
             lines.push(line);
             continue;
         }
-        // An unbreakable word survived textwrap wider than the column
-        // (break_words is off, and textwrap's char-based emergency split
-        // can tear grapheme clusters): hard-split on grapheme boundaries
-        // using the same display-width model as the table formatter.
+
         let mut piece = String::new();
         let mut piece_width = 0usize;
         for grapheme in line.graphemes(true) {
@@ -1864,11 +1561,6 @@ pub(crate) fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
     }
 }
 
-/// Parsed markdown ready for rendering.
-///
-/// Created by `MarkdownParser::parse()`. Contains the source text, style,
-/// and a reference to the populated buffers. Transient parsing state has
-/// been dropped at this point.
 pub struct ParsedMarkdown<'a, 'b> {
     pub(crate) text: &'a str,
     pub(crate) ms: MarkdownStyle,

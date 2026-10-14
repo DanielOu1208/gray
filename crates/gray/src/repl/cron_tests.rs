@@ -1,4 +1,3 @@
-// UNRUN (cargo test banned under X): run in TTY/CI.
 use super::*;
 
 fn job(name: &str, status: Option<crate::cron::RunStatus>) -> crate::cron::CronJob {
@@ -131,9 +130,7 @@ fn disabled(name: &str) -> crate::cron::CronJob {
 
 #[test]
 fn picker_offers_no_switch_on_states_a_toggle_cannot_change() {
-    // claim_due fires only Active *and* enabled: a finished one-shot and a
-    // disabled job would change state without changing whether they run, so
-    // both render read-only and tagged.
+
     for (built, tag) in [
         (finished as fn(&str) -> crate::cron::CronJob, "[done]"),
         (disabled, "[disabled]"),
@@ -147,7 +144,7 @@ fn picker_offers_no_switch_on_states_a_toggle_cannot_change() {
 
 #[test]
 fn picker_hides_the_ticker_row_when_there_are_no_jobs() {
-    // Otherwise the ticker line crowds out the add-a-job hint on a new store.
+
     let health = crate::cron::CronHealth {
         last_tick: None,
         overdue: vec![],
@@ -159,8 +156,6 @@ fn picker_hides_the_ticker_row_when_there_are_no_jobs() {
     );
 }
 
-/// Scripted executor: each wait answers the next scripted result (`None` =
-/// the slice timed out); `pending` says whether jobs are still running.
 struct ScriptedWaits {
     answers: std::sync::Mutex<Vec<Option<()>>>,
     pending: std::sync::atomic::AtomicBool,
@@ -202,7 +197,7 @@ fn scripted(answers: Vec<Option<()>>, pending: bool) -> std::sync::Arc<ScriptedW
 
 #[tokio::test]
 async fn a_job_longer_than_one_wait_slice_still_wakes_the_prompt() {
-    // The old waiter gave up after one 24h wait; a longer job never woke.
+
     let exec = scripted(vec![None, None, Some(())], true);
     wait_then_wake(
         exec.clone(),

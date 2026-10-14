@@ -2,8 +2,6 @@ use super::*;
 
 use std::process::Command;
 
-/// ffmpeg/ffprobe are the decoder here and are not guaranteed on a build
-/// machine, so the one test that needs a real clip skips rather than fails.
 fn have_ffmpeg() -> bool {
     Command::new("ffmpeg")
         .arg("-version")
@@ -12,7 +10,6 @@ fn have_ffmpeg() -> bool {
         .unwrap_or(false)
 }
 
-/// A 2s solid-color clip: 64x64, one second per color, cheap to make.
 fn tiny_clip(path: &std::path::Path) -> bool {
     Command::new("ffmpeg")
         .args([
@@ -71,8 +68,7 @@ fn a_real_clip_becomes_a_decodable_jpeg_sheet() {
     let sheet = video_sheet(&path, 4).expect("a real clip must sheet");
     let decoded = image::load_from_memory_with_format(&sheet, image::ImageFormat::Jpeg)
         .expect("sheet must be a decodable JPEG");
-    // 4 tiles of a 64-wide source at 2 rows: wider than tall, and not a
-    // single-frame passthrough.
+
     let (w, h) = (decoded.width(), decoded.height());
     assert!(w > 64, "sheet must tile, got {w}x{h}");
     assert!(h >= 64, "sheet must tile, got {w}x{h}");
@@ -105,8 +101,7 @@ fn a_bigger_tile_count_yields_a_taller_sheet() {
 
 #[test]
 fn a_hanging_media_helper_times_out() {
-    // `sh -c 'sleep 30'` stands in for a wedged pdftotext/ffmpeg: the call
-    // must fail at the bound, not hold the attach flow forever.
+
     let err = run("sh", &["-c", "sleep 30"], Duration::from_millis(150))
         .expect_err("a hanging helper must fail");
     assert!(err.to_string().contains("timed out"), "{err}");

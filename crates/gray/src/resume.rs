@@ -54,9 +54,6 @@ fn cwd_display(cwd: &Path, width: usize) -> String {
     }
 }
 
-/// Row preview: the latest user message, so a session reads as what it was
-/// last about. Falls back to the opener for a session whose only user text is
-/// empty, then to the empty-session placeholder.
 fn preview_text(s: &SessionSummary, width: usize) -> String {
     let raw = s
         .title
@@ -74,8 +71,6 @@ fn preview_text(s: &SessionSummary, width: usize) -> String {
     }
 }
 
-/// Display id: the first 8 hex chars for a legacy UUID, the full string for
-/// a three-word name (its first `-` segment would read as just "chiral").
 pub(crate) fn short_id(id: &SessionId) -> String {
     let s = id.as_str();
     if uuid::Uuid::parse_str(s).is_ok() {
@@ -91,26 +86,15 @@ fn paths_match(a: &Path, b: &Path) -> bool {
     ca == cb
 }
 
-/// An "empty" session has no user text on either end — created but never
-/// sent a message (the `(no message yet)` row, usually the `just now`
-/// session at the top). Noise in every resume listing, so the picker,
-/// headless lists, and `--last` all skip them. Explicit `resume <id>`
-/// still loads one.
 fn is_empty_session(s: &SessionSummary) -> bool {
     let has = |o: &Option<String>| o.as_deref().is_some_and(|t| !t.trim().is_empty());
     !(has(&s.first_user_text) || has(&s.last_user_text))
 }
 
-/// An auxiliary session was minted by a non-interactive producer (subagent
-/// runs carry `origin: "subagent"` from the supervisor's env): real work,
-/// still loadable by id, but noise in pickers and `-c`/`--last` selection.
 fn is_auxiliary_session(s: &SessionSummary) -> bool {
     s.origin.is_some() || system_tag(s).is_some()
 }
 
-/// Why a session reads as gray-made, for the picker's right-hand tag: the
-/// header `origin`, or a recognisable opener from before origins existed
-/// (background-task notifications, subagent / worker prompts).
 fn system_tag(s: &SessionSummary) -> Option<String> {
     if let Some(o) = &s.origin {
         return Some(o.clone());
@@ -118,18 +102,15 @@ fn system_tag(s: &SessionSummary) -> Option<String> {
     crate::session_store::opener_tag(s.first_user_text.as_deref()?).map(str::to_string)
 }
 
-/// Shorter than this between first and last entry reads as a one-shot, not
-/// work worth flagging as cut off.
 const MIN_INTERRUPTED_SPAN_MS: u64 = 60_000;
 
-/// Where a session stands, for the picker's marker column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionState {
-    /// Finished: the last entry is an assistant reply.
+
     Done,
-    /// Cut off mid-task: nobody holds it and the last entry never got its reply.
+
     Interrupted,
-    /// Open in a live process right now.
+
     Running,
 }
 
@@ -146,7 +127,6 @@ fn session_state(s: &SessionSummary, running: &std::collections::HashSet<String>
     }
 }
 
-/// How an interrupted session was cut off, for the interrupted view.
 fn end_label(e: SessionEnd) -> &'static str {
     match e {
         SessionEnd::ToolUse => "tool call",
@@ -156,7 +136,6 @@ fn end_label(e: SessionEnd) -> &'static str {
     }
 }
 
-/// Picker status filter, cycled with shift-tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StateFilter {
     All,
@@ -181,10 +160,6 @@ impl StateFilter {
     }
 }
 
-/// Index form of [`visible_sessions`] — what the picker caches. The same
-/// filters plus a (interrupted, running, done) then newest-activity sort:
-/// identical to filtering the activity-sorted list and stable-sorting by
-/// state, computed in one pass.
 fn visible_indices(
     summaries: &[SessionSummary],
     query: &str,
@@ -225,9 +200,6 @@ fn visible_indices(
     out
 }
 
-/// Rows the picker shows: scope + search + status filter, with interrupted
-/// then running sessions floated above finished ones, each group in
-/// newest-activity order. Test surface over [`visible_indices`].
 #[cfg(test)]
 fn visible_sessions<'a>(
     summaries: &'a [SessionSummary],
@@ -243,10 +215,6 @@ fn visible_sessions<'a>(
         .collect()
 }
 
-/// Picker filter: cwd scope plus case-insensitive query over id, cwd, and user
-/// text (both ends — the preview shows the latest, a remembered opener still
-/// identifies the session). Gray-made sessions are kept only when
-/// `show_hidden`. Empty sessions never show.
 fn session_matches_with(
     s: &SessionSummary,
     query: &str,
@@ -280,10 +248,6 @@ fn session_matches_with(
             .contains(&q)
 }
 
-/// The session `--last` resumes: the one touched most recently, scoped to
-/// the cwd. Activity, not creation — a session opened last week and used
-/// this morning is the one to continue. Empty sessions (never sent a
-/// message) are skipped.
 pub fn latest_summary<'a>(
     summaries: &'a [SessionSummary],
     cwd_filter: Option<&Path>,
@@ -295,10 +259,6 @@ pub fn latest_summary<'a>(
         .max_by_key(|s| s.last_message_at)
 }
 
-/// Session summaries for headless list output, newest activity first
-/// (`/resume` with piped stdout, `gray resume` without a TTY): the picker
-/// needs a real terminal, so these print as text instead. Same cwd filter
-/// as [`latest_summary`] (`--all` disables it). Empty sessions never show.
 pub async fn recent_summaries(store: &JsonlSessionStore, all: bool) -> Vec<SessionSummary> {
     let cwd = std::env::current_dir().ok();
     let filt = if all { None } else { cwd.as_deref() };
@@ -309,15 +269,12 @@ pub async fn recent_summaries(store: &JsonlSessionStore, all: bool) -> Vec<Sessi
         .filter(|s| filt.is_none_or(|c| paths_match(&s.cwd, c)))
         .filter(|s| !is_empty_session(s) && !is_auxiliary_session(s))
         .collect();
-    // Newest activity first, like the picker: the printed age then reads
-    // monotonically instead of jumping around.
+
     out.sort_by_key(|s| s.last_message_at);
     out.reverse();
     out
 }
 
-/// One text row for headless session lists: short id, preview, age. Both the
-/// preview and the age describe the session's latest message, not its opener.
 pub fn format_summary_row(s: &SessionSummary) -> String {
     format!(
         "{} — {} ({})",
@@ -339,7 +296,6 @@ pub async fn resolve_prefix(
         return None;
     }
 
-    // 1. Exact match across all sessions
     if let Some(s) = summaries
         .iter()
         .find(|s| s.id.as_str().to_lowercase() == lower)
@@ -347,7 +303,6 @@ pub async fn resolve_prefix(
         return Some(s.id.clone());
     }
 
-    // 2. Prefix match within CWD first (if not all)
     if !all && let Some(c) = cwd.as_deref() {
         let cwd_matches: Vec<&SessionSummary> = summaries
             .iter()
@@ -357,7 +312,7 @@ pub async fn resolve_prefix(
             return Some(cwd_matches[0].id.clone());
         }
         if cwd_matches.len() > 1 {
-            // Pick most recent in CWD
+
             let latest = cwd_matches.into_iter().max_by_key(|s| s.last_message_at);
             if let Some(s) = latest {
                 return Some(s.id.clone());
@@ -365,7 +320,6 @@ pub async fn resolve_prefix(
         }
     }
 
-    // 3. Prefix match across ALL sessions in store
     let all_matches: Vec<&SessionSummary> = summaries
         .iter()
         .filter(|s| s.id.as_str().to_lowercase().starts_with(&lower))
@@ -374,7 +328,7 @@ pub async fn resolve_prefix(
         return Some(all_matches[0].id.clone());
     }
     if all_matches.len() > 1 {
-        // Pick the most recent session matching this prefix
+
         let latest = all_matches.into_iter().max_by_key(|s| s.last_message_at);
         if let Some(s) = latest {
             return Some(s.id.clone());
@@ -406,11 +360,6 @@ fn quarantined_file_name(root: &Path, raw: &str) -> Option<String> {
     prefix_hit
 }
 
-/// Strict explicit-id resolution shared by `gray resume <id>` and `gray -p
-/// --session <id>`: prefix/exact match wins, else an exact load is attempted,
-/// else the same `no session matching` error both paths report (exit 1).
-/// A file `list()` already quarantined surfaces as the quarantined truth
-/// (`session corrupt, moved to .corrupt-N`), never masked as NotFound.
 pub async fn resolve_session_strict(
     store: &JsonlSessionStore,
     raw: &str,
@@ -436,11 +385,6 @@ pub async fn resolve_session_strict(
     }
 }
 
-/// Latest session for `gray -p -c`: most recent in this directory, falling
-/// back to the global latest (mirrors the REPL `-c` path, which has no
-/// `--all` flag). `Ok(None)` when the store is empty (fresh print run).
-/// Recall-first: the remembered-session pointer answers in one file read;
-/// the full list scan is the fallback (cold start, pruned pointer).
 pub async fn latest_session_anywhere(store: &JsonlSessionStore) -> Option<SessionId> {
     let cwd = std::env::current_dir().ok();
     if let Some(c) = cwd.as_deref()
@@ -454,9 +398,6 @@ pub async fn latest_session_anywhere(store: &JsonlSessionStore) -> Option<Sessio
         .map(|s| s.id.clone())
 }
 
-/// Single model priority for every resume path (explicit/config wins over the
-/// session's recorded model), so `resume`, `--session`, and `/resume` resolve
-/// the same model — and therefore the same context window — for one session.
 pub fn effective_session_model(config_model: Option<&str>, meta_model: &str) -> Option<String> {
     let nonempty = |s: &str| !s.trim().is_empty();
     if let Some(m) = config_model
@@ -470,10 +411,6 @@ pub fn effective_session_model(config_model: Option<&str>, meta_model: &str) -> 
     None
 }
 
-/// Human-readable confirmation for non-TTY `gray resume <id>`: loads the
-/// session so the announcement states what was resumed (id + message count).
-/// `Err` when the session cannot be loaded (caller exits 1, like `--last`
-/// with no sessions — never a silent exit 0).
 pub async fn resumed_session_line(
     store: &JsonlSessionStore,
     id: &SessionId,
@@ -489,10 +426,6 @@ pub async fn resumed_session_line(
     ))
 }
 
-/// Styled stderr card for a `session_locked` refusal — the refusal sibling
-/// of [`resumed_session_line`]: same `⬢` sigil, `└` continuation, and the
-/// action line dimmed on a real terminal. `main` prints this instead of
-/// anyhow's `Error:` dump; contention is routine, not a crash.
 pub fn locked_session_card(id: &SessionId, pid: Option<u32>) -> String {
     use std::io::IsTerminal as _;
     let notice = crate::session_store::SessionError::locked_notice(id, pid);
@@ -510,7 +443,6 @@ pub fn locked_session_card(id: &SessionId, pid: Option<u32>) -> String {
     out
 }
 
-/// User sessions in `cwd` (any directory when `None`) that read as cut off.
 fn interrupted_sessions<'a>(
     summaries: &'a [SessionSummary],
     running: &std::collections::HashSet<String>,
@@ -524,9 +456,6 @@ fn interrupted_sessions<'a>(
         .collect()
 }
 
-/// Startup nudge: how many user sessions in `cwd` were cut off, and how to
-/// clear them. `None` when there are none, so a clean directory starts with
-/// no extra line.
 pub(crate) fn interrupted_hint(
     summaries: &[SessionSummary],
     running: &std::collections::HashSet<String>,
@@ -548,8 +477,6 @@ pub(crate) fn interrupted_hint(
     ))
 }
 
-/// `/sessions dismiss`: marks every interrupted user session in `cwd` (all
-/// directories when `None`) as left alone on purpose. Returns how many.
 pub(crate) async fn dismiss_interrupted(cwd: Option<&Path>) -> usize {
     let Some(root) = crate::session_store::default_root() else {
         return 0;
@@ -565,7 +492,6 @@ pub(crate) async fn dismiss_interrupted(cwd: Option<&Path>) -> usize {
         .count()
 }
 
-/// Reads the store and builds [`interrupted_hint`] for the startup screen.
 pub(crate) async fn startup_interrupted_hint(cwd: &std::path::Path) -> Option<String> {
     let store = JsonlSessionStore::new(crate::session_store::default_root()?);
     let summaries = store.list_in(cwd).await;
@@ -589,10 +515,7 @@ pub async fn run_resume_picker(
     let root = crate::session_store::default_root()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve home"))?;
     let store = JsonlSessionStore::new(root);
-    // The scan streams: `.open` lock probes and per-file summaries land on
-    // the channel while the picker is already painting, so first paint
-    // never waits on a full `store.list()` over thousands of files. Rows
-    // pop in as they parse; `Done` settles the list.
+
     let scan = store.scan(None, true);
     run_picker_sync(show_all, scan, &store, bg)
 }
@@ -621,10 +544,6 @@ fn run_picker_sync(
     let accent_peach = crate::theme::theme().accent;
     let text_dim = crate::theme::theme().text_dim;
 
-    // Rows stream in from the scan; `filtered` caches the visible order as
-    // indices into `summaries` and is recomputed only when `dirty` marks a
-    // real change (arrivals, the finished lock probes, a keypress) — never
-    // on a bare paint tick.
     let mut summaries: Vec<SessionSummary> = Vec::new();
     let mut running = std::collections::HashSet::new();
     let mut filtered: Vec<usize> = Vec::new();
@@ -636,18 +555,16 @@ fn run_picker_sync(
     let mut state_filter = StateFilter::All;
     let mut sel: usize = 0;
     let mut scroll_top: usize = 0;
-    // `ctrl-r`: the row being renamed and the title typed so far.
+
     let mut rename: Option<(SessionId, String)> = None;
-    // `enter` on a running row: take-over confirmation plus the holder pid
-    // read at keypress time (re-read on confirm inside `try_take_over`).
+
     let mut takeover: Option<(SessionId, Option<u32>)> = None;
-    // One-line picker notice (failed takeover); cleared on Enter/Esc.
+
     let mut notice: Option<String> = None;
 
     let result: anyhow::Result<Option<SessionId>> = (|| {
         loop {
-            // Drain whatever the scan produced since the last tick; every
-            // arrival invalidates the cached row order.
+
             while let Ok(event) = scan.try_recv() {
                 match event {
                     SessionScanEvent::Running(set) => running = set,
@@ -693,8 +610,7 @@ fn run_picker_sync(
                 crate::setup::render_dimmed_background(frame, &bg_snapshot);
 
                 let modal_w = 84.min(area.width.saturating_sub(2)).max(40).min(area.width);
-                // Height hugs the filtered list: 8 rows of chrome (title,
-                // search, filter, gap, spacer, footer) + one row per session.
+
                 let modal_h = (filtered.len().clamp(1, 12) as u16 + 8)
                     .min(20)
                     .min(area.height.saturating_sub(2))
@@ -872,7 +788,7 @@ fn run_picker_sync(
                 } else {
                     10usize
                 };
-                // marker column: 1 glyph + 1 space
+
                 let prev_w = (inner.width as usize)
                     .saturating_sub(1 + 2 + date_w + 2 + cwd_w + 2 + id_w + 2)
                     .max(12);
@@ -915,8 +831,7 @@ fn run_picker_sync(
                         }
                         let s = &summaries[filtered[idx]];
                         let is_sel = idx == sel;
-                        // When the latest message was sent, matching the
-                        // preview beside it — not when the session opened.
+
                         let date = format_relative(s.last_message_at);
                         let cwd_s = cwd_display(&s.cwd, cwd_w);
                         let prev = preview_text(s, prev_w);
@@ -1021,8 +936,7 @@ fn run_picker_sync(
                 continue;
             }
             let event = read()?;
-            // Any keypress may have changed the row set — recompute on the
-            // next pass rather than every tick.
+
             if matches!(
                 event,
                 Event::Key(KeyEvent {
@@ -1118,7 +1032,7 @@ fn run_picker_sync(
                         sel = 0;
                         scroll_top = 0;
                     }
-                    // Rename the highlighted session (prefilled with its title).
+
                     KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
                         rename = filtered.get(sel).map(|&i| {
                             (
@@ -1127,8 +1041,7 @@ fn run_picker_sync(
                             )
                         });
                     }
-                    // Leave an interrupted session as it is on purpose: stop
-                    // flagging it (until it sees new activity).
+
                     KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
                         let target = filtered
                             .get(sel)
@@ -1186,18 +1099,12 @@ fn run_picker_sync(
     result
 }
 
-/// Take-over attempt behind `enter` on a running picker row: SIGTERM the
-/// recorded holder, then poll the open lock until the OS releases it
-/// (process death drops the flock). `Ok` means the caller may resume —
-/// our own pid counts as immediate success (the shared registry guard
-/// already owns it; signaling ourselves would kill this REPL).
 fn try_take_over(
     store: &JsonlSessionStore,
     id: &SessionId,
     pid: Option<u32>,
 ) -> Result<(), String> {
-    // The `running` set was read when the picker opened: a holder that
-    // exited since leaves nothing to take — resume straight away.
+
     if !store.open_lock_held_sync(id) {
         return Ok(());
     }
@@ -1211,8 +1118,7 @@ fn try_take_over(
         return Ok(());
     }
     terminate_holder(pid)?;
-    // The flock drops when the holder exits; a healthy gray answers
-    // SIGTERM in milliseconds, a wedged one never does.
+
     for _ in 0..30 {
         if !store.open_lock_held_sync(id) {
             return Ok(());
@@ -1225,16 +1131,11 @@ fn try_take_over(
     ))
 }
 
-/// SIGTERM the recorded holder of a locked session. On Linux refuses a
-/// pid whose `/proc` cmdline isn't gray — a recycled pid could belong to
-/// anything. No-ops elsewhere under `cfg(unix)`; non-unix gets no kill
-/// and an explanatory error instead.
 #[cfg(unix)]
 fn terminate_holder(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        // /proc cmdline is empty through a process's exec transition —
-        // poll briefly so a mid-exec gray isn't read as a foreign pid.
+
         let mut exe = String::new();
         for _ in 0..5 {
             if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
@@ -1255,8 +1156,7 @@ fn terminate_holder(pid: u32) -> Result<(), String> {
                 }
             }
             true => {
-                // Unreadable or still-empty /proc entry: dead, foreign, or
-                // kernel thread. Probe liveness before deciding anything.
+
                 let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
                 if !alive {
                     return Err(format!("pid {pid} is already gone — pick it again"));
@@ -1274,7 +1174,6 @@ fn terminate_holder(pid: u32) -> Result<(), String> {
     }
 }
 
-/// Non-unix has no signal path here; the picker reports the refusal.
 #[cfg(not(unix))]
 fn terminate_holder(pid: u32) -> Result<(), String> {
     let _ = pid;

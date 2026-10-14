@@ -1,5 +1,3 @@
-//! Host-owned plugin provider authentication for `/connect`.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -17,8 +15,6 @@ use crate::setup::catalog::{
     normalize_custom_base_url, save_saved_config_at, saved_config_path,
 };
 
-/// UI-safe login progress. No event ever carries a token, transcript, or
-/// provider response body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PluginLoginProgress {
     Started { verification_uri: String },
@@ -39,22 +35,12 @@ fn model_tuple(model: &gray_plugin::ProviderModel) -> (String, String) {
     (model.id.clone(), name)
 }
 
-/// Run one host-owned browser login against a provider sidecar.
-///
-/// The sidecar receives only host-owned identity and the credential payload
-/// it returned; Gray saves the credential before model discovery and shuts
-/// the sidecar down on every exit path.
 pub async fn run_plugin_login(
     installed: InstalledProvider,
     cancel: CancellationToken,
     progress: tokio::sync::mpsc::UnboundedSender<PluginLoginProgress>,
 ) -> anyhow::Result<()> {
-    // Relay providers (external login: agy, claude) own their auth in the
-    // user's terminal — there is no browser OAuth to drive. Verify the login
-    // answers (sidecar probe, no browser), prove one relay turn works, mark
-    // the connection verified, then list models. This path never auto-opens
-    // a browser (that fired a Firefox OAuth page on the wrong profile out of
-    // every `/connect` pick); the OAuth path below keeps its auto-open.
+
     if installed
         .auth_method
         .operations
@@ -73,8 +59,7 @@ pub async fn run_plugin_login(
     let _ = progress.send(PluginLoginProgress::Started {
         verification_uri: operation.verification_uri.clone(),
     });
-    // OAuth path only (relay/external-login returned above): the browser
-    // completes a real OAuth callback here.
+
     crate::feedback::open_in_browser(&operation.verification_uri);
 
     let mut delay = std::time::Duration::from_millis(1_000);
@@ -173,14 +158,6 @@ pub async fn run_plugin_login(
     }
 }
 
-/// External-login connect: no browser loop, no credential save. The sidecar's
-/// own probe already checked the real login (no browser window); here one
-/// `provider/chat` handshake proves a relay turn opens, the verified marker
-/// is stored so the row counts as connected, and the pinned catalog becomes
-/// the model list. Logged-out surfaces the sidecar's terminal hint.
-///
-/// Relay-only logins hold no secret: the store keeps just the marker. Treat
-/// it as connected while it verifies; anything else is a failure message.
 async fn run_external_login(
     installed: InstalledProvider,
     cancel: CancellationToken,
@@ -242,7 +219,6 @@ async fn run_external_login(
     Ok(())
 }
 
-/// Persist a plugin-backed provider selection: never a plaintext key.
 pub fn activate_plugin_connection(
     config: &mut Config,
     installed: &InstalledProvider,
@@ -273,8 +249,7 @@ fn activate_plugin_connection_at(
     saved.credential_source = config.credential_source.clone();
     saved.auth_ref = config.auth_ref.clone();
     saved.model = config.model.clone();
-    // This connection+model's own effort — never whatever level the
-    // previous provider left behind.
+
     apply_connection_effort(config, &mut saved);
     save_saved_config_at(path, &saved)
 }
@@ -313,16 +288,12 @@ fn api_key_selection_at(config: &mut Config, path: &Path) {
     let _ = save_saved_config_at(path, &saved);
 }
 
-/// Clear plugin references when an API-key row becomes active.
 pub fn select_api_key_connection(config: &mut Config) -> anyhow::Result<()> {
     let path = saved_config_path()?;
     api_key_selection_at(config, &path);
     Ok(())
 }
 
-/// `/connect`'s saved-key shortcut: an API-key row whose key is already
-/// stored connects without the model step. Any plugin identity must go
-/// too, or `picker_scope` keeps serving the old plugin.
 pub(crate) fn connect_saved_key_at(
     config: &mut Config,
     base_url: &str,
@@ -332,8 +303,7 @@ pub(crate) fn connect_saved_key_at(
 ) -> anyhow::Result<()> {
     let _cfg_lock = lock_saved_config_at(path).ok();
     let mut saved = load_saved_config_at(path);
-    // A plugin connection's model never belongs to the API-key endpoint,
-    // even when the stored base_url already matches.
+
     let is_switching =
         saved.base_url.as_deref() != Some(base_url) || saved.credential_source == "plugin";
     config.base_url = base_url.to_string();
@@ -358,8 +328,6 @@ pub(crate) fn connect_saved_key_at(
     save_saved_config_at(path, &saved)
 }
 
-/// Saved-key shortcut against the real config path (see
-/// [`connect_saved_key_at`]); the first cached model seeds a switch.
 pub fn connect_saved_key(config: &mut Config, base_url: &str, key: &str) -> anyhow::Result<()> {
     connect_saved_key_at(config, base_url, key, &saved_config_path()?, || {
         super::model_modal::cached_models_for(base_url, Some(key))
@@ -368,12 +336,6 @@ pub fn connect_saved_key(config: &mut Config, base_url: &str, key: &str) -> anyh
     })
 }
 
-/// Effort belongs to a connection+model, not to gray: on a provider or
-/// model switch the level riding in is the *previous* target's. Restore
-/// this target's remembered level (`SavedConfig::effort_memory`), or the
-/// `high` default, and move `saved.thinking_effort` with it so the next
-/// boot agrees. `GRAY_THINKING_EFFORT` stays a user override — apply never
-/// fights it.
 pub(crate) fn apply_connection_effort(config: &mut Config, saved: &mut SavedConfig) {
     if std::env::var_os("GRAY_THINKING_EFFORT").is_some() {
         return;
@@ -391,8 +353,6 @@ pub(crate) fn apply_connection_effort(config: &mut Config, saved: &mut SavedConf
     saved.thinking_effort = config.thinking_effort.clone();
 }
 
-/// Load/save-owning variant of [`apply_connection_effort`] for callers
-/// without `saved` in hand.
 pub(crate) fn adopt_connection_effort(config: &mut Config) {
     let Ok(path) = saved_config_path() else {
         return;
@@ -403,10 +363,6 @@ pub(crate) fn adopt_connection_effort(config: &mut Config) {
     let _ = save_saved_config_at(&path, &saved);
 }
 
-/// `/connect` writes the live config as rows are picked (base URL, key) and
-/// saves to disk only once a model is chosen. Leaving it any other way must
-/// leave the session as it was: a dismissed pick otherwise stayed live,
-/// paired with the old model, and every later agent rebuild (`/model`, `/new`, a resume) sent it until a restart re-read the file.
 pub fn settle_connect_config(
     config: &mut Config,
     before: Config,
@@ -415,10 +371,7 @@ pub fn settle_connect_config(
     match outcome {
         Ok(crate::setup::ConnectOutcome::Dismissed) | Err(_) => *config = before,
         Ok(crate::setup::ConnectOutcome::Connected) => {
-            // A provider or model switch: the effort that rode in belonged
-            // to the previous target — adopt this one's own remembered
-            // level. Same connection+model re-connecting is a no-op, so the
-            // key also guards the redundant disk write.
+
             let old_key = crate::setup::catalog::effort_memory_key(
                 &before.provider_id,
                 &before.base_url,
@@ -437,11 +390,6 @@ pub fn settle_connect_config(
     }
 }
 
-/// The API key saved for this session's own endpoint, when it differs from
-/// the one the session holds. Another window's `/connect` rewrites the
-/// file, and before this only a restart picked that up. A
-/// different saved endpoint or a plugin connection is that window's provider
-/// switch, never adopted here.
 pub fn saved_key_update(config: &Config, saved: &SavedConfig) -> Option<String> {
     if config.uses_plugin_credentials() || saved.credential_source == "plugin" {
         return None;
@@ -457,8 +405,6 @@ pub fn saved_key_update(config: &Config, saved: &SavedConfig) -> Option<String> 
     (same_endpoint && config.api_key.as_deref() != Some(key)).then(|| key.to_string())
 }
 
-/// After an auth failure: adopts the key saved for this endpoint if it
-/// changed on disk. True when `config` now holds a different key.
 pub fn adopt_saved_key(config: &mut Config) -> bool {
     let Ok(path) = saved_config_path() else {
         return false;
@@ -472,7 +418,6 @@ pub fn adopt_saved_key(config: &mut Config) -> bool {
     }
 }
 
-/// Local-first plugin credential removal plus best-effort remote revoke.
 pub async fn forget_plugin_connection(
     item: &crate::setup::ConnectItem,
     config: &mut Config,
@@ -541,7 +486,6 @@ fn plugin_auth(item: &crate::setup::ConnectItem) -> anyhow::Result<ConnectAuthPl
     }
 }
 
-/// Test seam: same persistence path against an explicit saved config.
 #[cfg(test)]
 fn activate_for_test(
     config: &mut Config,

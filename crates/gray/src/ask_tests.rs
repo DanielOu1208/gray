@@ -50,7 +50,7 @@ fn answers_json_shape() {
 fn modal_finish_preselects_first_option() {
     let mut st = AskModalState::new(1);
     st.load(vec![q("a", 2)]);
-    // Untouched: option 1 committed (Enter submits with zero moves).
+
     let answers = st.finish();
     assert_eq!(answers[0].answers, vec!["o0".to_string()]);
 }
@@ -59,7 +59,7 @@ fn modal_finish_preselects_first_option() {
 fn modal_finish_skipped_is_empty() {
     let mut st = AskModalState::new(1);
     st.load(vec![q("a", 2)]);
-    st.committed[0] = false; // Backspace-skip
+    st.committed[0] = false;
     let answers = st.finish();
     assert!(answers[0].answers.is_empty());
 }
@@ -81,7 +81,7 @@ fn ask_rows_shape() {
     let mut st = AskModalState::new(1);
     st.load(vec![q("a", 2)]);
     let rows = ask_rows(&st);
-    // header + 2 options + Other + notes
+
     assert_eq!(rows.len(), 5);
     assert_eq!(rows[0].0, "❓");
     assert_eq!(rows[1].1, "1. o0");
@@ -90,7 +90,7 @@ fn ask_rows_shape() {
 
 static ASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[allow(clippy::await_holding_lock)] // serial guard must cover the whole test (global ask service)
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn handle_ask_empty_and_nonblocking_resolve_empty() {
     let _guard = ASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -105,7 +105,7 @@ async fn handle_ask_empty_and_nonblocking_resolve_empty() {
     crate::ask::shutdown();
 }
 
-#[allow(clippy::await_holding_lock)] // serial guard must cover the whole test (global ask service)
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn handle_ask_rejects_bad_shape() {
     let _guard = ASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -115,14 +115,13 @@ async fn handle_ask_rejects_bad_shape() {
     crate::ask::shutdown();
 }
 
-#[allow(clippy::await_holding_lock)] // serial guard must cover the whole test (global ask service)
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn handle_ask_without_service_errors_loudly() {
     let _guard = ASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    crate::ask::shutdown(); // ensure no service
+    crate::ask::shutdown();
     let _ = crate::ask::handle_ask(serde_json::json!({"questions": []})).await;
-    // empty short-circuits before the service check… so install nothing and
-    // ask a real question instead:
+
     let r = crate::ask::handle_ask(
         serde_json::json!({"questions": [{"id":"a","header":"H","question":"q?","options":[{"label":"x","description":"y"}]}]}),
     )

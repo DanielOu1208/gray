@@ -1,34 +1,22 @@
-//! shell/kill.rs: process-group kill with SIGTERM-to-SIGKILL escalation.
-//!
-//! Only our own groups (spawned detached via setsid, pgid == pid). Refuses
-//! degenerate groups and our own process/group before any syscall.
-
 use std::time::Duration;
 
-// POSIX signal probing is separate from the Windows Job Object path.
 #[cfg(unix)]
 use std::io;
 #[cfg(unix)]
 use std::time::Instant;
 
-/// Single raw-signal choke point. Probes with sig 0 never count.
-/// SAFETY: `kill(2)` is async-signal-safe; targets are validated by callers.
 #[cfg(unix)]
 unsafe fn signal_pid(target: i32, sig: i32) -> i32 {
     unsafe { libc::kill(target, sig) }
 }
 
-/// Unsupported platforms have no signal backend; fail closed.
 #[cfg(all(not(unix), not(windows)))]
 unsafe fn signal_pid(_target: i32, _sig: i32) -> i32 {
     -1
 }
 
-/// True when no process answers at `target` (`kill(target, 0)` gives ESRCH).
-/// Anything else (including EPERM) counts as alive: fail closed.
-/// Non-unix: no signal probe exists, so never report gone (fail closed).
 #[cfg(not(windows))]
-#[cfg_attr(not(unix), allow(dead_code))] // unsupported-platform stub never probes
+#[cfg_attr(not(unix), allow(dead_code))]
 fn gone(target: i32) -> bool {
     if unsafe { signal_pid(target, 0) } == 0 {
         return false;
@@ -43,11 +31,9 @@ fn gone(target: i32) -> bool {
     }
 }
 
-/// Shared SIGTERM, 100 ms poll, SIGKILL escalation. `sig_target` is the
-/// `kill(2)` first arg (`-pgid` for our groups).
 #[cfg(not(windows))]
 async fn escalate(sig_target: i32, what: &str, grace: Duration) -> Result<(), String> {
-    // Unsupported platforms must not pretend to have POSIX signals.
+
     #[cfg(not(unix))]
     {
         let _ = (sig_target, grace);
@@ -88,9 +74,6 @@ async fn escalate(sig_target: i32, what: &str, grace: Duration) -> Result<(), St
     }
 }
 
-/// SIGTERM a group we created, SIGKILL after `grace` when ignored.
-/// Refuses degenerate groups and our own process/group before any syscall
-/// (never broadcast). Returns `Err` on refusal.
 #[cfg(not(windows))]
 pub async fn term_then_kill(pgid: i32, grace: Duration) -> Result<(), String> {
     if pgid <= 1 {
@@ -110,19 +93,15 @@ pub async fn term_then_kill(pgid: i32, grace: Duration) -> Result<(), String> {
 }
 
 #[path = "kill_tests.rs"]
-#[cfg(all(test, unix))] // signal/sh/sleep fixtures are unix-only
+#[cfg(all(test, unix))]
 mod tests;
 
-/// Windows has no safe POSIX group-signaling equivalent. The job handle, not
-/// a reusable PID, identifies exactly the shell tree owned by this call.
 #[cfg(windows)]
 pub async fn term_then_kill(job: &super::windows::Job, _grace: Duration) -> Result<(), String> {
     job.terminate()
         .map_err(|e| format!("terminating shell job failed: {e}"))
 }
 
-/// Last-resort cleanup when the runtime drops a running command future.
-/// Normal completion disarms this after reaping; ordinary cancel uses TERM/KILL.
 #[cfg(not(windows))]
 pub(crate) struct GroupGuard {
     pub(crate) pgid: i32,

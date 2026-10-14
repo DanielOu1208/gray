@@ -1,12 +1,3 @@
-//! Ratatui-backed composer: codex/grok-build architecture sized for gray.
-//!
-//! An inline viewport (the band: slash-completion panel, status, `❯` input)
-//! sits directly under the transcript, which goes into scrollback via
-//! `CustomTerminal::insert_before` (codex's viewport model, see `terminal`).
-//! Multiline, attachments, slash popup and history are replicated from
-//! `codex-rs/tui/src/bottom_pane/chat_composer.rs` and `textarea.rs`
-//! (one-file adaptation, stdlib only).
-
 use std::io::{Stdout, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,8 +14,7 @@ use crate::text_width::display_width;
 use draw::footer_badge_visible;
 
 pub(crate) const PANEL_ROWS: usize = 6;
-/// Smallest the viewport shrinks to while idle: box top pad + `❯` row +
-/// bottom pad + context footer. No cleared slack below the footer.
+
 pub(crate) const MIN_VIEWPORT_H: u16 = 4;
 
 mod plugin_widget;
@@ -39,13 +29,6 @@ pub(crate) mod transcript;
 
 pub type SharedTui = Arc<std::sync::Mutex<Tui>>;
 
-/// Single-line `✻ Thought for …`: `N tokens` is this turn's billed output
-/// token count (exact, from the TurnEnd usage report; reasoning is already
-/// included in output, never split out). Falls back to the streamed estimate
-/// when no usage report arrived (cancelled/errored turns). Other billed
-/// Σ-per-round totals stay out of the TUI line entirely (cost basis lives in
-/// `totals` / headless `turn_footer` only). Pure for testability
-/// (`Tui::new` needs a TTY).
 pub(crate) fn format_thought_line(
     verb: &str,
     elapsed: &str,
@@ -62,17 +45,6 @@ pub(crate) fn format_thought_line(
     line
 }
 
-/// The turn-end footer: the SINGLE `✻ Thought for …` line per turn (per-run
-/// summaries were deleted — they duplicated every reasoning round and
-/// re-stamped bogus 0ms lines on stray trailing chunks, each bringing its
-/// own pair of blanks). `N tokens` is this turn's billed output (exact, from
-/// the TurnEnd usage report; reasoning is already included in output, never
-/// split out) — a per-run line could never know it, and a chars/4 fallback
-/// here would reintroduce the 2.5M-on-a-14s-turn inflation the pill dropped.
-/// `None` (cancelled/errored before any usage report) prints the bare
-/// elapsed. Rate over streaming time only; the clock stays whole-turn on
-/// purpose (it is a duration, not a rate denominator). Pure for testability
-/// (`Tui::new` needs a TTY).
 pub(crate) fn turn_footer_line(
     had_thinking: bool,
     elapsed: Duration,
@@ -86,19 +58,11 @@ pub(crate) fn turn_footer_line(
     } else {
         "Worked for"
     };
-    // Other billed Σ-per-round totals stay out of the TUI line entirely
-    // (cost basis lives in `totals` / headless `turn_footer` only).
+
     let tps = turn_toks.and_then(|toks| crate::repl::turn_tokens_per_second(toks, stream_ms));
     format_thought_line(verb, &elapsed_str, turn_toks, tps)
 }
 
-/// Elapsed time for the working pill: anchored to the turn start so the
-/// per-tool `set_status` re-stamps (`Preparing tool:` -> `Working`) never
-/// reset the visible clock mid-turn. omp parity
-/// (`packages/coding-agent/src/session/agent-session.ts` stamps prompt->yield
-/// locally at completion, never from the provider, and tool events don't
-/// touch it). Falls back to the status stamp outside turns.
-/// Pure for testability (`Tui::new` needs a TTY).
 pub(crate) fn pill_elapsed(
     turn_started: Option<Instant>,
     status_started: Instant,
@@ -113,21 +77,8 @@ pub(crate) fn pill_elapsed(
     }
 }
 
-/// Token count for the `Working… · N tokens` pill — opencode2 parity
-/// (`packages/tui/src/component/prompt/index.tsx` `usage()`): the LAST
-/// usage report only, summed over non-overlapping parts
-/// (`input + output + reasoning + cache.read + cache.write`).
-/// Gray's `output_tokens` already include reasoning (unlike the TS shape
-/// where `output` excludes it), so the sum is
-/// `non_cached + output + cache_read + cache_write`.
-///
-/// Never a chars/4 estimate (that inflated to ~2.5M on a 14s turn), never
-/// a Σ-per-round sum (each round's input already contains the full
-/// history, so summing grows superlinearly). Pure for testability.
 pub(crate) fn pill_context_tokens(u: &gray_core::event::Usage) -> usize {
-    // No measured breakdown at all (all three zero): the input total is
-    // the whole prompt (defense against hand-built shapes; every mapped
-    // and normalized report carries non_cached or cache parts).
+
     let input_part = if u.non_cached_input_tokens == 0
         && u.cache_read_input_tokens == 0
         && u.cache_write_input_tokens == 0
@@ -143,12 +94,6 @@ pub(crate) fn pill_context_tokens(u: &gray_core::event::Usage) -> usize {
         .saturating_add(u.cache_write_input_tokens)
 }
 
-/// Live context total for the footer gauge (bottom): the latest report
-/// plus the streamed estimate since that report (bytes/4, the repo's
-/// estimate heuristic), or the bare estimate before any report lands.
-/// Pure for testability. Shares the streamed delta with the pill so `+1`
-/// on top is always `+1` on the bottom, but the bases differ (context vs
-/// output).
 pub(crate) fn live_context_total(
     usage: Option<gray_core::event::Usage>,
     streamed_bytes: u64,
@@ -156,21 +101,11 @@ pub(crate) fn live_context_total(
     let est = usize::try_from(streamed_bytes / 4).unwrap_or(usize::MAX);
     match usage {
         None => est,
-        // The streamed bytes always belong to a round no report covers yet
-        // (each report resets the estimate in `set_usage`), so they add on
-        // top. The old max-replace froze the pill whenever the estimate sat
-        // below the previous round's output (e.g. a no-CoT turn following a
-        // 14k-output turn never ticked).
+
         Some(u) => pill_context_tokens(&u).saturating_add(est),
     }
 }
 
-/// `· N tokens` suffix for the working pill (top): live output tokens
-/// ([`live_turn_output_tokens`] formatted), empty before the first streamed
-/// byte or when it totals zero (mirrors opencode2's `tokens <= 0` guard).
-/// Exact reports always win on arrival (the estimate resets with each
-/// report), so the counter ticks per chunk mid-stream and snaps exact at
-/// TurnEnd, converging to the `Thought for · N tokens` line.
 pub(crate) fn live_pill_suffix(turn_output_accum: usize, streamed_bytes: u64) -> String {
     let total = live_turn_output_tokens(turn_output_accum, streamed_bytes);
     if total == 0 {
@@ -180,20 +115,11 @@ pub(crate) fn live_pill_suffix(turn_output_accum: usize, streamed_bytes: u64) ->
     }
 }
 
-/// Live output tokens for the working-pill TPS readout: completed rounds'
-/// exact `StepUsage` outputs plus the streamed estimate since the last
-/// report (bytes/4, same heuristic as the token pill). Turn-level, so the
-/// live rate converges to the final `Thought for · N tokens · T tps` line.
-/// Pure for testability.
 pub(crate) fn live_turn_output_tokens(turn_output_accum: usize, streamed_bytes: u64) -> usize {
     let est = usize::try_from(streamed_bytes / 4).unwrap_or(usize::MAX);
     turn_output_accum.saturating_add(est)
 }
 
-/// `· N tps` suffix for the working pill. The denominator is
-/// streaming-only time (`stream_ms`), so a turn sitting in a tool call
-/// never drags the live rate down. Empty before the first output byte or
-/// when nothing has streamed yet. Pure for testability.
 pub(crate) fn live_tps_suffix(
     turn_output_accum: usize,
     streamed_bytes: u64,
@@ -205,12 +131,6 @@ pub(crate) fn live_tps_suffix(
         .unwrap_or_default()
 }
 
-/// Codex parity (`reference/openai/codex/codex-rs/tui/src/chatwidget/compaction.rs`):
-/// live compaction status. Its wall clock is separate from the turn's running
-/// time, and only a matching live completion contributes a duration to the
-/// transcript. The bottom-pane input box stays mounted the whole time —
-/// compaction only touches the status dock, never the viewport, transcript,
-/// or textarea.
 pub(crate) const COMPACTION_HEADER: &str = "Compacting context";
 
 #[derive(Debug, Clone)]
@@ -219,7 +139,6 @@ pub(crate) struct ActiveCompaction {
     pub(crate) started_at: Instant,
 }
 
-/// Codex `fmt_elapsed_compact`: `0s`, `59s`, `1m 00s`, `1h 00m 00s`.
 pub(crate) fn fmt_elapsed_compact(elapsed_secs: u64) -> String {
     if elapsed_secs < 60 {
         return format!("{elapsed_secs}s");
@@ -235,12 +154,8 @@ pub(crate) fn fmt_elapsed_compact(elapsed_secs: u64) -> String {
     format!("{hours}h {minutes:02}m {seconds:02}s")
 }
 
-/// Cap for viewport-anchored live tool cards: mirrors the queued-preview
-/// cap so the 14-row viewport never pushes the input box off.
 pub(crate) const MAX_LIVE_TOOLS: usize = 3;
 
-/// Live tool headers for the viewport, oldest-first, capped. Free fn so
-/// tests cover the cap/marker policy without `Tui::new` (needs a TTY).
 pub(crate) fn live_tool_rows(
     tools: &[LiveTool],
     elapsed: Duration,
@@ -252,16 +167,15 @@ pub(crate) fn live_tool_rows(
         .take(MAX_LIVE_TOOLS)
         .flat_map(|t| {
             let mut headers = t.header.clone();
-            // The shimmer marks the headline (the first row) only.
+
             if let Some(line) = headers.first_mut().filter(|_| t.running) {
-                // ponytail: reuse the status shimmer; only the live bash verb changes.
+
                 let prefix =
                     usize::from(line.spans.first().is_some_and(|s| s.content == "\u{2b22} "));
                 if prefix == 1 {
                     line.spans[0].content = "\u{2b21} ".into();
                 }
-                // The finished verb (`Ran `, `Waited on `, …) shimmers as
-                // its live form; a header without one gets `Running `.
+
                 let live = line
                     .spans
                     .get(prefix)
@@ -295,7 +209,6 @@ pub(crate) fn live_tool_rows(
         .collect()
 }
 
-/// Overflow count past [`MAX_LIVE_TOOLS`] (pure companion for tests).
 pub(crate) fn live_tool_overflow(len: usize) -> usize {
     len.saturating_sub(MAX_LIVE_TOOLS)
 }
@@ -311,66 +224,40 @@ pub struct Tui {
     pub(crate) matches: Vec<(String, String)>,
     pub(crate) sel: usize,
     status: Option<(Instant, String)>,
-    /// A block boundary was marked and its gap is not paid yet: the next
-    /// content row lands one blank row down (see `transcript::margins`).
+
     pub(crate) gap_owed: bool,
-    /// Nesting depth of the DEC 2026 synchronized-update bracket (see
-    /// `Tui::begin_sync`): only the outermost begin/end reach the terminal.
+
     sync_depth: u32,
-    /// Nesting depth of `Tui::atomic`; while > 0 `draw` is deferred to the
-    /// outermost batch end so a multi-step scrollback commit paints once.
+
     batch_depth: u32,
-    /// A provider round ended before the next text delta.  A punctuation-only
-    /// continuation in that first delta is a live-only orphan, not a new row.
+
     stream_round_boundary: bool,
-    /// Whether the current provider round has emitted visible prose.  Keeps
-    /// the orphan guard from hiding a legitimate standalone punctuation-only
-    /// response after a tool-only round.
+
     stream_round_had_text: bool,
-    /// Index of the prose history block that owns a pending continuation.
+
     stream_round_target: Option<usize>,
-    /// Punctuation-only delta held back one chunk (`stream_text`): the
-    /// markdown renderer freezes complete blocks, so a trailing punctuation
-    /// chunk (mid-round split or post-interrupt tail) would freeze as its
-    /// own lone-`.` paragraph row. Released into the renderer when the next
-    /// meaningful delta, thinking, a tool event, or the turn end proves it
-    /// wasn't an orphan continuation.
+
     stream_punct_hold: String,
     active_compaction: Option<ActiveCompaction>,
     pub(crate) turn_started: Option<Instant>,
     turn_had_thinking: bool,
-    /// Last retry cause shown this turn: an identical one is not repeated.
+
     pub(crate) last_retry_detail: Option<String>,
     pub is_task_running: bool,
-    /// Bare Enter resumes the last turn when it was interrupted or errored
-    /// (opencode "press Enter to continue"). Set by the REPL loop; the input
-    /// layer only gates the empty-submit swallow on it.
+
     pub allow_empty_submit: bool,
-    /// An alternate-screen modal owns the terminal: the 100ms ticker must not
-    /// draw (its frames land on the modal's screen as duplicated chrome).
-    /// Set by with_modal/with_modal_sync around every modal call.
+
     pub(crate) modal_open: bool,
-    /// Scrollback rows committed to `transcript`/`history_entries` while a
-    /// modal owned the screen: the `insert_before` paint was deferred (a
-    /// scrollback insert on the alternate screen garbles the modal). The
-    /// queue flushes in order when the flag drops; a resize reflow drops it
-    /// instead — its clear + re-emit already repaints the stored rows.
+
     pub(crate) modal_pending: Vec<PendingInsert>,
-    /// Replay/reflow insert batch: while `Some`, the emit funnels collect
-    /// painted rows here instead of running an `insert_before` per block,
-    /// so a long transcript lands as one scroll instead of a visible
-    /// top-to-bottom cascade. [`Tui::end_insert_batch`] flushes it.
+
     pub(crate) insert_batch: Option<Vec<BatchedInsert>>,
-    /// Palette the scrollback was last painted under. Rows bake the window
-    /// color into their cells, so a palette switch needs one re-emit (see
-    /// [`Tui::repaint_for_palette`]).
+
     pub(crate) painted_palette: crate::theme::UiTheme,
     pub queued_inputs: std::collections::VecDeque<(String, Vec<PathBuf>)>,
-    /// `gray send` entries still waiting in this session's inbox, shown in
-    /// the queued preview so a send is never invisible until it lands.
-    /// Display-only: claiming lives in session_send, not here.
+
     pub queued_sends: Vec<(String, Vec<PathBuf>)>,
-    /// Slash command submitted via Esc mid-turn: cancel + run locally, never to the AI.
+
     pub local_command: Option<String>,
     pending: String,
     thinking: bool,
@@ -378,40 +265,27 @@ pub struct Tui {
     pub(crate) history: Vec<String>,
     pub(crate) history_idx: Option<usize>,
     pub(crate) draft: String,
-    /// Attached files, drawn as chips above the draft. Never part of its text.
+
     pub(crate) attachments: Vec<PathBuf>,
     pub(crate) pending_pastes: Vec<(String, String)>,
     model_name: String,
-    /// Footer label overriding the friendly model name (a composite
-    /// selection: `Fusion · Opus 5.5 High + SWE-2 High`).
+
     model_label: Option<String>,
     model_label_parts: Option<Vec<(String, Option<usize>)>>,
     cwd: String,
     thinking_effort: String,
-    /// Effort-badge visibility snapshotted for the turn in flight.
-    /// `Some` freezes the footer right segment's shape until `end_turn`:
-    /// the reasoning flag it hides behind is filled asynchronously by
-    /// discovery (provider `/models` and models.dev, `repl/mod.rs`), and a
-    /// mid-turn flip would resize the right-anchored segment and walk the
-    /// model name across the bar while the answer streams.
-    /// `None` between turns resolves the flag live, so the converged
-    /// provider answer still lands.
+
     turn_show_effort: Option<bool>,
-    /// Footer segment for pending background work (`2 jobs · wake in 28m`),
-    /// kept current by `repl::jobs::spawn_footer_poller`; `None` hides it.
+
     pub(crate) background_work: Option<String>,
     pub(crate) history_entries: Vec<TranscriptEntry>,
     pub transcript: Vec<Line<'static>>,
     pub(crate) last_width: u16,
-    /// Height twin of `last_width`: resize detection must fire on ANY
-    /// geometry change. Height-only drags never reflowed, so a paint
-    /// landing on stale screen math tore scrollback with no repair coming.
+
     pub(crate) last_height: u16,
     pub latest_usage: Option<gray_core::event::Usage>,
     pub cumulative_usage: Option<gray_core::event::Usage>,
-    /// Last provider request seen this session: drives the footer's
-    /// prompt-cache warmth countdown and the cache-miss warning. Fed one
-    /// `StepUsage` report per round (see [`Tui::note_cache_request`]).
+
     pub(crate) cache: crate::cache::CacheTracker,
     markdown_renderer: gray_markdown::StreamingMarkdownRenderer,
     committed_markdown_lines: usize,
@@ -419,90 +293,49 @@ pub struct Tui {
     reveal_pacing: bool,
     feeding_markdown: bool,
     pub(crate) pending_resize: Option<(u16, Instant)>,
-    /// Billed output tokens from this turn's TurnEnd usage (Σ-per-round).
-    /// Display-only: the `Thought for · N tokens` line. `None` (cancelled /
-    /// errored before any usage report) prints the bare elapsed, like an
-    /// omp turn with no reported usage. Never feeds the context gauge
-    /// (that stays `latest_usage`, latest-round size).
+
     pub(crate) turn_billed_output: Option<usize>,
-    /// Assistant-text bytes streamed this turn/round (TextDelta +
-    /// ThinkingDelta — both ride inside output_tokens). Feeds both live
-    /// estimates (top output pill + bottom context gauge, same delta);
-    /// reset per turn and per usage report, exact bills win.
+
     pub(crate) streamed_bytes: u64,
-    /// Exact `StepUsage` output tokens finalized so far this turn
-    /// (Σ-per-round). Plus the streamed estimate gives the live pill output
-    /// count and the TPS numerator, both converging to the TurnEnd billed
-    /// output. Reset per turn; never feeds the context gauge base (that
-    /// stays `latest_usage`, latest-round size).
+
     pub(crate) turn_output_accum: usize,
-    /// Streaming-only ms for this turn, mirrored from the REPL's
-    /// [`crate::repl::TurnStreamClock`]: the denominator for every live tps
-    /// readout. Reset per turn; the end-of-turn `Thought for` line reads the
-    /// same value so the pill and the final line agree.
+
     pub(crate) turn_stream_ms: u64,
-    /// Current inline viewport height. `draw` keeps it at the exact-fit
-    /// content height (+1 spare cleared row, clamped to
-    /// `MIN_VIEWPORT_H..=viewport_cap(rows)`) so there is never a 10-row idle
-    /// popups can grow it back up.
+
     pub(crate) viewport_h: u16,
-    /// Live tool cards (pi `ToolExecutionComponent`, viewport-anchored):
-    /// streaming `ToolCallStart`/`Progress` and executing `ToolCallEnd`
-    /// state, keyed by call id in first-seen order. Rendered above the
-    /// input box by `draw`; the scrollback commit at `ToolResult` stays the
-    /// single transcript render, so resume/reflow never see this.
+
     live_tools: Vec<LiveTool>,
     plugin_widget: plugin_widget::Widget,
     pub(crate) ask_modal: Option<AskModal>,
-    /// The startup notice (interrupted sessions) shown under the home
-    /// hints, until the first real turn ends the home screen.
+
     pub(crate) home_notice: Option<String>,
-    /// The plugin counts row (`N plugins · M loaded · …`) under the home
-    /// hints, filled when the startup probe lands.
+
     pub(crate) plugin_stats: Option<String>,
-    /// The exe-replaced notice (`gray was updated — /restart to load
-    /// it`): a home row directly above the input box while the home
-    /// screen is up.
+
     pub(crate) home_update: Option<String>,
     pub(crate) home_qol: Option<String>,
-    /// The current-session line (`session <id> · To resume…`, or the
-    /// no-session note): a home row in the box lead — one live row the
-    /// band redraws, so it can't stack the way a transcript `say` could.
+
     pub(crate) home_session: Option<String>,
-    /// Slash commands and their modals keep the welcome up; the first real
-    /// turn (`begin_turn`) or a replayed session ends it.
+
     pub(crate) left_home: bool,
-    /// The key or paste that skipped the logo intro before the composer
-    /// existed — `read_line` dispatches it as its first event.
+
     pub(crate) pending_input: Option<crossterm::event::Event>,
-    /// Last `statusline::version()` painted; a change (plugin status,
-    /// status command output, `/reload`) repaints the footer.
+
     status_line_seen: u64,
 }
 
-/// Inline `host/ask` modal rows, rendered by `draw` above the input box
-/// while a sidecar plugin question is live. Owned by `crate::ask` (state +
-/// rows); the composer only stores the current snapshot. Never enters
-/// `history_entries` or the transcript — the resolved summary does that.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AskModal {
-    /// (glyph, label, description) rows: header first, options, notes last.
+
     pub rows: Vec<(String, String, String)>,
-    /// Highlighted row index (header counts, so option `i` is `i + 1`).
+
     pub cursor: usize,
 }
 
-/// One in-flight tool call rendered live above the input box while the
-/// model streams its args (`streaming`) or the executor runs it
-/// (`running`). `header` is always the full
-/// [`crate::tool_fmt::format_tool_call_header`]-family line so the live
-/// card keeps its command styling; execution adds a shimmering leading label
-/// instead of the completed bash verb. Never enters `history_entries`.
 #[derive(Clone, Debug)]
 pub(crate) struct LiveTool {
     pub(crate) id: String,
-    /// Tool name — the fusion footer lights the sidekick while its
-    /// `handoff` call is the one executing.
+
     pub(crate) name: String,
     pub(crate) header: Vec<Line<'static>>,
     pub(crate) running: bool,
@@ -560,20 +393,12 @@ impl LiveToolTail {
     }
 }
 
-/// One scrollback insert held while a modal owned the screen
-/// ([`Tui::modal_pending`]). `Rows` replays through `insert_paragraph`;
-/// `Styled` keeps each row's hyperlink targets so the deferred paint still
-/// patches OSC8 links exactly like the live path.
 #[derive(Clone, Debug)]
 pub(crate) enum PendingInsert {
     Rows(Vec<Line<'static>>, Option<ratatui::style::Color>),
     Styled(Vec<(Line<'static>, Vec<HyperlinkTarget>)>),
 }
 
-/// One row of a batched scrollback insert ([`Tui::insert_batch`]): the
-/// painted line, its OSC8 hyperlink targets, and the background its own
-/// block would have used (`None` = unstyled, the plain `insert_paragraph`
-/// pass with no card bg).
 pub(crate) type BatchedInsert = (
     Line<'static>,
     Vec<HyperlinkTarget>,
@@ -588,8 +413,7 @@ pub enum TranscriptEntry {
         header: Line<'static>,
         body: Vec<Line<'static>>,
     },
-    /// A tool box whose header runs to several rows (a template preview's
-    /// second line). Drawn exactly like `ToolBox`.
+
     ToolBoxLines {
         header: Vec<Line<'static>>,
         body: Vec<Line<'static>>,
@@ -598,27 +422,15 @@ pub enum TranscriptEntry {
         lines: Vec<Line<'static>>,
         hyperlinks: Vec<HyperlinkTarget>,
     },
-    /// The graychan art from `/hehe`, stored as a marker rather than a line
-    /// snapshot: `/hehe` again drops this entry (reverting to the default
-    /// ASCII banner) and a reflow re-derives the art at the new width.
+
     Mascot,
-    /// One live reasoning run as raw source text (`\n`-terminated logical
-    /// lines plus word-cut continuations concatenated back-to-back). The
-    /// live path paints incrementally without touching history; reflow
-    /// re-wraps from this source, so widening re-joins what the live
-    /// word-cut split — unlike `StyledLines` fragments, which re-wrap
-    /// alone and can only shrink, never expand.
+
     ThinkingRun(String),
     Gap(usize),
 }
 
-/// devin-tui's home hints (`shift+tab mode`, `ctrl+p commands`, …) mapped
-/// onto gray's default keymap — right-aligned under the input panel.
 const WELCOME_HINTS: &[(&str, &str)] = &[("/", "commands")];
 
-/// devin-tui's rotating `● Tip` row, gray's verbs. The scrollback banner
-/// can't tick, so one tip is picked per process and every re-emit
-/// (resize reflow, `/hehe` revert) keeps it.
 const WELCOME_TIPS: &[(&str, &str)] = &[
     ("/", "shows every command and skill"),
     ("/models", "picks a model"),
@@ -655,9 +467,6 @@ fn welcome_tip_index() -> usize {
     })
 }
 
-/// The home hint pairs (`/` commands) as right-edge spans for a
-/// `col_w`-wide column: keys bright, labels muted; the rightmost pairs
-/// drop first when narrow.
 pub(crate) fn hint_spans(col_w: usize) -> Vec<Span<'static>> {
     let theme = crate::theme::theme();
     let hint_w = |hints: &[(&str, &str)]| -> usize {
@@ -688,7 +497,6 @@ pub(crate) fn hint_spans(col_w: usize) -> Vec<Span<'static>> {
     spans
 }
 
-/// The `● Tip` spans: prefix and key bright, the rest muted.
 pub(crate) fn tip_spans() -> Vec<Span<'static>> {
     let theme = crate::theme::theme();
     let (key, text) = WELCOME_TIPS[welcome_tip_index()];
@@ -699,7 +507,6 @@ pub(crate) fn tip_spans() -> Vec<Span<'static>> {
     ]
 }
 
-/// The plugin counts (`N plugins · M loaded · …`), dim.
 pub(crate) fn stats_spans(stats: &str) -> Vec<Span<'static>> {
     vec![Span::styled(
         stats.to_string(),
@@ -707,41 +514,15 @@ pub(crate) fn stats_spans(stats: &str) -> Vec<Span<'static>> {
     )]
 }
 
-/// The column devin centers its home block on: `(x, width)`, `min(78, w-8)`
-/// wide. The welcome logo and the home input box share it.
 pub(crate) fn home_column(w: usize) -> (usize, usize) {
     let col_w = w.saturating_sub(8).clamp(1, 78);
     (w.saturating_sub(col_w) / 2, col_w)
 }
 
-/// The welcome banner — devin-tui's home screen as scrollback: the gray
-/// ASCII logo (its diagonal gradient stands in for the braille mark's
-/// shimmer) and `gray` + version, centered horizontally on the
-/// `min(78, w-8)` column devin uses and vertically together with the
-/// composer's home band ([`draw::home_band_h`]). The composer is the rest
-/// of devin's home: the framed panel with the hints and startup
-/// notice under it, and the status bar where the corner row was. Deliberately not the graychan art —
-/// that is `/hehe` only, so the startup screen is the logo and `/hehe`
-/// again puts the logo back.
-/// The intro's baked frames: `assets/logo-intro-ascii.py` rasterizes
-/// `logo-intro-pens.py` (v1 — two pens trace the rim from the top-left
-/// corner, each diagonal setting off as a pen passes) into six braille
-/// rows plus an edge plane flagging the cells at each live pen tip, at
-/// 30fps. `intro_frames` appends a settle pass that grows the thin band
-/// raster into `logo.txt` a few dots a frame, so the intro ends exactly
-/// on the static banner.
 const INTRO_FRAME_MS: u64 = 33;
 const INTRO_TOTAL_MS: u64 = 1000;
 const INTRO_FRAMES_TXT: &str = include_str!("../../assets/logo-intro-frames.txt");
 
-/// `(mark rows, edge flags)` per frame: the bake parsed once, plus the
-/// settle pass appended. The pens' band raster is a strict subset of
-/// `logo.txt` — same emblem, thinner strokes — so the tail grows the
-/// missing dots in dilation order (ink-touching rings first) until the
-/// mark IS the banner. Each fresh dot's cell rides the edge plane for
-/// its one frame, the same flash the pen tips use, and the last two
-/// frames sit on the clean logo so whichever frame the sweep stops on
-/// is already the banner.
 fn intro_frames() -> &'static [(Vec<String>, Vec<String>)] {
     static FRAMES: std::sync::OnceLock<Vec<(Vec<String>, Vec<String>)>> =
         std::sync::OnceLock::new();
@@ -761,8 +542,7 @@ fn intro_frames() -> &'static [(Vec<String>, Vec<String>)] {
                 })
             })
             .collect();
-        // The bake pins the last frame to `logo.txt`; the last frame the
-        // pens actually drew sits one earlier. Grow it into the logo.
+
         if frames.len() >= 2 {
             frames.extend(intro_settle_frames(&frames[frames.len() - 2].0));
         }
@@ -770,7 +550,6 @@ fn intro_frames() -> &'static [(Vec<String>, Vec<String>)] {
     })
 }
 
-/// Braille dot bits per (dx, dy) inside a cell.
 const BRAILLE_BITS: [(usize, usize, u32); 8] = [
     (0, 0, 0x01),
     (0, 1, 0x02),
@@ -782,13 +561,10 @@ const BRAILLE_BITS: [(usize, usize, u32); 8] = [
     (1, 3, 0x80),
 ];
 
-/// The mark's footprint in cells (16x6 — 32x24 dots).
 const MARK_CELLS: (usize, usize) = (16, 6);
 
-/// Settle frames after the pens finish: growth frames, then two clean.
 const INTRO_SETTLE_FRAMES: usize = 12;
 
-/// Lit dots of braille `rows` as (x, y) on the 2x4-per-cell dot grid.
 fn braille_dots(rows: &[String]) -> std::collections::BTreeSet<(usize, usize)> {
     let mut out = std::collections::BTreeSet::new();
     for (r, line) in rows.iter().enumerate() {
@@ -807,7 +583,6 @@ fn braille_dots(rows: &[String]) -> std::collections::BTreeSet<(usize, usize)> {
     out
 }
 
-/// Braille rows for lit `dots` — the inverse of [`braille_dots`].
 fn dots_braille(dots: &std::collections::BTreeSet<(usize, usize)>) -> Vec<String> {
     let (cx, cy) = MARK_CELLS;
     (0..cy)
@@ -828,10 +603,6 @@ fn dots_braille(dots: &std::collections::BTreeSet<(usize, usize)>) -> Vec<String
         .collect()
 }
 
-/// The settle pass: `from` (the pens' last drawn frame) grows into
-/// `logo.txt` over [`INTRO_SETTLE_FRAMES`] frames. It only ever adds
-/// dots — a redrawn logo that drops band dots yields no settle at all,
-/// and the bake's pinned last frame then stands alone like before.
 fn intro_settle_frames(from: &[String]) -> Vec<(Vec<String>, Vec<String>)> {
     let (cx, cy) = MARK_CELLS;
     let mut target: Vec<String> = crate::tui::LOGO
@@ -844,7 +615,7 @@ fn intro_settle_frames(from: &[String]) -> Vec<(Vec<String>, Vec<String>)> {
     if ink.difference(&want).next().is_some() {
         return Vec::new();
     }
-    // Dilation order: each ring is the missing dots touching ink.
+
     let mut frontier = ink.clone();
     let mut missing: std::collections::BTreeSet<(usize, usize)> =
         want.difference(&ink).copied().collect();
@@ -901,12 +672,6 @@ fn intro_settle_frames(from: &[String]) -> Vec<(Vec<String>, Vec<String>)> {
         .collect()
 }
 
-/// The welcome body at `progress` through the baked intro — `1.0` is
-/// the finished banner. With `intro` running, its elapsed time picks
-/// the frame (30fps); otherwise `progress` maps onto the frame count.
-/// Cells a live pen tip sits on paint full-bright; the rest ride the
-/// diagonal gradient. `gray` and the version are present from the first
-/// frame; the wordmark shimmers while `intro` runs.
 fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<Line<'static>> {
     let theme = crate::theme::theme();
     let version = env!("CARGO_PKG_VERSION").to_string();
@@ -925,7 +690,6 @@ fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<L
 
     let mut body: Vec<Line<'static>> = Vec::new();
 
-    // The mark — the diagonal gradient stands in for the shimmer sweep.
     let base = theme.text_dim;
     let hilite = theme.text_bright;
     let frames = intro_frames();
@@ -972,9 +736,6 @@ fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<L
     }
     body.push(Line::from(""));
 
-    // `gray` bold bright, then the muted version — devin's title pair.
-    // Both are up from the first frame (everything starts at once);
-    // while the intro runs the wordmark rides the status-line shimmer.
     let mut title = match intro {
         Some(elapsed) => draw::shimmer_spans("gray", elapsed),
         None => vec![Span::styled(
@@ -995,9 +756,6 @@ fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<L
     body
 }
 
-/// `top` blank rows over the body: the block is this banner plus the
-/// composer's home band; the band's spacer rows take the other half of
-/// the free rows. `pub(crate)` so the reveal contract is testable.
 pub(crate) fn welcome_lines_at(
     w: usize,
     progress: f32,
@@ -1020,25 +778,13 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
     welcome_lines_at(w, 1.0, None)
 }
 
-/// The startup sweep: a vertical front draws the welcome mark left to
-/// right in the rows the banner insert is about to fill, so the
-/// animation *becomes* the banner — the insert repaints the same cells,
-/// which is what pushes them into scrollback. Skipped when the block
-/// can't fit; either way the caller still runs the plain insert. A key
-/// or paste queued mid-sweep cuts to the settled frame; the swallowed
-/// keys (Enter, Esc, Space, Ctrl-anything) end it as `None`, everything
-/// else comes back for the composer's first read as normal input.
 fn play_logo_intro(
     terminal: &mut Term,
     w: usize,
     h: usize,
     welcome_h: usize,
 ) -> Option<crossterm::event::Event> {
-    // The banner lands `overflow` rows above the band's anchor: that's how
-    // much the insert and the first band draw would scroll past the
-    // bottom. Scrolling first keeps the painted rows final — run the
-    // insert first and the frames would scroll into scrollback as a ghost
-    // copy above the real banner.
+
     let y0 = terminal.viewport_area.y as usize;
     let overflow = (y0 + welcome_h + draw::home_band_h(w)).saturating_sub(h);
     if overflow > y0 {
@@ -1050,19 +796,14 @@ fn play_logo_intro(
         let _ = write!(out, "\x1b[{h};1H{}", "\n".repeat(overflow));
         let _ = out.flush();
     }
-    // The viewport covers down to the screen's last row so the skip hints
-    // can sit in the bottom corners; they die with the animation — the
-    // later insert only pushes the welcome rows into scrollback.
+
     terminal.set_viewport_area(ratatui::layout::Rect::new(
         0,
         start as u16,
         w as u16,
         (h - start) as u16,
     ));
-    // Drain the startup-probe answers before the loop: the terminal's
-    // replies to `with_options` CPR / keyboard-mode queries sit in the
-    // input queue and the kitty parser reads the `ESC[r;cR` answer as an
-    // F-key, which would cancel the sweep on frame zero.
+
     for _ in 0..64 {
         match crossterm::event::poll(Duration::ZERO) {
             Ok(true) => {
@@ -1094,12 +835,7 @@ fn play_logo_intro(
                 row,
             );
         });
-        // poll() is the frame clock *and* the skip: queued input cuts to
-        // the finished banner. Enter/Esc/Space and Ctrl-keys are eaten
-        // here (Enter must not submit); any other key or a paste comes
-        // back so `read_line` dispatches it as normal input. The
-        // terminal's CPR/focus responses to the startup probes sit in
-        // the same queue and must not cancel the sweep.
+
         if crossterm::event::poll(Duration::from_millis(INTRO_FRAME_MS)).unwrap_or(false) {
             match crossterm::event::read() {
                 Ok(crossterm::event::Event::Key(key)) => {
@@ -1124,19 +860,11 @@ fn play_logo_intro(
             }
         }
     }
-    // Collapse the band back to a zero-height anchor at the banner's top
-    // row — on every exit, skip included. A viewport still reaching the
-    // screen bottom would make the insert scroll the whole screen: the
-    // last frame and the hint row would land in scrollback instead of
-    // the settled banner overwriting them in place.
+
     terminal.set_viewport_area(ratatui::layout::Rect::new(0, start as u16, w as u16, 0));
     skipped
 }
 
-/// Whether the scrollback must be re-emitted before the next frame: it was
-/// last painted under `painted` and the palette is now `current`. A modal
-/// owns the screen, so nothing repaints under it; the check runs again when
-/// the modal closes.
 pub(crate) fn palette_repaint_due(
     painted: crate::theme::UiTheme,
     current: crate::theme::UiTheme,
@@ -1151,8 +879,7 @@ impl Tui {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
 
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        // Roll back acquired terminal modes when construction fails: without
-        // a Tui there is no Drop to restore them.
+
         let mut terminal =
             match CustomTerminal::with_options(CrosstermBackend::new(std::io::stdout())) {
                 Ok(terminal) => terminal,
@@ -1167,12 +894,9 @@ impl Tui {
                 }
             };
 
-        // Print welcome logo into scrollback once at startup
         let welcome_lines = build_welcome_lines(cols as usize);
         let welcome_h = welcome_lines.len() as u16;
-        // The sweep plays on resume too: it runs before the replay can
-        // paint (replay needs the Tui this returns), so nothing is hidden —
-        // a resumed session just pays the same ~1.5s a fresh one does.
+
         let pending_input = if crate::setup::intro_enabled() {
             play_logo_intro(
                 &mut terminal,
@@ -1199,9 +923,6 @@ impl Tui {
         ))
     }
 
-    /// Field wiring shared by `new` (TTY terminal, welcome scrollback) and
-    /// the headless `test_tui`: `transcript`/`history_entries` carry the
-    /// caller's already-painted seed block, if any.
     fn base(
         terminal: Term,
         cols: u16,
@@ -1291,11 +1012,6 @@ impl Tui {
         }
     }
 
-    /// A `Tui` on a synthetic terminal for transcript tests: a real
-    /// `CustomTerminal` over the captured test stdout — `at_row` skips the
-    /// TTY/cursor probe `with_options` needs, so `Tui::new` stays TTY-only
-    /// while ordering tests drive the same emit paths. Assert on
-    /// `transcript` / `history_entries`, not the painted cells.
     #[cfg(test)]
     pub(crate) fn test_tui(cols: u16, rows: u16) -> Self {
         Self::base(
@@ -1313,37 +1029,22 @@ impl Tui {
         )
     }
 
-    /// Puts the band back after an alternate-screen modal (codex
-    /// `leave_alt_screen`: restore the saved viewport, repaint it).
-    /// `LeaveAlternateScreen` restores the main screen exactly as it was, so
-    /// the band's row is still right: it is cleared and repainted in place.
-    /// It used to rebuild the terminal from a cursor probe, which landed on
-    /// the old prompt row, scrolled the screen when the band overflowed it,
-    /// and left the old input box painted above the new one (a doubled `❯`
-    /// after `/resume`). Nothing is purged or re-emitted either: that is
-    /// what destroyed the transcript behind modals.
     pub(crate) fn reanchor_viewport(&mut self, cols: u16) {
         self.last_width = cols;
         if let Ok((_, rows)) = crossterm::terminal::size() {
             self.last_height = rows;
         }
         self.pending_resize = None;
-        // Mode 2004 (bracketed paste) is terminal-global; re-assert after any
-        // alternate-screen modal in case a child cleared it.
+
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
         self.atomic(|t| {
             let _ = t.terminal.clear();
         });
     }
 
-    /// Finishes the live markdown renderer and commits every row past the
-    /// last committed offset. Shared by the reflow drain and `flush_markdown`.
     fn commit_markdown_tail(&mut self) {
         self.drain_reveal();
-        // A held punctuation burst is a continuation of the paragraph the
-        // renderer is about to finish: fold it into the source before the
-        // full re-render, or `finish()` would freeze it as its own lone
-        // `.` row — the very thing the hold exists to prevent.
+
         if !self.stream_punct_hold.is_empty() {
             let held = std::mem::take(&mut self.stream_punct_hold);
             self.markdown_renderer
@@ -1364,17 +1065,12 @@ impl Tui {
             let remaining_lines: Vec<Line<'static>> =
                 output.lines[self.committed_markdown_lines..].to_vec();
             let offset = self.committed_markdown_lines;
-            // Keep the original commit offset (not the post-drain total) so
-            // `rebase_hyperlinks_for_slice` keeps attributing each URL to
-            // its own row; the counter itself advances past the drain.
+
             self.push_styled_lines_with_hyperlinks(remaining_lines, &output.hyperlinks, offset);
         }
         self.committed_markdown_lines = 0;
     }
 
-    /// Opens (or nests inside) a DEC 2026 synchronized-update bracket.
-    /// Terminals do not nest the mode, so only the outermost call writes
-    /// the escape; `end_sync` mirrors it.
     pub(crate) fn begin_sync(&mut self) {
         if self.sync_depth == 0 {
             let _ = crossterm::execute!(
@@ -1395,15 +1091,6 @@ impl Tui {
         }
     }
 
-    /// Runs `f` as ONE atomic terminal frame: every scrollback insert inside
-    /// it, plus the viewport repaint, sits in a single synchronized update.
-    ///
-    /// `insert_before` ends by clearing the viewport and used to run outside
-    /// any bracket, so the dock/input box/footer vanished until some later
-    /// `draw` (tool results, gaps and reflows all inserted without one) —
-    /// the flicker on every tool call. Nested calls coalesce: `draw` is
-    /// deferred while a batch is open and runs once when the outermost
-    /// batch closes, still inside the bracket.
     pub(crate) fn atomic<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         self.begin_sync();
         self.batch_depth += 1;
@@ -1416,9 +1103,6 @@ impl Tui {
         out
     }
 
-    /// `insert_before` + `Paragraph` render for one block of rows; `bg`
-    /// paints the card background (user/tool cards), `None` leaves rows
-    /// unstyled. One home for the scrollback insert ceremony.
     pub(crate) fn insert_paragraph(
         &mut self,
         lines: &[Line<'static>],
@@ -1446,21 +1130,6 @@ impl Tui {
         });
     }
 
-    /// Moves in-flight (painted-nowhere / stored-nowhere) buffers into
-    /// `history_entries` so an immediately-following clear + re-emit cannot
-    /// drop them. Called at the top of [`Self::reflow_on_resize`], before the
-    /// scrollback purge.
-    ///
-    /// Two buffers qualify:
-    /// - `pending`: the live thinking tail [`Tui::stream_thinking`] has not
-    ///   flushed yet. Folded into the open `ThinkingRun` (raw source, no
-    ///   paint — the reflow below repaints everything from source).
-    /// - the unfrozen markdown renderer: frozen rows are already committed
-    ///   through [`Tui::stream_text`]; only the not-yet-frozen tail is
-    ///   forced out here. The renderer only freezes complete block rows, so
-    ///   an incremental reflow may re-close an open block (e.g. repeat a
-    ///   table header) once the turn's real close arrives — a cosmetic
-    ///   duplicate row, never lost text.
     pub(crate) fn drain_inflight_for_reflow(&mut self) {
         if self.thinking && !self.pending.is_empty() {
             let rest = std::mem::take(&mut self.pending);
@@ -1469,28 +1138,19 @@ impl Tui {
         self.commit_markdown_tail();
     }
 
-    /// Re-emits the history under the palette that is live now, when a
-    /// palette switch has left it painted under the old one. Called at the
-    /// top level right after `set_theme`, never from inside an emit: the
-    /// command's own reflow (`/theme` retracts its echo first) still ran
-    /// under the outgoing palette, and every row bakes its window in.
     pub(crate) fn repaint_for_palette(&mut self) {
         if palette_repaint_due(self.painted_palette, crate::theme::theme(), self.modal_open) {
             self.reflow_on_resize(self.last_width);
         }
     }
 
-    /// Codex-style transcript reflow on terminal resize:
-    /// Clears scrollback and visible screen, re-anchors the inline viewport at the new dimensions,
-    /// and re-emits the stored transcript history so lines wrap cleanly without distortion.
     pub(crate) fn reflow_on_resize(&mut self, new_cols: u16) {
-        // One atomic frame: the clear + re-emit of the whole scrollback must
-        // never be presented half-done.
+
         self.atomic(|t| t.reflow_on_resize_inner(new_cols));
     }
 
     fn reflow_on_resize_inner(&mut self, new_cols: u16) {
-        // Every row this pass re-emits takes the palette live right now.
+
         self.painted_palette = crate::theme::theme();
         let _ = self.hide_background();
         self.last_width = new_cols;
@@ -1498,27 +1158,15 @@ impl Tui {
             self.last_height = rows;
         }
 
-        // Draining mid-stream buffers into history first is what keeps a
-        // resize from eating in-flight text: `pending` (live thinking tail)
-        // and the unfrozen markdown renderer hold content that is neither
-        // painted nor stored yet. Without this, narrowing mid-turn widened
-        // the live cut budget past the reflowed rows and the tail rendered
-        // over-wide — Paragraph has no `.wrap()`, so it hard-clips at the
-        // right edge and the reasoning reads "shortened".
         self.drain_inflight_for_reflow();
-        // The clear + re-emit below repaints everything deferred rows were
-        // already stored as; replaying the queue would paint them twice.
+
         self.modal_pending.clear();
 
-        // Codex-style: purge scrollback and the screen; the band starts over
-        // on row 0 and the re-emitted history pushes it down.
         let (cols, rows) = crossterm::terminal::size().unwrap_or((new_cols, self.last_height));
         let _ = self
             .terminal
             .clear_scrollback_and_screen(ratatui::layout::Size::new(cols, rows));
 
-        // Re-emit the history through the same funnel that laid it out
-        // live (see `transcript::margins`), so a resize keeps every margin.
         let w = new_cols as usize;
         self.transcript.clear();
         self.gap_owed = false;
@@ -1527,12 +1175,7 @@ impl Tui {
         for entry in &entries {
             match entry {
                 TranscriptEntry::Welcome => {
-                    // The banner keeps its own spacing, blank rows included.
-                    // Recorded first: the home band sizes its spacer from
-                    // `transcript`, and the insert settles the band — an
-                    // empty transcript there sized it to the full screen, so
-                    // the insert scrolled the logo off and left the band
-                    // stranded mid-screen.
+
                     let lines = build_welcome_lines(w);
                     self.record_rows(lines.clone());
                     self.insert_paragraph(&lines, Some(crate::theme::theme().window_bg));
@@ -1581,18 +1224,6 @@ impl Tui {
         let _ = self.draw();
     }
 
-    /// `/hehe` again: drops the graychan art so the transcript is back to
-    /// the default gray ASCII welcome. Scrollback has no per-line delete, so
-    /// the removal re-emits the history the way a resize does.
-    ///
-    /// The toggle flag clears first, before the marker is even looked for:
-    /// the history cap evicts the oldest entries, so in a long session the
-    /// marker can be gone while `mascot_shown()` still says the art is up.
-    /// Returning early then would leave `/hehe` answering nothing forever —
-    /// a press that paints nothing and drops nothing. Clearing first makes
-    /// the next press paint graychan again.
-    ///
-    /// Returns false when no mascot entry was there to drop.
     pub(crate) fn pop_mascot(&mut self) -> bool {
         crate::mascot::set_mascot_shown(false);
         if !crate::composer::transcript::drop_mascot_entry(&mut self.history_entries) {
@@ -1621,13 +1252,11 @@ impl Tui {
     pub fn set_model(&mut self, model: String) {
         self.model_name = model;
     }
-    /// Footer label for the model (`None` = its friendly name).
+
     pub fn set_home_notice(&mut self, notice: Option<String>) {
         self.home_notice = notice;
     }
 
-    /// The plugin stats line the home rows show; set once the startup
-    /// probe's counts land.
     pub fn set_plugin_stats(&mut self, stats: Option<String>) {
         self.plugin_stats = stats;
     }
@@ -1636,21 +1265,14 @@ impl Tui {
         self.home_qol = line;
     }
 
-    /// The exe-replaced notice rendered above the input box while the
-    /// home screen is up.
     pub fn set_home_update(&mut self, notice: Option<String>) {
         self.home_update = notice;
     }
 
-    /// The session line the box lead paints while the home screen is up.
     pub fn set_home_session(&mut self, line: Option<String>) {
         self.home_session = line;
     }
 
-    /// devin's home screen: it stays up through slash commands — their
-    /// `❯` echo card, `say()` lines and `/hehe` art hang in scrollback —
-    /// and ends only when a real turn starts (`begin_turn` flips
-    /// `left_home`) or a resumed session replays real messages.
     pub(crate) fn is_home(&self) -> bool {
         !self.left_home
             && self.history_entries.iter().all(|e| match e {
@@ -1669,9 +1291,6 @@ impl Tui {
         self.model_label = label;
     }
 
-    /// Set alongside [`set_model_label`] for composite selections: each
-    /// `(text, slot)` segment is one footer span, so the part of a fusion
-    /// label that is producing output can burn brighter.
     pub fn set_model_label_parts(&mut self, parts: Option<Vec<(String, Option<usize>)>>) {
         self.model_label_parts = parts;
     }
@@ -1681,8 +1300,7 @@ impl Tui {
     pub fn set_thinking_effort(&mut self, effort: String) {
         self.thinking_effort = effort;
     }
-    /// Dismissed/cancelled modal: drop the typed slash draft, its completion
-    /// popup and attachments so the next prompt starts clean.
+
     pub(crate) fn clear_draft(&mut self) {
         self.textarea.set_text("");
         self.matches.clear();
@@ -1693,38 +1311,19 @@ impl Tui {
         self.pending_pastes.clear();
     }
     pub fn set_usage(&mut self, usage: gray_core::event::Usage) {
-        // An unmetered round (the provider reported nothing) carries no
-        // signal: keep the previous gauge and live estimate rather than
-        // zeroing the footer for the rest of the run.
+
         if !usage.any() {
             return;
         }
         self.latest_usage = Some(usage);
         self.cumulative_usage = Some(usage);
-        // Turn-level TPS numerator: every round bills its full output, so
-        // the live rate sums each report (converges to the TurnEnd total).
-        // Input stays last-report-only (see NOTE below) — only output sums.
+
         self.turn_output_accum = self.turn_output_accum.saturating_add(usage.output_tokens);
-        // New round segment: the report carries this round's exact output,
-        // so the streamed estimate restarts rather than double-counting it.
+
         self.streamed_bytes = 0;
-        // NOTE: no per-turn accumulation of the context size. `StepUsage`
-        // carries the latest context size (each round's input already
-        // contains the full history), so summing `usage.total()` across
-        // rounds grows superlinearly (e.g. 16 rounds x ~120k = ~1.9M). The
-        // context gauge reads this last report only (opencode2 `usage()`
-        // parity); the `Working… · N tok` pill instead reads the turn-level
-        // output accum above (exact per-round outputs + stream estimate,
-        // same delta as the gauge, output base). Exact turn/session bills
-        // live in the TurnEnd totals.
+
     }
-    /// Seeds the context gauge from a char-estimate when no provider
-    /// `StepUsage` is in force: resume replay (persisted usage is billed
-    /// Σ-per-round, unrestorable as context size) and post-compaction
-    /// (history just shrank; the pre-compact `StepUsage` is stale).
-    ///
-    /// No-op on zero so callers never blank a live gauge with an empty
-    /// estimate. First real `StepUsage` overwrites via `set_usage`.
+
     pub fn seed_estimate_usage(&mut self, tokens: usize) {
         if tokens == 0 {
             return;
@@ -1740,19 +1339,10 @@ impl Tui {
         self.streamed_bytes = 0;
         self.turn_output_accum = 0;
         self.turn_stream_ms = 0;
-        // New conversation: the cache state belongs to the old context.
+
         self.cache.reset();
     }
 
-    /// Records one per-round provider usage report (the `StepUsage` arm of
-    /// the REPL dispatch) and returns the cache miss it paid for, if any.
-    /// `model` is the active model id — it prices the miss. `wire_model` is
-    /// the id actually sent (effort/variant resolved): switching either
-    /// re-bills the whole prompt — on devin-sub an effort change respawns
-    /// the upstream session outright — so identity compares the wire id and
-    /// shows up as its own miss label. Pricing comes from the same LiteLLM
-    /// table `/usage` charges against; an unpriced model reports tokens
-    /// with no cost claim.
     pub fn note_cache_request(
         &mut self,
         usage: &gray_core::event::Usage,
@@ -1763,51 +1353,34 @@ impl Tui {
         self.cache.note(usage, wire_model, rate, Instant::now())
     }
 
-    /// Time left before the prompt cache goes cold, or `None` when the
-    /// provider never reported cache activity (or it already expired).
     pub fn cache_remaining(&self) -> Option<Duration> {
         self.cache.remaining(Instant::now())
     }
 
-    /// True when the prompt cache has expired since the last request, so the
-    /// next one re-bills the whole prefix whatever it holds.
     pub fn cache_is_cold(&self) -> bool {
         self.cache.is_cold(Instant::now())
     }
 
-    /// Drops the cache baseline: a compaction replaced the context, so the
-    /// next request's prompt is new content, not re-billed content.
     pub fn reset_cache(&mut self) {
         self.cache.reset();
     }
 
-    /// Ends the active-turn cache pause on paths that abort before the
-    /// normal `end_turn` lifecycle boundary without refreshing the timer.
     pub(crate) fn resume_cache(&mut self) {
         self.cache.resume(Instant::now());
     }
 
-    /// Ends a completed turn and starts a fresh cache warmth window.
     pub(crate) fn rearm_cache(&mut self) {
         self.cache.rearm(Instant::now());
     }
 
-    /// Mirror of the turn's streaming-only elapsed ms (the tps denominator).
     pub(crate) fn set_turn_stream_ms(&mut self, ms: u64) {
         self.turn_stream_ms = ms;
     }
 
-    /// Stashes the TurnEnd billed output + reasoning counts for the `end_turn`
-    /// Thought line. Called from the TurnEnd dispatch arm (which already holds
-    /// the billed usage); `end_turn` consumes both exactly once.
     pub fn set_turn_billed(&mut self, output_tokens: usize) {
         self.turn_billed_output = Some(output_tokens);
     }
 
-    /// Upserts a live tool card (pi `updateArgs` / `markExecutionStarted`):
-    /// `header` replaces the previous one for the same `id`, first-seen
-    /// order preserved; cap mirrors the queued-preview cap so the
-    /// 14-row viewport never pushes the input box off.
     pub(crate) fn upsert_live_tool(
         &mut self,
         id: &str,
@@ -1836,13 +1409,9 @@ impl Tui {
         }
     }
 
-    /// Drops a live tool card (pi `updateResult` flips the same card:
-    /// here the scrollback commit at `ToolResult` is the flip, so the live
-    /// card just goes away).
     pub(crate) fn remove_live_tool(&mut self, id: &str) {
         if let Some(pos) = self.live_tools.iter().position(|t| t.id == id) {
-            // The band keeps its top as it shrinks; the commit that follows
-            // (`push_tool_box`) shifts it down into the rows it gave up.
+
             self.live_tools.remove(pos);
             let _ = self.draw();
         }
@@ -1874,14 +1443,10 @@ impl Tui {
         out
     }
 
-    /// Overflow count past the live-tool cap (`+N more`, like the queued
-    /// preview's `… +N more`).
     pub(crate) fn live_tool_overflow(&self) -> usize {
         live_tool_overflow(self.live_tools.len())
     }
 
-    /// Clears live tool cards without touching scrollback (cancel/error/
-    /// turn end: pi `settle_pending_cards` — leftovers never stick).
     pub(crate) fn clear_live_tools(&mut self) {
         if !self.live_tools.is_empty() {
             self.live_tools.clear();
@@ -1940,11 +1505,6 @@ impl Tui {
         }
     }
 
-    /// Replays scrollback inserts deferred while a modal owned the screen,
-    /// in arrival order. Runs on every close path (`with_modal*`, the
-    /// external-editor pause): the rows were already committed to
-    /// `transcript`/`history_entries` at emit time — this is only the
-    /// paint. The band repaints once at the end.
     pub(crate) fn flush_modal_pending(&mut self) {
         if self.modal_pending.is_empty() {
             return;
@@ -1959,17 +1519,10 @@ impl Tui {
         let _ = self.draw();
     }
 
-    /// Batch scrollback inserts: while `insert_batch` is `Some`, the emit
-    /// funnels collect their rows instead of flushing an `insert_before`
-    /// per block, so replaying or re-emitting a long transcript lands as
-    /// one scroll rather than a visible top-to-bottom cascade.
     pub(crate) fn begin_insert_batch(&mut self) {
         self.insert_batch.get_or_insert_with(Vec::new);
     }
 
-    /// One `insert_before` for everything `begin_insert_batch` collected:
-    /// rows in emit order, each with the bg and hyperlink targets its own
-    /// block would have painted. The band settles once, at the end.
     pub(crate) fn end_insert_batch(&mut self) {
         let Some(rows) = self.insert_batch.take() else {
             return;
@@ -1994,29 +1547,21 @@ impl Tui {
         input::handle_paste(self, pasted)
     }
 
-    // opencode `prompt.paste` (ctrl+v): image attach first, then OS
-
     pub fn begin_turn(&mut self, label: &str) {
-        // The first real turn ends the home screen — slash commands and
-        // their modals never reach here.
+
         self.left_home = true;
         let now = Instant::now();
-        // The pending resume is now in flight: drop the flag so neither the
-        // ghost nor a bare (empty) Enter mid-turn re-submits it.
+
         self.allow_empty_submit = false;
-        // Freeze the footer's effort badge for this turn: its flag is a
-        // process-global cache that background discovery keeps writing,
-        // and a flip mid-turn would resize the right-anchored footer text.
+
         self.turn_show_effort = Some(footer_badge_visible(&self.model_name, None));
         self.cache.pause(now);
         self.stream_round_boundary = false;
         self.stream_round_had_text = false;
         self.stream_round_target = None;
-        // Fresh turn: a hold left by an interrupted turn is its orphan tail,
-        // not a continuation of what this turn is about to stream.
+
         self.discard_held_punctuation();
-        // Codex `status_controls.rs`: follow-up input and background activity
-        // must not obscure an active compaction — keep its header/clock.
+
         if let Some(active) = self.active_compaction.clone() {
             self.is_task_running = true;
             self.status = Some((active.started_at, COMPACTION_HEADER.to_string()));
@@ -2035,17 +1580,15 @@ impl Tui {
         self.status = Some((now, label.to_string()));
         let _ = self.draw();
     }
-    /// Takes the live status dock label (for `host/ask` modal parking).
+
     pub(crate) fn take_status(&mut self) -> Option<(Instant, String)> {
         self.status.take()
     }
 
-    /// Restores a parked status dock label (for `host/ask` modal teardown).
     pub(crate) fn restore_status(&mut self, status: Option<(Instant, String)>) {
         self.status = status;
     }
 
-    /// Show (or hide, `None`) the footer's background-work segment.
     pub(crate) fn set_background_work(&mut self, label: Option<String>) {
         if self.background_work != label {
             self.background_work = label;
@@ -2054,9 +1597,7 @@ impl Tui {
     }
 
     pub fn set_status(&mut self, label: Option<&str>) {
-        // Codex parity: while compacting, every other status request
-        // (`Working`, `Preparing tool:`, …) is ignored so
-        // the `Compacting context` dock never flickers or drops the input box.
+
         if let Some(active) = self.active_compaction.clone() {
             self.status = Some((active.started_at, COMPACTION_HEADER.to_string()));
             let _ = self.draw();
@@ -2066,15 +1607,11 @@ impl Tui {
         let _ = self.draw();
     }
 
-    /// Marks the end of a live provider round.  The next text delta may be a
-    /// punctuation-only continuation of the already-painted assistant block.
     pub(crate) fn mark_stream_round_boundary(&mut self) {
         if self.is_task_running {
             if self.stream_round_had_text {
                 let was_boundary = self.stream_round_boundary;
-                // Keep the exact prose block as the anchor. A later tool,
-                // warning, compaction, or reconnect row must not steal the
-                // punctuation when the continuation finally arrives.
+
                 let target = self.history_entries.iter().rposition(|entry| {
                     matches!(
                         entry,
@@ -2092,16 +1629,11 @@ impl Tui {
                     self.stream_round_boundary = false;
                 }
             }
-            // ToolCallStart can precede the round's StepUsage. Preserve an
-            // already-armed continuation guard across that bookkeeping event.
+
             self.stream_round_had_text = false;
         }
     }
 
-    /// Codex `on_context_compaction_started`: flush the live answer stream
-    /// with a separator, then raise a dedicated `Compacting context` status
-    /// with its own timer origin. Never touches the viewport, transcript,
-    /// textarea, or turn clock — the input box stays mounted.
     pub fn begin_compaction(&mut self, id: String) {
         if self
             .active_compaction
@@ -2113,7 +1645,7 @@ impl Tui {
         self.flush_markdown();
         self.end_thinking_run(true);
         self.is_task_running = true;
-        // A compaction is a turn too: same stale-resume rule as `begin_turn`.
+
         self.allow_empty_submit = false;
         let started_at = Instant::now();
         self.active_compaction = Some(ActiveCompaction { id, started_at });
@@ -2121,10 +1653,6 @@ impl Tui {
         let _ = self.draw();
     }
 
-    /// Codex `clear_context_compaction` + `on_context_compaction_completed`:
-    /// only the matching live id clears and contributes a duration. Restores
-    /// `restore` (`Working` for auto paths, `None` for manual `/compact`)
-    /// in the same lock so the ticker can never paint a stale header.
     pub fn finish_compaction(&mut self, id: &str, restore: Option<&str>) -> Option<Duration> {
         let active = self.active_compaction.take()?;
         if active.id != id {
@@ -2169,14 +1697,11 @@ impl Tui {
 
     pub fn end_turn(&mut self, stream_ms: u64) {
         self.rearm_cache();
-        // Codex `turn_runtime.rs`: a turn ending without item completion
-        // clears a live compaction silently (no `Context compacted` line).
+
         self.active_compaction = None;
-        // Belt-and-suspenders with the TurnEnd dispatch clear: prompt_turn
-        // always calls `end_turn`, so orphaned live cards can never leak
-        // across turns even if dispatch missed the event.
+
         self.live_tools.clear();
-        // capture elapsed before clearing
+
         let elapsed = self.turn_started.take().map(|s| s.elapsed());
         let had_thinking = self.turn_had_thinking;
         self.last_retry_detail = None;
@@ -2184,34 +1709,24 @@ impl Tui {
         if self.thinking {
             self.end_thinking_run(true);
         }
-        // Finish the final stream while the live boundary rules are still
-        // active; otherwise the final markdown tail can reintroduce a
-        // duplicate blank immediately before the turn footer.
+
         self.flush_markdown();
         self.stream_round_boundary = false;
         self.stream_round_had_text = false;
         self.stream_round_target = None;
-        // The turn is over: a still-held punctuation burst was the final
-        // delta (interrupt/stream end) — an orphan continuation that must
-        // not freeze as a lone `.` transcript row.
+
         self.discard_held_punctuation();
         self.is_task_running = false;
         self.status = None;
         self.turn_show_effort = None;
-        // Drop the status dock from the band before the footer lands, so
-        // the footer and its gap fill the rows the dock gave up instead of
-        // scrolling history while the band is still at its taller height.
+
         let _ = self.draw();
-        // Billed output only (exact, reasoning included). `None` prints the
-        // bare elapsed — a chars/4 fallback here would reintroduce the very
-        // inflation the pill just dropped (2.5M on a 14s turn).
+
         let turn_toks = self.turn_billed_output;
         self.turn_billed_output = None;
         self.turn_output_accum = 0;
         self.turn_stream_ms = 0;
 
-        // Profile warnings queued mid-turn (lib code can't print while the
-        // viewport is live) surface here as dim transcript lines, once each.
         let warnings = crate::take_profile_warnings();
         if !warnings.is_empty() {
             self.ensure_gap();
@@ -2256,14 +1771,11 @@ impl Tui {
         }
     }
     pub fn tick_status(&mut self) {
-        // A modal owns the screen: any draw here lands on its alternate
-        // screen as duplicated/garbled chrome. Skip until it closes.
+
         if self.modal_open {
             return;
         }
-        // Reference: codex screen_size.rs + transcript_reflow.rs — trailing 75ms debounce.
-        // Rows ride along: a height-only drag must reflow too, otherwise a
-        // paint on stale screen math tears scrollback with no repair coming.
+
         if let Some((cols, deadline)) = self.pending_resize {
             if Instant::now() >= deadline {
                 self.pending_resize = None;
@@ -2283,9 +1795,7 @@ impl Tui {
             }
         }
         let widget_changed = self.plugin_widget.refresh();
-        // A warm prompt cache keeps the footer countdown (◷ 4m) live, so
-        // the 100ms ticker must keep painting while it runs — the same
-        // reason the status dock and its shimmer tick.
+
         let cache_ticking = self.cache_remaining().is_some();
         let footer_changed = crate::statusline::version() != self.status_line_seen;
         if self.status.is_none()
@@ -2303,8 +1813,7 @@ impl Tui {
         self.background_closed = true;
         let _ = self.hide_background();
         self.background = None;
-        // The band's seam row was the gap under the last block; it leaves
-        // with the band, so pay it into scrollback before the shell prompt.
+
         self.gap_owed = true;
         self.pay_gap();
         let _ = self.terminal.clear();

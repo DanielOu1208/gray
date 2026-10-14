@@ -1,11 +1,3 @@
-//! Task 2.2: index client integration tests over a loopback axum server.
-//!
-//! Hermetic: ephemeral ports, fresh `TempDir` per test for `GRAY_HOME`
-//! (isolates the index cache), no external network. Env-touching tests
-//! hold the process-wide `ENV_LOCK` (Rust runs tests in one process).
-
-// Deliberate: the env lock must span each whole test (env is read inside
-// the awaited calls), so holding a std guard across await is the point.
 #![allow(clippy::await_holding_lock)]
 
 use std::sync::Mutex;
@@ -43,11 +35,9 @@ async fn spawn(router: Router) -> String {
     format!("http://127.0.0.1:{port}/index.json")
 }
 
-/// Point `GRAY_HOME` at a fresh tempdir and `GRAY_PLUGIN_INDEX` at `url`.
-/// Returns the tempdir (must stay alive for the test's duration).
 fn use_env(url: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
-    // SAFETY: under ENV_LOCK; no other test thread touches env concurrently.
+
     unsafe {
         std::env::set_var("GRAY_HOME", home.path());
         std::env::set_var(gray_pkg::index::INDEX_URL_ENV, url);
@@ -104,7 +94,6 @@ async fn etag_304_revalidates() {
     let first = gray_pkg::index::fetch_index(&client).await.unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 
-    // Age the cache past its TTL so the second fetch must revalidate.
     let cache = home.path().join("plugins/index-cache.json");
     let mut v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cache).unwrap()).unwrap();

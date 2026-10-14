@@ -1,5 +1,3 @@
-//! Plugin index client: fetch over HTTPS, ETag-cache, lookup.
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -7,16 +5,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::fetch::redact;
 
-/// Default index URL (overridden by [`INDEX_URL_ENV`]).
 pub const DEFAULT_INDEX_URL: &str = "https://gray.alignment.id/plugins/index.json";
-/// Env var overriding the index URL (tests point this at loopback).
+
 pub const INDEX_URL_ENV: &str = "GRAY_PLUGIN_INDEX";
-/// Default hub index URL: every package kind in one file (overridden by
-/// [`HUB_INDEX_URL_ENV`]).
+
 pub const DEFAULT_HUB_INDEX_URL: &str = "https://gray.alignment.id/hub/index.json";
-/// Env var overriding the hub index URL (tests point this at loopback).
+
 pub const HUB_INDEX_URL_ENV: &str = "GRAY_HUB_INDEX";
-/// Freshness window for the on-disk index cache.
+
 pub const INDEX_TTL_SECS: u64 = 24 * 60 * 60;
 
 pub fn index_url() -> String {
@@ -47,31 +43,25 @@ pub struct Entry {
     pub hash: HashSpec,
     #[serde(default)]
     pub scope: String,
-    /// Package kind: "plugin" (sidecar binary, the default when the index
-    /// predates kinds), "skill" (SKILL.md bundle), "misc" (anything else).
-    /// Empty string means a legacy index row — treated as a plugin.
+
     #[serde(default)]
     pub kind: String,
-    /// Publisher handle or "official" — informational only.
+
     #[serde(default)]
     pub author: Option<String>,
-    /// `true` for system-owned (first-party) plugins. Absent on community
-    /// entries.
+
     #[serde(default)]
     pub official: bool,
-    /// `true` for community plugins a maintainer has blessed. The registry
-    /// is open — anyone can publish — so an entry with neither `official`
-    /// nor `verified` is arbitrary third-party code; a matching tarball
-    /// hash proves integrity, never trustworthiness.
+
     #[serde(default)]
     pub verified: bool,
-    /// SPDX license id when the index carries one; informational only.
+
     #[serde(default)]
     pub license: String,
 }
 
 impl Entry {
-    /// Whether the index asserts any trust for this entry.
+
     pub fn trusted(&self) -> bool {
         self.official || self.verified
     }
@@ -84,8 +74,6 @@ pub struct Source {
     pub url: String,
 }
 
-/// Index hash: either `"sha256:<hex>"` or a per-target map.
-/// Per-target selection lands later; until then [`HashSpec::primary`] wins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum HashSpec {
@@ -94,7 +82,7 @@ pub enum HashSpec {
 }
 
 impl HashSpec {
-    /// Primary hash string: the single value, or the first map entry.
+
     pub fn primary(&self) -> Option<&str> {
         match self {
             HashSpec::Single(s) => Some(s.as_str()),
@@ -103,7 +91,6 @@ impl HashSpec {
     }
 }
 
-/// Look up a plugin by name. Miss message is part of the CLI contract.
 pub fn lookup<'a>(index: &'a Index, name: &str) -> anyhow::Result<&'a Entry> {
     index
         .plugins
@@ -136,18 +123,14 @@ fn write_cache(file: &str, cache: &IndexCache) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fetch the plugin index (plugin rows only — the legacy surface).
 pub async fn fetch_index(client: &reqwest::Client) -> anyhow::Result<Index> {
     fetch_index_url(client, &index_url(), "index-cache.json").await
 }
 
-/// Fetch the hub index (every package kind; each row carries `kind`).
 pub async fn fetch_hub_index(client: &reqwest::Client) -> anyhow::Result<Index> {
     fetch_index_url(client, &hub_index_url(), "hub-index-cache.json").await
 }
 
-/// Fetch an index, using the on-disk cache when fresh (<24h) and
-/// revalidating with `If-None-Match` otherwise (304 keeps the cache).
 async fn fetch_index_url(
     client: &reqwest::Client,
     url: &str,

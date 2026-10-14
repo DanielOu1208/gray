@@ -1,6 +1,3 @@
-// UNRUN (cargo test banned under X): run in TTY/CI.
-// Shift+Enter removal policy + the confirmation render.
-
 use super::connect_draw::{render_confirm_remove, render_selecting};
 use super::*;
 use catalog::{load_mixed_store, save_mixed_store};
@@ -71,14 +68,12 @@ fn only_rows_holding_a_credential_are_removable() {
     let custom = item("custom", "Custom", "https://example.test/v1");
     let fresh = item("anthropic", "Anthropic", "https://api.anthropic.com");
 
-    // Connected through auth.json.
     assert!(is_removable(&openrouter, &config, &auth));
-    // Custom never shows a check, but its stored key is still removable.
+
     assert!(is_removable(&custom, &config, &auth));
-    // A provider with nothing stored is not.
+
     assert!(!is_removable(&fresh, &config, &auth));
 
-    // The active provider is removable through config alone (no auth entry).
     config.api_key = Some("sk-live".into());
     let empty = BTreeMap::new();
     assert!(is_removable(&openrouter, &config, &empty));
@@ -144,7 +139,7 @@ fn list_footer_advertises_removal_only_for_a_stored_provider() {
     catalog::sort_connect_items(&mut items, &config, &auth, &BTreeMap::new());
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
     let mut scroll = 0usize;
-    // Highlight the first connected provider: the binding is advertised.
+
     terminal
         .draw(|frame| {
             render_selecting(
@@ -203,8 +198,7 @@ fn removing_the_active_provider_clears_both_credential_copies() {
     let dir = tempfile::tempdir().unwrap();
     let auth_path = dir.path().join("auth.json");
     let saved_path = dir.path().join("config.json");
-    // The active provider is the one case where the key exists twice: once in
-    // auth.json, once in the saved config that survives a restart.
+
     let mut store = load_mixed_store(&auth_path);
     store.insert("openrouter".into(), catalog::AuthEntry::Key("sk-or".into()));
     save_mixed_store(&auth_path, &store).unwrap();
@@ -310,9 +304,7 @@ fn list_footer_hides_removal_for_a_provider_with_nothing_stored() {
 
 #[test]
 fn saved_custom_rows_are_always_removable() {
-    // A saved custom endpoint is removable even with no credential filed —
-    // the row only exists because its endpoint entry does, and removal is
-    // how a dead endpoint leaves the list.
+
     let config = config_for("https://openrouter.ai/api/v1");
     let auth = BTreeMap::new();
     let item = crate::setup::ConnectItem {
@@ -324,7 +316,7 @@ fn saved_custom_rows_are_always_removable() {
         auth: crate::setup::ConnectAuth::None,
     };
     assert!(crate::setup::connect::is_removable(&item, &config, &auth));
-    // The bare "custom" add-row stays unremovable — nothing to forget.
+
     let add_row = crate::setup::ConnectItem {
         id: "custom".into(),
         name: "Custom".into(),

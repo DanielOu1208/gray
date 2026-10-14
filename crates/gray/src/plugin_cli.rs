@@ -1,8 +1,3 @@
-//! Native plugin command registration, help metadata and bounded UI requests. No model calls.
-//!
-//! One registry: `lock.json`. A `cli_argv` on a lock entry makes the plugin
-//! a `gray <name> …` command and enables slash-command capture; `argv` is
-//! always the sidecar invocation vector.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -24,11 +19,6 @@ fn load_lock(home: &Path) -> anyhow::Result<LockFile> {
     Ok(lock)
 }
 
-/// One-time migration: fold a legacy `plugins/commands.json` registry into
-/// `lock.json`. Each entry becomes (or fills in) a lock entry whose
-/// `cli_argv` is the old command argv; the file is renamed to
-/// `commands.json.migrated` so a second call is a no-op. Failures warn and
-/// leave both files untouched.
 fn migrate_commands_json(home: &Path) {
     let commands = home.join("plugins/commands.json");
     if !commands.exists() {
@@ -94,13 +84,6 @@ pub(crate) fn enabled(home: &Path, name: &str, entry: &LockEntry) -> bool {
         .is_none_or(|entry| entry.enabled)
 }
 
-/// Subcommands a registered plugin declares for itself: its manifest's
-/// `completion` array. That is the subcommand vocabulary (`settings`, `run`,
-/// …); the slash aliases live in `commands`, and a caller showing the app's
-/// own name has no use for them. Empty when the plugin registered no manifest
-/// (or the file is unreadable) — nothing is invented on its behalf.
-/// Installed CLI apps that declare a `setup` wizard (the platforms
-/// `gray gateway setup` offers).
 pub(crate) fn setup_apps(home: &Path) -> Vec<String> {
     load_lock(home)
         .map(|lock| {
@@ -128,9 +111,6 @@ pub(crate) fn declared_subcommands(home: &Path, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Slash commands a plugin declares in its manifest (`"/x"` entries, kept
-/// verbatim — the `/` prefix is the caller's concern). Provider plugins use
-/// these to name their login shortcut; the plugin owns the name.
 pub(crate) fn declared_commands(home: &Path, name: &str) -> Vec<String> {
     metadata(home, name)
         .ok()
@@ -148,47 +128,22 @@ fn metadata(home: &Path, name: &str) -> anyhow::Result<serde_json::Value> {
     )?)?)
 }
 
-/// How the unverified-plugin gate reports and whether it may ask. The
-/// registry is open — anyone can publish — so an index entry carrying
-/// neither `official` nor `verified` is third-party code running with the
-/// user's permissions; a matching tarball hash proves integrity, never
-/// trustworthiness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrustGate {
-    /// Warn on stderr, then ask `Install anyway? [y/N]` on a TTY (decline
-    /// aborts). A session that cannot ask proceeds, so pipes and
-    /// automation keep working.
+
     Ask,
-    /// Warn on stderr once, never ask (`--yes`).
+
     Quiet,
-    /// No stderr, no prompt: the warning becomes an output line so the
-    /// caller's own channel shows it (the REPL's `say`), then proceed.
+
     Lines,
 }
 
-/// Best-effort index lookup for the trust gate. `None` when the fetch or
-/// the lookup fails — `ops::install` fetches the index again (a cache hit)
-/// and reports the real error.
 async fn index_entry(name: &str) -> Option<gray_pkg::index::Entry> {
     let client = gray_pkg::fetch::client().ok()?;
     let index = gray_pkg::index::fetch_index(&client).await.ok()?;
     gray_pkg::index::lookup(&index, name).ok().cloned()
 }
 
-/// `gray plugin install <name|url|path>` — one entry point for every
-/// plugin source, tried in order:
-///   0. a skill spec (`github:`/`url:`) → `skills_ops` (skill
-///      installs write `~/.gray/skills`, never a plugin lock row);
-///   a. `GRAY_PLUGIN_PATH` set → register that executable under `spec`.
-///   b. `spec` is an existing path → register it (the manifest names it).
-///   c. `spec` is a valid name and `gray-<spec>` is on PATH → register it.
-///   d. otherwise → a gray-pkg index name or an https tarball URL.
-///
-/// Returns the user-facing lines; callers choose how to display them (the
-/// CLI prints, the TUI routes them through `say` — never stdout mid-frame).
-/// Never prompts: callers that can ask use [`install_spec`] instead. A
-/// native registration's capability consent defers the same way — the
-/// returned lines carry the declaration and the `grant` command.
 pub async fn install_spec_lines(
     home: &Path,
     spec: &str,
@@ -218,10 +173,7 @@ async fn install_spec_gated(
         return register_native_gated(home, Some(spec), Path::new(&path), force, gate).await;
     }
     let path = Path::new(spec);
-    // A bare name only resolves as a path when it looks like one — absolute,
-    // dot-prefixed, or containing a separator. Otherwise `gray plugin install
-    // demo` in a directory that happens to contain `demo` would register and
-    // execute it instead of installing `demo` from the index.
+
     let path_like = path.is_absolute()
         || spec.starts_with('.')
         || spec.contains(std::path::MAIN_SEPARATOR)
@@ -241,9 +193,7 @@ async fn install_spec_gated(
     }
     let parsed = gray_pkg::ops::parse_spec(spec);
     let mut lines = Vec::new();
-    // Trust gate for index installs: an entry with neither `official` nor
-    // `verified` is arbitrary third-party code. URL installs keep their own
-    // warning in `ops::install_url`; every other spec kind returned above.
+
     if let gray_pkg::ops::NameOrUrl::Name(name) = &parsed
         && let Some(entry) = index_entry(name).await
         && !entry.trusted()
@@ -262,8 +212,7 @@ async fn install_spec_gated(
             TrustGate::Quiet => eprintln!("{warning}"),
             TrustGate::Ask => {
                 eprintln!("{warning}");
-                // Ask only when the prompt can be seen *and* answered;
-                // piped stdin/stdout proceeds like the scan gate's --force.
+
                 if interactive() {
                     let granted = confirm("Install anyway? [y/N] ")?;
                     anyhow::ensure!(
@@ -275,9 +224,7 @@ async fn install_spec_gated(
         }
     }
     let r = gray_pkg::ops::install(parsed, gray_pkg::ops::InstallOpts::default()).await?;
-    // An index tarball whose executable speaks CLI gets `gray <name> …`
-    // the same way a manual registration does. Adoption is best-effort:
-    // the plugin is installed either way.
+
     match adopt_cli(home, &r.name, &r.path).await {
         Ok(true) => lines.push(format!(
             "installed {} {} at {}. Run: gray {} --help",
@@ -308,9 +255,6 @@ async fn install_spec_gated(
     Ok(lines)
 }
 
-/// `gray plugin install` — CLI entry: same resolution as the REPL's, printed
-/// to stdout. `yes` skips the unverified-plugin confirmation; the warning
-/// still prints once on stderr.
 pub async fn install_spec(home: &Path, spec: &str, force: bool, yes: bool) -> anyhow::Result<()> {
     let gate = if yes {
         TrustGate::Quiet
@@ -323,16 +267,6 @@ pub async fn install_spec(home: &Path, spec: &str, force: bool, yes: bool) -> an
     Ok(())
 }
 
-/// Run the install-time security scan and act on its verdict.
-///
-/// `dangerous` blocks with no override: the operator may be impatient,
-/// but a reverse shell is not a preference. `caution` needs either an
-/// interactive yes or `--force`; a session that cannot ask refuses
-/// instead of installing code nobody reviewed.
-///
-/// A `TrustGate::Lines` surface cannot print mid-frame or answer a
-/// prompt either: the verdict comes back as lines for the caller's own
-/// channel (the REPL's `say`) and a caution refuses the same way.
 fn scan_or_block(root: &Path, force: bool, gate: TrustGate) -> anyhow::Result<Vec<String>> {
     use gray_plugin::scan::{Verdict, scan_tree};
     let report = scan_tree(root)?;
@@ -405,9 +339,6 @@ fn scan_or_block(root: &Path, force: bool, gate: TrustGate) -> anyhow::Result<Ve
     Ok(out)
 }
 
-/// Same rule as the typed-manifest check: a protocol-1.2 sidecar that owns
-/// no other surface stays in `lock.json` for provider discovery while
-/// `active_plugins` skips spawning it.
 fn provider_only_role_json(manifest: &serde_json::Value) -> Option<String> {
     let empty = |key: &str| {
         manifest
@@ -426,13 +357,11 @@ fn provider_only_role_json(manifest: &serde_json::Value) -> Option<String> {
     provider_only.then(|| "provider_only".to_string())
 }
 
-/// Whether this process can ask the operator a question.
 fn interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-/// One yes/no question on the terminal. `false` when it cannot be answered.
 fn confirm(prompt: &str) -> anyhow::Result<bool> {
     use std::io::Write as _;
     print!("{prompt}");
@@ -445,19 +374,6 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
     Ok(answer == "y" || answer == "yes")
 }
 
-/// Show what a plugin declares, ask for a grant when the surface can,
-/// and return `(granted, consent hash, lines)`.
-///
-/// Nothing declared → no hash and no grant (an undeclared capability is
-/// not a capability). A session that cannot prompt grants nothing but
-/// still records the hash, so the plugin runs ungranted rather than
-/// grandfathered, and `gray plugin capabilities <name> --all` grants later.
-///
-/// `lines` stays empty on surfaces that print as they go. Under
-/// `TrustGate::Lines` nothing prints — the declaration block and the
-/// deferral hint come back for the caller's own channel (the REPL's
-/// `say`): a mid-frame println! splatters the composer and `read_line`
-/// races its raw-mode stdin.
 fn consent_capabilities(
     name: &str,
     declared: &[String],
@@ -502,13 +418,9 @@ fn consent_capabilities(
     }
 }
 
-/// `gray plugin capabilities [name]` — declared vs granted, per plugin,
-/// with the exact command that grants. Reads the cached manifest every
-/// install writes, so a plugin that never booted still lists correctly.
 pub fn print_capabilities(only: Option<&str>) -> anyhow::Result<()> {
     let home = home()?;
-    // list_managed runs the commands.json migration itself, so row.entry is
-    // the post-migration lock entry — a lock loaded here would predate it.
+
     let rows = list_managed(&home)?;
     let mut shown = 0usize;
     for row in &rows {
@@ -575,11 +487,6 @@ pub fn print_capabilities(only: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `gray plugin capabilities <name> --all` — the grant path the consent
-/// hints name: record every capability the cached manifest declares as
-/// granted and stamp the consent hash, then rebuild the provider cache so
-/// a provider plugin's declarations unhide immediately. Same shape the
-/// interactive prompt writes; nothing unknown to this build is minted.
 pub fn grant_all_capabilities(name: &str) -> anyhow::Result<()> {
     let home = home()?;
     migrate_commands_json(&home);
@@ -612,8 +519,6 @@ pub fn grant_all_capabilities(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One installed plugin in `lock.json`. `cli` is true for entries carrying
-/// `cli_argv` — they forward `gray <name> …` to an executable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedPlugin {
     pub name: String,
@@ -621,8 +526,6 @@ pub struct ManagedPlugin {
     pub cli: bool,
 }
 
-/// The unified registry listing, sorted by name. Missing lockfile reads as
-/// empty; a corrupt file is an error (callers warn the same way boot does).
 pub fn list_managed(home: &Path) -> anyhow::Result<Vec<ManagedPlugin>> {
     migrate_commands_json(home);
     let lock = load_lock(home)?;
@@ -636,8 +539,6 @@ pub fn list_managed(home: &Path) -> anyhow::Result<Vec<ManagedPlugin>> {
         .collect())
 }
 
-/// One display row of the registry, pre-resolved: `on` already folds the
-/// project enable overlay (see [`enabled`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedRow {
     pub name: String,
@@ -649,9 +550,6 @@ pub struct ManagedRow {
     pub global: bool,
 }
 
-/// Display rows (sorted by name) for `plugin list`, `/plugin list`, and the
-/// manager picker. When the home dir is unresolvable, falls back to the
-/// gray-pkg lockfile view instead of failing.
 pub fn list_rows() -> anyhow::Result<Vec<ManagedRow>> {
     let Ok(home) = home() else {
         return Ok(gray_pkg::ops::list()?
@@ -681,9 +579,6 @@ pub fn list_rows() -> anyhow::Result<Vec<ManagedRow>> {
         .collect())
 }
 
-/// Remove a plugin: drop its `lock.json` entry and plugin dir via gray-pkg,
-/// then drop its `<name>-manifest.json` so completion and help stop
-/// advertising it, and clear a widget slot it owned.
 pub fn remove_managed(name: &str) -> anyhow::Result<()> {
     let home = home()?;
     migrate_commands_json(&home);
@@ -702,14 +597,12 @@ pub fn remove_managed(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `gray plugin enable/disable <name>`.
 pub fn set_managed_enabled(name: &str, on: bool) -> anyhow::Result<()> {
     let home = home()?;
     migrate_commands_json(&home);
     gray_pkg::ops::set_enabled(name, on)
 }
 
-/// `gray plugin enable <name> --global` / the disable half of it.
 pub fn set_managed_global(name: &str, on: bool) -> anyhow::Result<()> {
     let home = home()?;
     migrate_commands_json(&home);
@@ -736,10 +629,6 @@ pub async fn check_managed(target: &str) -> anyhow::Result<Vec<gray_pkg::ops::Up
     gray_pkg::ops::check_update(target).await
 }
 
-/// A lock row with `cli_argv` and no index hash is a registered executable,
-/// not an index-installed package (index rows keep their hash even after
-/// adopting a `cli_argv`). Lock load errors answer false (the index path
-/// then reports whatever went wrong itself).
 #[allow(dead_code)]
 fn is_local_command(home: &Path, name: &str) -> bool {
     migrate_commands_json(home);
@@ -753,8 +642,6 @@ fn is_local_command(home: &Path, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Removed builtin subcommands still land in the plugin fallback — name what
-/// replaced them instead of pointing at an index that has no entry.
 fn removed_builtin(name: &str) -> Option<&'static str> {
     match name {
         "view" => Some(
@@ -765,15 +652,11 @@ fn removed_builtin(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Resolve only explicitly registered commands (never arbitrary PATH executables).
-/// exec preserves terminal, signals, argument boundaries, and the child's exit code.
 pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
     validate_name(name)?;
     migrate_commands_json(home);
     let lock = load_lock(home)?;
-    // A session home that never installed the plugin still reaches a
-    // `global` entry in the user home — the same dual-home rule `cmd`
-    // command lookup applies (conversation-scoped GRAY_HOMEs).
+
     let (entry, entry_home) = match lock.plugins.get(name).cloned() {
         Some(e) => (e, home.to_path_buf()),
         None => {
@@ -831,9 +714,6 @@ pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
     }
 }
 
-/// The CLI probe: `<bin> manifest` answered within the timeout and parsed
-/// as a manifest carrying a string `name`. `None` for wire-only sidecars
-/// (NDJSON on stdin, no argv protocol).
 async fn cli_manifest(binary: &Path) -> Option<Value> {
     let mut command = tokio::process::Command::new(binary);
     command.arg("manifest");
@@ -844,19 +724,6 @@ async fn cli_manifest(binary: &Path) -> Option<Value> {
         .filter(|m| m["name"].is_string())
 }
 
-/// Register a user-selected native executable; registration runs its manifest.
-/// The executable and widgets remain owned by the separate plugin repository.
-/// When `expected` is `Some`, the manifest name must match it; when `None`,
-/// the manifest names the plugin (validated as a command name).
-///
-/// Writes one `lock.json` entry: `argv` is the sidecar invocation vector,
-/// `cli_argv` enables `gray <name> …` forwarding and slash capture.
-///
-/// The CLI probe runs `<bin> manifest`; a wire-only sidecar (no CLI argv,
-/// NDJSON on stdin) fails it and is probed over `plugin/manifest` instead —
-/// those register sidecar-only (`cli_argv: None`, no widget slot).
-/// Returns the user-facing confirmation line; callers choose how to display
-/// it (CLI prints, the TUI routes it through `say`).
 pub async fn register_native(
     home: &Path,
     expected: Option<&str>,
@@ -871,13 +738,6 @@ pub async fn register_native(
     )
 }
 
-/// `register_native` under a trust gate. Every line the caller should
-/// surface comes back, in the order the CLI prints them: the scan verdict
-/// first, then the registration confirmation, then the deferred
-/// capability-consent block — the actionable "grant later" hint lands
-/// last. Under `TrustGate::Lines` those steps never print or prompt
-/// mid-frame; under every other gate they print and ask as before and
-/// only the confirmation returns.
 async fn register_native_gated(
     home: &Path,
     expected: Option<&str>,
@@ -915,8 +775,7 @@ async fn register_native_gated(
             name.to_string()
         }
     };
-    // A directory plugin is source we can read; a bare binary is not, so
-    // scanning (and every verdict about its code) is skipped there.
+
     let mut lines = if binary.is_dir() {
         scan_or_block(binary.as_ref(), force, gate)?
     } else {
@@ -935,7 +794,7 @@ async fn register_native_gated(
     std::fs::create_dir_all(home.join("plugins"))?;
     let _guard = gray_pkg::ops::hold_registry_lock_in(&home.join("plugins"))?;
     if manifest["widget"].as_bool() == Some(true) && !wire_only {
-        // v1 supports one above-editor plugin surface. Refuse to displace another.
+
         let path = home.join("plugins/widgets.json");
         if path.exists() {
             let old: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
@@ -954,8 +813,7 @@ async fn register_native_gated(
             version: manifest["version"].as_str().unwrap_or("unknown").into(),
             hash: String::new(),
             source: binary.to_string_lossy().into_owned(),
-            // A CLI-speaking binary may serve the wire under a subcommand
-            // (`gray-discord sidecar`); its manifest says which.
+
             argv: std::iter::once(binary.to_string_lossy().into_owned())
                 .chain(
                     manifest["sidecar_args"]
@@ -975,18 +833,14 @@ async fn register_native_gated(
             capabilities_hash,
         },
     );
-    // The manifest lands before the lock entry that references it: a
-    // concurrent provider-cache read then sees the pre-install state or
-    // the complete post-install state, never a lock entry pointing at a
-    // manifest that is not there yet.
+
     let mut metadata = tempfile::NamedTempFile::new_in(home.join("plugins"))?;
     use std::io::Write;
     writeln!(metadata, "{}", manifest)?;
     metadata.persist(home.join("plugins").join(format!("{name}-manifest.json")))?;
     lock.save(&gray_plugin::lock::lock_path(home))?;
     if !(manifest["widget"].as_bool() == Some(true) && !wire_only) {
-        // Reinstalling a plugin that dropped its widget (or became wire-only,
-        // where `binary widget` cannot run) must retire the old slot too.
+
         let widgets = home.join("plugins/widgets.json");
         if let Ok(raw) = std::fs::read(&widgets)
             && serde_json::from_slice::<serde_json::Value>(&raw)
@@ -997,8 +851,7 @@ async fn register_native_gated(
             let _ = std::fs::remove_file(&widgets);
         }
     }
-    // Refresh the provider cache from the plugin lock so provider rows are
-    // discoverable by `/connect` immediately after this registration.
+
     crate::providers::ProviderRegistry::refresh(home)?;
     if manifest["widget"].as_bool() == Some(true) && !wire_only {
         let mut tmp = tempfile::NamedTempFile::new_in(home.join("plugins"))?;
@@ -1022,17 +875,6 @@ async fn register_native_gated(
     Ok(lines)
 }
 
-/// Give an index-installed plugin a `cli_argv` when its installed
-/// executable speaks the CLI protocol (`<bin> manifest` answers). Runs
-/// after index installs and updates so `gray <name> …` and slash capture
-/// work without a manual registration — the lock key is the registry key,
-/// and the manifest's own name may differ (the `-sub` plugins publish
-/// under a shorter key, and the installer does not require equality).
-///
-/// A failed probe is never an install error: it only clears a stale
-/// `cli_argv` on index rows (non-empty hash — an update may have dropped
-/// CLI support). Registered executables (no hash) are left alone either
-/// way. Returns true when the entry now forwards `gray <name> …`.
 pub(crate) async fn adopt_cli(home: &Path, name: &str, dir: &Path) -> anyhow::Result<bool> {
     validate_name(name)?;
     let exe = gray_plugin::builder::resolve_argv(dir)
@@ -1052,9 +894,7 @@ pub(crate) async fn adopt_cli(home: &Path, name: &str, dir: &Path) -> anyhow::Re
     match manifest {
         Some(manifest) => {
             let exe = exe.expect("a manifest implies an executable");
-            // Same lock shape register_native writes: `argv` is the sidecar
-            // invocation vector — a CLI binary may serve the wire under a
-            // subcommand (`gray-discord sidecar`); its manifest says which.
+
             entry.argv = std::iter::once(exe.clone())
                 .chain(
                     manifest["sidecar_args"]
@@ -1065,24 +905,18 @@ pub(crate) async fn adopt_cli(home: &Path, name: &str, dir: &Path) -> anyhow::Re
                 )
                 .collect();
             entry.cli_argv = Some(vec![exe]);
-            // Same manifest sidecar register_native writes: completion and
-            // slash capture read `plugins/<name>-manifest.json`. It lands
-            // before the lock entry that adopts it so a concurrent read
-            // sees pre-install state or complete post-install state.
+
             let mut metadata = tempfile::NamedTempFile::new_in(&plugins)?;
             use std::io::Write;
             writeln!(metadata, "{manifest}")?;
             metadata.persist(plugins.join(format!("{name}-manifest.json")))?;
             lock.save(&lock_path)?;
-            // And the same provider-cache rebuild, so a provider the
-            // manifest declares is discoverable immediately.
+
             crate::providers::ProviderRegistry::refresh(home)?;
             Ok(true)
         }
         None => {
-            // An index row whose update dropped CLI support loses its
-            // forwarding and cached manifest; registered executables
-            // (no hash) keep both.
+
             if !entry.hash.is_empty() {
                 let mut changed = entry.cli_argv.take().is_some();
                 let manifest_path = plugins.join(format!("{name}-manifest.json"));
@@ -1101,7 +935,6 @@ pub(crate) async fn adopt_cli(home: &Path, name: &str, dir: &Path) -> anyhow::Re
     }
 }
 
-/// Slash commands use the registered executable without replacing the TUI.
 pub async fn capture_slash(name: &str, args: &[String]) -> anyhow::Result<Option<String>> {
     let home = home()?;
     migrate_commands_json(&home);
@@ -1137,30 +970,21 @@ pub async fn capture_slash(name: &str, args: &[String]) -> anyhow::Result<Option
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
-/// One plugin-declared slash command plus its manifest `completion` args —
-/// the unit `completions()` filters by the typed query.
 struct CompletionRow {
-    /// Declared command text, leading `/` stripped, built-ins excluded.
+
     command: String,
-    /// Owning plugin name, for the "{name} plugin" description suffix.
+
     plugin: String,
-    /// Manifest `completion` entries, matched as `command arg` candidates.
+
     args: Vec<String>,
 }
 
-/// The completion row universe plus the `(path, mtime)` stamps that prove
-/// it fresh: user lock, project lock, and every manifest it was built from.
-/// The `/` popup asks on every keystroke; rebuilding meant ~62 lockfile
-/// parses and ~61 manifest reads per key — the stamp check costs a few
-/// stats instead.
 struct CompletionTable {
     home: PathBuf,
     stamps: Vec<(PathBuf, Option<std::time::SystemTime>)>,
     rows: Vec<CompletionRow>,
 }
 
-/// The cached table plus a build count, so a test can see that a keystroke
-/// burst costs one rebuild instead of one per key.
 #[derive(Default)]
 struct CompletionCache {
     table: Option<CompletionTable>,
@@ -1176,8 +1000,6 @@ fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// `enabled` with the lockfiles already parsed: the project overlay wins on
-/// the flag, missing entries default to enabled — same verdict, no reloads.
 fn enabled_in(user: &LockFile, project: Option<&LockFile>, name: &str, entry: &LockEntry) -> bool {
     entry.enabled
         && project
@@ -1186,9 +1008,6 @@ fn enabled_in(user: &LockFile, project: Option<&LockFile>, name: &str, entry: &L
             .is_none_or(|entry| entry.enabled)
 }
 
-/// Read the lockfiles and every CLI plugin's manifest once and flatten them
-/// into filterable rows. `None` when the user lock cannot be parsed, same
-/// as `completions` answering empty.
 fn build_completion_table(home: &Path) -> Option<CompletionTable> {
     let lock = load_lock(home).ok()?;
     let project_path = std::env::current_dir()
@@ -1213,7 +1032,7 @@ fn build_completion_table(home: &Path) -> Option<CompletionTable> {
             continue;
         }
         let manifest = home.join("plugins").join(format!("{name}-manifest.json"));
-        // Stamp before reading so a manifest appearing later invalidates.
+
         stamps.push((manifest.clone(), file_mtime(&manifest)));
         let Ok(raw) = std::fs::read(&manifest) else {
             continue;
@@ -1251,7 +1070,6 @@ fn build_completion_table(home: &Path) -> Option<CompletionTable> {
     })
 }
 
-/// The cached completion universe, rebuilt only when an input mtime moved.
 fn completion_table<'a>(
     home: &Path,
     cache: &'a mut CompletionCache,
@@ -1270,7 +1088,6 @@ fn completion_table<'a>(
     cache.table.as_ref()
 }
 
-/// Only explicitly installed command metadata participates in completion.
 pub(crate) fn completions(query: &str) -> Vec<(String, String)> {
     let Ok(home) = home() else { return Vec::new() };
     migrate_commands_json(&home);
@@ -1295,8 +1112,6 @@ pub(crate) fn completions(query: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Child stdout is bounded and every failure kills/reaps the child. No terminal
-/// descriptors reach plugins. This is process isolation, not an OS sandbox.
 pub(crate) async fn capture(
     mut command: tokio::process::Command,
     ttl: std::time::Duration,
@@ -1416,7 +1231,7 @@ mod tests {
             Some(&["/usr/bin/demo".to_string()][..])
         );
         assert_eq!(entry.argv, vec!["/usr/bin/demo".to_string()]);
-        // The old registry is renamed aside; a second call is a no-op.
+
         assert!(!home.join("plugins/commands.json").exists());
         assert!(home.join("plugins/commands.json.migrated").exists());
         write_lock(
@@ -1434,7 +1249,7 @@ mod tests {
     fn migrate_fills_missing_cli_argv_but_keeps_existing() {
         let home = tempfile::tempdir().unwrap();
         let home = home.path();
-        // A same-named lock entry without cli_argv inherits the command argv.
+
         let bare = LockEntry {
             ecosystem: "gray-native".into(),
             argv: vec!["/sidecar".into()],
@@ -1510,8 +1325,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir().unwrap();
         let exe = home.path().join("wire-sidecar.sh");
-        // Any argv fails the CLI probe instantly (exit 1); the sidecar wire
-        // is the only language it speaks.
+
         std::fs::write(
             &exe,
             r#"#!/bin/sh
@@ -1541,7 +1355,7 @@ done
         assert!(!home.path().join("plugins/widgets.json").exists());
         let lock = load_lock(home.path()).unwrap();
         let entry = &lock.plugins["wiretest"];
-        // register_native canonicalizes (macOS: /var → /private/var).
+
         let exe = std::fs::canonicalize(&exe).unwrap();
         assert_eq!(entry.argv, vec![exe.to_string_lossy().into_owned()]);
         assert_eq!(entry.cli_argv, None);
@@ -1555,7 +1369,7 @@ done
         use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir().unwrap();
         let exe = home.path().join("provider-sidecar.sh");
-        // Wire-only sidecar whose manifest declares one provider.
+
         std::fs::write(
             &exe,
             r#"#!/bin/sh
@@ -1576,13 +1390,10 @@ done
         register_native(home.path(), None, &exe, false)
             .await
             .unwrap();
-        // One install must land the plugin in the provider cache — the
-        // refresh reads plugins/<name>-manifest.json, so it has to run
-        // after that file exists (a second install used to be required).
+
         let cached = crate::providers::ProviderRegistry::load_cached(home.path());
         let entry = &cached.cache().plugins["provtest"];
-        // Non-interactive consent grants nothing: the declared provider is
-        // cached but hidden until granted.
+
         assert!(entry.providers.is_empty());
         assert!(
             entry
@@ -1592,7 +1403,7 @@ done
             "{:?}",
             entry.errors
         );
-        // After granting, a refresh exposes the declared provider.
+
         let mut lock = load_lock(home.path()).unwrap();
         lock.plugins
             .get_mut("provtest")
@@ -1613,8 +1424,7 @@ done
         let home = home.path();
         let mut cli = cli_entry(&["/usr/bin/false"]);
         cli.cli_argv = Some(cli.argv.clone());
-        // An index install that adopted a CLI keeps its tarball hash —
-        // it is a managed package and still updates.
+
         let mut index_cli = cli_entry(&[]);
         index_cli.cli_argv = Some(vec!["/usr/bin/index-cli".into()]);
         index_cli.hash = "sha256:abc".into();
@@ -1630,7 +1440,7 @@ done
         assert!(!is_local_command(home, "index-cli"));
         assert!(!is_local_command(home, "sidecar-one"));
         assert!(!is_local_command(home, "absent"));
-        // A not-yet-migrated commands.json row counts too.
+
         write_commands(
             home,
             &serde_json::json!({"migrated": cli_entry(&["/usr/bin/legacy"])}),
@@ -1638,8 +1448,6 @@ done
         assert!(is_local_command(home, "migrated"));
     }
 
-    /// An index-style lock row: tarball hash present, `cli_argv` as
-    /// passed. Mirrors what `record_install` writes.
     fn index_row(cli_argv: Option<Vec<String>>) -> LockEntry {
         LockEntry {
             ecosystem: "gray-native".into(),
@@ -1660,9 +1468,7 @@ done
         let home = home.path();
         let dir = home.join("plugins/demo");
         std::fs::create_dir_all(&dir).unwrap();
-        // The manifest name deliberately differs from the lock key — the
-        // `-sub` plugins publish under a shorter registry key, and the
-        // installer does not require equality.
+
         let exe = dir.join("gray-demo");
         std::fs::write(
             &exe,
@@ -1679,12 +1485,12 @@ done
             entry.cli_argv.as_deref(),
             Some([exe.to_string_lossy().into_owned()].as_slice())
         );
-        // `argv` becomes the sidecar invocation vector, like register_native.
+
         assert_eq!(
             entry.argv,
             vec![exe.to_string_lossy().into_owned(), "sidecar".to_string()]
         );
-        // Every other lock field survives the adoption untouched.
+
         assert_eq!(entry.hash, "sha256:abc");
         assert_eq!(entry.version, "1.0.0");
         assert_eq!(entry.ecosystem, "gray-native");
@@ -1695,8 +1501,7 @@ done
         .unwrap();
         assert_eq!(manifest["name"], "demo-sub");
         assert_eq!(manifest["completion"], serde_json::json!(["run"]));
-        // The provider-cache rebuild accepts the mismatched manifest name
-        // and lands the entry under the lock key.
+
         let cache =
             crate::providers::ProviderCache::load(&crate::providers::registry::cache_path(home));
         assert!(cache.plugins.contains_key("demo"));
@@ -1711,7 +1516,7 @@ done
         let dir = home.join("plugins/demo");
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("gray-demo");
-        // A wire-only sidecar: no `manifest` argv protocol.
+
         std::fs::write(&exe, "#!/bin/sh\nexit 1\n").unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         write_lock(home, &serde_json::json!({"demo": index_row(None)}));
@@ -1732,8 +1537,7 @@ done
         let exe = dir.join("gray-demo");
         std::fs::write(&exe, "#!/bin/sh\nexit 1\n").unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // The previous version spoke CLI; this one no longer answers
-        // `manifest`, so the stale forwarding and cached manifest must go.
+
         write_lock(
             home,
             &serde_json::json!({"demo": index_row(Some(vec!["/old/exe".into()]))}),
@@ -1751,10 +1555,6 @@ done
         assert!(!home.join("plugins/demo-manifest.json").exists());
     }
 
-    /// The TUI's `install_spec_lines` path (`TrustGate::Lines`) must never
-    /// print mid-frame or read stdin — capability consent defers: the lock
-    /// records the hash with nothing granted and the lines carry the
-    /// declaration plus the grant command.
     #[cfg(unix)]
     #[tokio::test]
     async fn install_spec_lines_defers_capability_consent() {
@@ -1815,20 +1615,20 @@ done
             assert_eq!(table.rows.len(), 1);
             assert_eq!(table.rows[0].command, "demo");
             assert_eq!(table.rows[0].args, vec!["run".to_string()]);
-            // user lock + project lock + the one manifest that was read.
+
             assert_eq!(table.stamps.len(), 3);
         }
         assert_eq!(cache.builds, 1);
-        // Every further keystroke with unchanged inputs hits the cache.
+
         for _ in 0..5 {
             assert_eq!(completion_table(home, &mut cache).unwrap().rows.len(), 1);
         }
         assert_eq!(cache.builds, 1);
-        // The manifest going away invalidates the table.
+
         std::fs::remove_file(&manifest).unwrap();
         assert!(completion_table(home, &mut cache).unwrap().rows.is_empty());
         assert_eq!(cache.builds, 2);
-        // A disabled plugin drops its rows on the next rebuild.
+
         let lock_path = gray_plugin::lock::lock_path(home);
         let mut lock = gray_plugin::lock::LockFile::load(&lock_path).unwrap();
         lock.plugins.get_mut("demo").unwrap().enabled = false;

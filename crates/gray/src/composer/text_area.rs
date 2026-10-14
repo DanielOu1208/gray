@@ -1,12 +1,3 @@
-// ---------------------------------------------------------------------------
-// Minimal TextArea — literal copy-paste of codex textarea logic, trimmed to
-// stdlib. Full codex TextArea is 4518 lines with vim/kill-ring/unicode-
-// segmentation; this keeps the essential multiline + atomic-element contract
-// (cursor byte-boundary, wrap-aware up/down, element-shift on insert).
-// O(n) scan, no grapheme crate, word wrap via char count.
-// Upgrade path: vendor full `textarea.rs` + `textarea/wrapping.rs` when
-// unicode-width or vim bindings matter.
-// ---------------------------------------------------------------------------
 use std::ops::Range;
 
 #[derive(Debug, Clone)]
@@ -17,7 +8,7 @@ pub(crate) struct TextElement {
 #[derive(Debug)]
 pub(crate) struct TextArea {
     text: String,
-    cursor: usize, // byte index
+    cursor: usize,
     elements: Vec<TextElement>,
     preferred_col: Option<usize>,
 }
@@ -55,7 +46,7 @@ impl TextArea {
         p
     }
     pub(crate) fn next_boundary(&self, pos: usize) -> usize {
-        // next char boundary, but jump over atomic elements
+
         for el in &self.elements {
             if pos >= el.range.start && pos < el.range.end {
                 return el.range.end;
@@ -68,7 +59,7 @@ impl TextArea {
         while n < self.text.len() && !self.text.is_char_boundary(n) {
             n += 1;
         }
-        // if landing inside element, jump to its end
+
         for el in &self.elements {
             if n > el.range.start && n < el.range.end {
                 return el.range.end;
@@ -111,7 +102,7 @@ impl TextArea {
         let end = start + placeholder.len();
         self.elements.push(TextElement { range: start..end });
         self.elements.sort_by_key(|e| e.range.start);
-        // insert_str already invalidated, but ensure element range accounted
+
         self.preferred_col = None;
     }
     pub(crate) fn shift_elements(&mut self, pos: usize, removed: usize, inserted: usize) {
@@ -124,7 +115,7 @@ impl TextArea {
             if el.range.start >= pos + removed {
                 el.range.start = ((el.range.start as isize) + diff) as usize;
                 el.range.end = ((el.range.end as isize) + diff) as usize;
-            } else if el.range.end > pos { /* inside edit — collapse */
+            } else if el.range.end > pos {
             }
         }
     }
@@ -240,7 +231,7 @@ impl TextArea {
     }
     pub(crate) fn set_cursor(&mut self, pos: usize) {
         self.cursor = self.clamp_to_boundary(pos.min(self.text.len()));
-        // avoid landing inside element
+
         for el in &self.elements {
             if self.cursor > el.range.start && self.cursor < el.range.end {
                 self.cursor = el.range.end;
@@ -257,7 +248,7 @@ impl TextArea {
         self.cursor = self.next_boundary(self.cursor);
         self.preferred_col = None;
     }
-    // --- vertical movement helpers (logical lines) ---
+
     fn display_width_of_range(&self, start: usize, end: usize) -> usize {
         if start >= self.text.len() || end > self.text.len() || start >= end {
             return 0;
@@ -290,27 +281,27 @@ impl TextArea {
             if width + w > target_col {
                 break;
             }
-            // advance
+
             byte_pos = line_start + idx + ch.len_utf8();
             width += w;
             if width == target_col {
                 break;
             }
         }
-        // if target beyond line width, stay at line_end (clamp to last char start if needed)
+
         if width < target_col {
-            // target beyond line, go to end but not past last char's start if wide
+
             byte_pos = line_end;
-            // clamp to last valid boundary inside line if we overshoot
+
             if byte_pos > line_start {
-                // ensure we don't land in middle of char (already at boundary)
+
             }
         }
         let mut new_pos = self.clamp_to_boundary(byte_pos);
-        // avoid landing inside atomic element
+
         for el in &self.elements {
             if new_pos > el.range.start && new_pos < el.range.end {
-                // direction heuristic: moving up/down, snap to end if closer? use end for simplicity
+
                 new_pos = el.range.end;
                 break;
             }
@@ -322,7 +313,7 @@ impl TextArea {
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        // target col is sticky
+
         let target_col = match self.preferred_col {
             Some(c) => c,
             None => {
@@ -343,10 +334,10 @@ impl TextArea {
             .unwrap_or(0);
         let prev_line_end = prev_eol;
         self.move_to_display_col_on_line(prev_bol, prev_line_end, target_col);
-        // keep preferred_col for sticky column
+
     }
     pub(crate) fn move_down(&mut self) {
-        // Logical-line navigation
+
         let eol = self.text[self.cursor..]
             .find('\n')
             .map(|i| i + self.cursor)

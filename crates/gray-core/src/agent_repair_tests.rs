@@ -1,12 +1,6 @@
-// UNRUN (cargo test banned under X): run in TTY/CI.
-// `Agent::repair_dropped_cancel` — the transcript repair a REPL runs when its
-// bounded cancel grace expires and the run future has to be dropped.
-
 use super::*;
 use crate::message::{ContentBlock, Message, Role};
 
-/// Neither the provider nor the executor is ever reached: these tests only
-/// inspect and repair an existing transcript.
 struct Noop;
 
 impl Provider for Noop {
@@ -53,7 +47,6 @@ fn orphan_ids(agent: &Agent) -> Vec<String> {
         .collect()
 }
 
-/// Prose the assistant produced, in order (user turns excluded).
 fn texts(agent: &Agent) -> Vec<String> {
     agent
         .messages()
@@ -158,16 +151,13 @@ fn streamed_text_is_salvaged_once() {
         "the thinking the user saw is salvaged with the text"
     );
 
-    // The loop's own finalize already wrote this text: no duplicate.
     agent.repair_dropped_cancel("thinking...", "half an answer");
     assert_eq!(texts(&agent), vec!["half an answer".to_string()]);
 }
 
 #[test]
 fn synthetic_results_do_not_hide_earlier_turns() {
-    // A later round's orphan must not make round one's text look unsaved:
-    // the turn boundary is the last genuine user message, not the last
-    // user-role message (synthetic results are user-role too).
+
     let mut agent = agent_with(vec![
         Message::user("first"),
         Message::assistant("first answer"),

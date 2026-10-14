@@ -4,7 +4,7 @@ use super::*;
 fn first_boot_is_silent_then_a_crash_is_reported() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(boot(dir.path()), Previous::FirstBoot);
-    // Never marked stopped: the run died.
+
     let answer = boot_json(dir.path(), 2);
     assert_eq!(answer["previous"], "crashed");
     assert!(

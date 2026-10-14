@@ -33,8 +33,7 @@ fn frontmatter_without_args_means_no_args() {
 
 #[test]
 fn folded_description_joins_continuation_lines() {
-    // `description: >` frontmatter: the indented lines
-    // fold into one description (previously parsed as the bare `">"`).
+
     let mut f = tempfile::NamedTempFile::new().unwrap();
     writeln!(
             f,
@@ -83,8 +82,7 @@ fn frontmatter_preserves_crlf_unicode_and_body() {
 
 #[test]
 fn a_symlink_cycle_terminates() {
-    // Audit #11: root/a/loop -> root/a. Discovery follows symlinked
-    // directories, so without a visited set this recursion is unbounded.
+
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let inner = root.join("a");

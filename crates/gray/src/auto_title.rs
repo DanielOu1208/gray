@@ -1,10 +1,3 @@
-//! Auto-naming: a short title for a session after its first reply.
-//!
-//! One background model call per session, on the session's own provider. The
-//! result goes to `<id>.title`, the same sidecar a manual rename writes, so the
-//! picker needs no other change. It never delays the prompt, and it is silent
-//! on failure: the picker keeps the first-message preview.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,20 +8,17 @@ use gray_core::message::{ChatRequest, Message, Role};
 
 use crate::repl::SessionState;
 
-/// Longest wait for the title call. Past it, the preview stays.
 const TIMEOUT: Duration = Duration::from_secs(30);
-/// Words kept from the model's line. Titles read best short.
+
 const MAX_WORDS: usize = 8;
-/// Characters of each side of the exchange sent to the model.
+
 const EXCERPT_CHARS: usize = 600;
 const SYSTEM: &str = "You name chat sessions. Reply with a short title of about six words \
 that says what the session is about. Plain text only: no quotes, no trailing period, \
 no preamble.";
 
-/// Starts the title call when this turn produced the session's first reply.
-/// Returns at once; the call runs in the background.
 pub(crate) fn maybe_start(state: &SessionState, agent: &Agent, initial_count: usize) {
-    // Gray-made sessions (cron, subagent, print) are never named.
+
     if crate::session_store::session_origin_from_env().is_some() {
         return;
     }
@@ -57,9 +47,6 @@ pub(crate) fn maybe_start(state: &SessionState, agent: &Agent, initial_count: us
     });
 }
 
-/// The opening user message and the first assistant reply, when this turn
-/// (the messages from `initial_count` on) produced the session's first reply.
-/// A session resumed after it already had a reply is never named.
 pub(crate) fn first_exchange(
     messages: &[Message],
     initial_count: usize,
@@ -98,9 +85,6 @@ fn excerpt(s: &str) -> String {
     s.trim().chars().take(EXCERPT_CHARS).collect()
 }
 
-/// The title from the model's reply: its first non-empty line, with a leading
-/// "Title:", quotes, markdown and trailing punctuation dropped, capped at
-/// [`MAX_WORDS`] words. `None` when nothing is left.
 pub(crate) fn title_from_reply(raw: &str) -> Option<String> {
     let line = raw.lines().map(str::trim).find(|l| !l.is_empty())?;
     let line = if line.to_ascii_lowercase().starts_with("title:") {
@@ -114,8 +98,6 @@ pub(crate) fn title_from_reply(raw: &str) -> Option<String> {
     crate::session_store::clean_title(&words.join(" "))
 }
 
-/// Sends the request and collects the reply's text. `None` on a stream error,
-/// an empty reply, or the timeout.
 async fn complete(provider: Arc<dyn Provider>, req: ChatRequest) -> Option<String> {
     let mut stream = provider.stream(req);
     let drain = async {
@@ -178,7 +160,7 @@ mod tests {
             first_exchange(&turn, 0),
             Some(("fix the login loop".into(), "Found it: the redirect".into()))
         );
-        // A session resumed after it already had a reply is left alone.
+
         let resumed = vec![
             Message::user("old"),
             Message::assistant("old reply"),

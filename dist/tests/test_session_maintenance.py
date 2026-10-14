@@ -1,4 +1,3 @@
-"""Large superseded history must not block transport resumption."""
 import json
 import os
 from pathlib import Path
@@ -6,7 +5,6 @@ import subprocess
 import tempfile
 import unittest
 import uuid
-
 
 @unittest.skipUnless(os.environ.get('GRAY_TEST_BIN'), 'Set GRAY_TEST_BIN')
 class SessionMaintenanceTests(unittest.TestCase):
@@ -25,7 +23,7 @@ class SessionMaintenanceTests(unittest.TestCase):
                 f.write(json.dumps(row(36,'retained summary'))+'\n')
             original=path.stat().st_size
             env={k:v for k,v in os.environ.items() if not k.startswith(('GRAY_','OPENAI_'))};env['GRAY_HOME']=tmp
-            # No provider config: maintenance is local, no paid work necessary.
+
             result=subprocess.run([os.environ['GRAY_TEST_BIN'],'-p','hello','--json','--session',sid],
                 cwd=tmp,env=env,capture_output=True,text=True,timeout=30)
             self.assertNotEqual(result.returncode,0)

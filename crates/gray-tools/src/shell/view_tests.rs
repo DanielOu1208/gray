@@ -15,9 +15,6 @@ fn report(label: &str, note: Option<&str>) -> ExitReport {
     }
 }
 
-// 1D wave-test fix: ~22 bytes/line so 3,000 lines ≈ 66 KiB, exceeding
-// both the 50 KiB and 2,000-line budgets (the brief's "60 KiB,
-// 3,000-line input"). The old 11-byte lines never tripped the byte cap.
 fn numbered_lines(n: usize) -> Vec<u8> {
     (1..=n)
         .map(|i| format!("line {i:05} {i:010}\n"))
@@ -64,7 +61,7 @@ fn single_huge_line_cuts_at_codepoint_boundary() {
     log.extend_from_slice("héllo 🌍 end".as_bytes());
     let v = middle_out(&log, 50 * 1024, 2000, 100);
     assert!(v.body.contains("{{MARKER}}"));
-    // Both halves must still be valid UTF-8 (no torn codepoint).
+
     assert!(std::str::from_utf8(v.body.as_bytes()).is_ok());
     let (a, b) = v.omitted_range.unwrap();
     let head_len = v
@@ -80,15 +77,15 @@ fn single_huge_line_cuts_at_codepoint_boundary() {
 
 #[test]
 fn emoji_straddling_head_cut_is_atomic() {
-    // 4-byte emoji placed so a naive byte cut would split it.
+
     let head_budget = ((50 * 1024) as f32 * VIEW_HEAD_FRACTION).floor() as usize;
     let mut log = vec![b'A'; head_budget - 2];
-    log.extend_from_slice("😀".as_bytes()); // bytes head_budget-2..head_budget+2
+    log.extend_from_slice("😀".as_bytes());
     log.extend_from_slice(b"\n");
     log.extend_from_slice(&vec![b'B'; 60 * 1024]);
     let v = middle_out(&log, 50 * 1024, 2000, 0);
     let rendered = v.body.replace("{{MARKER}}", "M");
-    // Emoji is either wholly in head or wholly out — never replacement char from a split.
+
     assert!(!rendered.contains('�'), "{rendered:?}");
 }
 
@@ -114,10 +111,10 @@ fn resume_hint_marker_shape() {
     let v = middle_out(&log, 50 * 1024, 2000, 0);
     let m = resume_hint(&v, std::path::Path::new("/tmp/log"));
     assert!(m.contains("lines / "), "{m}");
-    // An exact, copy-pasteable command rather than "go and work out how".
+
     assert!(m.contains("sed -n '"), "{m}");
     assert!(m.contains("/tmp/log"), "{m}");
-    // Line numbers, not bytes: they survive the CRLF folding sanitize does.
+
     assert!(m.contains("lines "), "{m}");
     assert_eq!(
         resume_hint(
@@ -130,7 +127,7 @@ fn resume_hint_marker_shape() {
 
 #[test]
 fn home_relative_respects_gray_home() {
-    // Bug 1: isolated GRAY_HOME must shorten to ~, not leak real HOME.
+
     let dir = tempfile::tempdir().expect("tempdir");
     let gray = dir.path().to_string_lossy().into_owned();
     let prev = std::env::var("GRAY_HOME").ok();
@@ -150,7 +147,7 @@ fn home_relative_respects_gray_home() {
 
 #[test]
 fn header_goldens() {
-    // Need HOME for the ~ path; skip path assertion if HOME differs.
+
     let r = report("exit 0", None);
     let v = middle_out(b"hi\n", 50 * 1024, 2000, 0);
     let h = header(&r, Some(&v), Duration::from_millis(1200), &log_path());
@@ -162,7 +159,7 @@ fn header_goldens() {
     assert!(h2.contains("showing first"), "{h2}");
     assert!(h2.contains("omitted"), "{h2}");
     assert!(h2.contains("grep the log for more"), "{h2}");
-    // Whole views carry no hint: the log path stays the last field.
+
     assert!(
         !h.contains("grep the log for more"),
         "whole view must not hint: {h}"
@@ -190,8 +187,7 @@ fn header_goldens() {
 
 #[test]
 fn crlf_sets_folded_flag_and_header_marker() {
-    // A CRLF file and an LF file render identically; the header must
-    // disclose the folding so the model can distrust the visible bytes.
+
     let v = middle_out(b"id,name\r\n1,ann\r\n", 50 * 1024, 2000, 0);
     assert!(v.has_cr);
     assert_eq!(v.body, "id,name\n1,ann\n");
@@ -217,14 +213,11 @@ fn crlf_sets_folded_flag_and_header_marker() {
 
 #[test]
 fn inline_budget_keeps_head_and_tail_with_elision() {
-    // SPEC-01: the foreground inline budget is 6 KiB head + 6 KiB tail.
-    // A result re-sent in every later request of the turn is re-billed every
-    // later request, so a smaller window wins against a paged read.
+
     assert_eq!(MEM_HEAD_BYTES, 6 * 1024);
     assert_eq!(MEM_TAIL_BYTES, 6 * 1024);
     assert_eq!(INLINE_BUDGET_BYTES, 12 * 1024);
-    // 3,000 ~22-byte lines ≈ 66 KiB: over budget, so head + tail survive
-    // with an elided middle and exact line accounting.
+
     let log = numbered_lines(3000);
     assert!(log.len() > INLINE_BUDGET_BYTES);
     let v = middle_out(&log, INLINE_BUDGET_BYTES, 2000, 0);
@@ -238,8 +231,7 @@ fn inline_budget_keeps_head_and_tail_with_elision() {
         v.total_lines
     );
     assert_eq!(v.total_lines, 3000);
-    // Just under the byte budget renders whole with no marker (line budget
-    // set high here so the byte edge is what is under test).
+
     let small = middle_out(
         &log[..INLINE_BUDGET_BYTES - 100],
         INLINE_BUDGET_BYTES,
@@ -265,8 +257,7 @@ fn carriage_return_progress_becomes_readable_lines() {
 
 #[test]
 fn the_paging_command_extracts_exactly_the_omitted_lines() {
-    // Not a string-shape check: run the command the hint hands the model and
-    // confirm it lands on the lines that were dropped.
+
     let dir = tempfile::tempdir().expect("tempdir");
     let log_path = dir.path().join("log");
     let log = numbered_lines(3000);
@@ -275,8 +266,6 @@ fn the_paging_command_extracts_exactly_the_omitted_lines() {
     let view = middle_out(&log, 50 * 1024, 2000, 0);
     let hint = resume_hint(&view, &log_path);
 
-    // Pull the sed program back out of the hint the model would see, and run
-    // it verbatim: the hint already carries the full `A,Bp` form.
     let marker = "sed -n '";
     let start = hint.find(marker).expect("a sed command") + marker.len();
     let end = hint[start..].find('\'').expect("closing quote") + start;
@@ -292,7 +281,7 @@ fn the_paging_command_extracts_exactly_the_omitted_lines() {
     let paged = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = paged.lines().collect();
     let head_shown = view.shown_lines.0;
-    // `numbered_lines` writes "line NNNNN NNNNNNNNNN", so match the whole line.
+
     let expected_first = format!("line {:05} {:010}", head_shown + 1, head_shown + 1);
     let expected_last = format!(
         "line {:05} {:010}",
@@ -300,7 +289,6 @@ fn the_paging_command_extracts_exactly_the_omitted_lines() {
         head_shown + view.omitted_lines
     );
 
-    // Exactly the dropped block: nothing from the head, nothing from the tail.
     assert_eq!(
         lines.first().copied(),
         Some(expected_first.as_str()),
@@ -320,8 +308,7 @@ fn the_paging_command_extracts_exactly_the_omitted_lines() {
 
 #[test]
 fn strip_ansi_drops_every_escape_form_and_keeps_text() {
-    // CSI (SGR and a cursor move), OSC to BEL, OSC to ST, and a two-byte
-    // charset select.
+
     let colored = "\u{1b}[31mred\u{1b}[0m\n\u{1b}[2J\u{1b}[Hhome\n";
     assert_eq!(strip_ansi(colored), "red\nhome\n");
     assert_eq!(
@@ -335,11 +322,10 @@ fn strip_ansi_drops_every_escape_form_and_keeps_text() {
         "OSC to ST"
     );
     assert_eq!(strip_ansi("\u{1b}(Bplain\n"), "plain\n");
-    // A sequence the head/tail sample cut in half: the stray remainder goes
-    // too, since half an escape is not text.
+
     assert_eq!(strip_ansi("tail\n\u{1b}[3"), "tail\n");
     assert_eq!(strip_ansi("bare\u{1b}"), "bare");
-    // Multi-byte chars must survive the byte walk intact.
+
     assert_eq!(strip_ansi("\u{1b}[32m✓ π \u{1b}[0mdone\n"), "✓ π done\n");
 }
 
@@ -351,13 +337,12 @@ fn squeeze_collapses_repeated_lines_but_keeps_the_count() {
         out, "ok [… \u{d7} 3 more]\nFAILED\nFAILED\nbuild done\n",
         "a run of 3+ collapses; a run of 2 is left alone"
     );
-    // The count is the point: a collapsed `FAILED` run is signal, not noise.
+
     assert!(out.contains("\u{d7} 3 more"));
-    // Plain text is untouched apart from the normalized trailing newline.
+
     assert_eq!(squeeze("only line\n"), "only line\n");
     assert_eq!(squeeze(""), "");
-    // Composed: color goes first, so two differently-colored `ok` lines are
-    // one run, not two.
+
     assert_eq!(
         squeeze("\u{1b}[32mok\u{1b}[0m\nok\nok\n"),
         "ok [… \u{d7} 2 more]\n"

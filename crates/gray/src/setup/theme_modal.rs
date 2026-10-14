@@ -36,18 +36,11 @@ fn first_match<'a>(rows: &'a [Row], query: &str) -> Option<&'a Row> {
     rows.iter().find(|r| r.name.to_lowercase().contains(&q))
 }
 
-/// Rows the picker's list may take on a `height`-row terminal. The panel
-/// is its own 9 rows (title, query, gaps, the two specimen rows, padding)
-/// plus the list, with a row of backdrop above and below. The list gives up
-/// rows and scrolls before the specimen gets clipped.
 fn list_rows_for(height: u16, n: usize) -> usize {
     let room = usize::from(height).saturating_sub(11).max(1);
     n.clamp(1, 12).min(room)
 }
 
-/// Paints the picker panel: title, query with its position counter, the
-/// list scrolled to keep `sel` in view, and the specimen rows. `list_h`
-/// comes from [`list_rows_for`].
 fn draw_picker(
     frame: &mut ratatui::Frame,
     bg: &BackgroundSnapshot,
@@ -79,8 +72,7 @@ fn draw_picker(
     } else {
         format!("{}/{}", sel + 1, filtered.len())
     };
-    // Flat panel: the surface fill alone separates it from the
-    // dimmed backdrop — no border ring.
+
     frame.render_widget(
         Block::default().style(Style::default().bg(th.surface_bg)),
         modal,

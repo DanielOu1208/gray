@@ -9,13 +9,13 @@ fn line_bounds_single_line() {
 #[test]
 fn line_bounds_multiline_are_per_line() {
     let t = "one\ntwo\nthree";
-    // cursor inside "two"
+
     assert_eq!(line_start(t, 5), 4);
     assert_eq!(line_end(t, 5), 7);
-    // cursor at start of "three"
+
     assert_eq!(line_start(t, 8), 8);
     assert_eq!(line_end(t, 8), t.len());
-    // cursor right after a newline's predecessor
+
     assert_eq!(line_end(t, 3), 3);
 }
 

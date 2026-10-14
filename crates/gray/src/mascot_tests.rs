@@ -10,7 +10,7 @@ use crate::text_width::display_width;
 fn grid_fits_terminal_and_keeps_aspect() {
     let grid: MascotGrid = decode_grid(120, 40).expect("asset decodes");
     assert!(grid.cols <= 120, "must not exceed terminal width");
-    // 9-row headroom cap: at most 31 cell rows (62 pixel rows) on 40 rows.
+
     assert!(grid.rows <= 40 - 9 + 1, "must leave the banner visible");
     let aspect = grid.cols as f32 / (grid.rows * 2) as f32;
     assert!(
@@ -22,7 +22,7 @@ fn grid_fits_terminal_and_keeps_aspect() {
 #[test]
 fn grid_is_width_bound_on_a_wide_short_terminal() {
     let grid = decode_grid(200, 24).expect("asset decodes");
-    // Height caps first on a short terminal: 15 cell rows -> ~34 columns.
+
     assert!(grid.rows * 2 <= 2 * (24 - 9 + 1));
     assert!(grid.cols < 200);
 }
@@ -35,8 +35,7 @@ fn tiny_terminals_decline_the_mascot() {
 
 #[test]
 fn lines_tile_the_grid_with_merged_runs() {
-    // `mascot_lines` declines under NO_COLOR — the truecolor path needs
-    // it cleared regardless of what the dev shell exported.
+
     unsafe { std::env::remove_var("NO_COLOR") };
     let grid = decode_grid(120, 40).expect("asset decodes");
     let lines = super::mascot_lines_unchecked(120, 40, Some(120)).expect("truecolor path");
@@ -47,7 +46,6 @@ fn lines_tile_the_grid_with_merged_runs() {
     }
 }
 
-/// Flattened text of a line block, one string per line.
 fn plain(lines: &[Line<'static>]) -> Vec<String> {
     lines
         .iter()
@@ -57,7 +55,7 @@ fn plain(lines: &[Line<'static>]) -> Vec<String> {
 
 #[test]
 fn welcome_is_the_ascii_logo_by_default() {
-    // graychan is `/hehe` only: the startup screen is the plain logo.
+
     let welcome = plain(&build_welcome_lines(120));
     assert!(
         !welcome.iter().any(|l| l.contains('\u{2580}')),
@@ -72,8 +70,7 @@ fn welcome_is_the_ascii_logo_by_default() {
             "logo row missing from the welcome: {want:?}"
         );
     }
-    // The devin-tui home banner under the logo: `gray` + version once; the
-    // hints, tip and corner row moved into the composer's home band.
+
     assert!(
         welcome
             .iter()
@@ -97,12 +94,11 @@ fn welcome_is_the_ascii_logo_by_default() {
 #[test]
 fn mascot_art_paints_as_half_block_cells() {
     unsafe { std::env::remove_var("NO_COLOR") };
-    // Same size probe build_welcome_lines used to use (no TTY under cargo
-    // test, so crossterm fails and the fallback wins on both sides).
+
     let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 24));
     let grid = decode_grid(cols, rows).expect("asset decodes");
     let art = mascot_lines_unchecked(cols, rows, Some(120)).expect("truecolor path");
-    // Painted through a TestBackend the block is real cells, not escapes.
+
     let backend = TestBackend::new(120, 40);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
     terminal
@@ -148,8 +144,7 @@ fn hehe_toggle_drops_the_mascot_entry() {
 
 #[test]
 fn welcome_layout_is_devin_home() {
-    // devin-tui home: a `min(78, w-8)` column centered on screen and a
-    // blank tail so the composer's seam stays unspent.
+
     let w = 100usize;
     let text = plain(&build_welcome_lines(w));
     let col_w = (w - 8).min(78);
@@ -183,8 +178,7 @@ fn welcome_sweep_draws_to_the_full_mark() {
             })
             .sum()
     };
-    // The pens intro draws the mark progressively: blank at the start,
-    // more ink as progress advances, the complete mark at the end.
+
     let first = glyphs(0.4);
     let full = glyphs(1.0);
     assert!(first < full, "first {first}, full {full}");
@@ -197,7 +191,7 @@ fn welcome_sweep_draws_to_the_full_mark() {
         plain(&build_welcome_lines(w)),
         "the last frame IS the banner"
     );
-    // The title pair is up from the first frame — only the mark sweeps.
+
     assert!(
         plain(&welcome_lines_at(w, 0.0, None))
             .iter()
@@ -210,8 +204,7 @@ fn welcome_sweep_draws_to_the_full_mark() {
             .any(|l| l.trim().starts_with("gray ")),
         "title missing at full reveal"
     );
-    // Every frame is the banner's row count — the insert paints a fixed
-    // region, so a short frame would leave stale cells under it.
+
     assert_eq!(
         welcome_lines_at(w, 0.3, None).len(),
         welcome_lines_at(w, 1.0, None).len(),

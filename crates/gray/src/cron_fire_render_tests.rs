@@ -48,8 +48,7 @@ fn final_assistant_text_reads_the_event_stream() {
 #[test]
 fn final_assistant_text_starts_over_at_a_message_boundary() {
     use gray_core::event::AgentEvent;
-    // A mid-turn note ends the streamed message; what follows is a new
-    // message, and a delivery carries only that final one.
+
     let events = vec![
         AgentEvent::TextDelta {
             delta: "Time to eat.".into(),
@@ -112,7 +111,7 @@ fn reminder_plain_text_is_byte_for_byte() {
 
 #[test]
 fn reminder_name_is_a_slug_of_the_exact_text() {
-    assert_eq!(reminder_name("clean my roo"), "clean-my-roo"); // typo kept
+    assert_eq!(reminder_name("clean my roo"), "clean-my-roo");
     assert_eq!(reminder_name("  Call MOM!! "), "call-mom");
     assert_eq!(reminder_name("!!!"), "reminder");
     let long = reminder_name(&"word ".repeat(30));
@@ -146,8 +145,7 @@ fn redacts_secret_named_assignments_but_not_ordinary_lines() {
 
 #[test]
 fn a_secret_free_transcript_keeps_its_paths_verbatim() {
-    // The transcript is a tool log: paths are the point of it, so they only
-    // go when a secret fired alongside them.
+
     let home = tempfile::tempdir().unwrap();
     let t = "[tool:bash]\n[result:exit 0]\n<untrusted-output>\ndrwxr-xr-x 2 u u 4096 /home/u/roo\n</untrusted-output>\nTime to clean.";
     assert_eq!(redact_secrets(t, home.path()), t);

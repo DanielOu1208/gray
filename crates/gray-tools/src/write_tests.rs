@@ -48,7 +48,7 @@ fn force_bypasses_unread_and_partial_but_not_stale() {
     assert!(
         WriteTool::decide(Some(&partial), Some(&meta), old.as_bytes(), true, "f.txt").is_none()
     );
-    // Staleness still refuses even with force.
+
     std::fs::write(&p, b"one\ntwo\nthree\n").unwrap();
     let grown = std::fs::metadata(&p).unwrap();
     let current = std::fs::read(&p).unwrap();
@@ -65,9 +65,7 @@ fn full_view_writes_are_allowed() {
 
 #[test]
 fn partial_with_matching_hash_is_still_refused_hash_is_freshness_only() {
-    // Old lossy rule allowed a partial view when the hash matched disk.
-    // New contract: hash gates freshness only; delivered coverage gates
-    // overwrite, so a partial view is refused even with a matching hash.
+
     let (_dir, p, old) = fixture(b"one\ntwo\n");
     let meta = std::fs::metadata(&p).unwrap();
     let partial = entry_for(&p, false, FileLedger::hash_bytes(old.as_bytes()));
@@ -78,9 +76,7 @@ fn partial_with_matching_hash_is_still_refused_hash_is_freshness_only() {
 
 #[test]
 fn hash_mismatch_with_same_mtime_shape_is_stale() {
-    // Same size, forged-old mtime in entry is already stale via mtime;
-    // here the bytes differ while mtime/size match (entry forged to match
-    // disk meta): hash mismatch must still refuse as changed.
+
     let (_dir, p, _old) = fixture(b"one\ntwo\n");
     let meta = std::fs::metadata(&p).unwrap();
     let entry = LedgerEntry {
@@ -95,7 +91,7 @@ fn hash_mismatch_with_same_mtime_shape_is_stale() {
         read_at: std::time::Instant::now(),
     };
     let current = std::fs::read(&p).unwrap();
-    // Sanity: same length so only the hash can catch it.
+
     assert_eq!(current.len() as u64, meta.len());
     let msg = WriteTool::decide(Some(&entry), Some(&meta), &current, false, "f.txt")
         .expect("hash mismatch must be stale");
@@ -136,34 +132,27 @@ fn still_fresh_catches_a_change_between_check_and_replace() {
     std::fs::write(&path, "one").unwrap();
     let before = std::fs::metadata(&path).unwrap();
 
-    // Untouched: the replace may proceed.
     assert!(still_fresh(&path, Some(&before), None));
 
-    // A concurrent edit lands after the staleness check: the metadata the
-    // check saw no longer describes the file.
     std::thread::sleep(std::time::Duration::from_millis(15));
     std::fs::write(&path, "two — changed").unwrap();
     assert!(!still_fresh(&path, Some(&before), None));
 
-    // The file vanished under the check: fail closed.
     std::fs::remove_file(&path).unwrap();
     assert!(!still_fresh(&path, Some(&before), None));
 
-    // Still absent on both sides (a create): allowed.
     let fresh = dir.path().join("new.txt");
     assert!(still_fresh(&fresh, None, None));
     std::fs::write(&fresh, "x").unwrap();
     assert!(!still_fresh(&fresh, None, None), "appeared under us");
 
-    // Same metadata but different bytes: the hash comparison still catches it.
     let same_size = dir.path().join("s.txt");
     std::fs::write(&same_size, "aaa").unwrap();
     let meta = std::fs::metadata(&same_size).unwrap();
     let hash =
         super::FileLedger::hash_bytes(std::fs::read(&same_size).unwrap().as_slice()).unwrap();
     std::fs::write(&same_size, "bbb").unwrap();
-    // Same length, and mtime is coarse — force identical mtimes by copying
-    // the original metadata's mtime onto the file where the platform allows.
+
     assert!(
         !still_fresh(&same_size, Some(&meta), Some(hash))
             || meta.modified().unwrap()

@@ -1,12 +1,3 @@
-//! shell/split.rs — quote-aware pipeline splitter.
-//!
-//! Used by `exit::masked_note` (pipe detection). Deliberately not a shell
-//! parser: heredoc bodies (`<<…\n…`) are opaque, newline is not an operator,
-//! and `f() { …; }` keeps its paren depth.
-
-/// Pipe-only view for `exit::masked_note`: all other operators
-/// (`&&`, `||`, `;`, `&`) stay literal, except that they are not split on.
-/// Quote/backslash/subshell/heredoc rules stay exact.
 pub fn split_pipeline(cmd: &str) -> Vec<String> {
     split(cmd)
 }
@@ -29,7 +20,7 @@ fn split(cmd: &str) -> Vec<String> {
     let mut double = false;
     let mut backtick = false;
     let mut depth: u32 = 0;
-    // `<<` seen: the first depth-0 newline ends scanning (body opaque).
+
     let mut heredoc = false;
     while i < n {
         let c = chars[i];
@@ -90,7 +81,7 @@ fn split(cmd: &str) -> Vec<String> {
             cur.push(c);
             i += 1;
         } else if c == '<' && i + 1 < n && chars[i + 1] == '<' {
-            // Heredoc opener: copy `<<[-]delim` verbatim and arm the body rule.
+
             cur.push_str("<<");
             i += 2;
             if i < n && chars[i] == '-' {
@@ -128,7 +119,7 @@ fn split(cmd: &str) -> Vec<String> {
                 cur.push_str(&chars[i..].iter().collect::<String>());
                 break;
             }
-            // Heredoc nested in $(…): give up on the body, keep splitting.
+
             heredoc = false;
             cur.push(c);
             i += 1;

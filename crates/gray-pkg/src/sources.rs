@@ -1,10 +1,5 @@
-//! Shared source helpers: the shallow git clone used by `github:` skill
-//! installs and plugin `git` sources.
-
 use std::path::PathBuf;
 
-/// Shallow-clone `url` into `<tmp>/repo` (`extra` holds `--branch` /
-/// `--filter` / `--sparse` flags) and return the keeper tempdir + path.
 pub fn clone_into_tmp(
     url: &str,
     extra: &[&str],
@@ -18,9 +13,7 @@ pub fn clone_into_tmp(
         tempfile::tempdir()?
     };
     let dst = tmp.path().join("repo");
-    // Installs are hash-verified content copies, not working trees: line
-    // endings must reach the disk exactly as committed. Windows runners
-    // default core.autocrlf=true, which rewrites every text file.
+
     let mut cmd = std::process::Command::new("git");
     cmd.args(["-c", "core.autocrlf=false", "clone", "--depth", "1"])
         .args(extra)

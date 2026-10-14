@@ -4,7 +4,6 @@ use std::os::unix::process::ExitStatusExt;
 use crate::shell::spawn::spawn;
 use tokio::io::AsyncBufReadExt;
 
-/// Whole group reaped (orphans go to init, which reaps promptly).
 async fn group_gone(pgid: i32) -> bool {
     let t0 = Instant::now();
     while t0.elapsed() < Duration::from_secs(3) {
@@ -43,16 +42,11 @@ async fn guards_reject_degenerate_pgid() {
 
 #[tokio::test]
 async fn group_kill_kills_tree() {
-    // sh parent + sleep child in one group: SIGTERM may or may not be
-    // answered in time (load-dependent), so accept either escalation
-    // path — the invariant is the whole tree dies by SIGTERM or SIGKILL.
+
     let spawned = spawn("sleep 30", &std::env::temp_dir(), None, None).expect("spawn");
     let pgid = spawned.pgid;
     let mut child = spawned.child;
-    // Reap concurrently, like the real caller: a zombie left unreaped
-    // makes kill(-pgid, SIGKILL) return EPERM on macOS (nothing
-    // signalable remains), which is not a kill failure. Reaping as soon
-    // as the child dies empties the group before escalation fires.
+
     let (res, st) = tokio::join!(term_then_kill(pgid, Duration::from_secs(2)), child.wait());
     res.expect("group kill ok");
     let st = st.expect("reap");
@@ -68,10 +62,7 @@ async fn group_kill_kills_tree() {
 
 #[tokio::test]
 async fn term_ignored_escalates_to_sigkill() {
-    // Ignored TERM survives exec: sleep never answers, SIGKILL ends it.
-    // `echo ready` is the handshake: without it TERM could land before
-    // the trap installs and the test would lie. The reaper keeps the
-    // liveness probe honest (no zombie window).
+
     let spawned = spawn(
         "trap '' TERM; echo ready; exec sleep 30",
         &std::env::temp_dir(),
@@ -102,8 +93,7 @@ async fn term_ignored_escalates_to_sigkill() {
 
 #[tokio::test]
 async fn already_exited_sends_no_signal() {
-    // A live sleeper's pid, probed with sig 0: alive, so the probe
-    // answers 0 and no real signal is ever sent.
+
     let mut child = tokio::process::Command::new("sleep")
         .arg("30")
         .stdin(std::process::Stdio::null())

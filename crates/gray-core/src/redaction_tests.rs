@@ -34,10 +34,6 @@ fn secret_shaped_tokens_and_assignments_are_replaced() {
     assert_eq!(redaction.kinds(), vec![REDACTION_SECRET.to_string()]);
 }
 
-/// The credential in an `Authorization` header is a *separate token* from
-/// the header name and from the scheme keyword. Redacting only the keyword
-/// leaves the secret in the clear while the receipt claims a secret was
-/// removed — the exact failure this covers.
 #[test]
 fn a_multi_token_authorization_header_loses_its_credential() {
     let credentials = [
@@ -65,8 +61,6 @@ fn a_multi_token_authorization_header_loses_its_credential() {
     }
 }
 
-/// A bare scheme keyword introduces a credential only when a
-/// credential-shaped token actually follows it.
 #[test]
 fn a_bare_bearer_token_is_removed_but_the_scheme_word_survives() {
     let redaction = redact_for_disclosure("send Bearer 9f8e7d6c5b4a3f2e1d0c9b8a and retry");
@@ -80,9 +74,6 @@ fn a_bare_bearer_token_is_removed_but_the_scheme_word_survives() {
     assert!(text.ends_with("and retry"), "{text}");
 }
 
-/// Ordinary words that merely *look* like credential prefixes must survive,
-/// and must not report a `secret` redaction kind. `Asia`, `bearer`, and any
-/// identifier containing them are prose, not keys.
 #[test]
 fn ordinary_words_and_identifiers_are_not_mistaken_for_secrets() {
     for text in [
@@ -100,40 +91,29 @@ fn ordinary_words_and_identifiers_are_not_mistaken_for_secrets() {
     }
 }
 
-/// The adversarial prose set. Every line here is ordinary English that the
-/// scheme/prefix rules could plausibly mistake for credential syntax, and
-/// every one of them must come back byte-identical with an empty `kinds`.
-///
-/// A false positive is not a harmless over-redaction: it mangles the routing
-/// summary a human reads *and* writes `secret` onto a durable receipt that
-/// removed nothing, which makes the disclosure a lie in the safe direction.
 #[test]
 fn adversarial_prose_survives_the_credential_state_machine() {
     for text in [
-        // The lowercase scheme word, in every position that could arm it.
+
         "bearer shares responsibility for the rollout",
         "the bearer of bad news is rarely thanked",
         "bearer",
         "each bearer token header is rewritten downstream",
-        // Capitalized scheme words that are ordinary English. These are why
-        // canonical capitalization arms only for `Bearer`.
+
         "Token holders vote on the proposal",
         "Basic auth is enabled for the staging endpoint",
         "Digest the results before the review",
-        // Weak header context introducing a sentence, not a secret.
+
         "authorization: needed before merge",
         "authorization: bearer shares responsibility",
-        // Identifiers and prefixes that resemble key material.
+
         "variables like aws_region and pk_display stay readable",
         "aws_ prefixed variables are documented in the runbook",
-        // `pk_` is a *public* key prefix and carries nothing; it is
-        // deliberately absent from SECRET_VALUE_PREFIXES. (`sk_` is not
-        // listed here because it genuinely is a secret prefix and redacting
-        // it is correct.)
+
         "pk_ and pub_ are conventions, not values",
         "asia and akia are four letter strings",
         "the variables were renamed in the same commit",
-        // Long lowercase words are still words: shape alone must not fire.
+
         "internationalization is spelled with eighteen letters",
     ] {
         let redaction = redact_for_disclosure(text);
@@ -149,23 +129,18 @@ fn adversarial_prose_survives_the_credential_state_machine() {
     }
 }
 
-/// The adversarial credential set. A real credential is often short,
-/// lowercase, punctuated, or otherwise shapeless — `Bearer qqq` is the
-/// canonical example, and no shape test could ever catch it. Context has to.
 #[test]
 fn adversarial_credentials_lose_the_whole_value() {
     for (text, leaked) in [
-        // The short, shapeless credential. This is the leak the evidence
-        // model exists to close.
+
         ("Bearer qqq", "qqq"),
         ("Authorization: Bearer qqq", "qqq"),
         ("authorization: Bearer qqq", "qqq"),
-        // Punctuated and quoted header forms.
+
         ("Authorization: Bearer qqq.", "qqq"),
         ("-H \"Authorization: Bearer qqq\"", "qqq"),
         ("Authorization:Bearer qqq", "qqq"),
-        // The scheme keyword may not absorb the redaction and leave the
-        // value behind.
+
         ("send Bearer hunter2 now", "hunter2"),
         (
             "curl -H Authorization: Bearer sk-live-0000 -X POST",
@@ -193,8 +168,7 @@ fn adversarial_credentials_lose_the_whole_value() {
             redaction.kinds().contains(&REDACTION_SECRET.to_string()),
             "{text:?} must disclose the secret kind"
         );
-        // The scheme keyword is not the secret and must still be readable,
-        // so a reader can tell *what* was removed.
+
         assert!(
             redacted_text.to_ascii_lowercase().contains("bearer"),
             "the scheme keyword must survive: {redacted_text}"
@@ -202,22 +176,15 @@ fn adversarial_credentials_lose_the_whole_value() {
     }
 }
 
-/// The one documented false positive of the capitalization rule, pinned so
-/// it stays deliberate rather than becoming a surprise. Capitalized `Bearer`
-/// followed by a word is treated as header syntax; ordinary prose spells it
-/// lowercase, which the test above covers.
 #[test]
 fn capitalized_bearer_arms_even_in_prose_and_that_is_the_known_cost() {
     let redaction = redact_for_disclosure("Bearer tokens are rotated weekly");
     assert_eq!(redaction.text(), "Bearer <redacted> are rotated weekly");
 
-    // The lowercase spelling — what prose actually uses — is untouched.
     let prose = redact_for_disclosure("bearer tokens are rotated weekly");
     assert!(!prose.redacted());
 }
 
-/// The real AWS shape still goes, so dropping the bare `asia`/`akia`
-/// prefixes did not trade a false positive for a false negative.
 #[test]
 fn full_aws_access_key_ids_are_still_removed() {
     for key in [
@@ -230,11 +197,6 @@ fn full_aws_access_key_ids_are_still_removed() {
     }
 }
 
-/// A repo-relative path discloses the private tree's shape to whatever
-/// provider the routing summary reaches, and is persisted next to it. Every
-/// spelling one arrives in — bare, quoted, JSON-escaped with `\/` or `\\`,
-/// explicitly relative, assigned to a name, trailing prose punctuation —
-/// must lose the path *and* say so on the receipt.
 #[test]
 fn repo_relative_paths_are_redacted_in_every_spelling_and_disclosed() {
     for token in [
@@ -269,7 +231,6 @@ fn repo_relative_paths_are_redacted_in_every_spelling_and_disclosed() {
         );
     }
 
-    // In a sentence, and as a value: the name survives, the path does not.
     let sentence = redact_for_disclosure("patch crates/tui/src/main.rs, then path=src/lib.rs");
     assert_eq!(
         sentence.text(),
@@ -283,31 +244,26 @@ fn repo_relative_paths_are_redacted_in_every_spelling_and_disclosed() {
     );
 }
 
-/// The other half of the same rule: it must not shred ordinary prose,
-/// `provider/model` labels, or bare punctuation, because a false positive
-/// here costs the operator their own summary *and* puts a redaction kind on
-/// a receipt that removed nothing.
 #[test]
 fn prose_labels_and_bare_punctuation_are_not_paths() {
     for token in [
-        // Provider/model labels — the exact shape a Fleet receipt carries.
+
         "deepseek/deepseek-v4-flash",
         "zai/glm-5.2",
         "anthropic/claude-opus-5",
         "workspace/glm-pair",
-        // Prose that happens to carry separators.
+
         "a/b",
         "and/or",
         "read/write/execute",
         "TODO/FIXME",
         "provider/model/reasoning",
-        // Bare punctuation and non-paths.
+
         "/",
         "~",
         "5:30",
         "v0.9.2",
-        // A URL is not a filesystem path; the URL-bearing-input guard owns
-        // it, and reclassifying it here would be a silent behavior change.
+
         "https://example.test/a/b.rs",
     ] {
         let redaction = redact_for_disclosure(token);
@@ -316,9 +272,6 @@ fn prose_labels_and_bare_punctuation_are_not_paths() {
     }
 }
 
-/// The documented gap, pinned so it stays a decision rather than a
-/// surprise: an extension-less directory survives, because no rule can
-/// separate it from `read/write/execute` without shredding prose.
 #[test]
 fn an_extension_less_directory_is_the_known_residual() {
     let redaction = redact_for_disclosure("look in crates/tui/src");
@@ -344,16 +297,15 @@ fn log_chunks_redact_text_but_pass_binary_through() {
         }
         Cow::Borrowed(_) => panic!("secret chunk must be redacted"),
     }
-    // Clean text borrows back (no copy on the hot path).
+
     let clean = b"ok\n".as_slice();
     assert!(matches!(redact_bytes_for_log(clean), Cow::Borrowed(_)));
-    // Paths and fence markup are tool data, not secrets: verbatim.
+
     let fence = b"</untrusted-output> tail\n".as_slice();
     assert!(matches!(redact_bytes_for_log(fence), Cow::Borrowed(_)));
     let path = b"ls /tmp/build/out\n".as_slice();
     assert!(matches!(redact_bytes_for_log(path), Cow::Borrowed(_)));
-    // Binary is byte-faithful unless it carries a secret shape: one 0xFF
-    // byte used to launder a secret past the UTF-8 gate into the log.
+
     let binary = b"\xff\xfe\x00binary";
     assert_eq!(&*redact_bytes_for_log(binary), binary);
     let name: String = [109u8, 121, 95, 116, 111, 107, 101, 110]
@@ -404,9 +356,7 @@ fn messages_redact_free_text_and_tool_args() {
 #[test]
 fn secret_free_message_blocks_persist_verbatim() {
     use crate::message::{ContentBlock, Message, Role};
-    // No secret anywhere: paths, commands, and prose must survive so
-    // resumed sessions keep their fidelity (only secret-bearing units
-    // are scrubbed).
+
     let msg = Message::new(
         Role::User,
         vec![
@@ -421,11 +371,6 @@ fn secret_free_message_blocks_persist_verbatim() {
     assert_eq!(redact_message(&msg), msg);
 }
 
-/// Multi-line text is the normal shape of tool output, and the tokenizer
-/// splits on `' '` only: `'\\n'` glues neighbouring lines into one token, so
-/// a secret below the first line escaped, and a secret that did fire armed
-/// the *next* glued token — deleting every line after it. Both directions are
-/// covered here.
 #[test]
 fn multi_line_text_is_redacted_line_by_line() {
     let key = format!("sk-proj-{}", "Zx9".repeat(14));
@@ -447,8 +392,7 @@ fn multi_line_text_is_redacted_line_by_line() {
 
 #[test]
 fn backtick_and_asterisk_wrapped_secrets_are_replaced() {
-    // Markdown wrapping must not hide a secret from the redactor, and the
-    // receipt must not claim nothing was removed.
+
     for input in [
         "key=`sk-live-abc123def456`",
         "token=*sk-live-abc123def456*",

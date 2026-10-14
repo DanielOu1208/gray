@@ -23,7 +23,7 @@ fn wide_natural_table_stays_grid() {
 
 #[test]
 fn fragmented_compact_column_switches_to_records() {
-    // Single-row table: one unbreakable token far wider than its column.
+
     let header = vec![cell("ID"), cell("Name")];
     let rows = vec![vec![cell("ID-AA1001001001"), cell("ok")]];
     let widths = vec![4, 8];

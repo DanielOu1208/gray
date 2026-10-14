@@ -1,11 +1,8 @@
-//! Transcript box/line insertion (`impl Tui`, split from `transcript`).
-
 use super::*;
 
 impl Tui {
     pub fn push_tool_box(&mut self, header: Line<'static>, body: Vec<Line<'static>>) {
-        // A card is its own block: a boundary on each side, the gap outside
-        // its painted padding (see `margins`).
+
         self.atomic(|t| {
             t.insert_tool_box(header, body);
             t.ensure_gap();
@@ -14,8 +11,6 @@ impl Tui {
         let _ = std::io::stdout().flush();
     }
 
-    /// [`Self::push_tool_box`] for a header that runs to several rows (a
-    /// template preview with a second line).
     pub fn push_tool_box_lines(&mut self, header: Vec<Line<'static>>, body: Vec<Line<'static>>) {
         self.atomic(|t| {
             t.insert_tool_box_lines(header, body);
@@ -26,13 +21,7 @@ impl Tui {
     }
 
     fn insert_tool_box_lines(&mut self, header: Vec<Line<'static>>, body: Vec<Line<'static>>) {
-        // Emission order: stream text still in flight (reveal buffer, held
-        // punctuation, the unfrozen markdown tail) was emitted before this
-        // card, so it commits and paints first. Callers flush only at
-        // `ToolCallStart`, while same-step deltas can keep arriving until
-        // `ToolResult`; the `drain_reveal` inside `emit_rows` ran after the
-        // history push and never reached the renderer tail, so that text
-        // painted and replayed below the step's cards.
+
         self.flush_markdown();
         self.ensure_gap();
         let w = self.width().max(10);
@@ -43,7 +32,7 @@ impl Tui {
     }
 
     fn insert_tool_box(&mut self, header: Line<'static>, body: Vec<Line<'static>>) {
-        // Same ordering invariant as `insert_tool_box_lines`.
+
         self.flush_markdown();
         self.ensure_gap();
         let w = self.width().max(10);
@@ -58,11 +47,6 @@ impl Tui {
         self.push_styled_lines_with_hyperlinks(vec![l], &[], 0);
     }
 
-    /// Appends flushed thinking text to the open run, creating one when the
-    /// tail entry isn't a run (fresh turn, evicted history). Raw fragments
-    /// concatenate back into logical lines, so resize re-wraps from source.
-    /// `terminated` marks `\n`-drained lines (their terminator is stored,
-    /// word-cut continuations and the final tail stay bare).
     pub(crate) fn append_thinking_text(&mut self, fragment: &str, terminated: bool) {
         if !matches!(
             self.history_entries.last(),
@@ -82,8 +66,6 @@ impl Tui {
         }
     }
 
-    /// True when the open thinking run ends on a live word-cut (no `\n`
-    /// terminator yet): the next flushed fragment continues that line.
     pub(crate) fn thinking_run_mid_line(&self) -> bool {
         matches!(
             self.history_entries.last(),
@@ -92,8 +74,6 @@ impl Tui {
         )
     }
 
-    /// Stores one flushed thinking fragment in the open run and paints it,
-    /// trimming the word-cut seam (see [`thinking_paint_text`]).
     pub(crate) fn flush_thinking_fragment(&mut self, fragment: &str, terminated: bool) {
         let mid_line = self.thinking_run_mid_line();
         self.append_thinking_text(fragment, terminated);
@@ -102,11 +82,6 @@ impl Tui {
         }
     }
 
-    /// Paints one flushed thinking fragment (a `\n`-drained logical line, a
-    /// live word-cut, or the run tail) without touching `history_entries` —
-    /// the run's raw text is the history. A blank fragment (a paragraph
-    /// break) paints nothing: it owes the gap the next fragment pays, so a
-    /// pause after `\n\n` shows the last thought, one gap, the dock.
     pub(crate) fn paint_thinking_fragment(&mut self, fragment: String) {
         let line = Line::from(vec![Span::styled(fragment, thinking_style())]);
         self.emit_styled(vec![line], Vec::new());
@@ -134,8 +109,7 @@ impl Tui {
                 let hl_owned: Vec<HyperlinkTarget> = if src_range.end == usize::MAX {
                     line_hyperlinks.iter().map(|h| (*h).clone()).collect()
                 } else {
-                    // Translate each hyperlink's absolute columns into this
-                    // row's coordinates; drop parts landing on other rows.
+
                     line_hyperlinks
                         .iter()
                         .filter_map(|h| {
@@ -158,8 +132,7 @@ impl Tui {
         }
         let lines_only: Vec<Line<'static>> = all_wrapped.iter().map(|(l, _)| l.clone()).collect();
         if self.modal_open {
-            // Deferred: `record_rows` below still commits the same rows, the
-            // paint queues for the modal's close.
+
             self.modal_pending
                 .push(crate::composer::PendingInsert::Styled(all_wrapped));
             return lines_only;
@@ -168,10 +141,6 @@ impl Tui {
         lines_only
     }
 
-    /// `insert_before` + per-row render for wrapped styled rows — the same
-    /// paint `render_and_insert_styled_lines` does live and
-    /// `flush_modal_pending` replays after a modal. OSC8 hyperlinks are
-    /// patched per row against the padded column range.
     pub(crate) fn insert_styled_rows(
         &mut self,
         all_wrapped: Vec<(Line<'static>, Vec<HyperlinkTarget>)>,
@@ -207,8 +176,7 @@ impl Tui {
             return;
         }
         let rebased = rebase_hyperlinks_for_slice(hyperlinks, line_offset, lines.len());
-        // History keeps the block as it came (edge blanks included): reflow
-        // and replay run it through the same funnel and land where this did.
+
         self.history_entries
             .push(crate::composer::TranscriptEntry::StyledLines {
                 lines: lines.clone(),
@@ -219,11 +187,6 @@ impl Tui {
         let _ = std::io::stdout().flush();
     }
 
-    /// `/hehe`: paints the graychan mascot into the transcript as big as the
-    /// terminal allows. A `Mascot` marker entry, not a `StyledLines`
-    /// snapshot, so `/hehe` again can drop exactly this block and a reflow
-    /// re-derives the art at the new width. Returns false when the terminal
-    /// can't show it (no truecolor / too small) so the caller can say so.
     pub(crate) fn push_mascot(&mut self) -> bool {
         let w = self.width().max(10);
         let cols = u16::try_from(w).unwrap_or(u16::MAX);
@@ -255,19 +218,10 @@ impl Tui {
         self.push_styled_lines_with_hyperlinks(lines, &[], 0);
     }
 
-    /// A turn-ending error (`format_core_error`): the headline in the
-    /// theme's error colour, its hint lines muted. Plain `stream` painted it
-    /// as assistant prose, so a rate limit read like part of the answer.
     pub fn push_error(&mut self, msg: &str) {
         self.push_styled_lines_with_hyperlinks(error_lines(msg), &[], 0);
     }
 
-    /// Renders a `/compact` summary (LLM markdown) through the same
-    /// pipeline as assistant answers: `**bold**`/`##` markers become
-    /// styled rows (BOLD headings/prose, links, tables) instead of
-    /// printing literally. Pure over the markdown renderer so tests
-    /// cover it without `Tui::new` (needs a TTY). Blank input yields
-    /// no rows so compact never paints empty gaps.
     pub fn push_compaction_summary(&mut self, summary: &str) {
         let (lines, hyperlinks) = render_markdown_lines(summary, Some(self.width()));
         if lines.is_empty() {
@@ -302,9 +256,6 @@ impl Tui {
         self.push_styled_lines_with_hyperlinks(vec![line], &[], 0);
     }
 
-    /// Shifts a receipt row (`push_action` / `push_warning`) onto the home
-    /// column's left edge while the home screen owns the layout — see
-    /// [`home_receipt_indent`]. Identity off home.
     fn indent_home_receipt(&self, mut line: Line<'static>) -> Line<'static> {
         let indent = home_receipt_indent(self.is_home(), self.width());
         if indent > 0 {
@@ -313,10 +264,6 @@ impl Tui {
         line
     }
 
-    /// One warning row (⚠ …): the warning twin of
-    /// [`Tui::push_action`] — glyph in the soft error tone, body in soft
-    /// text. Used by the prompt-cache miss notice (pi `addCacheMissNotice`
-    /// parity), where a dim row would read as chrome instead of money.
     pub fn push_warning(&mut self, text: &str) {
         let line = Line::from(vec![
             Span::styled(
@@ -334,7 +281,6 @@ impl Tui {
         self.push_styled_lines_with_hyperlinks(vec![line], &[], 0);
     }
 
-    /// Replays a previous session's message history into the TUI scrollback.
     pub fn replay_session_history(
         &mut self,
         entries: &[crate::session_store::SessionEntry],
@@ -347,9 +293,6 @@ impl Tui {
         );
     }
 
-    /// [`Self::replay_session_history`] with the agent's tool display maps, so
-    /// resumed cards name their tools the way the live cards did. Labels are
-    /// not persisted: the caller takes them from the agent's tool defs.
     pub fn replay_session_history_with_tools(
         &mut self,
         entries: &[crate::session_store::SessionEntry],
@@ -384,9 +327,7 @@ impl Tui {
                             | gray_core::ContentBlock::Media {
                                 media_type, data, ..
                             } => {
-                                // Replay materializes the stored bytes so the
-                                // chip survives reopen — and `read` can pull
-                                // the file back in as vision on demand.
+
                                 if let Some(p) =
                                     gray_core::paths::materialize_media(media_type, data)
                                 {
@@ -417,10 +358,7 @@ impl Tui {
                             .any(|b| matches!(b, gray_core::ContentBlock::Text { .. }));
                     if !user_text.is_empty() || !attached.is_empty() {
                         self.push_user_prompt(&user_text, &attached, true);
-                        // Feed composer input history so Up/Down recall works
-                        // for prompts from the resumed session. Injected notes
-                        // (job notices, nudges) and component events stay out —
-                        // recall is for text the user actually typed.
+
                         if typed {
                             self.history.push(user_text.clone());
                             if self.history.len() > 100 {
@@ -434,9 +372,7 @@ impl Tui {
                     for block in &entry.message.content {
                         match block {
                             gray_core::ContentBlock::Thinking { text, .. } => {
-                                // Persisted reasoning replays dim+italic like
-                                // live thinking (no `Thought for` timing —
-                                // that only exists live). Previously dropped.
+
                                 let rows = thinking_replay_lines(text);
                                 if !rows.is_empty() {
                                     self.ensure_gap();
@@ -447,8 +383,7 @@ impl Tui {
                                 let clean = strip_ansi(text);
                                 if !clean.trim().is_empty() {
                                     self.ensure_gap();
-                                    // Same budget the insert wrapper will use:
-                                    // tables fit by construction instead of shredding.
+
                                     let tw = prose_width(self.width().max(10));
                                     let mut buffers = gray_markdown::MarkdownBuffers::new();
                                     let (output, _) =
@@ -506,26 +441,17 @@ impl Tui {
             );
             self.push_tool_box_lines(header, Vec::new());
         }
-        // NOTE: persisted turn usage is billed Σ-per-round (the cost basis),
-        // NOT context size — restoring it into the gauge repainted the
-        // `843.8k/200k`-style spike on every resume until the next turn's
-        // first StepUsage. Seed the gauge from the replayed messages instead:
-        // same char-estimate `/context` + the compact threshold fall back to,
-        // so footer, `/context`, and trigger agree from the first paint.
-        // First real StepUsage overwrites (see `seed_estimate_usage`).
+
         let replay_estimate: usize = entries
             .iter()
             .map(|e| crate::compact::estimate_tokens(&e.message))
             .sum();
         self.seed_estimate_usage(replay_estimate);
         self.end_insert_batch();
-        // pi-style: seam gap provided by viewport box padding, not transcript trailing blank
+
     }
 }
 
-/// Replays one persisted ToolResult into the scrollback: resolves the
-/// matching ToolUse name/args, renders header + body, pushes the card.
-/// Shared by the User-role and System-role replay arms.
 fn replay_tool_result(
     tui: &mut Tui,
     tool_calls: &mut HashMap<String, (String, serde_json::Value)>,
@@ -565,16 +491,6 @@ fn replay_tool_result(
     tui.push_tool_box_lines(header, lines);
 }
 
-/// Rebase absolute hyperlink targets onto a committed slice.
-///
-/// `hyperlinks` carry document-absolute `line_index` values while `lines` is
-/// the just-frozen slice starting at `line_offset` (see `stream_text` /
-/// `flush_markdown`). Keep only targets landing inside
-/// `[line_offset, line_offset + lines.len())` and shift them to slice-relative
-/// indices, so the `by_line` map in `render_and_insert_styled_lines` (and the
-/// stored history replayed on resize) attributes each URL to its own line.
-/// Without this, an incremental commit of line N resolves `by_line[0]` to
-/// line 0's URL — the second bullet steals the previous file's link.
 pub(crate) fn rebase_hyperlinks_for_slice(
     hyperlinks: &[HyperlinkTarget],
     line_offset: usize,
@@ -593,14 +509,6 @@ pub(crate) fn rebase_hyperlinks_for_slice(
         .collect()
 }
 
-/// Extra left indent for a receipt row (`push_action`, `push_warning`)
-/// while the home screen owns the layout. Receipts paint in the transcript,
-/// whose rows start at `GUTTER`; the home screen instead centers its block on
-/// `home_column`, so an announcement about the box landed at screen-left while
-/// the box sat ~30% in. Pad content to the box's left edge — the emit path
-/// adds `left_pad()` (GUTTER) on top, so the content pad is `x - GUTTER`.
-/// Off home (or when the column sits inside the gutter) returns zero and the
-/// row keeps the usual transcript column.
 pub(crate) fn home_receipt_indent(home: bool, width: usize) -> usize {
     if !home {
         return 0;
@@ -608,10 +516,6 @@ pub(crate) fn home_receipt_indent(home: bool, width: usize) -> usize {
     crate::composer::home_column(width).0.saturating_sub(GUTTER)
 }
 
-/// Rows for a turn-ending error: first line (`✗ Rate limited (retryable):
-/// …`) in the error colour, follow-up hint lines (`  Try again later…`)
-/// muted. Codex parity: errors read as errors (`new_error_event`, red).
-/// Blank input yields no rows. Pure for testability (`Tui::new` needs a TTY).
 pub(crate) fn error_lines(msg: &str) -> Vec<Line<'static>> {
     let theme = crate::theme::theme();
     msg.trim_end()
@@ -629,10 +533,6 @@ pub(crate) fn error_lines(msg: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Renders markdown to ratatui rows with the live insert budget
-/// (`width - 2`, same as the replay Text arm): tables fit by construction
-/// instead of shredding. Blank input yields no rows. Pure so the
-/// `/compact` summary path is testable without `Tui::new` (needs a TTY).
 pub(crate) fn render_markdown_lines(
     text: &str,
     width: Option<usize>,

@@ -106,12 +106,10 @@ fn profile_binding_changes_when_request_policy_changes() {
 fn warm_replay_defaults_off_and_only_rebinds_on_opt_in() {
     let decl = valid_provider_decl();
     assert!(!decl.transport.request.warm_replay);
-    // Absent/false serializes away so declarations that don't opt in keep
-    // their existing profile binding byte-for-byte across a gray-plugin
-    // upgrade.
+
     let request = serde_json::to_value(&decl.transport.request).unwrap();
     assert!(request.get("warm_replay").is_none(), "{request}");
-    // Opting in is a credential-contract change: it rebinds.
+
     let mut opted = valid_provider_decl();
     opted.transport.request.warm_replay = true;
     let request = serde_json::to_value(&opted.transport.request).unwrap();
@@ -184,7 +182,7 @@ fn chat_operation_is_accepted_and_bound_to_profile() {
     value["auth_methods"][0]["operations"] =
         serde_json::json!(["login", "refresh", "revoke", "models", "chat"]);
     let decl = ProviderDecl::from_value(&value).expect("chat is a valid operation");
-    // The profile binding covers the ops list: adding chat changes it.
+
     assert_ne!(
         decl.profile_binding("oauth").unwrap(),
         valid_provider_decl().profile_binding("oauth").unwrap()
@@ -201,7 +199,7 @@ fn chat_request_result_round_trip() {
     };
     let v = serde_json::to_value(&req).unwrap();
     assert_eq!(v["model"], serde_json::json!("flash"));
-    // `model` defaults empty so older sidecars stay parseable.
+
     let back: ProviderChatRequest =
         serde_json::from_value(serde_json::json!({"provider": "p", "auth_method": "a"})).unwrap();
     assert!(back.model.is_empty());
@@ -214,7 +212,7 @@ fn chat_request_result_round_trip() {
         v["relay_url"],
         serde_json::json!("http://127.0.0.1:9/relay/tok/responses")
     );
-    // Debug never leaks the per-turn bearer.
+
     let dbg = format!("{res:?}");
     assert!(!dbg.contains("tok"), "{dbg}");
 }
@@ -232,7 +230,7 @@ fn provider_model_legacy_json_parses_without_variants_or_slots() {
     assert!(m.context_window.is_none());
     assert!(m.variants.is_empty());
     assert!(m.slots.is_empty());
-    // Empty composite fields stay off the wire so older hosts see the old shape.
+
     let v = serde_json::to_value(&m).unwrap();
     assert!(v.get("variants").is_none(), "{v}");
     assert!(v.get("slots").is_none(), "{v}");
@@ -286,7 +284,7 @@ fn provider_model_fusion_row_round_trips() {
         ],
     };
     let v = serde_json::to_value(&model).unwrap();
-    // `fast: false` is omitted; `fast: true` is emitted.
+
     assert!(v["variants"][0].get("fast").is_none(), "{v}");
     assert_eq!(v["variants"][1]["fast"], json!(true));
     assert_eq!(v["variants"][0]["parts"]["sidekick"], json!("swe-2-high"));

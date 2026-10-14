@@ -38,15 +38,14 @@ fn quote_and_apostrophe_entities() {
 
 #[test]
 fn numeric_decimal_and_hex_entities() {
-    // &#60; = '<', &#x3e; = '>'
+
     let lines = pretty_lines("a &#60;b&#x3e; c\n\n");
     assert_eq!(lines[0], "a <b> c", "got: {lines:#?}");
 }
 
 #[test]
 fn full_html5_named_entities_decoded() {
-    // Beyond the XML core set: these must decode in prose just like they
-    // already do in table cells (via pulldown), keeping the two consistent.
+
     let lines = pretty_lines("&mdash; &copy; &hellip; &rarr; &times;\n\n");
     assert_eq!(lines[0], "— © … → ×", "got: {lines:#?}");
 }
@@ -59,8 +58,7 @@ fn nbsp_decodes_to_no_break_space() {
 
 #[test]
 fn control_char_entities_are_not_injected() {
-    // ESC / BEL / NUL / CR must never be substituted into terminal output;
-    // the source stays literal instead.
+
     for (src, literal) in [
         ("x &#27; y\n\n", "&#27;"),
         ("x &#x1b; y\n\n", "&#x1b;"),
@@ -94,12 +92,11 @@ fn entity_inside_link_text_decodes_and_keeps_link() {
 
 #[test]
 fn entity_inside_inline_math_does_not_corrupt() {
-    // The entity sits inside a `\(...\)` math span; the math transform owns
-    // those bytes, so the entity scan must not add an overlapping transform.
+
     let lines = pretty_lines("eq \\(a &lt; b\\) end\n\n");
     let joined = lines.join("\n");
     assert!(joined.contains("end"), "trailing text intact: {lines:#?}");
-    // No doubled fragments from overlapping transforms.
+
     assert!(!joined.contains("endend"), "no double emit: {lines:#?}");
 }
 
@@ -125,7 +122,7 @@ fn entities_decoded_inside_emphasis_and_heading() {
 
 #[test]
 fn entities_left_literal_in_code() {
-    // Inline code and fenced blocks are intentionally verbatim.
+
     let inline = pretty_lines("call `vec&lt;i32&gt;` now.\n\n");
     assert!(
         inline.iter().any(|l| l.contains("vec&lt;i32&gt;")),
@@ -140,7 +137,7 @@ fn entities_left_literal_in_code() {
 
 #[test]
 fn unknown_or_bare_ampersand_untouched() {
-    // No semicolon, unknown name, and a lone `&` must all pass through.
+
     let lines = pretty_lines("Tom &amp Jerry &unknown; plain & text\n\n");
     assert_eq!(
         lines[0], "Tom &amp Jerry &unknown; plain & text",
@@ -150,8 +147,7 @@ fn unknown_or_bare_ampersand_untouched() {
 
 #[test]
 fn entity_in_table_cell_still_decodes() {
-    // Regression guard: the table cell path already decoded entities; this
-    // must keep working alongside the new prose path.
+
     let lines = pretty_lines("| H |\n|---|\n| a &lt; b |\n\n");
     let joined = lines.join("\n");
     assert!(joined.contains("a < b"), "got: {lines:#?}");
@@ -159,8 +155,7 @@ fn entity_in_table_cell_still_decodes() {
 
 #[test]
 fn decode_html_entities_text_decodes_and_leaves_unknown_literal() {
-    // Tool-card path: known refs decode, control-decoding and unknown refs
-    // and a bare `&` stay literal.
+
     let got = crate::decode_html_entities_text("&lt;a&gt; &amp; it&#x27;s &#27; &bogus; & alone");
     assert_eq!(got, "<a> & it's &#27; &bogus; & alone");
 }
@@ -179,14 +174,12 @@ fn no_panic_on_entity_edge_cases() {
         "&lt;&gt;&amp;",
         "&#xZZ;\n\n",
         "&CounterClockwiseContourIntegral;\n\n",
-        // Multi-byte UTF-8 mixed with `&` in various positions: the inner
-        // loop only advances over ASCII bytes, so it must not slice
-        // through a multi-byte sequence.
+
         "& é &lt; ñ\n\n",
         "café &lt; thé\n\n",
         "🦀 & 🦀\n\n",
         "&amp;🦀&lt;\n\n",
-        // Repeated `&` runs (worst case for the O(n²) bound).
+
         "&&&&&&&&&&&&\n\n",
         &("&".repeat(200) + "\n\n"),
     ] {

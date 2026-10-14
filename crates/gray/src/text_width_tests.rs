@@ -15,10 +15,6 @@ fn emoji_counts_two_cells() {
     assert_eq!(char_width('a'), 1);
 }
 
-/// UI glyphs must stay single-cell: the footer's pad math
-/// (`left_len`/`right_len`) and every wrap assume one cell per glyph.
-/// ◷ is the prompt-cache warmth countdown, ⬡ the status dock,
-/// ⚠ the warning rows.
 #[test]
 fn ui_glyphs_are_single_cell() {
     for c in ['\u{25f7}', '\u{2b21}', '\u{26a0}'] {
@@ -30,6 +26,6 @@ fn ui_glyphs_are_single_cell() {
 fn fit_never_splits_and_always_progresses() {
     let chars: Vec<char> = "a⭐b".chars().collect();
     assert_eq!(fit_char_count(&chars, 3), 2);
-    assert_eq!(fit_char_count(&chars, 0), 1); // progress over exactness
+    assert_eq!(fit_char_count(&chars, 0), 1);
     assert_eq!(fit_char_count(&[], 0), 0);
 }

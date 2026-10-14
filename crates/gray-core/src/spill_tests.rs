@@ -1,22 +1,12 @@
-//! The spill store: handles, recovery, the trust boundary and the bounds.
-//!
-//! Every test pins `$GRAY_HOME` to its own tempdir: these write real files, and
-//! a test suite must never touch the developer's own store.
-
 use crate::spill::*;
 use crate::tool_out;
 
-/// `$GRAY_HOME` is process-global, so these tests take a lock rather than
-/// racing each other into another test's directory.
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Runs `body` with `$GRAY_HOME` pointed at a fresh directory, holding the
-/// lock for the whole body so no sibling test can repoint it mid-run.
 fn with_home<T>(body: impl FnOnce() -> T) -> T {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::TempDir::new().expect("tempdir");
-    // SAFETY: the lock makes this the only thread touching the var while it
-    // is set, and every test reads back only its own directory.
+
     unsafe { std::env::set_var("GRAY_HOME", dir.path()) };
     let out = body();
     unsafe { std::env::remove_var("GRAY_HOME") };
@@ -49,10 +39,10 @@ fn a_handle_never_names_a_path_outside_the_store() {
             "../../etc/passwd",
             "..",
             "",
-            "ABCDEF0123456789",  // uppercase: not what we print
-            "abcdef012345678",   // 15
-            "abcdef01234567890", // 17
-            "abcdef012345678g",  // not hex
+            "ABCDEF0123456789",
+            "abcdef012345678",
+            "abcdef01234567890",
+            "abcdef012345678g",
             "abcdef012345678/../x",
         ] {
             let err = read(bad).expect_err("must refuse");
@@ -79,16 +69,16 @@ fn an_evicted_or_unknown_handle_is_an_error_not_an_empty_result() {
 #[test]
 fn an_over_budget_result_keeps_its_preview_and_names_the_handle() {
     with_home(|| {
-        // 4000 lines of 40 bytes: over the 2000-line cap, under 50 KiB.
+
         let raw: String = (0..4000)
             .map(|i| format!("line {i:04} ...................................\n"))
             .collect();
         let out = tool_out::finish(raw.clone());
         assert!(!out.is_error);
-        // The preview is still head + tail, as before.
+
         assert!(out.content.contains("line 0000"), "head missing");
         assert!(out.content.contains("[truncated"), "annotation missing");
-        // …and now the original is recoverable.
+
         assert!(
             out.content.contains("[spilled"),
             "no footer: {}",
@@ -100,7 +90,6 @@ fn an_over_budget_result_keeps_its_preview_and_names_the_handle() {
     });
 }
 
-/// The 16 hex characters after `gray spill ` in a footer.
 fn handle_from(text: &str) -> String {
     text.split("gray spill head ")
         .nth(1)
@@ -150,7 +139,7 @@ fn the_meter_reports_what_compression_saved() {
             "{}",
             totals.saved_pct()
         );
-        // Per rule, so `gray spill stats` can say which rule earns its keep.
+
         assert_eq!(totals.by_rule["cargo"], (2, 32_000, 2_800));
         assert_eq!(totals.by_rule[""], (1, 90_000, 50_000));
     });
@@ -178,9 +167,9 @@ fn a_torn_meter_line_does_not_hide_the_rest() {
 fn the_store_is_bounded_and_keeps_the_newest() {
     with_home(|| {
         for i in 0..MAX_ENTRIES + 20 {
-            // Distinct content: distinct handles.
+
             store(&format!("payload {i}")).expect("stored");
-            // Distinct mtimes so "newest" is unambiguous on a coarse clock.
+
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let files: Vec<_> = std::fs::read_dir(dir().expect("home"))
@@ -189,13 +178,12 @@ fn the_store_is_bounded_and_keeps_the_newest() {
             .filter(|e| e.path().extension().is_some_and(|x| x == "txt"))
             .collect();
         assert!(files.len() <= MAX_ENTRIES, "store grew to {}", files.len());
-        // The newest survived the eviction.
+
         let newest = handle_for(&format!("payload {}", MAX_ENTRIES + 19));
         assert!(read(&newest).is_ok(), "the newest entry was evicted");
     });
 }
 
-/// Unix-only: owner-only is a mode bit there; Windows has no equivalent.
 #[cfg(unix)]
 #[test]
 fn the_store_is_written_owner_only() {

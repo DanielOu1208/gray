@@ -2,8 +2,7 @@ use super::*;
 
 #[test]
 fn replayed_thinking_keeps_every_line_dim_italic() {
-    // Resume must show persisted reasoning: one row per source line,
-    // in the live thinking style. Blank blocks paint nothing.
+
     let rows = thinking_replay_lines("first\nsecond");
     assert_eq!(rows.len(), 2, "{rows:?}");
     for r in &rows {
@@ -15,10 +14,7 @@ fn replayed_thinking_keeps_every_line_dim_italic() {
 
 #[test]
 fn adjacent_file_links_do_not_steal_previous_url() {
-    // TODO-list shape: two adjacent bullets carrying different file URLs.
-    // Second commit arrives as slice [line 1] with absolute hyperlinks
-    // for lines 0..2 and offset 1; it must resolve to NOTES.txt, not the
-    // previous line's src/main.rs URL.
+
     let hyperlinks = vec![
         HyperlinkTarget {
             line_index: 0,
@@ -46,9 +42,7 @@ fn adjacent_file_links_do_not_steal_previous_url() {
 
 #[test]
 fn compaction_summary_renders_markdown_not_literal() {
-    // `/compact` summary is LLM markdown (`**bold**`, `##` headings):
-    // it must render through the markdown pipeline like assistant
-    // answers, not `push_dim` literally (screenshot: raw `**` markers).
+
     let (lines, _) = render_markdown_lines("**Active request:** foo", Some(80));
     let text: String = lines
         .iter()
@@ -73,8 +67,7 @@ fn compaction_summary_renders_markdown_not_literal() {
 
 #[test]
 fn a_turn_error_reads_as_an_error_not_as_prose() {
-    // A rate limit used to stream as plain assistant prose. The headline
-    // takes the error colour, the hint below it is muted.
+
     let theme = crate::theme::theme();
     let msg = "✗ Rate limited (retryable): status 429: slow down\n  Try again later or switch model via /model.\n";
     let rows = error_lines(msg);
@@ -119,7 +112,7 @@ fn long_header_breaks_before_its_in_detail() {
             "  in /home/u/content/videos/attention-explained/SCRIPT-FINAL.txt".to_string(),
         ]
     );
-    // Even when it fits, `in <dir>` takes its own row.
+
     let rows = super::cards::header_rows(header, 200);
     assert_eq!(rows.len(), 2);
     assert_eq!(
@@ -142,14 +135,12 @@ fn other_header_details_stay_inline_when_they_fit() {
 
 #[test]
 fn home_receipt_rows_indent_to_the_box_edge() {
-    // Off home the indent is zero — receipts keep the transcript gutter.
+
     assert_eq!(home_receipt_indent(false, 160), 0);
-    // On home the row lands on the home column's left edge; the emit
-    // path adds `left_pad()` itself, so content pad is x - GUTTER.
+
     let (x, _) = crate::composer::home_column(160);
     assert_eq!(home_receipt_indent(true, 160), x - GUTTER);
-    // A narrow terminal whose column sits inside the gutter clamps to 0
-    // rather than panicking on the subtraction.
+
     let (narrow_x, _) = crate::composer::home_column(10);
     assert_eq!(
         home_receipt_indent(true, 10),

@@ -1,18 +1,3 @@
-//! Shared plugin→host runner core (`host/run` over a `gray -p` child).
-//!
-//! The host (REPL/`-p` in `gray`) serves sidecar
-//! `host/*` requests through this: a subprocess, not an in-process agent
-//! turn, because `Agent::run` futures are `!Send` (streaming sink) and the
-//! sidecar transport (`sidecar.rs` reader) needs `Send`. Spawning the running
-//! binary (`current_exe`) keeps dev and installed layouts working with no
-//! `PATH` setup; the process env (`GRAY_HOME`) is inherited so the cron
-//! sidecar and its runner see the same jobs.
-//!
-//! Ceiling: the host enforces a 30 s TTL per request — this helper reaps the
-//! child at 28 s so a long turn reports a loud timeout instead of hanging
-//! the sidecar. A timed-out turn's side effects already happened; only the
-//! reply is lost (the error text says so).
-
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -20,8 +5,6 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
-/// Run `prompt` through a fresh `gray -p` child, returning the `host/run`
-/// result value (`{"text"}` or `{"error"}`). Loud on every failure, never hangs.
 pub async fn run_prompt_child(cwd: &Path, prompt: &str) -> Value {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -40,8 +23,7 @@ pub async fn run_prompt_child(cwd: &Path, prompt: &str) -> Value {
         Ok(c) => c,
         Err(e) => return json!({"error": format!("host/run spawn: {e}")}),
     };
-    // Drain stdout concurrently (capped: a runaway child must not fill
-    // memory): `wait()` alone deadlocks past the pipe buffer.
+
     const MAX_CHILD_OUT: u64 = 256 * 1024;
     let mut piped = child.stdout.take();
     let drain = tokio::spawn(async move {
@@ -53,9 +35,7 @@ pub async fn run_prompt_child(cwd: &Path, prompt: &str) -> Value {
             let mut capped = (&mut *o).take(MAX_CHILD_OUT + 1);
             let _ = capped.read_to_end(&mut v).await;
         }
-        // Keep draining to EOF (audit #7): dropping the read half here
-        // would hand a chatty child SIGPIPE/EPIPE, which no shell user
-        // would see. The cap holds the *memory*, not the pipe open.
+
         let mut sink = tokio::io::sink();
         let _ = tokio::io::copy(o, &mut sink).await;
         v
@@ -66,8 +46,7 @@ pub async fn run_prompt_child(cwd: &Path, prompt: &str) -> Value {
         Err(_) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            // A descendant can hold stdout open past the child's death; never
-            // hang the caller waiting on the drain.
+
             let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
             return json!({"error": "host/run timed out after 28s"});
         }

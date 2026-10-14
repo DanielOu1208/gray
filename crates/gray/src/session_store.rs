@@ -1,58 +1,3 @@
-//! Session storage for the Gray agent.
-//!
-//! This module provides session persistence and management for conversations,
-//! storing each session as a JSONL file.
-//!
-//! # Architecture & Logging Choice
-//! This crate uses the lightweight [`log`] facade (not `tracing`) as it is a leaf
-//! library with no spans or asynchronous task hierarchies of its own. Warnings
-//! (`log::warn!`) are emitted only on skipped or corrupt data.
-//!
-//! # Locking: cross-process file lock first, in-memory mutex second
-//! The store mutex is per-instance. Every read-modify-append/replace path
-//! (`append`, `append_compaction_replacement`) additionally
-//! holds a per-session cross-process exclusive lock (`<root>/<id>.lock` via
-//! `std::fs::File::lock`) for the whole critical section. Lock order is always
-//! file-lock -> in-memory mutex; never the reverse. The lock file is opened
-//! (created 0600 on unix) then `try_lock` is retried up to 30s; the
-//! open file handle is kept alive until the end of the method — closing it
-//! releases the flock, including on process death. `create` uses atomic
-//! `create_new` and needs no lock; `load`/`list` are lock-free reads (a torn
-//! final line is ignored on load, appends refuse a damaged tail).
-//!
-//! # Open-locks: one owner per session
-//! `<root>/<id>.open` is a different lock from `<id>.lock`: it is held for
-//! the whole time a process has the session open (REPL, `-p`), not for one
-//! write critical section. A second process's [`JsonlSessionStore::acquire_open`]
-//! fails with [`SessionError::Locked`], which carries the holder PID the
-//! lock file records. Within one process repeated acquires share the flock
-//! through a `Weak` registry — the OS lock lives on a single open file
-//! description, so a self-reacquire can never report `Locked`. `load` and
-//! `list` stay lock-free: readers do not claim ownership. `delete` refuses
-//! a session another process holds open (`prune` skips it), since deleting
-//! under a live owner strands its appends on an unlinked inode.
-//!
-//! # Storage privacy: private resumable storage vs redacted export (ONE rule)
-//! The store is private resumable storage: `<root>` is 0700 and every
-//! `.jsonl`/`.lock`/tmp file is 0600 on unix (best-effort chmod after
-//! `create_dir_all`; Windows ACLs are not hardened — std has no portable
-//! owner-only flag). The store persists exactly what callers hand it; it does
-//! NOT redact.
-//!
-//! Divergence (intentional, documented here — do not "centralize" by changing
-//! replay fidelity):
-//! - `gray::print` (`save_session`, `append_new_messages`) pre-scrubs via
-//!   `gray_core::redaction::redact_message` — secret-scoped: secret-bearing
-//!   blocks are redacted (paths in the same block go too), secret-free blocks
-//!   persist verbatim for resume fidelity.
-//! - REPL (`repl::session::persist_turn_messages`, compaction paths,
-//!   `acp_cmds`) persists RAW messages
-//!   for exact replay fidelity (tool args/results, secrets needed to reproduce
-//!   the turn). Safety comes from the 0700/0600 store, not from scrubbing.
-//!
-//!   Redacted export (logs, receipts, `redact_for_disclosure`) is a separate
-//!   disclosure path and must never be confused with resumable storage.
-
 use std::path::{Path, PathBuf};
 
 use crate::print::now_millis;
@@ -60,9 +5,8 @@ use crate::print::now_millis;
 use gray_core::{ContentBlock, Message, Role};
 use serde::{Deserialize, Serialize};
 
-/// On-disk session format version this build reads/writes.
 const SUPPORTED_SESSION_VERSION: u32 = 1;
-/// How long a writer waits for a held per-session file lock before failing.
+
 const SESSION_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
@@ -87,9 +31,6 @@ fn tighten_file_mode(path: &Path) {
     }
 }
 
-// Session-id word lists: `<qualifier>-<middle>-<phenomenon>` (`Why three-word
-// names` on `SessionId`). Lowercase a-z only so `valid_session_id` always
-// accepts them.
 const QUALIFIER_WORDS: &[&str] = &[
     "chiral",
     "ionic",
@@ -274,26 +215,13 @@ const PHENOMENON_WORDS: &[&str] = &[
     "fjord",
 ];
 
-/// Word-list picks per `fresh_id` attempt before we salt with hex (see
-/// [`JsonlSessionStore::fresh_id`]).
 const FRESH_ID_ATTEMPTS: usize = 16;
 
-/// A unique session identifier.
-///
-/// # Why three-word names
-/// Session IDs must be globally unique, filesystem-safe, coordination-free
-/// identifiers. We build them as `<qualifier>-<middle>-<phenomenon>`
-/// (`chiral-xenon-pulsar`) so they read and type like names, not hex — and
-/// still draw 128 random bits from UUID v4 (a maintained stdlib-grade crate,
-/// no counter state or clock) to index three fixed word lists. The space is
-/// 62×60×53 ≈ 197k names; [`JsonlSessionStore::fresh_id`] retries on collision
-/// and `create`'s atomic `create_new` is the real race guard.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(String);
 
 impl SessionId {
-    /// Generates a new random session id: `<qualifier>-<middle>-<phenomenon>`
-    /// picked uniformly from the word lists above by UUID v4 bits.
+
     pub fn generate() -> Self {
         let bits = uuid::Uuid::new_v4().as_u128();
         let q = QUALIFIER_WORDS[(bits as usize) % QUALIFIER_WORDS.len()];
@@ -302,20 +230,14 @@ impl SessionId {
         Self(format!("{q}-{m}-{p}"))
     }
 
-    /// Creates a session ID from an existing string.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
-    /// Returns a string slice of the session ID.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
-
-// NOTE: earlier `From<String>`/`From<&str>`/`AsRef<str>`
-// impls were deleted — every caller uses `new`/`generate`/`as_str`.
-// `Display` stays: it formats `{sid}` in status lines and `NotFound`.
 
 impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -323,30 +245,25 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-/// Monotonically increasing identifier for an entry within a session.
 pub type SessionEntryId = u64;
 
-/// Metadata associated with a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
-    /// Unique identifier for the session.
+
     pub id: SessionId,
-    /// Unix timestamp in milliseconds when the session was created.
+
     pub timestamp: u64,
-    /// Current working directory when the session was started.
+
     pub cwd: PathBuf,
-    /// Model name or identifier used for the session.
+
     pub model: String,
-    /// Who minted the session — `None` for a user-facing session, a tag like
-    /// `"subagent"` for an auxiliary one. Auxiliary sessions stay loadable
-    /// (steer/`--session` still resolve them) but never appear in resume
-    /// pickers or win the per-cwd remembered pointer.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
 }
 
 impl SessionMeta {
-    /// Creates new session metadata with the given parameters.
+
     pub fn new(
         id: SessionId,
         timestamp: u64,
@@ -362,15 +279,12 @@ impl SessionMeta {
         }
     }
 
-    /// Marks the session's producer (see [`session_origin_from_env`]).
     pub fn with_origin(mut self, origin: Option<String>) -> Self {
         self.origin = origin;
         self
     }
 }
 
-/// An origin tag is `[a-z0-9_-]` ≤32 chars: anything else reads as absent
-/// rather than letting env junk onto a header line.
 fn sanitize_origin_tag(raw: &str) -> Option<String> {
     let t = raw.trim().to_ascii_lowercase();
     (!t.is_empty()
@@ -380,9 +294,6 @@ fn sanitize_origin_tag(raw: &str) -> Option<String> {
     .then_some(t)
 }
 
-/// Session origin for this process, if one was declared: `GRAY_SESSION_ORIGIN`
-/// wins (any producer can name itself), then the legacy `GRAY_SUBAGENTS_ACTIVE`
-/// marker the subagent supervisor already exports maps to `"subagent"`.
 pub fn session_origin_from_env() -> Option<String> {
     if let Some(v) = std::env::var("GRAY_SESSION_ORIGIN")
         .ok()
@@ -393,8 +304,6 @@ pub fn session_origin_from_env() -> Option<String> {
     (std::env::var("GRAY_SUBAGENTS_ACTIVE").as_deref() == Ok("1")).then(|| "subagent".to_string())
 }
 
-/// Origin for non-interactive `-p` runs: the declared env origin if any,
-/// else `"print"`, so scripted one-shots stay out of the resume picker.
 pub fn print_session_origin() -> Option<String> {
     session_origin_from_env().or_else(|| Some("print".to_string()))
 }
@@ -405,143 +314,111 @@ fn is_false(b: &bool) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionEntry {
-    /// Compaction boundary marker: when true, all prior entries are superseded
-    /// and reload replays only the entries after the last marker. Old files
-    /// omit it (`default` = false), so they keep loading whole.
+
     #[serde(default, skip_serializing_if = "is_false")]
     pub compaction_boundary: bool,
-    /// Monotonic sequence ID of this entry in the session.
+
     pub entry_id: u64,
-    /// ID of the parent entry in the session tree or history, or `None` for the root entry.
+
     pub parent_id: Option<u64>,
-    /// Unix timestamp in milliseconds when this entry was created.
+
     pub timestamp: u64,
-    /// The conversation turn message stored in this entry.
+
     pub message: Message,
-    /// Token usage recorded for this turn, if available.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<gray_core::event::Usage>,
-    /// Wall-clock turn duration in milliseconds, if measured.
-    /// Tokens stay in `usage`; time lives alongside it.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
 }
 
-/// What the last entry of a session was — enough to tell a finished
-/// conversation from one cut off mid-task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionEnd {
-    /// Assistant text reply: the turn completed.
+
     #[default]
     Done,
-    /// Assistant requested a tool and never got the result.
+
     ToolUse,
-    /// A tool result landed and the assistant never answered it.
+
     ToolResult,
-    /// The user's message was never answered.
+
     UserUnanswered,
 }
 
-/// Summary overview of a session for listing operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {
-    /// How the session's last entry ended (see [`SessionEnd`]). Drives the
-    /// resume picker's done / interrupted markers.
+
     #[serde(default)]
     pub last_end: SessionEnd,
-    /// `last_message_at` of the moment the user dismissed this session's
-    /// "interrupted" flag (`<id>.dismissed`). It only silences that exact
-    /// state: new activity changes `last_message_at`, so a session cut off
-    /// again later is flagged again.
+
     #[serde(default)]
     pub dismissed_at: Option<u64>,
-    /// Display title (`<id>.title`), set by the user. Replaces the
-    /// first-message preview in the sessions picker; `None` = untitled.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Unique identifier of the session.
+
     pub id: SessionId,
-    /// Unix timestamp in milliseconds when the session started.
+
     pub started_at: u64,
-    /// Current working directory of the session.
+
     pub cwd: PathBuf,
-    /// The text content of the first user message in the session, if present.
+
     pub first_user_text: Option<String>,
-    /// The text content of the most recent user message in the session, if
-    /// present — what the resume list previews, so a long session reads as
-    /// what it was last about rather than how it opened.
+
     #[serde(default)]
     pub last_user_text: Option<String>,
-    /// Unix timestamp in milliseconds of the most recent entry in the session
-    /// (any role), i.e. when the session was last active. Falls back to
-    /// [`started_at`](Self::started_at) for a session that has no entries yet.
+
     #[serde(default)]
     pub last_message_at: u64,
-    /// Producer tag from the header (`None` = user-facing). Resume pickers
-    /// and remembered-pointer paths hide marked sessions; explicit
-    /// `resume <id>` / `--session` still load them.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
 }
 
-/// Errors that can occur during session storage operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    /// Underlying I/O error.
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// JSON serialization or deserialization error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// The requested session was not found.
     #[error("session {0} not found")]
     NotFound(SessionId),
 
-    /// A session with this ID already exists (create never truncates).
     #[error("session {0} already exists")]
     AlreadyExists(SessionId),
 
-    /// The session is open in a live process (`<id>.open` flock held).
-    /// `pid` is the holder recorded in the lock file, when readable.
     #[error(
         "session '{id}' is already open in another process{}. Close the other instance before opening it here.",
         .pid.map(|p| format!(" (PID {p})")).unwrap_or_default()
     )]
     Locked {
-        /// Session that could not be claimed.
+
         id: SessionId,
-        /// Recorded holder PID, when the lock file could be read.
+
         pid: Option<u32>,
     },
 
-    /// A corrupt or malformed entry was encountered in a session file.
-    /// `source` carries the detail (JSON syntax or structural validation:
-    /// unsupported version, id mismatch, duplicate id, bad parent chain), so
-    /// it is part of the display — `to_string()` alone must stay clear.
     #[error("corrupt entry at {}:{}: {source}", path.display(), line)]
     Corrupt {
-        /// File path where the corruption occurred.
+
         path: PathBuf,
-        /// 1-based line number of the corrupt entry.
+
         line: usize,
-        /// Underlying JSON parsing error.
+
         #[source]
         source: serde_json::Error,
     },
 }
 
-/// Type alias for results from session operations.
 pub type Result<T> = std::result::Result<T, SessionError>;
 
 impl SessionError {
-    /// Two-line human notice for a [`SessionError::Locked`] refusal —
-    /// headline then the next action, no glyphs or ANSI. Shared by the
-    /// REPL `say` surface (it prefixes each line itself) and the CLI
-    /// boundary card in `main` (`⬢`/`└` styling wraps this text). The
-    /// variant `Display` stays one line for logs and JSON message fields.
+
     pub fn locked_notice(id: &SessionId, pid: Option<u32>) -> String {
         let head = match pid {
             Some(p) => format!("session '{id}' is already open in another process (pid {p})"),
@@ -551,7 +428,6 @@ impl SessionError {
     }
 }
 
-/// Header metadata stored as the first line of a session `.jsonl` file.
 #[derive(Debug, Serialize, Deserialize)]
 struct Header {
     version: u32,
@@ -563,27 +439,18 @@ struct Header {
     origin: Option<String>,
 }
 
-/// A JSONL file-backed session store.
-///
-/// Each session is stored as a single `.jsonl` file at `<root>/<id>.jsonl`.
-/// Line 0 contains the JSON header object (`{"version":1, ...}`), and each subsequent line
-/// contains a serialized [`SessionEntry`].
 pub struct JsonlSessionStore {
     root_dir: PathBuf,
     lock: tokio::sync::Mutex<()>,
 }
 
 impl Default for JsonlSessionStore {
-    /// Store rooted at the default directory (`~/.gray/sessions`), falling back
-    /// to `.gray/sessions` under the current directory when `$HOME` is unset.
+
     fn default() -> Self {
         Self::new(default_root().unwrap_or_else(|| PathBuf::from(".gray/sessions")))
     }
 }
 
-/// One policy for session identifiers: 1..=128 bytes of ASCII alphanumerics,
-/// `-`, `_` — and never a Windows reserved device basename (case-insensitive):
-/// `CON.jsonl` opens the console device, not a file.
 pub(crate) fn valid_session_id(s: &str) -> bool {
     if s.is_empty()
         || s.len() > 128
@@ -608,7 +475,7 @@ pub(crate) fn valid_session_id(s: &str) -> bool {
 }
 
 impl JsonlSessionStore {
-    /// Creates a new JSONL session store rooted at the given directory path.
+
     pub fn new(root_dir: impl Into<PathBuf>) -> Self {
         Self {
             root_dir: root_dir.into(),
@@ -616,13 +483,10 @@ impl JsonlSessionStore {
         }
     }
 
-    /// Returns a reference to the root directory path of the store.
     pub fn root_dir(&self) -> &Path {
         &self.root_dir
     }
 
-    /// FNV-1a 64-bit hex of `s` (no new deps): stable pointer-file names
-    /// for remembered workspace sessions.
     fn fnv1a_hex(s: &str) -> String {
         let mut h: u64 = 0xcbf29ce484222325;
         for b in s.bytes() {
@@ -632,14 +496,10 @@ impl JsonlSessionStore {
         format!("{h:016x}")
     }
 
-    /// Directory holding one remembered-session pointer per cwd hash.
-    /// A directory (not `.jsonl` files) so [`Self::list`] never scans it.
     fn remembered_dir(&self) -> PathBuf {
         self.root_dir.join("remembered")
     }
 
-    /// Pointer path for `cwd`: hash of the canonical path when it resolves,
-    /// else the raw path (same rule on write and read, so they agree).
     fn remember_path_for_cwd(&self, cwd: &Path) -> PathBuf {
         let key = cwd
             .canonicalize()
@@ -650,9 +510,6 @@ impl JsonlSessionStore {
             .join(format!("{}.txt", Self::fnv1a_hex(&key)))
     }
 
-    /// Best-effort write of the remembered session for `cwd` (`cwd\nid`,
-    /// 0600, atomic tmp+rename). Never fails the caller: a missing pointer
-    /// just means the next `-c` pays one full scan.
     pub async fn remember(&self, id: &SessionId, cwd: &Path) {
         if !valid_session_id(id.as_str()) {
             return;
@@ -680,9 +537,6 @@ impl JsonlSessionStore {
         tighten_file_mode(&path);
     }
 
-    /// Recalled session id for `cwd`, or `None` when no/invalid pointer.
-    /// Verifies the stored cwd still matches (hash collisions, moved dirs)
-    /// and the id is well-formed — never trusts the file blindly.
     pub async fn recall(&self, cwd: &Path) -> Option<SessionId> {
         let content = tokio::fs::read_to_string(self.remember_path_for_cwd(cwd))
             .await
@@ -703,8 +557,6 @@ impl JsonlSessionStore {
         Some(SessionId::new(id_str))
     }
 
-    /// Recalled id that still has a session file on disk (`None` after
-    /// prune/delete — the caller then falls back to the list scan).
     pub async fn recall_validated(&self, cwd: &Path) -> Option<SessionId> {
         let id = self.recall(cwd).await?;
         let path = self.session_path(&id).ok()?;
@@ -720,13 +572,10 @@ impl JsonlSessionStore {
         }
     }
 
-    /// Best-effort delete of the remembered-session pointer for `cwd`
-    /// (`/new` over `gray cmd` clears the pointer, never the session).
     pub async fn forget(&self, cwd: &Path) {
         let _ = tokio::fs::remove_file(self.remember_path_for_cwd(cwd)).await;
     }
 
-    /// Whether `<root>/<id>.jsonl` exists (invalid id or IO error → false).
     pub(crate) async fn exists_on_disk(&self, id: &SessionId) -> bool {
         let Ok(path) = self.session_path(id) else {
             return false;
@@ -737,17 +586,10 @@ impl JsonlSessionStore {
             .unwrap_or(false)
     }
 
-    /// A session id no existing file claims: [`SessionId::generate`] retried
-    /// until its `.jsonl` is absent (up to [`FRESH_ID_ATTEMPTS`] picks — the
-    /// name space is ~197k, so one pick almost always suffices). Past that
-    /// we salt a last pick with `-` plus 4 hex chars from a fresh UUID. The
-    /// real race protection stays `create`'s atomic `create_new`.
     pub async fn fresh_id(&self) -> SessionId {
         self.fresh_id_with(SessionId::generate).await
     }
 
-    /// [`fresh_id`](Self::fresh_id) with the id generator injected, so the
-    /// collision-skip path is testable without 197k-to-1 luck.
     async fn fresh_id_with(&self, mut next_id: impl FnMut() -> SessionId) -> SessionId {
         for _ in 0..FRESH_ID_ATTEMPTS {
             let id = next_id();
@@ -760,11 +602,6 @@ impl JsonlSessionStore {
         SessionId::new(format!("{}-{salt:04x}", base.as_str()))
     }
 
-    /// `(next_id, parent_id)` for append paths: reads the file and runs the
-    /// same [`Self::scan_entries`] validation the load path uses, so a torn
-    /// tail / corrupt entry is refused with its real line number.
-    // full rescan per append (O(n²) per session); restore a tail
-    // probe + length cursor if append latency ever shows up.
     async fn next_ids_for_append(id: &SessionId, path: &Path) -> Result<(u64, Option<u64>)> {
         let content = match tokio::fs::read_to_string(path).await {
             Ok(c) => c,
@@ -773,12 +610,7 @@ impl JsonlSessionStore {
             }
             Err(e) => return Err(SessionError::Io(e)),
         };
-        // A torn tail (kill/crash mid-append leaves a partial final line)
-        // heals here, under the session lock, exactly the way `load`
-        // repairs it: truncate after the last complete record and rescan.
-        // The caller appends as if the crash never happened — no
-        // repair-then-retry pass. A file with no newline at all is a
-        // single torn record: unsalvageable, `scan_entries` refuses it.
+
         if !content.ends_with('\n')
             && let Some(cut) = content.rfind('\n')
         {
@@ -799,10 +631,6 @@ impl JsonlSessionStore {
         Self::scan_entries(id, &content, path)
     }
 
-    /// Storage path for `id`, validated at the boundary: only ASCII
-    /// alphanumerics, `-`, `_` (covers UUIDs and safe legacy IDs). Anything
-    /// else — `../`, absolute paths, NUL — is rejected before touching the
-    /// filesystem.
     fn session_path(&self, id: &SessionId) -> std::io::Result<PathBuf> {
         let s = id.as_str();
         if !valid_session_id(s) {
@@ -814,20 +642,11 @@ impl JsonlSessionStore {
         Ok(self.root_dir.join(format!("{s}.jsonl")))
     }
 
-    /// Sibling lock token for `id` (`<root>/<id>.lock`). Validates the id via
-    /// [`Self::session_path`] first so traversal ids never reach the fs.
     fn session_lock_path(&self, id: &SessionId) -> std::io::Result<PathBuf> {
         self.session_path(id)?;
         Ok(self.root_dir.join(format!("{}.lock", id.as_str())))
     }
 
-    /// Acquires the per-session cross-process exclusive lock, creating the
-    /// root (0700) and lock file (0600) as needed. File lock first, memory
-    /// mutex second — callers must hold the returned `File` alive for the
-    /// whole read-modify-write section, then take `self.lock`. Retries
-    /// `WouldBlock` until [`SESSION_LOCK_TIMEOUT`]; any other lock error
-    /// degrades to unlocked-with-warning (availability over mutual exclusion
-    /// on filesystems without flock).
     async fn lock_session_file(&self, id: &SessionId) -> Result<std::fs::File> {
         let lock_path = self.session_lock_path(id)?;
         ensure_private_dir(&self.root_dir)?;
@@ -864,26 +683,11 @@ impl JsonlSessionStore {
         }
     }
 
-    /// Sibling open-lock token for `id` (`<root>/<id>.open`), the session
-    /// owner claim distinct from the `<id>.lock` write critical section.
-    /// Validates the id via [`Self::session_path`] first so traversal ids
-    /// never reach the fs.
     fn session_open_path(&self, id: &SessionId) -> std::io::Result<PathBuf> {
         self.session_path(id)?;
         Ok(self.root_dir.join(format!("{}.open", id.as_str())))
     }
 
-    /// Claims `id` as open in this process until every clone of the returned
-    /// guard drops (process death releases the flock — a crash can never
-    /// strand it). The file records this PID so the next opener's
-    /// [`SessionError::Locked`] names who holds it.
-    ///
-    /// One flock per (process, session): re-acquiring a session this process
-    /// already holds returns a guard sharing the live lock — never a
-    /// self-`Locked` (the OS lock is per open-file-description, so a blind
-    /// second `try_lock` would deadlock-report on ourselves). Filesystems
-    /// without flock degrade to unlocked-with-warning like
-    /// [`Self::lock_session_file`]: availability over mutual exclusion.
     pub async fn acquire_open(&self, id: &SessionId) -> Result<SessionOpenGuard> {
         let open_path = self.session_open_path(id)?;
         ensure_private_dir(&self.root_dir)?;
@@ -896,13 +700,12 @@ impl JsonlSessionStore {
         }
         let mut file = options.open(&open_path)?;
         tighten_file_mode(&open_path);
-        // The registry mutex also serializes the check+claim below, so two
-        // in-process acquirers racing a free lock can't both `try_lock`.
+
         let mut held = OPEN_LOCKS.lock().expect("open-lock registry poisoned");
         if let Some(inner) = held.get(&open_path).and_then(std::sync::Weak::upgrade) {
             return Ok(SessionOpenGuard { _inner: inner });
         }
-        held.remove(&open_path); // dead Weak — never accumulate
+        held.remove(&open_path);
         match file.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
@@ -924,18 +727,10 @@ impl JsonlSessionStore {
         Ok(SessionOpenGuard { _inner: inner })
     }
 
-    /// Whether a process holds `id`'s open lock right now — this process
-    /// included (the probe cannot tell self from other, which is what
-    /// `delete` wants: your own open session is still held). Advisory:
-    /// never creates the file, and a filesystem without flock answers
-    /// false like the writer path does.
     pub async fn open_lock_held(&self, id: &SessionId) -> bool {
         self.open_lock_held_sync(id)
     }
 
-    /// Sync [`Self::open_lock_held`] for callers outside an async context
-    /// (the resume picker's draw loop, which polls after a takeover
-    /// SIGTERM). Same advisory semantics: never creates the file.
     pub(crate) fn open_lock_held_sync(&self, id: &SessionId) -> bool {
         let Ok(open_path) = self.session_open_path(id) else {
             return false;
@@ -943,11 +738,6 @@ impl JsonlSessionStore {
         open_lock_held_at(&open_path)
     }
 
-    /// Which of `ids` a live process holds open right now — the per-id
-    /// `open`+flock probes run a bounded batch at a time on the blocking
-    /// pool rather than serially behind the caller. Same advisory
-    /// semantics as [`Self::open_lock_held`]: never creates the file, and
-    /// this process's own sessions count.
     pub async fn held_open_locks(&self, ids: Vec<SessionId>) -> std::collections::HashSet<String> {
         use futures::StreamExt as _;
         let mut probes = futures::stream::iter(
@@ -972,13 +762,10 @@ impl JsonlSessionStore {
         held
     }
 
-    /// The holder PID recorded in `<id>.open`, for `Locked` detail on
-    /// paths that refuse rather than claim (`delete`, picker takeover).
     pub(crate) fn open_holder_pid(&self, id: &SessionId) -> Option<u32> {
         read_open_holder(&self.session_open_path(id).ok()?)
     }
 
-    /// Moves a corrupt session file aside as `<stem>.corrupt-<n>`, keeping the newest 3.
     async fn quarantine_corrupt_file(path: &Path) {
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             return;
@@ -1010,33 +797,21 @@ impl JsonlSessionStore {
     }
 }
 
-/// What a streamed [`JsonlSessionStore::scan`] yields. Summaries land as
-/// each file parses — arrival order, not the sorted order `list` returns —
-/// and `Done` ends the stream (the channel closes right after).
 pub(crate) enum SessionScanEvent {
-    /// Ids whose `<id>.open` flock a live process holds, this one
-    /// included. Sent once after the directory pass, usually well before
-    /// the last summary.
+
     Running(std::collections::HashSet<String>),
-    /// One parsed session summary.
+
     Summary(SessionSummary),
-    /// The scan is finished.
+
     Done,
 }
 
-/// The per-file outcome a scan worker returns.
 enum SessionFileRead {
     Summary(SessionSummary),
-    /// A complete first line that will not parse. Quarantine candidates
-    /// go back to the async side — `quarantine_corrupt_file` awaits.
+
     Corrupt(PathBuf),
 }
 
-/// The text a user message contributes to a session summary (the picker
-/// preview, `--last`, the "has a user turn" test). Text wins. A message
-/// with only attachments gets a bracketed label, so its session is not
-/// hidden as empty. Only the summary uses this: the model and the stored
-/// message are unchanged.
 fn user_summary_text(message: &Message) -> String {
     let text = message.text_content();
     if !text.is_empty() {
@@ -1052,14 +827,10 @@ fn user_summary_text(message: &Message) -> String {
     }
 }
 
-/// One session file → its summary: the whole per-file work of a `list`
-/// scan (read both ends, parse, resolve the sidecars), packaged so it can
-/// run inside a single blocking-pool task per file.
 fn summarize_session_file(root: &Path, path: &Path, cwd: Option<&Path>) -> Option<SessionFileRead> {
     let slices = read_session_ends(path, cwd)?;
     let stem = path.file_stem().and_then(|s| s.to_str())?;
 
-    // A first line with no newline is a creator mid-write.
     let complete_first_line = slices.head.contains('\n');
 
     let header_str = match slices.head.lines().find(|l| !l.trim().is_empty()) {
@@ -1074,11 +845,7 @@ fn summarize_session_file(root: &Path, path: &Path, cwd: Option<&Path>) -> Optio
         Ok(h) => h,
         Err(e) => {
             log::warn!("skipping corrupt header in {}: {}", path.display(), e);
-            // Quarantine only a *complete* first line that will not parse.
-            // A file whose first line has no terminating newline is a
-            // creator mid-write (create streams the header into a
-            // `create_new` file), so renaming it away would steal a
-            // session that is about to be valid.
+
             if complete_first_line {
                 return Some(SessionFileRead::Corrupt(path.to_path_buf()));
             }
@@ -1093,14 +860,11 @@ fn summarize_session_file(root: &Path, path: &Path, cwd: Option<&Path>) -> Optio
         return None;
     }
 
-    // A header-only session still has a usable "last active" time.
     let mut last_message_at = header.timestamp;
     let mut first_user_text = None;
     let mut last_user_text = None;
     let mut last_end = SessionEnd::Done;
-    // Head first, then tail. `in_tail` means "this line came from the tail
-    // slice", not "a boundary was seen": a post-boundary turn inside the
-    // head is still the session's first turn, while a tail turn never is.
+
     for (in_tail, chunk) in [(false, &slices.head), (true, &slices.tail)] {
         for line in chunk.lines().filter(|l| !l.trim().is_empty()) {
             let Ok(entry) = serde_json::from_str::<SessionEntry>(line) else {
@@ -1108,8 +872,7 @@ fn summarize_session_file(root: &Path, path: &Path, cwd: Option<&Path>) -> Optio
             };
             last_message_at = last_message_at.max(entry.timestamp);
             if entry.compaction_boundary {
-                // Replacement follows: the pre-compact messages no longer
-                // describe the session (both ends move).
+
                 first_user_text = None;
                 last_user_text = None;
                 continue;
@@ -1157,9 +920,6 @@ fn summarize_session_file(root: &Path, path: &Path, cwd: Option<&Path>) -> Optio
     }))
 }
 
-/// The body of [`JsonlSessionStore::scan`]: walks the session dir, kicks
-/// the `.open` lock probes off in parallel with the file reads, and
-/// forwards each summary as soon as its worker answers.
 async fn scan_session_dir(
     root: PathBuf,
     cwd: Option<PathBuf>,
@@ -1177,11 +937,6 @@ async fn scan_session_dir(
         }
     };
 
-    // Pass one: the directory itself. Cheap, and it collects the paths so
-    // the reads below can overlap instead of serializing behind one
-    // another on a slow disk. `.open` files ride the same pass: a session
-    // can only be flock-held when its file exists, so the probes below
-    // never touch ids without one.
     let mut paths = Vec::new();
     let mut open_paths = Vec::new();
     while let Ok(Some(entry)) = read_dir.next_entry().await {
@@ -1201,7 +956,7 @@ async fn scan_session_dir(
         if ext != Some("jsonl") {
             continue;
         }
-        // Real file, not a symlink; stem must be a valid session id.
+
         if !entry
             .file_type()
             .await
@@ -1220,9 +975,6 @@ async fn scan_session_dir(
         paths.push(path);
     }
 
-    // The lock probes overlap the reads: one open+flock per existing
-    // `.open` file, a bounded batch at a time on the blocking pool. This
-    // process's own sessions answer from the registry without a syscall.
     if probe_locks {
         let probe_tx = tx.clone();
         tokio::spawn(async move {
@@ -1247,9 +999,6 @@ async fn scan_session_dir(
         });
     }
 
-    // Pass two: read+parse each file on the blocking pool, a bounded
-    // number at a time — one task per file, and each finished summary is
-    // sent downstream the moment it lands.
     use futures::StreamExt as _;
     let mut reads = futures::stream::iter(paths)
         .map(|path| {
@@ -1281,28 +1030,15 @@ async fn scan_session_dir(
     let _ = tx.send(SessionScanEvent::Done);
 }
 
-/// Bytes read from each end of a session file to build its summary. The
-/// first user message and the newest entry both live near an end; the
-/// middle of a conversation cannot change what the row says.
 const SUMMARY_END_BYTES: u64 = 16 * 1024;
 
-/// Extra bytes allowed to find the line boundary a cut landed in, so a
-/// slice never starts or ends mid-line.
 const BOUNDARY_SCAN_BYTES: u64 = 64 * 1024;
 
-/// The two ends of a session file, cut on line boundaries: `head` starts
-/// at byte 0 and ends just after a newline; `tail` starts just after a
-/// newline and runs to EOF. No line is ever split, so every line handed to
-/// the JSON parser is whole. For a file too small to have two ends the head
-/// is the whole file and the tail is empty.
 struct SessionSlices {
     head: String,
     tail: String,
 }
 
-/// Read both ends of a session file. Synchronous by design: it runs
-/// inside one blocking-pool task per file, so plain `std::fs` keeps the
-/// whole file to five cheap reads with no per-read task dispatch.
 fn read_session_ends(path: &Path, cwd: Option<&Path>) -> Option<SessionSlices> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -1315,8 +1051,6 @@ fn read_session_ends(path: &Path, cwd: Option<&Path>) -> Option<SessionSlices> {
         return None;
     }
 
-    // Head: from byte 0, extended past the first newline at or after the
-    // cut so the last head line is complete.
     let head_len = SUMMARY_END_BYTES.min(len);
     let mut head_bytes = vec![0u8; head_len as usize];
     file.read_exact(&mut head_bytes).ok()?;
@@ -1342,16 +1076,12 @@ fn read_session_ends(path: &Path, cwd: Option<&Path>) -> Option<SessionSlices> {
         }
         match scan[..got].iter().position(|b| *b == b'\n') {
             Some(at) => head_bytes.extend_from_slice(&scan[..=at]),
-            // One line longer than the whole scan budget: the header is
-            // unterminated in what we read, so read the file rather than
-            // guess (a mid-write file stays a mid-write file).
+
             None => return read_session_whole(path),
         }
     }
     let head = String::from_utf8_lossy(&head_bytes).into_owned();
 
-    // Tail: the last SUMMARY_END_BYTES, advanced to the next newline so it
-    // begins on a line boundary.
     if len <= head_bytes.len() as u64 + SUMMARY_END_BYTES {
         return Some(SessionSlices {
             head,
@@ -1384,8 +1114,7 @@ fn read_session_whole(path: &Path) -> Option<SessionSlices> {
 }
 
 impl JsonlSessionStore {
-    // Returns Result — callers decide what a failed
-    // session write means instead of five nested warn-and-continue arms.
+
     pub async fn create(&self, meta: SessionMeta) -> Result<SessionId> {
         let _guard = self.lock.lock().await;
         let id = meta.id.clone();
@@ -1404,8 +1133,7 @@ impl JsonlSessionStore {
 
         let json = serde_json::to_string(&header)?;
         let line = format!("{json}\n");
-        // create_new: an existing ID is AlreadyExists, never a silent
-        // truncation of live history. Mode 0600 on unix at creation.
+
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -1419,8 +1147,7 @@ impl JsonlSessionStore {
                 file.flush().await?;
                 file.sync_all().await?;
                 tighten_file_mode(&path);
-                // Auxiliary sessions (subagent runs etc.) must not become the
-                // cwd's remembered session — `-c` would land on agent noise.
+
                 if header.origin.is_none() {
                     self.remember(&id, &header.cwd).await;
                 }
@@ -1433,10 +1160,6 @@ impl JsonlSessionStore {
         }
     }
 
-    /// Refuse a damaged tail instead of appending past it: without the
-    /// trailing newline the last record is torn, and appending would
-    /// merge with it (or strand it as interior corruption). Repair via
-    /// the quarantine flow, then append. Returns `(next_id, parent_id)`.
     fn scan_entries(id: &SessionId, content: &str, path: &Path) -> Result<(u64, Option<u64>)> {
         let mut lines = content.lines().filter(|l| !l.trim().is_empty());
         if lines.next().is_none() {
@@ -1454,7 +1177,7 @@ impl JsonlSessionStore {
             let entry = serde_json::from_str::<SessionEntry>(line).map_err(|source| {
                 SessionError::Corrupt {
                     path: path.to_path_buf(),
-                    // +2: header line + 1-based.
+
                     line: n + 2,
                     source,
                 }
@@ -1477,8 +1200,7 @@ impl JsonlSessionStore {
         usage: Option<gray_core::event::Usage>,
         duration_ms: Option<u64>,
     ) -> Result<SessionEntryId> {
-        // Lock order file -> memory (see module docs); `_lock_file` stays
-        // alive for the whole read-modify-append.
+
         let _lock_file = self.lock_session_file(id).await?;
         let _guard = self.lock.lock().await;
         let path = self.session_path(id)?;
@@ -1520,12 +1242,6 @@ impl JsonlSessionStore {
         Ok(next_id)
     }
 
-    /// Appends a compaction replacement: one boundary marker plus the active
-    /// (post-compact) messages, in a single locked batch. Reload replays only
-    /// what follows the last marker, so the pre-compact history stays on disk
-    /// for recovery without re-entering the active transcript (previously the
-    /// replacement was appended bare, and reload replayed original +
-    /// replacement duplicated with compaction silently undone).
     pub async fn append_compaction_replacement(
         &self,
         id: &SessionId,
@@ -1538,7 +1254,7 @@ impl JsonlSessionStore {
         let (mut next_id, mut parent_id) = Self::next_ids_for_append(id, &path).await?;
 
         let mut out = String::new();
-        // Marker first, then the replacement, one entry per line.
+
         let mut msgs = Vec::with_capacity(replacement.len() + 1);
         msgs.push((
             true,
@@ -1588,15 +1304,6 @@ impl JsonlSessionStore {
         Ok(())
     }
 
-    /// Semantic validation over the full on-disk entry list (before the
-    /// compaction drain): unsupported versions, filename-vs-header ID
-    /// mismatches, duplicate entry IDs, and invalid parent chains (missing
-    /// parents, forward references). A cycle always contains a forward
-    /// reference, so the parent-precedes-entry check rejects it here.
-    /// Returns `Corrupt` with a custom message so existing `matches!(Corrupt)`
-    /// callers (e.g. strict resume) keep reporting it as corruption; the file
-    /// is NOT quarantined here — rejection only. Old version-1 linear files
-    /// pass unchanged.
     fn validate_loaded_graph(
         path: &Path,
         expected_id: &SessionId,
@@ -1681,10 +1388,6 @@ impl JsonlSessionStore {
         Ok(())
     }
 
-    /// Remove superseded on-disk history from the hot file without losing it.
-    /// Streams records into a replacement, retaining the complete original in
-    /// archive. Only valid linear histories are rewritten; branches/torn files
-    /// remain untouched for the normal loader's validation/recovery rules.
     pub async fn maintain(&self, id: &SessionId) -> Result<bool> {
         use std::io::{BufRead, Seek, SeekFrom, Write};
         let _lock_file = self.lock_session_file(id).await?;
@@ -1717,8 +1420,7 @@ impl JsonlSessionStore {
         let mut boundary = false;
         loop {
             line.clear();
-            // A single enormous record cannot allocate unbounded memory here.
-            // Return untouched so maintenance never truncates valid user data.
+
             let n = std::io::Read::take(&mut reader, 16 * 1024 * 1024 + 1).read_line(&mut line)?;
             if n == 0 {
                 break;
@@ -1744,9 +1446,7 @@ impl JsonlSessionStore {
                 boundary = true;
                 continue;
             }
-            // Until a compaction marker is found these records cannot be part
-            // of the replacement. Do not serialize megabytes only to truncate
-            // them at the marker (the original is archived intact below).
+
             if !boundary {
                 continue;
             }
@@ -1767,9 +1467,6 @@ impl JsonlSessionStore {
         Ok(true)
     }
 
-    /// Keep the complete original beside the rewritten file. Both writers of a
-    /// shorter session -- compaction and `/undo` -- are destructive by design,
-    /// and this archive is what makes either recoverable by hand.
     fn archive_original(&self, id: &SessionId, path: &Path) -> Result<()> {
         let archive_dir = self.root_dir.join("archive");
         ensure_private_dir(&archive_dir)?;
@@ -1783,22 +1480,9 @@ impl JsonlSessionStore {
         Ok(())
     }
 
-    /// Rewind the session to its first `keep` *active* entries and return the
-    /// entries that were dropped (empty when there is nothing to drop).
-    ///
-    /// The caller rewinds the *conversation*, never the disk: files the model
-    /// wrote are git's business, not this method's. The complete original
-    /// lands in `archive/`, so a rewind is recoverable by hand.
-    ///
-    /// Records are copied verbatim rather than re-serialized: truncating a tail
-    /// never invalidates the ids the surviving records already carry (the chain
-    /// only ever points backwards), and verbatim keeps fields this build does
-    /// not know about. Everything up to the last compaction marker stays, since
-    /// dropping that marker would resurrect the history its summary replaced.
     pub async fn rewind(&self, id: &SessionId, keep: usize) -> Result<Vec<SessionEntry>> {
         use std::io::Write;
-        // `load` replays from the last compaction marker, so `active` is
-        // exactly what a resume would see: the count the caller means.
+
         let (_meta, active) = self.load(id).await?;
         if keep >= active.len() {
             return Ok(Vec::new());
@@ -1836,16 +1520,6 @@ impl JsonlSessionStore {
         Ok(dropped)
     }
 
-    /// Reads a session file as text, together with its raw bytes (so a repair
-    /// can back up exactly what was on disk).
-    ///
-    /// A crash mid-append can stop anywhere, including between the bytes of a
-    /// single multi-byte character, and that tail is no more recoverable than a
-    /// tear on a character boundary: the decodable prefix is kept and its final
-    /// partial line is dropped by the torn-record rule below. Invalid bytes that
-    /// are followed by a complete line are *not* a tear — the writer got past
-    /// them — so those stay an error, since a silently-wrong resume is worse
-    /// than a loud one.
     async fn read_session_text(path: &Path) -> Result<Option<(String, Vec<u8>)>> {
         let bytes = match tokio::fs::read(path).await {
             Ok(b) => b,
@@ -1867,8 +1541,7 @@ impl JsonlSessionStore {
                     )));
                 }
                 let bytes = error.into_bytes();
-                // `valid` is exactly where decoding failed, so the prefix in
-                // front of it is valid UTF-8 by construction.
+
                 let prefix = std::str::from_utf8(&bytes[..valid])
                     .expect("prefix bounded by valid_up_to is valid UTF-8")
                     .to_owned();
@@ -1877,10 +1550,6 @@ impl JsonlSessionStore {
         }
     }
 
-    /// Replays a session: the header, the entries, then only the transcript
-    /// after the last compaction boundary. A torn or unparseable final record
-    /// is dropped and the file repaired in place; corruption anywhere else is
-    /// an error, so a quietly-wrong resume can never happen.
     pub async fn load(&self, id: &SessionId) -> Result<(SessionMeta, Vec<SessionEntry>)> {
         let _lock_file = self.lock_session_file(id).await?;
         let _guard = self.lock.lock().await;
@@ -1897,8 +1566,6 @@ impl JsonlSessionStore {
             .filter(|(_, line)| !line.trim().is_empty())
             .collect();
 
-        // Empty or whitespace-only file: parse an empty string so the JSON
-        // error surfaces as a Corrupt failure at line 1.
         let (header_line_num, header_str) =
             all_lines.first().map(|&(n, s)| (n, s)).unwrap_or((1, ""));
         let header: Header = match serde_json::from_str(header_str) {
@@ -1945,9 +1612,6 @@ impl JsonlSessionStore {
             }
         }
 
-        // Structural validation on the full on-disk graph (before the drain):
-        // version, filename-vs-header id, duplicates, parent chain. Old
-        // version-1 linear files pass unchanged.
         Self::validate_loaded_graph(
             &path,
             id,
@@ -1957,8 +1621,6 @@ impl JsonlSessionStore {
             &entry_line_nums,
         )?;
 
-        // A resumed session must remain appendable. Preserve the original
-        // before atomically replacing only a damaged final record/newline.
         if damaged_tail || !content.ends_with('\n') {
             use std::io::Write;
             let mut backup = tempfile::Builder::new()
@@ -1999,8 +1661,6 @@ impl JsonlSessionStore {
             self.remember(id, &meta.cwd).await;
         }
 
-        // Compaction boundary: replay only the active transcript after the
-        // last marker. Old files carry no markers and load whole.
         let mut active = entries;
         if let Some(last) = active.iter().rposition(|e| e.compaction_boundary) {
             active.drain(..=last);
@@ -2027,10 +1687,7 @@ impl JsonlSessionStore {
                 SessionScanEvent::Running(_) => {}
             }
         }
-        // Newest activity first — the same key the row prints, so the list
-        // reads monotonically instead of mixing "when it started" with
-        // "when it was last used". Ties fall to the id, which reproduces the
-        // old path-ordered build plus `.reverse()` exactly.
+
         summaries.sort_by(|a, b| {
             b.last_message_at
                 .cmp(&a.last_message_at)
@@ -2039,13 +1696,6 @@ impl JsonlSessionStore {
         summaries
     }
 
-    /// Progressive [`Self::list`]: one scan whose events a UI can paint as
-    /// they arrive instead of blocking first paint on the whole directory.
-    /// Spawns the work — call from a Tokio context. With `probe_locks`,
-    /// `.open` files found in the directory pass are flock-probed on the
-    /// blocking pool and the held ids arrive as one
-    /// [`SessionScanEvent::Running`]; a session without an `.open` file
-    /// cannot be held, so it is never probed.
     pub(crate) fn scan(
         &self,
         cwd: Option<PathBuf>,
@@ -2058,15 +1708,10 @@ impl JsonlSessionStore {
     }
 
     pub async fn delete(&self, id: &SessionId) -> Result<()> {
-        // Cross-process lock first, in-memory second: without the file lock
-        // a delete can race another process's append and leave that writer
-        // appending to an unlinked inode (its writes vanish silently).
+
         let _lock = self.lock_session_file(id).await?;
         let _guard = self.lock.lock().await;
-        // A session with a live owner keeps its file: deleting under it
-        // strands the owner's appends on an unlinked inode — the same loss
-        // the lock above prevents, one level up (prune skips, it doesn't
-        // fail).
+
         if self.open_lock_held(id).await {
             return Err(SessionError::Locked {
                 id: id.clone(),
@@ -2079,8 +1724,7 @@ impl JsonlSessionStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(SessionError::Io(e)),
         }
-        // Sidecars belong to the session, so drop them with it. Best effort:
-        // a sidecar that was never written is not an error.
+
         for ext in ["dismissed", "title", "autotitle"] {
             let sidecar = self.root_dir.join(format!("{}.{ext}", id.as_str()));
             let _ = tokio::fs::remove_file(&sidecar).await;
@@ -2088,17 +1732,13 @@ impl JsonlSessionStore {
         Ok(())
     }
 
-    /// Deletes every session whose header timestamp predates `cutoff_ms`.
-    /// Returns the ids removed. Corrupt files are quarantined by `list`, not
-    /// deleted (`gray sessions prune --older-than-days N`, audit F8).
     pub async fn prune_before(&self, cutoff_ms: u64) -> Result<Vec<SessionId>> {
         let mut removed = Vec::new();
         for summary in self.list().await {
             if summary.started_at < cutoff_ms {
                 match self.delete(&summary.id).await {
                     Ok(()) => removed.push(summary.id),
-                    // Open in a live process: leave it alone rather than
-                    // fail the whole sweep.
+
                     Err(SessionError::Locked { .. }) => {}
                     Err(e) => return Err(e),
                 }
@@ -2108,12 +1748,10 @@ impl JsonlSessionStore {
     }
 }
 
-/// Returns the default session directory (`~/.gray/sessions`), or `None` if `$HOME` is not set.
 pub fn default_root() -> Option<PathBuf> {
     gray_core::paths::gray_home().map(|home| home.join("sessions"))
 }
 
-/// Reads `<root>/<id>.dismissed`: the `last_message_at` the user dismissed.
 fn read_dismissal(root: &Path, id: &str) -> Option<u64> {
     std::fs::read_to_string(root.join(format!("{id}.dismissed")))
         .ok()?
@@ -2122,8 +1760,6 @@ fn read_dismissal(root: &Path, id: &str) -> Option<u64> {
         .ok()
 }
 
-/// Records that the user chose to leave `id` as it is, so the picker and the
-/// startup hint stop calling it interrupted until it sees new activity.
 pub fn write_dismissal(root: &Path, id: &SessionId, last_message_at: u64) -> std::io::Result<()> {
     if !valid_session_id(id.as_str()) {
         return Err(std::io::Error::other("invalid session id"));
@@ -2134,24 +1770,18 @@ pub fn write_dismissal(root: &Path, id: &SessionId, last_message_at: u64) -> std
     )
 }
 
-/// Longest stored title, in characters.
 const MAX_TITLE_CHARS: usize = 80;
 
-/// One line, whitespace collapsed, capped; `None` when nothing is left.
 pub(crate) fn clean_title(raw: &str) -> Option<String> {
     let one: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     let t: String = one.chars().take(MAX_TITLE_CHARS).collect();
     (!t.is_empty()).then_some(t)
 }
 
-/// Reads `<root>/<id>.title`.
 fn read_title(root: &Path, id: &str) -> Option<String> {
     clean_title(&std::fs::read_to_string(root.join(format!("{id}.title"))).ok()?)
 }
 
-/// Why a transcript's opening message marks it as gray-made, for sessions
-/// written before origins were recorded: background-task notifications and
-/// subagent or worker prompts. `None` for a user's own opener.
 pub(crate) fn opener_tag(first: &str) -> Option<&'static str> {
     let first = first.trim_start();
     let head: String = first.chars().take(160).collect();
@@ -2166,9 +1796,6 @@ pub(crate) fn opener_tag(first: &str) -> Option<&'static str> {
     }
 }
 
-/// Claims a session for auto-naming: creates `<id>.autotitle` before the
-/// model is asked, so a session is asked at most once, across restarts too.
-/// `false` when it is already claimed or already has a title.
 pub fn claim_auto_title(root: &Path, id: &SessionId) -> bool {
     if !valid_session_id(id.as_str()) || read_title(root, id.as_str()).is_some() {
         return false;
@@ -2180,9 +1807,6 @@ pub fn claim_auto_title(root: &Path, id: &SessionId) -> bool {
         .is_ok()
 }
 
-/// Stores a model-proposed title, but only when the session has none. The
-/// title file is created exclusively, so a manual rename that landed first is
-/// never overwritten. Returns whether a title was written.
 pub fn set_auto_title(root: &Path, id: &SessionId, proposed: &str) -> std::io::Result<bool> {
     use std::io::Write as _;
     if !valid_session_id(id.as_str()) {
@@ -2205,8 +1829,6 @@ pub fn set_auto_title(root: &Path, id: &SessionId, proposed: &str) -> std::io::R
     }
 }
 
-/// Sets (or, for blank text, clears) the display title of `id`. Returns the
-/// stored title. The session transcript itself is never touched.
 pub fn write_title(root: &Path, id: &SessionId, title: &str) -> std::io::Result<Option<String>> {
     if !valid_session_id(id.as_str()) {
         return Err(std::io::Error::other("invalid session id"));
@@ -2227,39 +1849,26 @@ pub fn write_title(root: &Path, id: &SessionId, title: &str) -> std::io::Result<
     }
 }
 
-/// Held open-locks this process owns, keyed by `<id>.open` path. The OS
-/// lock lives on one open file description per session; repeated
-/// `acquire_open` calls share it through `Weak` so a self-reacquire can
-/// never `Locked` on ourselves. Dead entries are pruned on the next
-/// acquire for that path.
 static OPEN_LOCKS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<OpenLockInner>>>,
 > = std::sync::LazyLock::new(Default::default);
 
-/// The open file description carrying one session's flock.
 #[derive(Debug)]
 struct OpenLockInner {
     _file: std::fs::File,
 }
 
-/// A held "session is open here" claim (`<root>/<id>.open` flock). The
-/// claim ends when the last clone of the guard drops; the OS releases the
-/// flock on file close or process death, so a crash can never strand it.
 #[derive(Debug)]
 pub struct SessionOpenGuard {
     _inner: std::sync::Arc<OpenLockInner>,
 }
 
-/// Holder record written into `<id>.open`: who a `Locked` error names.
 #[derive(Debug, Serialize, Deserialize)]
 struct OpenHolder {
     pid: u32,
     started_ms: u64,
 }
 
-/// Best-effort holder stamp: the PID only matters when a second opener
-/// trips the lock, and a write failure leaves a nameless (still held)
-/// lock rather than failing the acquire.
 fn write_open_holder(file: &mut std::fs::File, path: &Path) {
     use std::io::{Seek, SeekFrom, Write};
     #[cfg(not(windows))]
@@ -2290,11 +1899,6 @@ fn write_open_holder(file: &mut std::fs::File, path: &Path) {
     }
 }
 
-/// The open-lock probe shared by every "is this session held" caller.
-/// This process's registry answers first — a live entry means we hold it,
-/// no syscall — then a real `open`+flock attempt on `<id>.open`. Advisory
-/// like the writer path: never creates the file, and a filesystem without
-/// flock answers false.
 fn open_lock_held_at(open_path: &Path) -> bool {
     if let Ok(held) = OPEN_LOCKS.lock()
         && held
@@ -2312,15 +1916,13 @@ fn open_lock_held_at(open_path: &Path) -> bool {
         return false;
     };
     match file.try_lock() {
-        // Free — the probe's own lock releases when `file` drops.
+
         Ok(()) => false,
         Err(std::fs::TryLockError::WouldBlock) => true,
         Err(std::fs::TryLockError::Error(_)) => false,
     }
 }
 
-/// PID recorded by the lock holder, for `Locked` detail. A bare number
-/// parses too (a holder build that wrote the pid alone).
 fn read_open_holder(path: &Path) -> Option<u32> {
     #[cfg(windows)]
     let path = path.with_extension("open-holder");

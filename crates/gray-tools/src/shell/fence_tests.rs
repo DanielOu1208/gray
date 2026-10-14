@@ -20,8 +20,7 @@ fn empty_body_has_no_fence() {
 
 #[test]
 fn trailing_newlines_do_not_add_phantom_blank_line() {
-    // `hello world\nfoo bar baz\n` must render 2 lines, not 3: the
-    // fence supplies the closing newline itself.
+
     assert_eq!(
         fence("hello world\nfoo bar baz\n"),
         "<untrusted-output>\nhello world\nfoo bar baz\n</untrusted-output>"

@@ -1,14 +1,3 @@
-//! Gateway host: gray's daemon shape, ported from hermes' gateway craft.
-//!
-//! What lives here: process lifecycle (pid claim + state), the control socket
-//! (`identify`/`status` — a connectable socket with a well-formed answer IS
-//! liveness), supervisor integration (runit / systemd-user install + drive),
-//! and the 60s cron tick loop that makes `gray cron` fire with no REPL open.
-//!
-//! What deliberately does NOT live here: any messaging adapter. Transports
-//! are plugin-template territory (`gateway/inbound` + `gateway/deliver` on
-//! the plugin wire); the daemon stays provider-agnostic.
-
 pub mod activity;
 pub mod brain;
 pub mod cli;
@@ -26,29 +15,20 @@ pub mod turn;
 
 mod run;
 
-/// `~/.gray/gateway/`: the always-on state (events, outbox, sessions,
-/// activity, running turns). See `docs/always-on/DESIGN.md`.
 pub fn state_dir(home: &Path) -> std::path::PathBuf {
     home.join("gateway")
 }
 
-/// The estop: while this file exists, autonomous wakes (`wake`, triggers)
-/// wait; user messages still run.
 pub fn paused(dir: &Path) -> bool {
     dir.join("PAUSED").exists()
 }
 
 use std::path::Path;
 
-/// Master switch (`gray gateway off`): `run`/`start` refuse while off so a
-/// stale autostart cannot resurrect the server. `status`/`stop` stay open —
-/// a running gateway remains inspectable and stoppable.
 fn ensure_gateway_on() -> anyhow::Result<()> {
     ensure_gateway_on_with(crate::setup::gw_auto_enabled())
 }
 
-/// Test seam for [`ensure_gateway_on`]: the master switch arrives as a
-/// parameter so the refusal is exercised without the live config.
 fn ensure_gateway_on_with(enabled: bool) -> anyhow::Result<()> {
     if enabled {
         return Ok(());
@@ -56,9 +36,6 @@ fn ensure_gateway_on_with(enabled: bool) -> anyhow::Result<()> {
     anyhow::bail!("gateway is off — `gray gateway on` to enable")
 }
 
-/// Dispatch `gray gateway <cmd>`.
-/// Hermes' `gateway setup`: pick a platform, install its app when missing,
-/// hand the terminal to the app's own wizard.
 async fn setup_platform(platform: Option<String>) -> anyhow::Result<()> {
     use anyhow::Context as _;
     let home = crate::setup::gray_home()?;
@@ -67,8 +44,7 @@ async fn setup_platform(platform: Option<String>) -> anyhow::Result<()> {
         None => {
             let apps = crate::plugin_cli::setup_apps(&home);
             match apps.len() {
-                // ponytail: discord is the only published platform app; list
-                // the index here once there are more.
+
                 0 => "discord".to_string(),
                 1 => apps[0].clone(),
                 _ => {
@@ -103,8 +79,7 @@ async fn setup_platform(platform: Option<String>) -> anyhow::Result<()> {
 
 pub async fn run_cli(cmd: crate::GatewayCmd, config: &crate::config::Config) -> anyhow::Result<()> {
     use crate::GatewayCmd;
-    // Pure file bookkeeping for an adapter's own daemon: no service manager,
-    // no master switch, so it answers everywhere.
+
     if let GatewayCmd::Lifecycle(cmd) = cmd {
         return lifecycle_cli(cmd);
     }
@@ -114,8 +89,7 @@ pub async fn run_cli(cmd: crate::GatewayCmd, config: &crate::config::Config) -> 
     if let GatewayCmd::Setup { platform } = cmd {
         return setup_platform(platform).await;
     }
-    // Native service/IPC lifecycle is not implemented in this preview. Reject
-    // before creating pid/socket state or calling Unix service managers.
+
     anyhow::ensure!(
         !cfg!(windows),
         "gateway is not supported on native Windows; use WSL for background scheduling"
@@ -203,8 +177,6 @@ fn lifecycle_cli(cmd: crate::LifecycleCmd) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Human report for `gateway status`. Live socket first (hermes liveness
-/// doctrine), pid file fallback, state file for "why did it stop".
 fn report(home: &Path) -> (bool, Vec<String>) {
     let now = crate::cron::now_secs();
     let sup = service::detect();
@@ -253,7 +225,6 @@ fn report(home: &Path) -> (bool, Vec<String>) {
         }
     }
 
-    // Cron liveness — the reason this daemon exists.
     match crate::cron::CronStore::open(home.join("cron")) {
         Ok(store) => {
             let health = store.health(now).unwrap_or_default();

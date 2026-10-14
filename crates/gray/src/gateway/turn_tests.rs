@@ -1,11 +1,7 @@
-//! `ChildRunner` against `#!/bin/sh` fake-grays: the NDJSON contract is the
-//! real one (`print.rs`), and the process bits (pipes, pgroup, kill) run for
-//! real. Shell scripts make every test unix-only.
 #![cfg(unix)]
 
 use super::*;
 
-/// An executable `#!/bin/sh` script in `dir` named `name`.
 fn fake_gray(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);

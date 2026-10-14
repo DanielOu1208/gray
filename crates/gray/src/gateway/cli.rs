@@ -1,33 +1,30 @@
-//! `gray gateway send|wake|activity|pause|resume|inbox`: talk to
-//! and steer the always-on agent from a shell.
-
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum AgentCmd {
-    /// Say something to the agent's main session and print its reply
+
     Send {
-        /// Message text (joined with spaces)
+
         #[arg(required = true, trailing_var_arg = true)]
         text: Vec<String>,
-        /// Seconds to wait for the reply (0 = don't wait)
+
         #[arg(long, default_value_t = 900)]
         wait: u64,
     },
-    /// Wake the agent with a note (a `trigger` event into main), no waiting
+
     Wake {
         #[arg(required = true, trailing_var_arg = true)]
         text: Vec<String>,
     },
-    /// What the agent did, said, held back and why
+
     Activity {
-        /// Rows to show (`tail -f ~/.gray/gateway/activity.jsonl` to follow)
+
         #[arg(short = 'n', long, default_value_t = 30)]
         lines: usize,
     },
-    /// Stop autonomous wakes (wake, triggers); user messages still run
+
     Pause,
-    /// Undo `pause`
+
     Resume,
-    /// Print and clear replies that had no chat to go to
+
     Inbox,
 }
 
@@ -38,8 +35,6 @@ use super::event::{self, Event, Kind, MAIN};
 use super::outbox::{self, Intent, LOCAL};
 use crate::cron::store::Origin as Route;
 
-/// Everything here is files under `~/.gray/gateway/`; the running gateway
-/// polls them, so no socket round-trip is needed.
 pub async fn run(cmd: AgentCmd) -> anyhow::Result<()> {
     let home = crate::setup::gray_home()?;
     let dir = super::state_dir(&home);
@@ -121,8 +116,6 @@ async fn send(home: &Path, dir: &Path, text: &str, wait: u64) -> anyhow::Result<
     }
 }
 
-/// The main turn for a message sent at `sent_at` has ended: its reply (or
-/// failure note) arrived, or it chose silence.
 fn answered(got: &[Intent], activity: &[serde_json::Value], sent_at: i64) -> bool {
     got.iter()
         .any(|i| i.kind == Kind::User && i.key == MAIN && i.created_at >= sent_at)
@@ -134,7 +127,6 @@ fn answered(got: &[Intent], activity: &[serde_json::Value], sent_at: i64) -> boo
         })
 }
 
-/// A user reply prints bare; anything the agent said on its own is tagged.
 fn label(i: &Intent) -> String {
     if i.kind == Kind::User {
         i.text.clone()
@@ -171,7 +163,7 @@ mod tests {
             i
         };
         assert!(answered(&[reply(Kind::User, 10)], &[], 10));
-        // An autonomous turn landing in the inbox, or an older reply, is not the answer.
+
         assert!(!answered(&[reply(Kind::Trigger, 10)], &[], 10));
         assert!(!answered(&[reply(Kind::User, 9)], &[], 10));
         let row =

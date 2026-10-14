@@ -1,18 +1,3 @@
-//! shell/spawn.rs: process spawn.
-//!
-//! `sh -c` with null stdin, piped stdout/stderr, non-interactive env,
-//! detached via setsid (pgid == pid). NO `kill_on_drop`: from now on a
-//! Unix children die by explicit kill or exit. Windows owns a Job Object
-//! instead: dropping the job closes any remaining descendants too.
-//!
-//! Intentional non-gate (GRY-01 triage): no command guard, no approval
-//! prompt, no container/VM isolation — model `bash` runs with user
-//! privileges (see SECURITY.md + README Safety). Containment here is only
-//! timeout + process-group kill + output redact/fence upstream.
-//!
-//! An exec prefix moves the same command somewhere else (a container, a
-//! remote box) without changing what runs: see [`spawn_with_prefix`].
-
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -20,15 +5,8 @@ use tokio::process::Command;
 
 use super::contract::Spawned;
 
-/// Env var naming the exec prefix: a program that runs the command elsewhere,
-/// e.g. `docker exec -i dev sh -s` or `ssh box sh -s`. Written from
-/// `exec_prefix` in the saved config; also settable directly in the
-/// environment, next to the other `GRAY_*` shell knobs.
 pub const EXEC_PREFIX_ENV: &str = "GRAY_EXEC_PREFIX";
 
-/// Split a configured prefix into argv, honouring single and double quotes and
-/// backslash escapes, so `ssh -p 2222 box sh -s` and `ssh 'my box' sh -s` both
-/// work. An unterminated quote is an error, never a silently truncated command.
 pub fn split_prefix(raw: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -88,28 +66,17 @@ pub fn split_prefix(raw: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// POSIX single-quote one word: wrap in `'…'`, close-escape-reopen for an
-/// embedded quote. The export preamble is parsed by the far side's shell
-/// rather than passed as argv, so it needs real quoting.
 fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
-/// The environment every spawned shell gets. Under an exec prefix the same
-/// pairs are also emitted as an `export` preamble, because neither `ssh` nor
-/// `docker exec` forwards the client's environment: without it a prefixed
-/// command silently loses `GRAY_SESSION_ID`, `GRAY_CWD_REPORT` and the
-/// non-interactive guards — `GIT_TERMINAL_PROMPT=0` is what stops a remote
-/// `git` from blocking forever on a password prompt.
 fn shell_env(session: Option<&str>, cwd_report: Option<&Path>) -> Vec<(String, String)> {
     let mut env: Vec<(&str, &str)> = vec![
         ("DEBIAN_FRONTEND", "noninteractive"),
         ("GIT_TERMINAL_PROMPT", "0"),
         ("SUDO_ASKPASS", "/bin/false"),
         ("TERM", "dumb"),
-        // Color is noise the model pays for: no ANSI handling exists
-        // downstream, and the inline body is stripped anyway. Both spellings
-        // because tools disagree about which one they honor.
+
         ("NO_COLOR", "1"),
         ("CLICOLOR", "0"),
         ("PAGER", "cat"),
@@ -128,10 +95,6 @@ fn shell_env(session: Option<&str>, cwd_report: Option<&Path>) -> Vec<(String, S
         .collect()
 }
 
-/// The script the far side's shell reads: the export preamble, then the
-/// command exactly as gray would have run it locally. Fed from a file so a
-/// large script can never block us on a full stdin pipe while the child is
-/// still starting.
 fn write_script(command: &str, env: &[(String, String)]) -> io::Result<PathBuf> {
     let mut script = String::new();
     for (key, value) in env {
@@ -146,17 +109,6 @@ fn write_script(command: &str, env: &[(String, String)]) -> io::Result<PathBuf> 
     Ok(path)
 }
 
-/// Spawn `command` via `sh - c` in `cwd`, or through the exec prefix when one
-/// is configured (see [`spawn_with_prefix`]).
-///
-/// `session` is exported as `GRAY_SESSION_ID` so anything the command runs can
-/// name the session it belongs to: a `gray memory set` issued from inside a
-/// session stamps its entry with that session rather than the generic `cli`.
-///
-/// `cwd_report`, when given, is exported as `GRAY_CWD_REPORT`; the command is
-/// expected to write its final directory there so the caller can keep a
-/// session's working directory across calls. It is a file rather than stdout
-/// so the command's output — and the durable log — stay byte-identical.
 pub fn spawn(
     command: &str,
     cwd: &Path,
@@ -181,19 +133,6 @@ pub fn spawn(
     spawn_with_prefix(command, cwd, session, cwd_report, prefix)
 }
 
-/// [`spawn`] with the prefix passed in, so tests never mutate the process
-/// environment (they run in parallel) and both paths stay testable on their own.
-///
-/// The prefix is a program that ends in a shell reading its script from stdin:
-/// `docker exec -i dev sh -s`, `ssh box sh -s`. That is what lets one setting
-/// cover a local container and a remote box with no quoting rules to get wrong
-/// — the command crosses as text, not as an argv the far side re-splits (the
-/// `ssh box sh -c 'ls'` trap). The command's own words, `$`, globs and heredocs
-/// are parsed exactly once, by the shell that runs it.
-///
-/// ponytail: a prefix that wants `-c`, or that does not read stdin at all,
-/// silently runs nothing. That is the ceiling of the one-knob design; the
-/// upgrade path is a second key choosing argv (`<prefix> … sh -c`) over stdin.
 pub fn spawn_with_prefix(
     command: &str,
     cwd: &Path,
@@ -220,7 +159,7 @@ pub fn spawn_with_prefix(
         Some(_) => {
             let script = write_script(command, &env)?;
             let file = std::fs::File::open(&script);
-            // A script we cannot open leaves nothing to clean up.
+
             cmd.stdin(std::process::Stdio::from(file?));
             match spawn_child(&mut cmd) {
                 Ok(spawned) => {
@@ -242,8 +181,6 @@ pub fn spawn_with_prefix(
     }
 }
 
-/// The no-prefix command: `sh -c`, or Git's sh on Windows with a PATH that
-/// reaches its tools.
 fn local_command() -> io::Result<Command> {
     #[cfg(not(windows))]
     {
@@ -253,8 +190,7 @@ fn local_command() -> io::Result<Command> {
     {
         let shell = super::windows::shell_path()?;
         let mut cmd = Command::new(&shell);
-        // Git's shell can be found without usr/bin being on PATH. Its tools
-        // (cat, sleep, etc.) must be reachable inside non-login shell commands.
+
         let mut paths = vec![
             shell
                 .parent()
@@ -268,25 +204,18 @@ fn local_command() -> io::Result<Command> {
             "PATH",
             std::env::join_paths(paths).map_err(io::Error::other)?,
         );
-        // Do not source user startup files in this non-interactive tool.
+
         cmd.env_remove("BASH_ENV").env_remove("ENV");
         Ok(cmd)
     }
 }
 
-/// The spawn both paths share: detach from the controlling terminal (Unix) or
-/// hand the tree to a Job Object (Windows), then record the real pid.
 fn spawn_child(cmd: &mut Command) -> io::Result<Spawned> {
     #[cfg(unix)]
     {
         unsafe {
             cmd.pre_exec(|| {
-                // Detach from controlling terminal (setsid) so child processes
-                // cannot open /dev/tty to block on password prompts or leak
-                // onto the TUI. The child becomes its own group leader.
-                // A failed setsid must fail the spawn: recording pgid == pid
-                // afterwards would be fictitious (kill paths would signal the
-                // wrong group).
+
                 if check_setsid(libc::setsid()).is_err() {
                     return Err(io::Error::last_os_error());
                 }
@@ -305,14 +234,12 @@ fn spawn_child(cmd: &mut Command) -> io::Result<Spawned> {
         child,
         pid,
         #[cfg(not(windows))]
-        pgid: pid as i32, // setsid: group leader, pgid == pid
+        pgid: pid as i32,
         #[cfg(windows)]
         job,
     })
 }
 
-/// Pure setsid-result check so the pre_exec failure path is unit-testable
-/// (a real setsid failure cannot be forced from a test).
 #[cfg(unix)]
 fn check_setsid(ret: libc::pid_t) -> io::Result<()> {
     if ret == -1 {

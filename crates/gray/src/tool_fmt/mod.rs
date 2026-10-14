@@ -1,19 +1,9 @@
-//! Tool formatting and rendering matching Grok CLI (GrokNight theme).
-//!
-//! Provides rich, clean terminal display for tool calls (bash, write, edit, read,
-//! grep, find, ls) with Grok-styled diff rendering and syntax highlighting.
-
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::path::Path;
 
-// ── Palette (active theme) ─────────────────────────────────────────────────
-// GrokNight/TokyoNight heritage: green bullet, orange paths, yellow commands.
-// Call sites read the shared [`crate::theme::theme()`] palette directly.
-
 fn arg_path(args: &serde_json::Value) -> &str {
-    // Schemas emit only `path` + `file_path` (write.rs); dropped
-    // filePath/TargetFile/targetFile/file/filename/target/destination probes.
+
     args.get("path")
         .or_else(|| args.get("file_path"))
         .and_then(|v| v.as_str())
@@ -21,8 +11,7 @@ fn arg_path(args: &serde_json::Value) -> &str {
 }
 
 fn arg_content(args: &serde_json::Value) -> &str {
-    // write.rs schema emits content/contents/text; dropped
-    // CodeContent/code_content/codeContent/code/body/data probes.
+
     args.get("content")
         .or_else(|| args.get("contents"))
         .or_else(|| args.get("text"))
@@ -30,10 +19,6 @@ fn arg_content(args: &serde_json::Value) -> &str {
         .unwrap_or("")
 }
 
-/// Shortens a path relative to CWD or HOME for compact terminal display.
-/// Long paths are middle-truncated (`head…tail`, tail kept longer since the
-/// filename matters most) so tool headers stay on one line instead of
-/// wrapping across three — fixed 80 cols, not terminal width.
 pub fn shorten_path(path_str: &str, cwd: Option<&Path>) -> String {
     let path = Path::new(path_str);
     let mut rel = path_str.to_string();
@@ -57,7 +42,7 @@ pub fn shorten_path(path_str: &str, cwd: Option<&Path>) -> String {
     if rel.chars().count() <= MAX {
         return rel;
     }
-    // Char-based split, byte-safe via char indices
+
     let chars: Vec<char> = rel.chars().collect();
     let tail_len = 49;
     let head_len = MAX - 1 - tail_len;
@@ -66,8 +51,6 @@ pub fn shorten_path(path_str: &str, cwd: Option<&Path>) -> String {
     format!("{head}…{tail}")
 }
 
-/// Expands tabs to 4-space stops so all characters are explicit printable
-/// spaces and background styling covers every cell.
 pub fn expand_tabs(s: &str) -> String {
     const TAB_SIZE: usize = 4;
     if !s.contains('\t') {
@@ -90,18 +73,6 @@ pub fn expand_tabs(s: &str) -> String {
     result
 }
 
-/// First line of a command or arg preview, capped at 80 display cells.
-///
-/// The cap is counted in cells and cut on a char boundary, never in raw
-/// bytes: `line.len()` is a byte count and `&line[..80]` panics the moment
-/// a multi-byte char straddles offset 80 — which is exactly what a pasted
-/// review's `\u{1f7e0}` marker did to a live REPL (byte index 80 inside the
-/// 4-byte emoji). ASCII text cuts at exactly 80, as before; wide text now
-/// fills the same 80 cells instead of being cut a quarter of the way in.
-/// Discord-bound text without its markdown markers: `**bold**` → `bold`,
-/// `__underline__` → `underline`, `` `code` `` → `code`, `~~strike~~` → `strike`.
-/// Single `*`/`_` stay (Discord only pairs them) and the `||spoiler||` bars
-/// stay too — stripping one bar of a spoiler pair corrupts worse than noise.
 fn strip_markup(s: &str) -> String {
     let mut out = s.to_string();
     for (open, close) in [("**", "**"), ("__", "__"), ("~~", "~~")] {
@@ -118,7 +89,7 @@ fn strip_markup(s: &str) -> String {
             out.replace_range(a..b + close.len(), &inner);
         }
     }
-    // Single-backtick code spans: drop the fences, keep the code.
+
     let mut res = String::with_capacity(out.len());
     let mut chars = out.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -152,14 +123,6 @@ fn truncate_cmd(cmd: &str) -> &str {
     &line[..end]
 }
 
-/// Live header for a still-streaming tool call (pi `renderCall` on partial
-/// args): renders the same lines as [`format_tool_card_lines`] once
-/// `args_so_far` parses as JSON, else streams the in-progress scalar
-/// (`command` / `path` / `pattern` / …) raw. Char-safe throughout: partial
-/// tails decode `char`-wise (a multibyte split mid-chunk can never panic)
-/// and the 9000-char cap falls back to the name-only line, so `truncate_cmd`
-/// never byte-slices attacker-shaped partial text (it cuts on a char
-/// boundary at 80 cells — see its doc comment).
 pub fn format_live_tool_header(
     name: &str,
     args_so_far: &str,
@@ -172,12 +135,11 @@ pub fn format_live_tool_header(
     if trimmed.is_empty() {
         return vec![tool_name_line(name, label)];
     }
-    // Fast path: complete JSON renders exactly like the final card.
+
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         return format_tool_card_lines(name, &v, cwd, label, preview);
     }
-    // Slow path: stream the in-progress scalar, tolerating unclosed quotes
-    // and trailing escapes. Stays a dumb string scan (no new deps).
+
     match extract_partial_scalar(name, trimmed, RAW_CAP) {
         Some(partial) => format_tool_card_lines(name, &partial, cwd, label, preview),
         None => vec![tool_name_line(name, label)],
@@ -197,11 +159,6 @@ fn tool_hue(name: &str) -> Color {
     }
 }
 
-/// Bare `⬡ name` line for empty/garbage partial args (pi `renderCall` with
-/// `undefined` args: `formatShellCall` shows the prompt + `...`).
-/// The name-only headline: the plugin's declared `label` when there is one,
-/// else the wire name humanized (`web_search` renders `Web Search`; single
-/// tokens stay raw, see `humanize_tool_name`).
 fn tool_name_line(name: &str, label: Option<&str>) -> Line<'static> {
     let hue = tool_hue(name);
     let name = match label.map(str::trim).filter(|t| !t.is_empty()) {
@@ -222,12 +179,6 @@ fn tool_name_line(name: &str, label: Option<&str>) -> Line<'static> {
     ])
 }
 
-/// Best-effort scalar for the tool's headline arg straight from the raw
-/// partial-JSON buffer. Finds the key's opening quote, then decodes
-/// `\"`-aware up to the buffer end; trailing backslash (split escape) is
-/// dropped. `None` when the key/value isn't started yet. Bounded: values
-/// past RAW_CAP chars fall back to the name-only line, and only the key
-/// region is scanned, so per-delta cost is O(key + value), never O(buffer).
 fn extract_partial_scalar(name: &str, raw: &str, cap: usize) -> Option<serde_json::Value> {
     let key = match name {
         "bash" => "command",
@@ -241,9 +192,6 @@ fn extract_partial_scalar(name: &str, raw: &str, cap: usize) -> Option<serde_jso
     Some(serde_json::Value::Object(obj))
 }
 
-/// Headline key per tool: `path` for file tools, `pattern` for search
-/// tools, `skill`'s `name` handled by the caller. Unknown tools reuse the
-/// same guess so `format_tool_call_header`'s `other` arm renders `k=v`.
 fn scalar_key(name: &str, raw: &str) -> &'static str {
     match name {
         "read" | "write" | "edit" | "ls" => "path",
@@ -251,8 +199,7 @@ fn scalar_key(name: &str, raw: &str) -> &'static str {
         "web_search" => "query",
         "web_fetch" => "url",
         _ => {
-            // key order decides, not a schema table. `path` wins
-            // on ties (the final header's `other` arm prefers it too).
+
             let path_pos = raw.find("\"path\"").map(|i| (i, "path"));
             let pattern_pos = raw.find("\"pattern\"").map(|i| (i, "pattern"));
             let command_pos = raw.find("\"command\"").map(|i| (i, "command"));
@@ -266,8 +213,6 @@ fn scalar_key(name: &str, raw: &str) -> &'static str {
     }
 }
 
-/// Byte offset of the string value's first content char after
-/// `"key" : "`, or `None` if the key/opening quote hasn't streamed yet.
 fn find_key_value_start(raw: &str, key: &str) -> Option<usize> {
     let quoted = format!("\"{key}\"");
     let mut search = raw;
@@ -294,11 +239,6 @@ fn find_key_value_start(raw: &str, key: &str) -> Option<usize> {
     }
 }
 
-/// Decodes a partial JSON string body (opening quote already consumed):
-/// `\"` stays a literal quote, `\\` a backslash, `\n`/`\t` their
-/// control chars; unknown escapes keep the escaped char. A trailing lone
-/// `\\` is a split escape — dropped. Over-cap values return `None`
-/// (caller falls back to the name-only line).
 fn decode_partial_string(raw: &str, cap: usize) -> Option<(String, bool)> {
     let mut out = String::new();
     let mut chars = raw.chars();
@@ -329,11 +269,6 @@ fn decode_partial_string(raw: &str, cap: usize) -> Option<(String, bool)> {
     Some((out, closed))
 }
 
-/// Heredoc hidden in a bash command (`cat <<'EOF' > path` … `EOF`):
-/// returns the body plus the redirect target, if any, so replay shows the
-/// code gray wrote or ran (bash-only harness: the `write`-tool arm never
-/// fires, and the one-line header plus trivial stdout would hide it).
-/// First heredoc wins; unclosed or empty bodies yield None.
 fn heredoc_body(command: &str) -> Option<(String, Option<String>)> {
     let mut lines = command.lines();
     let mut opener = None;
@@ -375,9 +310,6 @@ fn heredoc_body(command: &str) -> Option<(String, Option<String>)> {
     None
 }
 
-/// Resolves the display name for a `skill` tool call, matching opencode's
-/// `Skill "name"` header. Prefers explicit `name`/`skill` args, then derives
-/// from `path`/`location` (parent dir for SKILL.md, else file stem).
 fn skill_display_name(args: &serde_json::Value) -> String {
     if let Some(n) = args
         .get("name")
@@ -418,11 +350,6 @@ fn skill_display_name(args: &serde_json::Value) -> String {
     "skill".to_string()
 }
 
-/// Resolves a plugin-declared `preview` against one call's args, flattened
-/// onto one line: the headline suffix, then the second line, joined with
-/// ` · `. A spec without `{` is a dot path (`"document.title"`), the original
-/// contract. A template renders through `render_template`. Surfaces that keep
-/// the two lines apart use [`format_tool_call_lines`].
 pub fn preview_at(args: &serde_json::Value, spec: &str) -> Option<String> {
     if !is_template(spec) {
         return dot_path_at(args, spec);
@@ -435,11 +362,6 @@ pub fn preview_at(args: &serde_json::Value, spec: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(PREVIEW_SEP))
 }
 
-/// First non-empty string at a dot path. Core walks object keys only: no
-/// array indices, no wildcards, no schema knowledge. Anything missing,
-/// non-string, or whitespace-only is `None`, so a surface that declares a path
-/// for a shape it never sends degrades to the built-in preview instead of an
-/// error.
 fn dot_path_at(args: &serde_json::Value, path: &str) -> Option<String> {
     let mut cur = args;
     for key in path.split('.').map(str::trim).filter(|k| !k.is_empty()) {
@@ -451,21 +373,12 @@ fn dot_path_at(args: &serde_json::Value, path: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Separator between template segments, and between a rendered line's segments.
 const PREVIEW_SEP: &str = " \u{b7} ";
 
-/// A `preview` containing `{` is a template; anything else is a dot path.
 fn is_template(spec: &str) -> bool {
     spec.contains('{')
 }
 
-/// Renders a template into `(headline suffix, second line)`.
-///
-/// The first line break (a real newline or the two characters `\n`) splits
-/// the template in two. A later break reads as a space. Each line splits into
-/// segments on ` · `. A segment survives unless it has placeholders and every
-/// one came out empty, which takes its literal text with it. The second line
-/// is `None` when it comes out empty.
 fn render_template(args: &serde_json::Value, spec: &str) -> (String, Option<String>) {
     let (first, second) = split_template_lines(spec);
     let head = render_segments(args, first);
@@ -475,8 +388,6 @@ fn render_template(args: &serde_json::Value, spec: &str) -> (String, Option<Stri
     (head, detail)
 }
 
-/// Splits at the first line break. Returns the first line and the rest, with
-/// any later breaks turned into spaces.
 fn split_template_lines(spec: &str) -> (&str, Option<String>) {
     let real = spec.find('\n').map(|at| (at, 1));
     let escaped = spec.find("\\n").map(|at| (at, 2));
@@ -493,7 +404,6 @@ fn split_template_lines(spec: &str) -> (&str, Option<String>) {
     }
 }
 
-/// One template line: its surviving segments joined with ` · `.
 fn render_segments(args: &serde_json::Value, line: &str) -> String {
     line.split(PREVIEW_SEP)
         .filter_map(|segment| render_segment(args, segment))
@@ -501,8 +411,6 @@ fn render_segments(args: &serde_json::Value, line: &str) -> String {
         .join(PREVIEW_SEP)
 }
 
-/// One segment rendered, or `None` when it has placeholders and all of them
-/// came out empty. A segment with no placeholders survives unless it is blank.
 fn render_segment(args: &serde_json::Value, segment: &str) -> Option<String> {
     let mut out = String::new();
     let mut placeholders = 0usize;
@@ -527,8 +435,6 @@ fn render_segment(args: &serde_json::Value, segment: &str) -> Option<String> {
     (!out.is_empty()).then(|| out.to_string())
 }
 
-/// One `path` or `path|filter` placeholder, rendered (empty when missing).
-/// An unknown filter reads as no filter.
 fn placeholder_text(args: &serde_json::Value, inner: &str) -> String {
     let (path, filter) = match inner.split_once('|') {
         Some((path, filter)) => (path, filter.trim()),
@@ -547,9 +453,6 @@ fn placeholder_text(args: &serde_json::Value, inner: &str) -> String {
     }
 }
 
-/// Raw text of the value at a dot path. Strings keep their line breaks (for
-/// `firstline`), numbers and booleans print as text, and arrays join their
-/// scalar items with `, `. Objects, null, and missing paths are empty.
 fn value_text(args: &serde_json::Value, path: &str) -> String {
     let mut cur = args;
     for key in path.split('.').map(str::trim).filter(|k| !k.is_empty()) {
@@ -571,7 +474,6 @@ fn value_text(args: &serde_json::Value, path: &str) -> String {
     }
 }
 
-/// One array item as a line of text. Nested arrays, objects, and null skip.
 fn scalar_item_text(item: &serde_json::Value) -> Option<String> {
     let text = match item {
         serde_json::Value::String(s) => one_line(s),
@@ -582,8 +484,6 @@ fn scalar_item_text(item: &serde_json::Value) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// Trimmed and single-line: each line trimmed, the non-empty ones joined with
-/// spaces, so a value's own line breaks never split the headline.
 fn one_line(text: &str) -> String {
     text.lines()
         .map(str::trim)
@@ -592,8 +492,6 @@ fn one_line(text: &str) -> String {
         .join(" ")
 }
 
-/// Caps one line of preview text at the header budget: 80 cells, cut on a
-/// char boundary, with `…` when cut. The same cap every other preview uses.
 fn ellipsize_cells(text: &str) -> String {
     let cut = truncate_cmd(text);
     if cut.len() < text.len() {
@@ -603,10 +501,6 @@ fn ellipsize_cells(text: &str) -> String {
     }
 }
 
-/// The footer's display name for a model id: `crate::setup::friendly_model_name`
-/// with the vendor word dropped, like the picker's short labels
-/// (`claude-haiku-5-5` → `Haiku 5.5`). The formatter names every non-empty id,
-/// so the raw id shows only when it names nothing.
 fn model_display_name(id: &str) -> String {
     let id = id.trim();
     let friendly = crate::setup::friendly_model_name(id);
@@ -621,8 +515,6 @@ fn model_display_name(id: &str) -> String {
     }
 }
 
-/// The lines of a template header: the headline with its muted suffix, then
-/// the second line, if any, indented to the headline text.
 fn template_header_lines(
     bullet: Span<'static>,
     headline: String,
@@ -648,12 +540,6 @@ fn template_header_lines(
     lines
 }
 
-/// Args with a display-only `label` injected (plugin `label` support).
-/// Renderers read `label` in the `other` arm; sub-renderers
-/// (`arg_path`, previews) ignore unknown keys, so injection is safe.
-/// The manifest label wins over a wire arg named `label`: this copy is for
-/// display only, so the wire args are never changed.
-/// Callers pass the wire args; this stays a pure view helper.
 pub fn with_tool_label(args: &serde_json::Value, label: Option<&str>) -> serde_json::Value {
     let Some(label) = label.map(str::trim).filter(|t| !t.is_empty()) else {
         return args.clone();
@@ -671,9 +557,6 @@ pub fn with_tool_label(args: &serde_json::Value, label: Option<&str>) -> serde_j
     }
 }
 
-/// The agent's display metadata per wire tool name: each tool's `label` and
-/// `preview` (from its `ToolDef`). Borrowed; every card surface reads both
-/// lookups through this one type.
 #[derive(Clone, Copy, Default)]
 pub struct ToolDisplay<'a> {
     pub labels: Option<&'a std::collections::HashMap<String, String>>,
@@ -681,20 +564,16 @@ pub struct ToolDisplay<'a> {
 }
 
 impl<'a> ToolDisplay<'a> {
-    /// The declared headline for `name`, if any.
+
     pub fn label(self, name: &str) -> Option<&'a str> {
         self.labels.and_then(|m| m.get(name)).map(String::as_str)
     }
 
-    /// The declared preview (dot path or template) for `name`, if any.
     pub fn preview(self, name: &str) -> Option<&'a str> {
         self.previews.and_then(|m| m.get(name)).map(String::as_str)
     }
 }
 
-/// The card header for one call, with the agent's display `label` and
-/// `preview` for its tool. Every surface that draws a tool card (live, final,
-/// replayed) goes through this, so they agree.
 pub fn format_tool_card_lines(
     name: &str,
     args: &serde_json::Value,
@@ -705,14 +584,6 @@ pub fn format_tool_card_lines(
     format_tool_call_lines(name, &with_tool_label(args, label), cwd, preview)
 }
 
-/// Every line of a tool's transcript header, in Grok CLI styling for Ratatui.
-/// Line one is the headline and its suffix. A template `preview` with a line
-/// break adds a second line, muted and indented under the headline text.
-/// [`format_tool_call_header`] is line one alone.
-///
-/// `preview_path` is the plugin's declared `preview`: a dot path into `args`,
-/// or a template (see `render_template`). It is display metadata, never a
-/// wire argument, so a real `preview` arg stays opaque.
 pub fn format_tool_call_lines(
     name: &str,
     args: &serde_json::Value,
@@ -850,9 +721,7 @@ pub fn format_tool_call_lines(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim();
-            // Discord renders markdown, the terminal does not: strip the
-            // markers (`**bold**` reads as literal asterisks) so the
-            // preview matches what the channel actually shows.
+
             let plain = strip_markup(content);
             let cut = truncate_cmd(&plain);
             let shown = if cut.len() < plain.len() {
@@ -894,11 +763,7 @@ pub fn format_tool_call_lines(
             Span::styled("Read Discord UI schema", action_style),
         ]),
         other => {
-            // `label` is display-only: a plugin may pass one inside args
-            // (see `Agent::with_tool_labels`) so transcripts name the tool
-            // while the wire name stays the executor key. Multi-word wire
-            // names humanize (`my_tool` renders `My Tool`); single tokens
-            // stay raw.
+
             let headline = args
                 .get("label")
                 .and_then(|v| v.as_str())
@@ -906,8 +771,7 @@ pub fn format_tool_call_lines(
                 .filter(|t| !t.is_empty())
                 .map(str::to_string)
                 .unwrap_or_else(|| humanize_tool_name(other));
-            // A template owns the whole suffix: muted, optionally a second
-            // line, and never the raw `k=v` dump below.
+
             let declared = preview_path.map(str::trim).filter(|t| !t.is_empty());
             if let Some(template) = declared.filter(|t| is_template(t)) {
                 return template_header_lines(
@@ -944,11 +808,7 @@ pub fn format_tool_call_lines(
                     Span::styled(path, path_style),
                 ])
             } else {
-                // No declared preview and no path: surface the first
-                // string-valued arg as the quoted preview (search-ish
-                // tools key on one), and flag the remaining scalars —
-                // `all=true` renders `all`, so `recall {all, limit:10}`
-                // reads `Recall all limit=10`, not a raw `k=v` dump.
+
                 let obj_args: Vec<(&String, &serde_json::Value)> = args
                     .as_object()
                     .map(|obj| obj.iter().filter(|(k, _)| *k != "label").collect())
@@ -1000,8 +860,6 @@ pub fn format_tool_call_lines(
     vec![head]
 }
 
-/// The headline line of [`format_tool_call_lines`], for single-line callers.
-/// Same `preview_path` contract.
 pub fn format_tool_call_header(
     name: &str,
     args: &serde_json::Value,
@@ -1014,14 +872,6 @@ pub fn format_tool_call_header(
         .unwrap_or_default()
 }
 
-/// The `bash` header names what the call did, not just "Ran": one tool runs
-/// commands and manages their background jobs (`action`), so a job check
-/// reads `Waited on cargo-check`, never an empty `Ran`. Commands show
-/// without their setup (`cd … && nice … flock …`, see
-/// [`gray_tools::shell::label`]); a peeled `cd` stays visible, dimmed.
-/// A provably read-only command names what it looked at instead
-/// (`Viewed chart.png`, `Read lib.rs · lines 10–40`, `Searched foo ·
-/// src`, see [`gray_tools::shell::label::read_only`]).
 fn bash_header(
     args: &serde_json::Value,
     cwd: Option<&Path>,
@@ -1074,8 +924,7 @@ fn bash_header(
                 .trim();
             let core = gray_tools::shell::label::core_command(full);
             let background = args.get("background").and_then(|v| v.as_bool()) == Some(true);
-            // A no-op the model sent to stall (`true`, `:`, lone `echo`) never
-            // reaches a shell; "Ran true" read like real work happened.
+
             if !background && gray_tools::shell::label::is_noop(full) {
                 return Line::from(vec![
                     bullet,
@@ -1096,7 +945,7 @@ fn bash_header(
                 );
             }
             let cut = truncate_cmd(core.command);
-            // A cut command says so: `… | sort |` alone reads as a broken pipe.
+
             let cmd = if cut.len() < core.command.len() || full.lines().nth(1).is_some() {
                 format!("{}\u{2026}", cut.trim_end())
             } else {
@@ -1118,8 +967,6 @@ fn bash_header(
     }
 }
 
-/// Header for a read-only command: the verb, what it looked at (paths
-/// shortened like the file tools'), then its detail and a peeled `cd`.
 fn read_header(
     read: &gray_tools::shell::label::ReadOnly,
     peeled_cd: Option<&str>,
@@ -1165,7 +1012,6 @@ fn read_header(
     Line::from(spans)
 }
 
-/// The verb a running `bash` header shimmers instead of its finished one.
 pub(crate) fn live_bash_verb(done: &str) -> Option<&'static str> {
     Some(match done {
         "Ran " => "Running ",
@@ -1182,8 +1028,6 @@ pub(crate) fn live_bash_verb(done: &str) -> Option<&'static str> {
     })
 }
 
-/// A job as people read it: its name (`cargo-check`). Ids from before jobs
-/// had names (`bash-<32 hex>`) shrink to `job bbc7b0`.
 fn job_label(id: &str) -> String {
     match id.strip_prefix("bash-") {
         Some(hex) if hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()) => {
@@ -1193,7 +1037,6 @@ fn job_label(id: &str) -> String {
     }
 }
 
-/// `900` → `15m`, `75` → `1m 15s`, `30` → `30s`.
 fn human_secs(secs: u64) -> String {
     match (secs / 3600, (secs % 3600) / 60, secs % 60) {
         (0, 0, s) => format!("{s}s"),
@@ -1204,11 +1047,6 @@ fn human_secs(secs: u64) -> String {
     }
 }
 
-/// Rewrite the `bash` tool's job notices for people, display only. They are
-/// written for the model (`still running · job … · yielded after 10s`, then
-/// how to await it); the card says what is happening instead. Only lines
-/// outside the `<untrusted-output>` fence are touched: command output is
-/// shown exactly as it came.
 fn humanize_bash_notices(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let open = lines
@@ -1231,7 +1069,7 @@ fn humanize_bash_notices(text: &str) -> String {
             continue;
         }
         let t = line.trim();
-        // `job cargo-check` above a finished result: the header names it.
+
         if i == 0 && more_after(i) && t.starts_with("job ") && t.split_whitespace().count() == 2 {
             continue;
         }
@@ -1248,8 +1086,7 @@ fn humanize_bash_notices(text: &str) -> String {
                 rest.split(';').next().unwrap_or(rest)
             ));
         } else if let Some(cut) = line.find("; rerun without the pipe to check") {
-            // `exit 0 (\`head\` masks earlier stages' exit; rerun …)`: keep
-            // the fact, drop the instruction.
+
             let tail = &line[cut + "; rerun without the pipe to check".len()..];
             out.push(format!("{}{tail}", &line[..cut]));
         } else if t == "Partial output (snapshot):" {
@@ -1257,7 +1094,7 @@ fn humanize_bash_notices(text: &str) -> String {
         } else if let Some(rest) = t.strip_prefix("job ")
             && rest.contains(" \u{00b7} ")
         {
-            // A status row: `job X · running · elapsed 1m 3s · log …`.
+
             out.push(drop_log_field(&rest.replace("elapsed ", "")));
         } else {
             out.push(line.to_string());
@@ -1266,16 +1103,12 @@ fn humanize_bash_notices(text: &str) -> String {
     out.join("\n")
 }
 
-/// Lines that tell the model what to do next; people never need them.
 const MODEL_HINTS: &[&str] = &[
     "Continue other work",
     "Moved to a background job",
     "Not killed",
 ];
 
-/// `cargo-check · yielded after 10s (duration limit, not a stall) ·
-/// timeout 900s · log …` → `running in background as cargo-check · after
-/// 10s · limit 15m`.
 fn running_line(fields: &str) -> String {
     let mut parts = fields.split(" \u{00b7} ");
     let id = job_label(parts.next().unwrap_or("job"));
@@ -1297,12 +1130,6 @@ fn running_line(fields: &str) -> String {
     out
 }
 
-/// Humanizes a wire name for the transcript (`web_search` renders `Web Search`).
-/// Known tools get verb arms above; this is the fallback so a new plugin
-/// never renders as raw snake_case. Only wire-encoded names (with `_`/`-`)
-/// are decoded — a single token (`bash`, `custom`) is already displayable
-/// and stays byte-identical, so live and final headers agree with history.
-/// Single pass, no allocs beyond output.
 pub(crate) fn humanize_tool_name(name: &str) -> String {
     if !name.contains('_') && !name.contains('-') {
         return name.to_string();
@@ -1333,16 +1160,12 @@ mod diff;
 pub use diff::{DiffHunk, DiffLine, DiffTag, parse_diff_hunks, render_diff_hunks};
 pub(crate) use diff::{highlight_line_spans, wrap_styled_spans};
 
-/// Renders a newly created / written code block with line numbers and syntax highlighting.
 pub fn render_code_block(content: &str, path: Option<&Path>) -> Vec<Line<'static>> {
     let syntect = gray_markdown::get_syntect();
     let mut highlighter = path.and_then(|p| syntect.highlight_lines_by_file_path(p));
     render_numbered_lines(&content.lines().collect::<Vec<_>>(), &mut highlighter)
 }
 
-/// Guesses a syntect language token for command output and lightly
-/// pretty-prints it: JSON is reflowed, minified HTML/XML is split one tag
-/// per line. Returns (text, token); token is None for plain output.
 fn prettify_output(trimmed: &str) -> (String, Option<&'static str>) {
     let head = trimmed
         .trim_start()
@@ -1350,7 +1173,7 @@ fn prettify_output(trimmed: &str) -> (String, Option<&'static str>) {
         .unwrap_or(trimmed.trim_start())
         .to_ascii_lowercase();
     if head.starts_with("<!doctype") || head.starts_with("<html") {
-        // Tag-boundary split only (`><`), never touches text content.
+
         return (trimmed.replace("><", ">\n<"), Some("html"));
     }
     if head.starts_with("<?xml") {
@@ -1406,9 +1229,6 @@ fn push_numbered_wrapped(
     }
 }
 
-/// Numbered, highlighted, indent-wrapped rendering shared by
-/// [`render_code_block`] (capped) and command output (uncapped).
-/// Above the cap, keeps head/tail with an omission marker.
 fn render_numbered_lines(
     raw_lines: &[&str],
     highlighter: &mut Option<gray_markdown::syntect::easy::HighlightLines<'_>>,
@@ -1479,9 +1299,6 @@ fn render_numbered_lines(
     lines
 }
 
-/// Tools whose success results can render a body in the TUI (diffs, code,
-/// command output). Everything else (skill, read, …) renders header-only,
-/// so the REPL keeps the styled result card instead of a naked live line.
 pub fn tool_may_render_body(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -1489,21 +1306,6 @@ pub fn tool_may_render_body(tool_name: &str) -> bool {
     )
 }
 
-/// Strip the `<untrusted-output>` shell fence for *display* only.
-///
-/// `bash` wraps process output in the fence so the model can
-/// tell tool output from user text (prompt-injection boundary). The tags are
-/// harness plumbing: the transcript keeps them, but rendering them as
-/// numbered output lines confuses humans.
-///
-/// Real shell output is `header + fence(body)` — e.g. `exit 0 …` on line 1,
-/// `<untrusted-output …>` on line 2, body, `</untrusted-output>`, then an
-/// optional trailer (`…more available…`, `for the rest`, wake text, …).
-/// Strip the first opener near the top and the last closer near the bottom,
-/// independently — a budget-truncated body may carry only one half. Body
-/// closers are escaped as `<\\/…`, so an exact `</untrusted-output>` match
-/// is the real fence; opener matches are position-guarded so a body line
-/// that happens to look like a tag is left alone.
 fn strip_shell_fence(trimmed: &str) -> String {
     let mut lines: Vec<&str> = trimmed.lines().collect();
     if let Some(idx) = lines
@@ -1520,10 +1322,7 @@ fn strip_shell_fence(trimmed: &str) -> String {
     {
         lines.remove(idx);
     }
-    // The header's `· log <path>` names the raw log for the model (it can
-    // page it back); on a card it is a long path on every run. Drop that
-    // field from the display only, keeping any field after it.
-    // The header is line 1, or line 2 under a `cancelled by user` row.
+
     let mut owned: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
     for l in owned.iter_mut().take(2) {
         *l = drop_log_field(l);
@@ -1545,7 +1344,6 @@ fn drop_log_field(header: &str) -> String {
     }
 }
 
-/// Formats tool output lines with Codex/Grok-style rendering.
 pub fn format_tool_result_lines_with_context(
     tool_name: &str,
     args: Option<&serde_json::Value>,
@@ -1559,8 +1357,7 @@ pub fn format_tool_result_lines_with_context(
             return Vec::new();
         }
         let mut lines = Vec::new();
-        // Same margins as a numbered output row (`  ` + `  1 | `): the
-        // mark sits in the number column, the text where output text starts.
+
         for (i, l) in trimmed.lines().take(8).enumerate() {
             let prefix = if i == 0 {
                 "    \u{2717}   "
@@ -1595,7 +1392,6 @@ pub fn format_tool_result_lines_with_context(
     };
     let file_path = path_buf.as_deref();
 
-    // Check if this output is a diff or from edit/write tool
     if tool_name == "edit" || output.starts_with("--- ") || output.contains("@@ ") {
         let hunks = parse_diff_hunks(output);
         if !hunks.is_empty() {
@@ -1605,8 +1401,7 @@ pub fn format_tool_result_lines_with_context(
     }
 
     if tool_name == "write" {
-        // Diff-like output was already rendered (or discarded) above; a write
-        // reaching here displays the written code block with line numbers.
+
         let content = args.map(arg_content).unwrap_or("");
         if !content.is_empty() {
             return render_code_block(content, file_path);
@@ -1627,22 +1422,16 @@ pub fn format_tool_result_lines_with_context(
     let mut rows = if trimmed.is_empty() {
         Vec::new()
     } else if let Some(text) = web::web_body_text(tool_name, &trimmed) {
-        // Web bodies render as plain numbered text: search results are
-        // already structured (title/url/snippet) and fetch text is prose —
-        // a syntax highlighter only re-colors JSON braces it no longer sees.
+
         render_numbered_lines(&text.lines().collect::<Vec<_>>(), &mut None)
     } else {
-        // Cap display like code blocks (40-line threshold → 18 head + 6 tail):
-        // full output stays in model context, TUI only renders a window.
-        // reuse render_code_block cap, no new collapsing system.
+
         let (pretty, token) = prettify_output(&trimmed);
         let syntect = gray_markdown::get_syntect();
         let mut highlighter = token.and_then(|t| syntect.highlight_lines_for_token(t));
         render_numbered_lines(&pretty.lines().collect::<Vec<_>>(), &mut highlighter)
     };
-    // Bash-only harness: file writes arrive as heredocs, whose bodies the
-    // one-line header never shows — render them like the `write` arm does
-    // (same cap), ahead of the command output.
+
     if tool_name == "bash"
         && let Some(cmd) = args.and_then(|a| a.get("command")).and_then(|v| v.as_str())
         && let Some((body, target)) = heredoc_body(cmd)
@@ -1658,9 +1447,6 @@ pub fn format_tool_result_lines_with_context(
     rows
 }
 
-/// A `Viewed` card's header already names the files, so the tool's bare
-/// `Shown: <paths>` line is an echo. Notes on it (`skipped: …`, a capped
-/// count) and attached text after it still render.
 fn drop_view_echo<'a>(args: Option<&serde_json::Value>, output: &'a str) -> &'a str {
     let viewed = args
         .and_then(|a| a.get("command"))

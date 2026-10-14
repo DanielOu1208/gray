@@ -42,7 +42,7 @@ fn bubble_argv(dir: &Path) -> Vec<String> {
 }
 
 fn endpoint_files(dir: &PathBuf) -> Vec<(PathBuf, String, String)> {
-    // (path, child-pid from filename, endpoint text)
+
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else {
         return out;
@@ -66,8 +66,7 @@ fn endpoint_files(dir: &PathBuf) -> Vec<(PathBuf, String, String)> {
 }
 
 fn child_alive(pid: &str) -> bool {
-    // Portable: macOS has no /proc, so signal 0 via /bin/kill works on
-    // both linux and macos (own child, same user — no EPERM case).
+
     std::process::Command::new("kill")
         .arg("-0")
         .arg(pid)
@@ -128,7 +127,6 @@ async fn shutdown_one_leaves_other_alive() {
 
     p1.shutdown(Duration::from_secs(2)).await;
 
-    // Killed one's file removed + child gone within 2s; other's file + child stay.
     assert!(
         poll_until(Duration::from_secs(2), || !path1.exists()).await,
         "endpoint file for shutdown sidecar removed within 2s"
@@ -142,20 +140,19 @@ async fn shutdown_one_leaves_other_alive() {
         child_alive(&pid2),
         "other sidecar's child {pid2} still alive"
     );
-    // Other sidecar still serves prompt/context.
+
     let e2b = p2.prompt_context("/tmp").await.expect("other still alive");
     assert_eq!(e2b, e2);
 
     p2.shutdown(Duration::from_secs(2)).await;
     let _ = std::fs::remove_dir_all(&dir);
-    // Avoid unused ToolContext import warning when sibling changes land.
+
     let _ = ToolContext::default();
 }
 
 #[tokio::test]
 async fn pre_v1_fixture_survives_shutdown_without_hanging() {
-    // hooks_plugin.sh has no `protocol` (pre-v1) and no shutdown handling:
-    // shutdown() must not hang waiting for a reply — killed after grace.
+
     let p = SidecarPlugin::spawn(vec!["testdata/hooks_plugin.sh".into()])
         .await
         .unwrap();

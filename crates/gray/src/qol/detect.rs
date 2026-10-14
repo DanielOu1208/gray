@@ -13,7 +13,7 @@ pub(crate) struct ToolDef {
     pub plugin: Option<&'static str>,
     pub mcp: Option<McpSource>,
     pub creds: Option<&'static [CredSource]>,
-    /// Config file whose mtime stands in for "last used" in item descs.
+
     pub stale_probe: Option<&'static str>,
 }
 
@@ -22,17 +22,14 @@ pub(crate) enum McpSource {
     Opencode(&'static str),
 }
 
-/// A file holding credentials importable into gray's auth store. The
-/// variant names the on-disk shape; listing reads provider ids and env
-/// names only — secret values are read once, at apply time.
 pub(crate) enum CredSource {
-    /// Hermes `auth.json` (`credential_pool` + `providers` maps).
+
     HermesAuth(&'static str),
-    /// `KEY=VALUE` dotenv file; allowlisted secret names only.
+
     DotEnv(&'static str),
-    /// OpenClaw `auth-profiles.json` `profiles` map (OAuth — reported, not imported).
+
     OpenclawProfiles(&'static str),
-    /// OpenClaw `models.json` `providers` map (`apiKey` fields).
+
     OpenclawModels(&'static str),
 }
 

@@ -1,5 +1,3 @@
-//! REPL unit tests (split from `repl`).
-
 use super::format_core_error;
 use gray_core::error::CoreError;
 
@@ -112,8 +110,7 @@ fn totals_sum_durations_and_skip_untimed() {
 fn turn_footer_rate_uses_streaming_time_not_whole_turn_time() {
     let usage = gray_core::event::Usage::new(1000, 500);
     let totals = super::SessionTotals::default();
-    // 40s turn, 4s of it actually streaming: the rate is 125 tps (500 out /
-    // 4s), never the whole-turn 13 tps the tool waits would imply.
+
     let line = super::turn_footer(
         &usage,
         "test-persist-model",
@@ -130,7 +127,7 @@ fn turn_footer_rate_uses_streaming_time_not_whole_turn_time() {
         !line.contains("13 tps"),
         "tool waits must not dilute it: {line}"
     );
-    // Nothing streamed (pure tool turn): no rate at all, duration still shown.
+
     let silent = super::turn_footer(&usage, "test-persist-model", &totals, Some(40_000), None);
     assert!(!silent.contains("tps"), "{silent}");
     assert!(silent.contains("40s"), "{silent}");
@@ -156,8 +153,6 @@ fn turn_footer_shows_tokens_per_second() {
     assert!(!untimed.contains("tps"), "no duration, no rate: {untimed}");
 }
 
-/// Stub plugin claiming `/echo`, like a sidecar manifest with
-/// `commands:["/echo"]` answering `command/run` with `{"text"}`.
 struct EchoHook;
 
 #[async_trait::async_trait]
@@ -174,8 +169,6 @@ impl gray_core::agent::PluginHooks for EchoHook {
     }
 }
 
-/// Stub plugin claiming `/ask`, answering `command/run` with
-/// `{"prompt"}` (asks the host to submit a turn instead of printing).
 struct PromptHook;
 
 #[async_trait::async_trait]
@@ -229,13 +222,12 @@ async fn plugin_command_prompt_reply_takes_prompt_path() {
         vec![std::sync::Arc::new(PromptHook)];
     let (name, argv) = super::split_plugin_command("/ask write tests").expect("splits");
     let out = super::run_plugin_command(&hooks, &name, argv).await;
-    // Prompt replies stay distinct from Say: the `Unknown` handler
-    // routes this into `pending_command = ReplCommand::Prompt`, not `say()`.
+
     assert!(
         matches!(out, Some(CommandOutcome::Prompt(ref p)) if p == "write tests"),
         "got {out:?}"
     );
-    // And the text path is untouched.
+
     let hooks = echo_hooks();
     let (name, argv) = super::split_plugin_command("/echo hi").expect("splits");
     let out = super::run_plugin_command(&hooks, &name, argv).await;
@@ -250,7 +242,7 @@ async fn plugin_command_unclaimed_returns_none() {
     let hooks = echo_hooks();
     let (name, argv) = super::split_plugin_command("/nope hi").expect("splits");
     assert_eq!(super::run_plugin_command(&hooks, &name, argv).await, None);
-    // No hooks at all: same None, so the unknown-command message stays.
+
     let empty: Vec<std::sync::Arc<dyn gray_core::agent::PluginHooks>> = Vec::new();
     let (name, argv) = super::split_plugin_command("/echo hi").expect("splits");
     assert_eq!(super::run_plugin_command(&empty, &name, argv).await, None);
@@ -313,9 +305,7 @@ fn delivered(name: &str, to_chat: bool, failed: bool) -> crate::cron_serve::Deli
 
 #[test]
 fn cron_tick_line_reads_as_a_notice() {
-    // The line only ever paints when a tick had errors — a clean tick
-    // flashes `cron · N fired` in the footer's work segment instead
-    // (jobs::note_cron_tick). No emoji, no "0 errors" filler.
+
     let rep = crate::cron_serve::TickReport {
         fired: 1,
         errors: 1,
@@ -330,10 +320,10 @@ fn cron_tick_line_reads_as_a_notice() {
     assert!(text.contains("1 fired"), "{text}");
     assert!(text.contains("1 error"), "{text}");
     assert!(!text.contains("errors"), "singular for one: {text}");
-    // File-only fires get named; chat-bound ones already framed a box.
+
     assert!(text.contains("flaky-job"), "{text}");
     assert!(!text.contains("chat-drop"), "{text}");
-    // The error count is the loud span.
+
     let errors = line
         .spans
         .iter()

@@ -1,43 +1,8 @@
-//! Skill context for the bash-only surface + paste helpers for `/skills <name>`.
-//!
-//! No `skill` tool — the tool surface stays blocking-`bash`-only.
-//! Skills work through context + bash:
-//! [`SkillsPlugin`] serves the per-turn `<available_skills>` list (names,
-//! descriptions, exact `<location>` paths) via the `prompt/context` hook,
-//! and the model reads one with bash (`cat <location>`).
-//! This module also keeps the pure helpers the REPL slash command needs:
-//! frontmatter stripping, `$ARGUMENTS` / `${SKILL_DIR}` substitution, and
-//! name→path resolution via [`crate::skills::discover_skills`].
-//!
-//! [`ProjectContextPlugin`] rides the same hook to serve the per-turn
-//! `<project_context>` block: the nearest project AGENTS.md / CLAUDE.md
-//! above the turn cwd, so project rules stay in the permanent prompt
-//! instead of arriving as prunable tool observations.
-
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Cache entry: owning cwd, discovery fingerprint, auto-switch snapshot,
-/// disabled-set snapshot, served block. The toggles flip no file stat —
-/// without them a toggle would serve the stale block.
 type SkillsCache = Option<(String, u64, bool, BTreeSet<String>, Option<String>)>;
 
-/// Context-only builtin plugin carrying the per-turn `<available_skills>`
-/// list, so the model finds skills without bash-hunting for `SKILL.md`.
-///
-/// - `tools()` is empty: the tool surface stays bash-only.
-/// - `prompt_context()` returns [`crate::skills::format_skills_for_prompt`]
-///   for the turn cwd, `None` when nothing is discovered (system prefix stays
-///   byte-stable for prefix caching).
-///
-/// Discovery walks ~300 files, so the served block is cached per cwd behind
-/// a [`crate::skills::discovery_fingerprint`] (stat-only, no reads): any
-/// add/edit/remove flips the fingerprint and rescans, so a cache hit can
-/// never serve bytes a fresh discovery wouldn't — behavior is identical to
-/// per-turn rediscovery, minus the IO.
-///
-/// The stored system prompt (`~/.gray/AGENTS.md`) stays verbatim — this list
-/// is ephemeral per-turn context, never written anywhere.
 #[derive(Default)]
 pub struct SkillsPlugin {
     cache: std::sync::Mutex<SkillsCache>,
@@ -60,8 +25,7 @@ impl gray_plugin::Plugin for SkillsPlugin {
 
     async fn prompt_context(&self, cwd: &str) -> Option<String> {
         let fingerprint = crate::skills::discovery_fingerprint(Path::new(cwd));
-        // Toggles flip no file stat, so the auto switch + disabled set ride the
-        // cache key — otherwise a toggle would keep serving the stale block.
+
         let auto = crate::setup::skills_auto_enabled();
         let disabled = crate::setup::disabled_skill_names();
         if let Ok(guard) = self.cache.lock()
@@ -87,36 +51,23 @@ impl gray_plugin::Plugin for SkillsPlugin {
         out
     }
 }
-/// Rule file names probed at each directory level, nearest level first.
+
 const PROJECT_RULES_NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 
-/// Cap on served rule bytes. An AGENTS.md is normally a few KB; a
-/// pathological one must not be able to eat the context window, so the tail
-/// is cut with a pointer back to the file.
 pub(crate) const PROJECT_RULES_MAX_CHARS: usize = 32_768;
 
-/// Read the exact `<project_context>` block the prompt hook serves for `cwd`:
-/// the nearest `AGENTS.md` / `CLAUDE.md` at or above `cwd`. `None` when no
-/// file is found or it is empty — the caller (`repl::status` for `/context`,
-/// [`ProjectContextPlugin`] for the prompt) shares this one implementation.
-///
-/// The gray-home `AGENTS.md` is the stored system prompt itself; serving it
-/// as project context would duplicate the whole prompt every turn, so that
-/// level is skipped while the walk continues above it. Nearest ancestor
-/// only: a monorepo's nested rule files wait for the model to read them,
-/// which keeps the per-turn budget bounded.
 pub fn project_context_block(cwd: &Path) -> Option<String> {
     let gray_home = crate::setup::gray_home()
         .ok()
         .and_then(|p| p.canonicalize().ok());
-    // AGENTS.md and CLAUDE.md in a repo are instructions: serve them only once trusted.
+
     if !crate::project_trust::is_trusted(&crate::skills::gray_agent_dir(), cwd) {
         return None;
     }
     let path = find_project_rules(cwd, gray_home.as_deref())?;
     let body = std::fs::read_to_string(&path).ok()?;
     let body = strip_rationale_comments(body.trim());
-    // Stripping can leave only the blank lines that separated the comments.
+
     if body.trim().is_empty() {
         return None;
     }
@@ -133,18 +84,13 @@ pub fn project_context_block(cwd: &Path) -> Option<String> {
             path.display()
         ));
     }
-    // The block carries its own semantics, like the skills block does: a
-    // stored prompt that never mentions <project_context> still learns what
-    // it is and how to weigh it.
+
     Some(format!(
         "<project_context source=\"{}\">\nProject rules; they outrank general defaults. The file also has `# r1: ...` rationale lines, stripped here; keep them when editing it.\n\n{body}\n</project_context>",
         path.display()
     ))
 }
 
-/// Nearest-ancestor search for a rule file. Each level prefers `AGENTS.md`
-/// over `CLAUDE.md`. The gray-home level is skipped (it holds the stored
-/// system prompt, not project rules); levels above it still count.
 fn find_project_rules(cwd: &Path, gray_home: Option<&Path>) -> Option<PathBuf> {
     let mut dir = Some(cwd);
     while let Some(d) = dir {
@@ -164,12 +110,6 @@ fn find_project_rules(cwd: &Path, gray_home: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-/// A maintainer's rationale line: `# r<n>: ...` — the prompt-comment syntax
-/// from arXiv 2608.11095, where a comment records *why* a rule exists (the
-/// failure that prompted it, whether it recurred, what was falsified). The
-/// executor that only has to follow the rules never sees them; the
-/// maintainer editing the file does. A markdown heading is not a comment:
-/// the marker demands `r` + digits + `:`, so `# Requirements:` survives.
 fn is_rationale_comment(line: &str) -> bool {
     let Some(rest) = line.trim_start().strip_prefix('#') else {
         return false;
@@ -181,9 +121,6 @@ fn is_rationale_comment(line: &str) -> bool {
     digits > 0 && rest[digits..].trim_start().starts_with(':')
 }
 
-/// Drop rationale comments before serving. Byte-identical when the file has
-/// none, so comment-free rule files render exactly as before, and the cap
-/// then applies to rules alone — rationale never eats the budget.
 pub(crate) fn strip_rationale_comments(body: &str) -> String {
     let mut out = String::with_capacity(body.len());
     let mut stripped = false;
@@ -200,16 +137,6 @@ pub(crate) fn strip_rationale_comments(body: &str) -> String {
     if stripped { out } else { body.to_string() }
 }
 
-/// Context-only builtin plugin serving the per-turn `<project_context>`
-/// block (nearest project AGENTS.md / CLAUDE.md above the turn cwd).
-///
-/// - `tools()` is empty: the tool surface stays bash-only.
-/// - `prompt_context()` returns [`project_context_block`], `None` when no
-///   rule file exists (system prefix stays byte-stable for prefix caching).
-///
-/// The walk is a handful of stats, and the hook already runs once per turn
-/// (not per round), so there is deliberately no cache to go stale — every
-/// turn observes the file as it is on disk right now.
 pub struct ProjectContextPlugin;
 
 #[async_trait::async_trait]
@@ -232,8 +159,6 @@ impl gray_plugin::Plugin for ProjectContextPlugin {
     }
 }
 
-/// Resolve a skill name to its SKILL.md path via [`crate::skills::discover_skills`]
-/// (global + project roots, first name match wins).
 pub fn resolve_skill_name(cwd: &Path, name: &str) -> Option<PathBuf> {
     crate::skills::discover_skills(cwd)
         .skills
@@ -242,7 +167,6 @@ pub fn resolve_skill_name(cwd: &Path, name: &str) -> Option<PathBuf> {
         .map(|s| s.file_path)
 }
 
-/// Strip YAML frontmatter (`---`-delimited block at the top), returning the body.
 pub fn strip_frontmatter(content: &str) -> &str {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
@@ -259,7 +183,6 @@ pub fn strip_frontmatter(content: &str) -> &str {
     content
 }
 
-/// Substitute `$ARGUMENTS` and `${SKILL_DIR}` in a skill body (Grok-style).
 pub fn apply_substitutions(body: &str, args: Option<&str>, skill_dir: &str) -> String {
     body.replace("$ARGUMENTS", args.unwrap_or(""))
         .replace("${SKILL_DIR}", skill_dir)

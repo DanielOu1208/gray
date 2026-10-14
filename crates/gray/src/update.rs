@@ -1,4 +1,3 @@
-//! Startup update check + self-update via the gray.alignment.id installer.
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,7 +10,6 @@ fn base_url() -> String {
 }
 pub const CHANNEL: &str = env!("GRAY_CHANNEL");
 
-/// Numeric triple plus prerelease identifiers, build metadata dropped.
 fn parse_version(v: &str) -> Option<(u64, u64, u64, Option<String>)> {
     let v = v.trim();
     let (core, pre) = match v.split_once('-') {
@@ -34,9 +32,6 @@ fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-/// Full SemVer precedence (§ 11): a prerelease sorts below its release;
-/// identifiers compare numerically when both numeric, else lexically, with
-/// numeric below alphanumeric and fewer fields below more.
 fn version_cmp(
     a: &(u64, u64, u64, Option<String>),
     b: &(u64, u64, u64, Option<String>),
@@ -94,9 +89,6 @@ pub(crate) async fn latest_version() -> anyhow::Result<String> {
     Ok(txt.trim().to_string())
 }
 
-/// Optional installer pin: when `GRAY_INSTALLER_SHA256` is set, the update
-/// path downloads install.sh first, verifies sha256, then executes the
-/// verified bytes instead of `curl|sh` on a mutable script.
 fn installer_pin() -> Option<String> {
     std::env::var("GRAY_INSTALLER_SHA256")
         .ok()
@@ -104,13 +96,6 @@ fn installer_pin() -> Option<String> {
         .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
-/// curl -fsSL https://gray.alignment.id/install.sh | sh [- beta]
-///
-/// Trust contract: with no pin set, self-update executes the installer's
-/// mutable HTTPS script — payload checksums do not authenticate the
-/// installer that serves them, so this path is not an independently
-/// verified update. Setting `GRAY_INSTALLER_SHA256` opts into the pinned
-/// path above, which verifies that one script before running it.
 fn install_command() -> String {
     match CHANNEL {
         "stable" => "sh -c 'curl -fsSL https://gray.alignment.id/install.sh | sh'".into(),
@@ -118,7 +103,6 @@ fn install_command() -> String {
     }
 }
 
-/// Ask y/n in raw mode. Returns true on y/Y.
 fn confirm() -> bool {
     use crossterm::event::{self, Event, KeyCode, KeyEvent};
     if crossterm::terminal::enable_raw_mode().is_err() {
@@ -135,17 +119,6 @@ fn confirm() -> bool {
     yes
 }
 
-/// The pinned self-update path: fetch, verify, run.
-///
-/// Digest and base URL are parameters rather than env reads so a test can
-/// drive the whole thing without mutating the process environment — env
-/// mutation here races every other test that reads it.
-///
-/// The scratch directory is a private 0700 `TempDir` with an unguessable
-/// name, dropped on every exit including the mismatch return below. It was
-/// `gray-installer-<pid>` under the shared temp dir, removed only on
-/// success: another local user could pre-create that name and swap
-/// `install.sh` between the hash check and `sh`.
 fn run_pinned_installer(pin: &str, base: &str) -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let file = dir.path().join("install.sh");
@@ -174,8 +147,7 @@ fn run_installer() -> anyhow::Result<()> {
         !cfg!(windows),
         "self-update is not supported on native Windows: close Gray and rerun install-native.ps1 with the verified preview ZIP and checksum"
     );
-    // Pinned path: download install.sh, check sha256 against
-    // GRAY_INSTALLER_SHA256, execute the verified bytes.
+
     if let Some(pin) = installer_pin() {
         return run_pinned_installer(&pin, &base_url());
     }
@@ -196,7 +168,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", sha2::Sha256::digest(bytes))
 }
 
-/// Exclusive-update lock path: `<gray-home>/logs/update.lock` (temp fallback).
 fn update_lock_path() -> PathBuf {
     crate::setup::gray_home()
         .map(|h| h.join("logs").join("update.lock"))
@@ -207,13 +178,11 @@ pub(crate) struct UpdateLock(std::fs::File);
 
 impl Drop for UpdateLock {
     fn drop(&mut self) {
-        // Closing alone leaves flock held if a concurrent fork inherited the
-        // descriptor. Explicit unlock ends ownership when this guard ends.
+
         let _ = self.0.unlock();
     }
 }
 
-/// Acquires the exclusive update lock; explicitly released when the guard drops.
 pub(crate) fn acquire_update_lock_at(path: &Path) -> std::io::Result<UpdateLock> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -248,16 +217,11 @@ pub(crate) fn try_acquire_update_lock() -> Option<UpdateLock> {
     }
 }
 
-/// Installer run under mutual exclusion.
 pub(crate) fn run_installer_locked() -> anyhow::Result<()> {
     let _lock = acquire_update_lock()?;
     run_installer()
 }
 
-/// Where the installer writes: `$GRAY_INSTALL_DIR`, else the per-OS default —
-/// `/usr/local/bin` as root and `~/.local/bin` otherwise on Unix (what
-/// `dist/install.sh` does), `%LOCALAPPDATA%\Programs\gray\bin` on Windows
-/// (what `dist/install-native.ps1` does).
 fn installer_dest() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("GRAY_INSTALL_DIR").filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(dir));
@@ -275,9 +239,7 @@ fn installer_dest() -> Option<PathBuf> {
 
 #[cfg(unix)]
 fn unix_installer_dest() -> Option<PathBuf> {
-    // Root first: a root shell with no HOME still installs to /usr/local/bin,
-    // and the shadow guard must not lose the destination over it.
-    // SAFETY: geteuid takes no arguments and cannot fail.
+
     if unsafe { libc::geteuid() } == 0 {
         return Some(PathBuf::from("/usr/local/bin"));
     }
@@ -296,9 +258,6 @@ fn windows_installer_dest() -> Option<PathBuf> {
     )
 }
 
-/// `gray --version` of the binary at `path` ("gray 0.1.1" -> "0.1.1"). Only
-/// ever called on the installer's own destination: a PATH-resolved candidate
-/// is untrusted search-path output and is never executed (CWE-426).
 fn binary_version(path: &Path) -> Option<String> {
     let out = Command::new(path).arg("--version").output().ok()?;
     if !out.status.success() {
@@ -310,8 +269,6 @@ fn binary_version(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Launcher names a shell may resolve in a PATH entry: Windows runs
-/// `gray.exe`, Unix `gray`.
 fn gray_names() -> &'static [&'static str] {
     #[cfg(windows)]
     {
@@ -323,7 +280,6 @@ fn gray_names() -> &'static [&'static str] {
     }
 }
 
-/// First `gray` among `entries`, in PATH order, the way a shell resolves it.
 fn first_gray_in(entries: &[PathBuf]) -> Option<PathBuf> {
     entries.iter().find_map(|d| {
         gray_names()
@@ -333,10 +289,6 @@ fn first_gray_in(entries: &[PathBuf]) -> Option<PathBuf> {
     })
 }
 
-/// A launcher the shell would actually run. On Unix that means the executable
-/// bit: a plain data file named `gray` cannot shadow anything, so it must not
-/// raise a warning either. On Windows the name list carries the check
-/// (`gray.exe`, then `gray`).
 fn is_launcher(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -352,14 +304,12 @@ fn is_launcher(path: &Path) -> bool {
     }
 }
 
-/// The `gray` the next shell will actually launch.
 fn first_gray_on_path() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let entries: Vec<PathBuf> = std::env::split_paths(&path).collect();
     first_gray_in(&entries)
 }
 
-/// Same binary under two paths (`~/.local/bin` is often a symlink farm).
 fn same_binary(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -370,8 +320,6 @@ fn same_binary(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Decision half of the post-update guard: `installed` is the build the
-/// installer just wrote, `resolved` the one a new shell launches instead.
 fn shadow_warning(installed: &Path, installed_version: &str, resolved: &Path) -> Option<String> {
     if same_binary(resolved, installed) {
         return None;
@@ -384,29 +332,20 @@ fn shadow_warning(installed: &Path, installed_version: &str, resolved: &Path) ->
     ))
 }
 
-/// Post-update guard. The installer writes one path; the shell may resolve
-/// another. A stale copy earlier on PATH (an old `cargo install --path`, say)
-/// keeps launching the previous build, so "updated" would be a lie and the
-/// banner would never move.
 fn post_update_shadow_warning() -> Option<String> {
     let installed = installer_dest()?.join("gray");
-    // The installed build is the one the installer just wrote, so asking it
-    // for its version is the same trust the update itself already carries.
+
     let installed_version = binary_version(&installed)?;
     let resolved = first_gray_on_path()?;
     shadow_warning(&installed, &installed_version, &resolved)
 }
 
-/// Report a shadowed install: the update landed, but the next launch would not
-/// pick it up.
 pub(crate) fn warn_on_shadow() {
     if let Some(w) = post_update_shadow_warning() {
         eprintln!("{w}");
     }
 }
 
-/// Decision half of the startup guard: `current` is this process's binary,
-/// `resolved` the one a new shell launches instead.
 fn divergence_warning(current: &Path, running: &str, resolved: &Path) -> Option<String> {
     if same_binary(resolved, current) {
         return None;
@@ -418,24 +357,18 @@ fn divergence_warning(current: &Path, running: &str, resolved: &Path) -> Option<
     ))
 }
 
-/// Startup guard for the same hazard without an update in the picture: this
-/// process runs one build while PATH resolves a newer one, so every new shell
-/// silently lands on a different gray than the one already open.
 fn path_divergence_warning() -> Option<String> {
     let current = std::env::current_exe().ok()?;
     let resolved = first_gray_on_path()?;
     divergence_warning(&current, env!("CARGO_PKG_VERSION"), &resolved)
 }
 
-/// Report a PATH/build divergence. Cadence-free: callers gate it behind the
-/// daily update check.
 fn warn_on_divergence() {
     if let Some(w) = path_divergence_warning() {
         eprintln!("{w}");
     }
 }
 
-/// Manual `gray update`: run the installer unconditionally, then exit hint.
 pub async fn update_now() -> anyhow::Result<()> {
     println!("→ updating gray ({CHANNEL})...");
     install()?;
@@ -452,12 +385,8 @@ pub(crate) fn install_unlocked() -> anyhow::Result<()> {
     run_installer()
 }
 
-/// Install the newest build, refusing only where it cannot work. Shared by
-/// `gray update` and the REPL's `/update` so both take the same lock and
-/// refuse the same platforms.
 pub(crate) fn install() -> anyhow::Result<()> {
-    // Windows locks its running executable. Never launch the Unix installer
-    // or advertise an update we could not install; external reinstall only.
+
     anyhow::ensure!(
         !cfg!(windows),
         "self-update is not supported on native Windows: close Gray and rerun install-native.ps1 with the verified preview ZIP and checksum"
@@ -465,13 +394,12 @@ pub(crate) fn install() -> anyhow::Result<()> {
     run_installer_locked()
 }
 
-/// Seconds between update checks.
 const CHECK_INTERVAL_SECS: u64 = 24 * 3600;
 
 fn update_check_due(last_check_secs: Option<u64>, now_secs: u64) -> bool {
     match last_check_secs {
         None => true,
-        // Clock skew (last check in the future) never blocks: check is due.
+
         Some(t) => match now_secs.checked_sub(t) {
             None => true,
             Some(elapsed) => elapsed >= CHECK_INTERVAL_SECS,
@@ -499,15 +427,10 @@ fn write_last_check(now_secs: u64) {
     }
 }
 
-/// Auto self-update is stable-channel only: beta redeploys on every push to
-/// main, so GRAY_AUTO_UPDATE=1 on beta would be a per-commit curl|sh
-/// subscription. Manual `gray update` stays unconditional.
 fn auto_update_allowed(channel: &str, flag: Option<&str>) -> bool {
     channel == "stable" && flag == Some("1")
 }
 
-/// Called before the REPL starts. Checks for a newer release, prompts y/n.
-/// Errors are silent — update checks must never break startup.
 pub async fn startup_check() {
     let current = env!("CARGO_PKG_VERSION");
     if std::env::var("GRAY_NO_UPDATE_CHECK").as_deref() == Ok("1") {
@@ -526,8 +449,7 @@ pub async fn startup_check() {
         return;
     }
     write_last_check(now);
-    // No update needed for this to matter: a stale copy first on PATH keeps
-    // every new shell on the previous build, and nothing else would say so.
+
     warn_on_divergence();
     let Ok(Ok(latest)) =
         tokio::time::timeout(std::time::Duration::from_millis(1500), latest_version()).await
@@ -559,9 +481,7 @@ pub async fn startup_check() {
                 crate::profile::queue_profile_warning(format!(
                     "gray {latest} installed in the background — restart to apply"
                 ));
-                // Same hazard as a manual update, and this path is the one that
-                // never asked: a stale copy earlier on PATH keeps every new
-                // shell on the previous build.
+
                 if let Some(w) = post_update_shadow_warning() {
                     crate::profile::queue_profile_warning(w);
                 }

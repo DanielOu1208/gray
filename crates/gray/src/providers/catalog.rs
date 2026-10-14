@@ -1,5 +1,3 @@
-//! Plugin-backed provider resolution, dynamic provider construction, and model discovery.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -19,8 +17,6 @@ use crate::providers::registry::ProviderRpc;
 use crate::providers::registry::{InstalledProvider, ProviderRegistry};
 use crate::providers::runtime::ProviderRuntime;
 
-/// One dynamic provider: the declared profile plus the credential source the
-/// agent, setup modal, and background refreshes all share.
 pub struct DynamicProvider {
     installed: InstalledProvider,
     profile: OpenAiProviderProfile,
@@ -42,7 +38,6 @@ impl DynamicProvider {
     }
 }
 
-/// Resolve the active config to one installed provider/auth-method pair.
 pub fn resolve_provider_connection(config: &Config, home: &Path) -> Option<InstalledProvider> {
     if !config.uses_plugin_credentials() {
         return None;
@@ -50,7 +45,6 @@ pub fn resolve_provider_connection(config: &Config, home: &Path) -> Option<Insta
     ProviderRegistry::load_cached(home).resolve(&config.provider_id, &config.auth_ref)
 }
 
-/// Start the provider sidecar and build its dynamic credential source.
 pub async fn connect_dynamic_provider(
     config: &Config,
     home: &Path,
@@ -80,10 +74,6 @@ pub async fn connect_dynamic_provider(
     })
 }
 
-/// The provider sidecar of the live connection. A model switch on the same
-/// provider and auth method reuses it: each fresh spawn waited for its
-/// manifest before the switch returned, and handed the new model a cold
-/// process whose first chat could stall.
 static LIVE_RUNTIME: std::sync::Mutex<Option<Arc<ProviderRuntime>>> = std::sync::Mutex::new(None);
 
 async fn shared_runtime(installed: InstalledProvider) -> anyhow::Result<Arc<ProviderRuntime>> {
@@ -100,12 +90,11 @@ async fn shared_runtime(installed: InstalledProvider) -> anyhow::Result<Arc<Prov
     let started = std::time::Instant::now();
     let fresh = Arc::new(ProviderRuntime::start(installed).await?);
     log::debug!(target: "gray_timing", "provider sidecar start elapsed_ms={}", started.elapsed().as_millis());
-    // Replacing the slot drops the previous runtime, which kills its child.
+
     *LIVE_RUNTIME.lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh.clone());
     Ok(fresh)
 }
 
-/// Same sidecar identity: the process would answer the same provider.
 fn same_connection(a: &InstalledProvider, b: &InstalledProvider) -> bool {
     a.plugin == b.plugin
         && a.provider.id == b.provider.id
@@ -182,8 +171,6 @@ fn declared_header(header: &ProviderHeaderDecl) -> Option<OpenAiHeader> {
     })
 }
 
-/// Plugin model discovery goes through the provider RPC with a real credential;
-/// the generic HTTP catalog client never sees plugin requests.
 pub async fn fetch_models_for_config(config: &Config) -> Vec<(String, String)> {
     if !config.uses_plugin_credentials() {
         return Vec::new();
@@ -198,10 +185,7 @@ pub async fn fetch_models_for_config(config: &Config) -> Vec<(String, String)> {
     let Ok(runtime) = ProviderRuntime::start(installed.clone()).await else {
         return Vec::new();
     };
-    // Relay providers (`chat` operation): the per-turn loopback URL only
-    // exists after `provider/chat`, so discovery calls `provider/models`
-    // directly with an empty envelope (the sidecar ignores it) instead of
-    // going through `acquire`, which would burn a relay on a listing.
+
     let is_relay = installed
         .auth_method
         .operations

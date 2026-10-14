@@ -2,8 +2,7 @@ use super::*;
 
 #[test]
 fn schema_has_single_scalar_types_paths_exclude_and_empty_required() {
-    // Only the real invariant: no property uses a union type. Key lists
-    // and required-emptiness are snapshots that fail on harmless changes.
+
     let def = ReadTool::default().def();
     let props = def
         .parameters

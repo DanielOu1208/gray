@@ -46,12 +46,12 @@ fn parse_rejects_garbage() {
 
 #[test]
 fn shifted_symbols_and_capitals_normalize() {
-    // Terminals report Shift+A as 'A' (sometimes with SHIFT set too).
+
     let a = Chord::from_event(&ev(KeyCode::Char('A'), KeyModifiers::NONE)).unwrap();
     assert_eq!(a, chord("shift+a"));
     let a2 = Chord::from_event(&ev(KeyCode::Char('A'), KeyModifiers::SHIFT)).unwrap();
     assert_eq!(a2, chord("shift+a"));
-    // '?' arrives with SHIFT on some terminals: the symbol already says it.
+
     let q = Chord::from_event(&ev(KeyCode::Char('?'), KeyModifiers::SHIFT)).unwrap();
     assert_eq!(q, chord("?"));
     let bt = Chord::from_event(&ev(KeyCode::BackTab, KeyModifiers::SHIFT)).unwrap();
@@ -63,7 +63,7 @@ fn shifted_symbols_and_capitals_normalize() {
 #[test]
 fn resolve_lists_context_candidates_in_priority_order() {
     let km = Keymap::defaults();
-    // Up: popup selection first, cursor/history second.
+
     assert_eq!(
         km.resolve(&chord("up")),
         vec![
@@ -71,7 +71,7 @@ fn resolve_lists_context_candidates_in_priority_order() {
             Binding::Action(Action::CursorUp)
         ]
     );
-    // Ctrl+D: exit on an empty draft before deleting forward.
+
     assert_eq!(
         km.resolve(&chord("ctrl+d")),
         vec![
@@ -79,7 +79,7 @@ fn resolve_lists_context_candidates_in_priority_order() {
             Binding::Action(Action::DeleteCharForward)
         ]
     );
-    // Esc: close the popup before interrupting.
+
     assert_eq!(
         km.resolve(&chord("escape")),
         vec![
@@ -99,7 +99,7 @@ fn user_file_replaces_defaults_and_unbinds() {
     assert!(km.warnings.is_empty(), "{:?}", km.warnings);
     assert_eq!(km.keys_for(Action::CursorWordLeft), &[chord("ctrl+y")]);
     assert!(km.keys_for(Action::Exit).is_empty());
-    // Defaults gone for the overridden action.
+
     assert!(
         !km.resolve(&chord("alt+b"))
             .contains(&Binding::Action(Action::CursorWordLeft))
@@ -134,7 +134,7 @@ fn pi_only_ids_are_silent_unknown_ids_and_bad_keys_warn() {
     assert_eq!(km.warnings.len(), 2, "{:?}", km.warnings);
     assert!(km.warnings.iter().any(|w| w.contains("editor.bogus")));
     assert!(km.warnings.iter().any(|w| w.contains("ctrl+banana")));
-    // The good key of a partly bad list still binds.
+
     assert_eq!(km.keys_for(Action::Submit), &[chord("enter")]);
 }
 

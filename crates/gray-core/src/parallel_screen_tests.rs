@@ -1,6 +1,3 @@
-//! Bash-screen tests: inline-code, fetch-and-write, and script
-//! execution demote.
-
 use crate::parallel::bash_is_batchable;
 
 #[test]
@@ -22,7 +19,7 @@ fn inline_interpreter_code_demotes() {
 fn bare_interpreters_stay_allowed() {
     assert!(bash_is_batchable("python --version"));
     assert!(bash_is_batchable("node --version"));
-    // `-e` without an interpreter is someone else's flag (`sed -e`).
+
     assert!(bash_is_batchable("sed -e 's/a/b/' file.txt"));
 }
 
@@ -45,9 +42,9 @@ fn script_execution_demotes() {
 
 #[test]
 fn shell_c_string_and_version_stay_allowed() {
-    // The `-c` payload is screened as part of the whole command string.
+
     assert!(bash_is_batchable("bash -c 'ls'"));
     assert!(bash_is_batchable("bash --version"));
-    // ...while a mutating payload still demotes via the word screen.
+
     assert!(!bash_is_batchable("bash -c 'rm -rf x'"));
 }

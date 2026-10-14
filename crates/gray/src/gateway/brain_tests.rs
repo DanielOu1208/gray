@@ -73,7 +73,7 @@ async fn waiting_events_for_one_key_batch_and_the_cap_holds() {
         std::thread::sleep(Duration::from_millis(2));
     }
     brain.step(1_000);
-    // Cap 2: main (both messages, one turn) + the next oldest key.
+
     assert_eq!(brain.busy_keys(), 2);
     assert_eq!(event::pending(&brain.dir).len(), 1);
     drain(&mut brain, &mut rx).await;

@@ -1,24 +1,8 @@
-//! Port of `pi/packages/coding-agent/src/core/tools/edit-diff.ts`.
-//!
-//! Provides BOM handling, line-ending normalization, fuzzy matching helpers,
-//! multi-edit application with non-overlapping/unique validation, and diff
-//! generation. Uses a simple LCS-based line diff (no external `similar` crate
-//! needed) — swap in `similar` if it is later added to `Cargo.toml`.
-
-// ---------------------------------------------------------------------------
-// BOM / line endings
-// ---------------------------------------------------------------------------
-
-/// Result of [`split_bom`].
 pub struct SplitBom {
     pub bom: String,
     pub text: String,
 }
 
-/// Split a leading UTF-8 BOM (`\u{FEFF}`) from `content`.
-///
-/// Models never include the invisible BOM in `oldText`, so matching must be
-/// done on the BOM-stripped text and the BOM re-prepended on write.
 pub fn split_bom(content: &str) -> SplitBom {
     if let Some(stripped) = content.strip_prefix('\u{FEFF}') {
         SplitBom {
@@ -33,11 +17,6 @@ pub fn split_bom(content: &str) -> SplitBom {
     }
 }
 
-/// Detect the dominant line ending in `content`.
-///
-/// Mirrors `detectLineEnding` in `edit-diff.ts`: if the first `\r\n` appears
-/// before the first `\n`, treat the file as CRLF, otherwise LF. Files with no
-/// newlines default to LF.
 pub fn detect_line_ending(content: &str) -> &'static str {
     let crlf_idx = content.find("\r\n");
     let lf_idx = content.find('\n');
@@ -54,16 +33,14 @@ pub fn detect_line_ending(content: &str) -> &'static str {
     }
 }
 
-/// Normalize all line endings to LF (`\n`).
 pub fn normalize_to_lf(text: &str) -> String {
-    // Cheap path: if no '\r', nothing to do.
+
     if !text.contains('\r') {
         return text.to_string();
     }
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// Restore `ending` (`\n` or `\r\n`) in `text` (which is assumed LF-normalized).
 pub fn restore_line_endings(text: &str, ending: &str) -> String {
     if ending == "\r\n" {
         text.replace('\n', "\r\n")
@@ -72,14 +49,8 @@ pub fn restore_line_endings(text: &str, ending: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fuzzy helpers (mirrors normalizeForFuzzyMatch)
-// ---------------------------------------------------------------------------
-
 fn normalize_for_fuzzy_match(text: &str) -> String {
-    // Trim trailing whitespace per line, then normalize smart quotes/dashes/spaces.
-    // NFKC is omitted (requires external crate); the remaining transforms cover
-    // the cases models actually emit.
+
     let trimmed: String = text
         .split('\n')
         .map(|line| line.trim_end())
@@ -89,14 +60,14 @@ fn normalize_for_fuzzy_match(text: &str) -> String {
     let mut out = String::with_capacity(trimmed.len());
     for ch in trimmed.chars() {
         let mapped = match ch {
-            // Smart single quotes → '
+
             '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
-            // Smart double quotes → "
+
             '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
-            // Various dashes/hyphens → -
+
             '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
             | '\u{2212}' => '-',
-            // Special spaces → regular space
+
             '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
             | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{205F}'
             | '\u{3000}' => ' ',
@@ -107,34 +78,24 @@ fn normalize_for_fuzzy_match(text: &str) -> String {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Edit types
-// ---------------------------------------------------------------------------
-
-/// Single replacement, mirroring `Edit` in `edit-diff.ts`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Edit {
     pub old_text: String,
     pub new_text: String,
-    /// 1-based line hint (e.g., start line of the edit) to disambiguate multiple occurrences.
+
     pub line_hint: Option<usize>,
-    /// 1-based occurrence index to target (e.g., 1 for 1st, 2 for 2nd, -1 for last).
+
     pub occurrence: Option<isize>,
-    /// If true, replace all occurrences of `old_text`.
+
     pub replace_all: Option<bool>,
 }
 
-/// Result of [`apply_edits_to_normalized_content`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppliedEditsResult {
     pub base_content: String,
     pub new_content: String,
     pub notes: Vec<String>,
 }
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct MatchedEdit {
@@ -148,12 +109,12 @@ type TextReplacement = MatchedEdit;
 
 fn apply_replacements(content: &str, replacements: &[TextReplacement], offset: usize) -> String {
     let mut result = content.to_string();
-    // Apply in reverse so offsets remain stable.
+
     let mut sorted = replacements.to_vec();
     sorted.sort_by_key(|r| r.match_index);
     for r in sorted.iter().rev() {
         let idx = r.match_index - offset;
-        // Safety: indices are byte indices from `find`, always on char boundaries.
+
         result = format!(
             "{}{}{}",
             &result[..idx],
@@ -169,8 +130,7 @@ fn map_fuzzy_occurrences(
     base_content: &str,
     mut occurrences: Vec<Occurrence>,
 ) -> Result<Vec<Occurrence>, String> {
-    // Map fuzzy byte spans back to original bytes; never rebuild an entire
-    // matched line from normalized punctuation or trimmed whitespace.
+
     let mut starts = Vec::new();
     let mut ends = Vec::new();
     let mut original_offset = 0;
@@ -202,10 +162,6 @@ fn map_fuzzy_occurrences(
     Ok(occurrences)
 }
 
-// ---------------------------------------------------------------------------
-// Fuzzy find
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy)]
 struct Occurrence {
     index: usize,
@@ -233,17 +189,6 @@ fn find_all_occurrences(content: &str, target: &str) -> Vec<Occurrence> {
     occurrences
 }
 
-// ---------------------------------------------------------------------------
-// Public: applyEditsToNormalizedContent
-// ---------------------------------------------------------------------------
-
-/// Apply one or more exact-text replacements to LF-normalized `content`.
-///
-/// All edits are matched against the same original content.
-/// Handles multiple occurrences gracefully via line_hint, occurrence index,
-/// replace_all, or defaults to the first occurrence with an explanatory note.
-///
-/// Returns [`AppliedEditsResult`] containing `(base_content, new_content, notes)`.
 pub fn apply_edits_to_normalized_content(
     normalized_content: &str,
     edits: &[Edit],
@@ -253,7 +198,6 @@ pub fn apply_edits_to_normalized_content(
         return Err("edits must contain at least one replacement.".to_string());
     }
 
-    // Normalize edits to LF as well.
     let normalized_edits: Vec<Edit> = edits
         .iter()
         .map(|e| Edit {
@@ -279,8 +223,7 @@ pub fn apply_edits_to_normalized_content(
     let mut notes: Vec<String> = Vec::new();
 
     for (i, edit) in normalized_edits.iter().enumerate() {
-        // Exact matching is per edit: one fuzzy sibling must not redirect
-        // another edit. Convert fuzzy spans before selection/overlap checks.
+
         let mut occurrences = find_all_occurrences(normalized_content, &edit.old_text);
         if occurrences.is_empty() {
             let fuzzy_content = normalize_for_fuzzy_match(normalized_content);
@@ -389,8 +332,7 @@ pub fn apply_edits_to_normalized_content(
                 ));
             }
         } else if total > 1 {
-            // Graceful handling of multiple occurrences when no disambiguation is provided:
-            // default to first occurrence and emit a helpful note.
+
             let occ = occurrences[0];
             let first_line = normalized_content[..occ.index].split('\n').count();
             matched.push(MatchedEdit {
@@ -403,7 +345,7 @@ pub fn apply_edits_to_normalized_content(
                 "[edit: found {total} occurrences of {edit_label} in {path}; edited occurrence 1 at line {first_line} (provide line_start, occurrence, or replace_all to disambiguate)]"
             ));
         } else {
-            // Exactly 1 occurrence
+
             let occ = occurrences[0];
             matched.push(MatchedEdit {
                 edit_index: i,
@@ -448,10 +390,6 @@ pub fn apply_edits_to_normalized_content(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Diff generation (simple LCS, no external crate)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone)]
 enum DiffOp {
     Equal(String),
@@ -465,12 +403,10 @@ fn lcs_diff(old_lines: &[String], new_lines: &[String]) -> Vec<DiffOp> {
     if n == 0 && m == 0 {
         return vec![];
     }
-    // DP table for LCS length. Use u16/u32 optimization for large files? Keep usize.
-    // For very large files this is O(n*m) memory; cap to avoid OOM by falling back to
-    // naive diff if product is huge.
-    const MAX_CELLS: usize = 10_000_000; // ~80MB for usize table
+
+    const MAX_CELLS: usize = 10_000_000;
     if n * m > MAX_CELLS {
-        // Fallback: treat as delete all + insert all
+
         let mut ops = Vec::new();
         for l in old_lines {
             ops.push(DiffOp::Delete(l.clone()));
@@ -517,12 +453,6 @@ fn lcs_diff(old_lines: &[String], new_lines: &[String]) -> Vec<DiffOp> {
     ops
 }
 
-/// Generate a standard unified patch, mirroring `generateUnifiedPatch`.
-///
-/// Uses the `diff` crate semantics: header `--- path` / `+++ path` and
-/// `@@ -l,len +l,len @@` hunks with `context` lines. This is a minimal
-/// implementation that produces a valid patch for review/automation; it does
-/// not aim for 100% `diff` crate fidelity.
 pub fn generate_unified_patch(
     path: &str,
     old_content: &str,
@@ -537,8 +467,6 @@ pub fn generate_unified_patch(
         return String::new();
     }
 
-    // Build hunks with context grouping
-    // Walk ops, emit hunks separated by > context*2 equal lines
     let mut hunks: Vec<Vec<DiffOp>> = Vec::new();
     let mut cur: Vec<DiffOp> = Vec::new();
     let mut equal_run: Vec<DiffOp> = Vec::new();
@@ -548,22 +476,22 @@ pub fn generate_unified_patch(
             DiffOp::Equal(_) => {
                 equal_run.push(op.clone());
                 if equal_run.len() > context_lines * 2 {
-                    // Flush current hunk
+
                     if cur.iter().any(|o| !matches!(o, DiffOp::Equal(_))) {
-                        // Keep leading context (first `context` of the run) in current hunk
+
                         let keep = equal_run.drain(..context_lines).collect::<Vec<_>>();
                         cur.extend(keep);
                         hunks.push(std::mem::take(&mut cur));
-                        // Remaining equals are skipped (gap), keep trailing context for next hunk
+
                         let tail = if equal_run.len() > context_lines {
                             equal_run.split_off(equal_run.len() - context_lines)
                         } else {
                             std::mem::take(&mut equal_run)
                         };
-                        // tail becomes start of next hunk's leading context
+
                         cur = tail;
                     } else {
-                        // No changes yet, keep only trailing context
+
                         if equal_run.len() > context_lines {
                             equal_run.drain(..equal_run.len() - context_lines);
                         }
@@ -577,7 +505,7 @@ pub fn generate_unified_patch(
             }
         }
     }
-    // Flush last
+
     if !equal_run.is_empty() {
         let keep = equal_run.len().min(context_lines);
         cur.extend(equal_run.into_iter().take(keep));
@@ -594,16 +522,15 @@ pub fn generate_unified_patch(
     out.push_str(&format!("--- {path}\n"));
     out.push_str(&format!("+++ {path}\n"));
 
-    // Compute hunk headers from the single ops result (no second lcs_diff).
     let mut old_line = 1usize;
     let mut new_line = 1usize;
     let mut op_idx = 0usize;
-    // Reuse ops to advance gap counters between hunks.
+
     let all_ops = &ops;
     for hunk in hunks {
-        // Advance op_idx to start of hunk
+
         while op_idx < all_ops.len() {
-            // Check if remaining all_ops[op_idx..] starts with hunk
+
             let mut matches = true;
             for (k, hop) in hunk.iter().enumerate() {
                 if op_idx + k >= all_ops.len() {
@@ -659,7 +586,7 @@ pub fn generate_unified_patch(
                 DiffOp::Insert(t) => out.push_str(&format!("+{t}\n")),
             }
         }
-        // Advance counters past hunk + op_idx
+
         for op in &hunk {
             match op {
                 DiffOp::Equal(_) => {
@@ -671,24 +598,14 @@ pub fn generate_unified_patch(
             }
         }
         op_idx += hunk.len();
-        // Skip gap (already accounted via old_line/new_line advancement above? Need to also skip gap equals)
-        // The gap equals are those all_ops between hunks that we already skipped in next iteration's while loop,
-        // so counters will be updated there.
+
     }
 
     out
 }
 
-// ---------------------------------------------------------------------------
-// T1.6: cat -n prefix tolerance (relational fix for T1.2)
-// ---------------------------------------------------------------------------
-
-/// Note appended to a successful edit when the prefix repair fired, so the
-/// model learns to quote unprefixed text next time.
 pub const EDIT_PREFIX_STRIP_NOTE: &str = "[edit: stripped cat -n prefixes from oldText/newText]";
 
-/// Strip one leading `cat -n` prefix (`^\s*\d+\t`) from each line that has
-/// one; lines without that shape are returned unchanged.
 pub fn strip_cat_n_prefixes(text: &str) -> String {
     text.split('\n')
         .map(strip_one_prefix)
@@ -696,10 +613,6 @@ pub fn strip_cat_n_prefixes(text: &str) -> String {
         .join("\n")
 }
 
-/// Strip the prefix from a single line, or return it unchanged. The head
-/// before the first tab must be whitespace followed by digits (`cat -n`
-/// layout); anything else — tab-indented code, `12 \t` with a stray space,
-/// `abc\t` — is left alone.
 fn strip_one_prefix(line: &str) -> &str {
     let Some(tab) = line.find('\t') else {
         return line;
@@ -712,7 +625,6 @@ fn strip_one_prefix(line: &str) -> &str {
     &line[tab + 1..]
 }
 
-/// Extract the line number from the first line that has a `cat -n` prefix.
 pub fn extract_first_prefix_line_number(text: &str) -> Option<usize> {
     for line in text.split('\n') {
         let Some(tab) = line.find('\t') else {
@@ -730,10 +642,6 @@ pub fn extract_first_prefix_line_number(text: &str) -> Option<usize> {
     None
 }
 
-/// Strip prefixes from a set of edits for the T1.6 retry. Each edit's
-/// `old_text` drives: its `new_text` is stripped only when its `old_text`
-/// was (both or neither, never new alone). Returns `None` when no edit's
-/// `old_text` changed, i.e. there is nothing to retry.
 pub fn strip_edit_prefixes(edits: &[Edit]) -> Option<Vec<Edit>> {
     let mut changed = false;
     let out: Vec<Edit> = edits

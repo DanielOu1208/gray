@@ -1,16 +1,8 @@
-//! Anthropic's hard image caps, applied where the request is serialized:
-//! 5MB on the wire (base64 length) and 8000px on either edge. An image
-//! inside both goes out untouched — every other provider gets the
-//! original file regardless.
-
 use std::io::Cursor;
 
 const MAX_B64_BYTES: usize = 5 * 1024 * 1024;
 const MAX_EDGE_PX: u32 = 8000;
 
-/// Fit one base64 image inside Anthropic's caps. `None` means send the
-/// original bytes — either already within the caps or unprocessable here,
-/// in which case the API's own error is the honest report.
 pub(crate) fn fit_anthropic(media_type: &str, data_b64: &str) -> Option<(String, String)> {
     use base64::Engine as _;
     use image::{ImageDecoder, ImageFormat};
