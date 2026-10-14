@@ -64,7 +64,7 @@ pub use profile::{build_registry, take_profile_warnings};
 pub use repl::{ReplCommand, parse_command, run_repl_mode};
 pub use tui::{clear_screen, print_wrapped};
 
-pub const DEFAULT_SYS_PROMPT: &str = r#"<!--
+pub const LEGACY_SYS_PROMPT: &str = r#"<!--
 Unreadable note: this HTML comment stays in the file but is stripped before
 the prompt reaches the model — only the text after this note reaches it.
 
@@ -82,6 +82,43 @@ back in with "lean": false or GRAY_LEAN=0. Edit with `/agentsmd`
 You are Gray, running on the user's machine.
 "#;
 
+pub const DEFAULT_SYS_PROMPT: &str = r#"<!--
+Gray generated this file and refreshes it when the shipped default changes —
+but only while it stays byte-identical to a default it wrote (the managed
+stamp on line 1 is how it knows). Edit anything, even whitespace, and it
+becomes yours forever. `/agentsmd` Ctrl-R restores the default and its stamp.
+
+This file IS the stored system prompt. Comments like this one stay in the
+file but are stripped before the prompt reaches the model. After it, gray
+appends a small runtime block: identity, harness facts, and your working
+directory / repo / branch. Per turn it may also inject ephemeral context —
+<available_skills> for the turn's directory, <project_context> from the
+nearest AGENTS.md / CLAUDE.md above cwd, plugin docs. Lean mode (default)
+skips those; opt in with "lean": false or GRAY_LEAN=0.
+
+Edit with `/agentsmd` (Ctrl-S save & apply, Ctrl-R reset to default,
+Ctrl-X cancel).
+-->
+You are Gray, running on the user's machine.
+"#;
+
+const MANAGED_STAMP_PREFIX: &str = "<!-- gray:managed sha256:";
+
+fn managed_stamp(body: &str) -> String {
+    use sha2::Digest;
+    let digest = format!("{:x}", sha2::Sha256::digest(body.as_bytes()));
+    format!("{MANAGED_STAMP_PREFIX}{} -->", &digest[..16])
+}
+
+pub fn stamped_system_prompt(body: &str) -> String {
+    format!("{}\n{}", managed_stamp(body), body)
+}
+
+fn managed_body(file: &str) -> Option<&str> {
+    let (first, rest) = file.split_once('\n')?;
+    (first == managed_stamp(rest)).then_some(rest)
+}
+
 pub const BARE_SYS_PROMPT: &str = "You are a helpful assistant that can interact with a computer.";
 
 pub fn sys_prompt_path() -> anyhow::Result<PathBuf> {
@@ -89,8 +126,19 @@ pub fn sys_prompt_path() -> anyhow::Result<PathBuf> {
 }
 
 pub fn load_or_create_system_prompt_at(path: &Path) -> anyhow::Result<String> {
-    if let Ok(body) = std::fs::read_to_string(path) {
-        return Ok(body);
+    if let Ok(file) = std::fs::read_to_string(path) {
+        if let Some(body) = managed_body(&file) {
+            if body != DEFAULT_SYS_PROMPT {
+                if std::fs::write(path, stamped_system_prompt(DEFAULT_SYS_PROMPT)).is_ok() {
+                    return Ok(DEFAULT_SYS_PROMPT.to_string());
+                }
+            }
+            return Ok(body.to_string());
+        }
+        if file == DEFAULT_SYS_PROMPT || file == LEGACY_SYS_PROMPT {
+            let _ = std::fs::write(path, stamped_system_prompt(&file));
+        }
+        return Ok(file);
     }
 
     if path.file_name().is_some_and(|n| n == "AGENTS.md")
@@ -107,7 +155,7 @@ pub fn load_or_create_system_prompt_at(path: &Path) -> anyhow::Result<String> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(path, DEFAULT_SYS_PROMPT)?;
+            std::fs::write(path, stamped_system_prompt(DEFAULT_SYS_PROMPT))?;
             Ok(DEFAULT_SYS_PROMPT.to_string())
         }
         Err(e) => Err(e.into()),
@@ -268,8 +316,9 @@ async fn build_agent_with(
         session_id: session_id.map(str::to_string),
         cwd: cwd.to_path_buf(),
 
-        system_prompt: gray_plugin::builder::SystemPrompt::Build(Box::new(
-            move |_registry: &gray_tools::Registry| {
+        system_prompt: gray_plugin::builder::SystemPrompt::Build({
+            let session_cwd = cwd.to_path_buf();
+            Box::new(move |_registry: &gray_tools::Registry| {
                 let mut prompt = system_prompt::build_system_prompt(Some(body));
                 if !identity.is_empty() {
                     if !prompt.is_empty() {
@@ -283,6 +332,8 @@ async fn build_agent_with(
                     prompt.push_str(&system_prompt::harness_facts(Some(
                         std::time::Duration::from_secs(cache_ttl_secs),
                     )));
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&system_prompt::session_card(&session_cwd));
                 }
 
                 if let Some(framing) = crate::fusion::lead_framing() {
@@ -290,8 +341,8 @@ async fn build_agent_with(
                     prompt.push_str(framing);
                 }
                 prompt
-            },
-        )),
+            })
+        }),
 
         extra_plugins: extra_surface_plugins(config, spawn_plugins),
 

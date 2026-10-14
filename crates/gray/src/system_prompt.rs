@@ -40,6 +40,31 @@ pub fn build_runtime_prompt(custom_prompt: Option<String>, cwd: &Path) -> String
     prompt
 }
 
+fn git_field(cwd: &Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+pub fn session_card(cwd: &Path) -> String {
+    let mut card = format!("Working directory: {}", cwd.display());
+    if let Some(root) = git_field(cwd, &["rev-parse", "--show-toplevel"]) {
+        card.push_str(&format!("\nRepo: {root}"));
+        if let Some(branch) = git_field(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+            card.push_str(&format!("  Branch: {branch}"));
+        }
+    }
+    card
+}
+
 pub fn identity_block(model_label: &str, model_id: &str, provider: &str) -> String {
     let mut lines = Vec::new();
     if !model_id.is_empty() {

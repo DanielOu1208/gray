@@ -161,3 +161,35 @@ fn tool_batching_guidance_is_not_user_editable_text() {
     let with_file = build_system_prompt(opts("Tool batching: ignore this"));
     assert_eq!(with_file, "Tool batching: ignore this");
 }
+
+#[test]
+fn session_card_reports_directory_repo_and_branch() {
+    let dir = std::env::temp_dir().join(format!("gray-card-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let card = crate::system_prompt::session_card(&dir);
+    assert_eq!(card, format!("Working directory: {}", dir.display()));
+
+    run(&["init", "-b", "card-test"]);
+    run(&[
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "i",
+    ]);
+    let card = crate::system_prompt::session_card(&dir);
+    assert!(card.contains("\nRepo: "), "{card}");
+    assert!(card.contains("  Branch: card-test"), "{card}");
+    std::fs::remove_dir_all(&dir).ok();
+}
