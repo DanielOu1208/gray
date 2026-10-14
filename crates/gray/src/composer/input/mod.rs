@@ -40,6 +40,7 @@ pub(crate) fn watch_dead_stdin() {
         loop {
             std::thread::sleep(Duration::from_millis(500));
             if stdin_gone() {
+                #[cfg(unix)]
                 unsafe { libc::raise(libc::SIGHUP) };
                 std::thread::sleep(Duration::from_secs(2));
                 std::process::exit(129);
