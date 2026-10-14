@@ -246,6 +246,7 @@ fn trace(
         .append(true)
         .open(path)
     {
-        let _ = writeln!(f, "{line}");
+        // One write syscall: concurrent shims must not interleave fragments.
+        let _ = f.write_all(format!("{line}\n").as_bytes());
     }
 }

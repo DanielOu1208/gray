@@ -56,15 +56,27 @@ impl Walk {
 
 /// A grep invocation the index can serve.
 pub struct GrepPlan {
-    /// The real tool's argv without the operand, the walk flags, or `-r`:
-    /// output flags, `-e` patterns, and `-H` unless the caller said `-h`.
+    /// The real tool's argv without the operands or `-r`: output flags,
+    /// walk flags, and `-e` patterns. Filename printing (`-H`) is decided
+    /// by the server once it knows what each operand resolves to.
     pub argv: Vec<String>,
-    /// The directory the real tool would have walked, as given.
-    pub operand: String,
+    /// What the real tool would have read or walked, as given. A directory
+    /// under the root is served from the index; anything else (a file, a
+    /// missing path, a dir without `-r`) is passed through unchanged.
+    pub operands: Vec<String>,
     /// Each matching line of the real tool holds one of these, literally.
+    /// Meaningful only when `all_needled`.
     pub needles: Vec<String>,
+    /// Every pattern contributed at least one required literal. False when
+    /// some pattern is unprunable (`.*`, `x|y.z`, ...) — directory operands
+    /// must then decline; file operands do not care.
+    pub all_needled: bool,
     pub ignore_case: bool,
     pub walk: Walk,
+    /// `-H`/`-h` as the caller gave it; `None` is grep's default.
+    pub with_name: Option<bool>,
+    /// `-r`/`--recursive` was given.
+    pub recursive: bool,
 }
 
 /// Parse a grep argv (without argv[0]) into a plan, or the reason to decline.
@@ -126,6 +138,10 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
                 "include" | "exclude" | "exclude-dir" => {
                     let g = take(&mut i)?;
                     let m = glob(&g)?;
+                    // The flags stay in the served argv too: they filter
+                    // pass-through operands identically and are a no-op on
+                    // candidates the walk filter already passed.
+                    argv.push(format!("--{name}={g}"));
                     match name {
                         "include" => walk.rules.push((true, m)),
                         "exclude" => walk.rules.push((false, m)),
@@ -196,9 +212,6 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
         }
         positional.push(a.to_string());
     }
-    if !recursive {
-        return Err("not recursive");
-    }
     let operands = if patterns.is_empty() {
         if positional.is_empty() {
             return Err("no pattern");
@@ -208,27 +221,38 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
     } else {
         positional
     };
-    let [operand] = operands.as_slice() else {
-        return Err("needs exactly one directory operand");
+    // `-r` with no operand defaults to `.`; without it a missing operand is
+    // stdin, as is an operand `-`.
+    let operands = if operands.is_empty() {
+        if !recursive {
+            return Err("reads stdin");
+        }
+        vec![".".to_string()]
+    } else {
+        operands
     };
+    if operands.iter().any(|o| o == "-") {
+        return Err("reads stdin");
+    }
     if patterns.iter().any(|p| p.is_empty() || p.contains('\n')) {
         return Err("empty or multi-line pattern");
     }
     let syntax = syntax.unwrap_or(Syntax::Basic);
     let mut needles = Vec::new();
+    let mut all_needled = true;
     for p in &patterns {
-        needles.extend(needles_for(p, syntax, ignore_case).ok_or("no required literal")?);
+        match needles_for(p, syntax, ignore_case) {
+            Some(n) => needles.extend(n),
+            None => all_needled = false,
+        }
     }
     needles.sort();
     needles.dedup();
-    if with_name != Some(false) {
-        argv.insert(0, "-H".into());
-    }
     for p in patterns {
         argv.push("-e".into());
         argv.push(p);
     }
-    Ok(GrepPlan { argv, operand: operand.clone(), needles, ignore_case, walk })
+    Ok(GrepPlan { argv, operands, needles, all_needled, ignore_case, walk, with_name, recursive })
 }
 
 fn glob(pat: &str) -> Result<GlobMatcher, &'static str> {
@@ -240,7 +264,7 @@ fn glob(pat: &str) -> Result<GlobMatcher, &'static str> {
 pub fn needles_for(pattern: &str, syntax: Syntax, ignore_case: bool) -> Option<Vec<String>> {
     let branches: Vec<String> = match syntax {
         Syntax::Fixed => vec![pattern.to_string()],
-        Syntax::Basic => vec![pattern.to_string()],
+        Syntax::Basic => split_bre_alternatives(pattern)?,
         Syntax::Extended => split_alternatives(pattern)?,
     };
     let mut out = Vec::new();
@@ -294,6 +318,48 @@ fn split_alternatives(p: &str) -> Option<Vec<String>> {
             _ => {}
         }
         out.last_mut()?.push(c);
+        i += 1;
+    }
+    (depth == 0).then_some(out)
+}
+
+/// Split a BRE at its top-level `\\|` (GNU alternation). `\\(`/`\\)`
+/// groups count toward depth, so an alternation inside one stays in the
+/// branch and `required_runs` declines it there. `None` when escapes or
+/// groups do not balance (the real tool reports that).
+fn split_bre_alternatives(p: &str) -> Option<Vec<String>> {
+    let cs: Vec<char> = p.chars().collect();
+    let mut out = vec![String::new()];
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            '[' => {
+                let end = bracket_end(&cs, i)?;
+                out.last_mut()?.extend(&cs[i..=end]);
+                i = end + 1;
+                continue;
+            }
+            '\\' => {
+                let n = *cs.get(i + 1)?;
+                match n {
+                    '(' => depth += 1,
+                    ')' => depth = depth.checked_sub(1)?,
+                    '|' if depth == 0 => {
+                        out.push(String::new());
+                        i += 2;
+                        continue;
+                    }
+                    _ => {}
+                }
+                out.last_mut()?.push('\\');
+                out.last_mut()?.push(n);
+                i += 2;
+                continue;
+            }
+            _ => {}
+        }
+        out.last_mut()?.push(cs[i]);
         i += 1;
     }
     (depth == 0).then_some(out)

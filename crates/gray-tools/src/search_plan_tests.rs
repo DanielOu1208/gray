@@ -18,17 +18,41 @@ fn needles_are_the_longest_safe_required_run() {
     assert_eq!(n("ignore", Syntax::Fixed, true), None, "-i folds i unsafely: decline");
     assert_eq!(n("Error", Syntax::Fixed, true), Some(vec!["Error".into()]));
     assert_eq!(n("(abc)x", Syntax::Extended, false), None, "a group is not required, and x is too short");
+    assert_eq!(
+        n("unable\\|handle", Syntax::Basic, false),
+        Some(vec!["unable".into(), "handle".into()]),
+        "BRE \\| is alternation"
+    );
+    assert_eq!(n("a.b\\|x", Syntax::Basic, false), None, "a BRE branch without a literal declines");
+    assert_eq!(n("foo\\|", Syntax::Basic, false), None, "an empty BRE branch matches everything");
+    assert_eq!(n("foo|bar", Syntax::Basic, false), Some(vec!["foo|bar".into()]), "BRE | is literal");
+    assert_eq!(n("a\\(b\\|c\\)d", Syntax::Basic, false), None, "alternation in a group is not splittable");
+    assert_eq!(n("one\\|two", Syntax::Basic, true), Some(vec!["one".into(), "two".into()]), "-i: ASCII-safe folds still serve");
 }
 
 #[test]
 fn plans_serve_recursive_greps_and_decline_the_rest() {
     let p = grep_plan(&args("-rn foo dir")).expect("served");
-    assert_eq!(p.argv, ["-H", "-n", "-e", "foo"]);
-    assert_eq!(p.operand, "dir");
+    assert_eq!(p.argv, ["-n", "-e", "foo"]);
+    assert_eq!(p.operands, ["dir"]);
     assert_eq!(p.needles, ["foo"]);
+    assert!(p.all_needled && p.recursive && p.with_name.is_none());
     let p = grep_plan(&args("-r -h --include=*.rs -e needle .")).expect("served");
-    assert_eq!(p.argv, ["-h", "-e", "needle"], "-h keeps the name off; --include leaves argv");
-    for line in ["-v foo .", "-c foo .", "-P foo .", "foo a b", "foo", "-rE a|b x", "-r fo .", "-rl foo . -E -F"] {
+    assert_eq!(p.argv, ["-h", "--include=*.rs", "-e", "needle"], "-h keeps the name off; --include rides along");
+    // A lone file operand, a list of operands, and a non-recursive grep are
+    // all pass-through servable: the real tool reads them unchanged.
+    let p = grep_plan(&args("foo one.c two.c")).expect("served");
+    assert_eq!(p.operands, ["one.c", "two.c"]);
+    assert!(!p.recursive);
+    let p = grep_plan(&args("-rn foo dir1 dir2")).expect("served");
+    assert_eq!(p.operands, ["dir1", "dir2"]);
+    // `-r` with no operand defaults to `.`.
+    assert_eq!(grep_plan(&args("-rn foo")).expect("served").operands, ["."]);
+    // Patterns with no required literal still plan; the server declines them
+    // only when an operand needs the index.
+    assert!(!grep_plan(&args("-rE a|b x")).expect("plans").all_needled);
+    assert!(!grep_plan(&args("-r fo .")).expect("plans").all_needled);
+    for line in ["-v foo .", "-c foo .", "-P foo .", "foo", "foo -", "-rl foo . -E -F"] {
         assert!(grep_plan(&args(line)).is_err(), "must decline: {line}");
     }
 }

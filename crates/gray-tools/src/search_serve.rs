@@ -30,8 +30,7 @@ use serde_json::{Value, json};
 use crate::search_plan::{self, GrepPlan};
 use crate::search_watch::Watch;
 
-/// Everything one server answers from. The index directory is removed when
-/// the process exits.
+/// Everything one server answers from.
 struct Server {
     root: PathBuf,
     engine: fsearch::Engine,
@@ -41,22 +40,38 @@ struct Server {
     order: Mutex<HashMap<PathBuf, Option<HashMap<OsString, usize>>>>,
     /// Unheld paths under the root, cached until the watch reports a change.
     unheld: Mutex<Option<Arc<BTreeSet<Vec<u8>>>>>,
-    _index_dir: tempfile::TempDir,
+    /// Set only for a temporary index dir, whose Drop removes it. A
+    /// persistent `--index-dir` is left in place across restarts.
+    _index_dir: Option<tempfile::TempDir>,
 }
 
-/// Serve queries for `root` on `sock` until the process dies.
+/// Serve queries for `root` on `sock` until the process dies. `index_dir`,
+/// when given, holds the index persistently so a restart reloads it instead
+/// of rebuilding; otherwise a tempdir is used and removed on exit.
 #[cfg(unix)]
-pub fn serve(root: &Path, sock: &Path) -> std::io::Result<()> {
+pub fn serve(root: &Path, sock: &Path, index_dir: Option<&Path>) -> std::io::Result<()> {
     let root = root.canonicalize()?;
     let home = root.to_str().ok_or_else(|| std::io::Error::other("root is not UTF-8"))?.to_string();
-    let index_dir = tempfile::Builder::new().prefix("gray-serve-").tempdir()?;
+    let (index_dir, _index_dir) = match index_dir {
+        Some(d) => {
+            std::fs::create_dir_all(d)?;
+            if d.canonicalize().unwrap_or_else(|_| d.to_path_buf()).starts_with(&root) {
+                return Err(std::io::Error::other("index dir must not be inside the indexed root"));
+            }
+            (d.to_path_buf(), None)
+        }
+        None => {
+            let t = tempfile::Builder::new().prefix("gray-serve-").tempdir()?;
+            (t.path().to_path_buf(), Some(t))
+        }
+    };
     // The watch goes in before the engine scans: anything written after this
     // point is reported, and anything before it is in the scan.
     let watch = Arc::new(Watch::new(&root)?);
     let drain = watch.clone();
     std::thread::spawn(move || drain.drain_forever());
     let engine = fsearch::Engine::start(fsearch::Options {
-        dir: index_dir.path().to_path_buf(),
+        dir: index_dir,
         home,
         root: Some(root.clone()),
         skip: Some(Vec::new()),
@@ -68,7 +83,7 @@ pub fn serve(root: &Path, sock: &Path) -> std::io::Result<()> {
         watch,
         order: Mutex::new(HashMap::new()),
         unheld: Mutex::new(None),
-        _index_dir: index_dir,
+        _index_dir,
     });
     let _ = std::fs::remove_file(sock);
     let listener = UnixListener::bind(sock)?;
@@ -83,7 +98,7 @@ pub fn serve(root: &Path, sock: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-pub fn serve(_root: &Path, _sock: &Path) -> std::io::Result<()> {
+pub fn serve(_root: &Path, _sock: &Path, _index_dir: Option<&Path>) -> std::io::Result<()> {
     Err(std::io::Error::other("search-serve needs a unix socket"))
 }
 
@@ -125,18 +140,89 @@ fn serve_line(server: &Server, line: &str) -> Result<Answer, &'static str> {
 
 fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static str> {
     let plan = search_plan::grep_plan(argv)?;
-    let st = server.engine.status();
-    if !st.ready || st.root_missing || st.content_pending > 0 || st.content_docs == 0 {
-        return Err("index not settled");
+    // Each operand is either a directory under the root walked recursively,
+    // whose candidates come from the index, or anything else — a file, a
+    // missing path, a directory without `-r`, one outside the index, one
+    // whose name --exclude-dir skips, one under an unneedled pattern —
+    // passed through for the real tool to read itself. `argv` keeps the
+    // walk flags, so a pass-through operand is handled exactly as the real
+    // tool would.
+    enum Op {
+        Indexed { scope: PathBuf, prefix: String },
+        Pass(String),
     }
-    let (scope, prefix) = operand(&server.root, cwd, &plan)?;
+    let mut ops = Vec::new();
+    let mut indexed = false;
+    for raw in &plan.operands {
+        let joined = cwd.join(raw);
+        let scope = (plan.recursive && joined.is_dir()).then(|| joined.canonicalize().ok()).flatten();
+        let serve = scope.as_ref().is_some_and(|s| {
+            plan.all_needled
+                && !plan.needles.is_empty()
+                && s.starts_with(&server.root)
+                && !s.file_name().is_some_and(|n| plan.walk.skips_dir(n.as_bytes()))
+        });
+        if !serve {
+            ops.push(Op::Pass(raw.clone()));
+            continue;
+        }
+        let scope = scope.unwrap();
+        let trimmed = raw.trim_end_matches('/');
+        let prefix = if raw.starts_with('/') && trimmed.is_empty() { "/".to_string() } else { format!("{trimmed}/") };
+        ops.push(Op::Indexed { scope, prefix });
+        indexed = true;
+    }
+    let mut files = Vec::new();
+    if indexed {
+        let st = server.engine.status();
+        if !st.ready || st.root_missing || st.content_pending > 0 || st.content_docs == 0 {
+            return Err("index not settled");
+        }
+        let mut order = server.order.lock().unwrap();
+        let mut unheld: Option<Arc<BTreeSet<Vec<u8>>>> = None;
+        for op in &ops {
+            match op {
+                Op::Pass(raw) => files.push(raw.clone()),
+                Op::Indexed { scope, prefix } => files.extend(dir_files(server, scope, prefix, &plan, &mut order, &mut unheld)?),
+            }
+        }
+    } else {
+        files = plan.operands.clone();
+    }
+    // Filename printing matches grep's rule on the operands the caller gave:
+    // on for more than one operand or any directory operand, off for a lone
+    // file, and whatever `-H`/`-h` the caller gave regardless.
+    let mut out_argv = plan.argv.clone();
+    // `-r` was lifted into the plan; a pass-through operand that is a
+    // directory still needs the real tool to recurse it.
+    if plan.recursive {
+        out_argv.push("-r".into());
+    }
+    if plan.with_name.is_none() && (ops.len() > 1 || indexed) {
+        out_argv.insert(0, "-H".into());
+    }
+    Ok((out_argv, files))
+}
+
+/// The display paths under one indexed operand: the union of unheld,
+/// literal-matching, and watch-changed files, walk-filtered and listed in
+/// the order the real tool's walk reaches them.
+fn dir_files(
+    server: &Server,
+    scope: &Path,
+    prefix: &str,
+    plan: &GrepPlan,
+    order: &mut HashMap<PathBuf, Option<HashMap<OsString, usize>>>,
+    unheld: &mut Option<Arc<BTreeSet<Vec<u8>>>>,
+) -> Result<Vec<String>, &'static str> {
     let scope_bytes = scope.as_os_str().as_bytes();
     let changed = server.watch.changed(scope_bytes).ok_or("watch broken")?;
     if !changed.is_empty() {
-        server.order.lock().unwrap().clear();
+        order.clear();
+        *unheld = None;
         *server.unheld.lock().unwrap() = None;
     }
-    let unheld = {
+    if unheld.is_none() {
         let mut cache = server.unheld.lock().unwrap();
         if cache.is_none() {
             let root_bytes = server.root.as_os_str().as_bytes();
@@ -148,9 +234,9 @@ fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static
                 .collect();
             *cache = Some(Arc::new(all));
         }
-        cache.as_ref().unwrap().clone()
-    };
-    let unheld = unheld.iter().filter(|p| {
+        *unheld = Some(cache.as_ref().unwrap().clone());
+    }
+    let unheld = unheld.as_ref().unwrap().iter().filter(|p| {
         p.starts_with(scope_bytes)
             && (p.len() == scope_bytes.len() || p.get(scope_bytes.len()) == Some(&b'/'))
     }).cloned();
@@ -159,21 +245,20 @@ fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static
         .held_matches(scope_bytes, &plan.needles, plan.ignore_case)
         .ok_or("match answer partial")?;
     let all: BTreeSet<Vec<u8>> = unheld.chain(matched).chain(changed).collect();
-    let mut order = server.order.lock().unwrap();
     let mut found = Vec::new();
     for p in all {
         let path = Path::new(OsStr::from_bytes(&p));
-        let Ok(rel) = path.strip_prefix(&scope) else { continue };
-        if !walked(&plan, rel) || !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+        let Ok(rel) = path.strip_prefix(scope) else { continue };
+        if !walked(plan, rel) || !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
             continue;
         }
         let name = rel.to_str().ok_or("path is not UTF-8")?;
-        let key = walk_key(&mut order, &scope, rel).ok_or("walk order unknown")?;
+        let key = walk_key(order, scope, rel).ok_or("walk order unknown")?;
         found.push((key, format!("{prefix}{name}")));
     }
     // The real tool reads files in the order its walk reaches them; so do we.
     found.sort();
-    Ok((plan.argv, found.into_iter().map(|(_, f)| f).collect()))
+    Ok(found.into_iter().map(|(_, f)| f).collect())
 }
 
 /// Where the real tool's walk reaches `rel` under `scope`: the position of
@@ -204,30 +289,6 @@ fn readdir_order(dir: &Path) -> Option<HashMap<OsString, usize>> {
 
 /// gnulib fts sorts a directory by inode number past this many entries.
 const FTS_INODE_SORT_ENTRIES: usize = 10_000;
-
-/// The canonical directory the operand names under the root, and the prefix
-/// the real tool prints before each path under it (`operand/`, as given with
-/// any trailing slash removed).
-fn operand(root: &Path, cwd: &Path, plan: &GrepPlan) -> Result<(PathBuf, String), &'static str> {
-    let raw = cwd.join(&plan.operand);
-    if !raw.is_dir() {
-        return Err("operand is not a directory");
-    }
-    let scope = raw.canonicalize().map_err(|_| "operand does not resolve")?;
-    if !scope.starts_with(root) {
-        return Err("operand outside the index root");
-    }
-    if scope.file_name().is_some_and(|n| plan.walk.skips_dir(n.as_bytes())) {
-        return Err("operand excluded by --exclude-dir");
-    }
-    let trimmed = plan.operand.trim_end_matches('/');
-    let prefix = if plan.operand.starts_with('/') && trimmed.is_empty() {
-        "/".to_string()
-    } else {
-        format!("{trimmed}/")
-    };
-    Ok((scope, prefix))
-}
 
 /// Would the real tool's recursion under the operand visit this file?
 /// `rel` is the path under the operand; every directory on it must pass

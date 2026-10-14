@@ -744,6 +744,10 @@ pub enum Commands {
         /// Unix socket to listen on
         #[arg(long, value_name = "PATH")]
         sock: std::path::PathBuf,
+        /// Directory to keep the index in across runs (default: a tempdir
+        /// removed on exit)
+        #[arg(long, value_name = "DIR")]
+        index_dir: Option<std::path::PathBuf>,
     },
     /// Plugin-provided commands (`gray NAME setup`, …) — forwarded to the plugin
     #[command(external_subcommand)]
