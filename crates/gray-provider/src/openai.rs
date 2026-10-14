@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::stream::{self, BoxStream, Stream, StreamExt};
 use gray_core::agent::{Provider, ProviderError};
 use gray_core::credential::{CredentialLease, CredentialSource};
 use gray_core::event::{StopReason, StreamEvent, Usage};
@@ -26,6 +28,8 @@ const MAX_ATTEMPTS: usize = 5;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+const DEFAULT_STREAM_STALL: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 pub struct OpenAiProvider {
@@ -1348,6 +1352,54 @@ const QUOTA_EXHAUSTED_HINTS: [&str; 14] = [
     "resets in ~",
 ];
 
+pub const QUOTA_VENDOR_CODE: &str = "quota_exhausted";
+
+fn is_quota_code(code: &str) -> bool {
+    code.split(';').next() == Some(QUOTA_VENDOR_CODE)
+}
+
+fn quota_hinted(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    QUOTA_EXHAUSTED_HINTS.iter().any(|h| lower.contains(h))
+}
+
+fn quota_vendor_code(orig: Option<String>, resets_in: Option<Duration>) -> String {
+    let mut code = String::from(QUOTA_VENDOR_CODE);
+    if let Some(orig) = orig.filter(|s| !s.is_empty()) {
+        code.push_str(&format!(";code={}", orig.replace([';', '='], "_")));
+    }
+    if let Some(d) = resets_in {
+        code.push_str(&format!(";reset_in={}", d.as_secs()));
+    }
+    code
+}
+
+pub fn is_quota_exhausted(err: &ProviderError) -> bool {
+    if let Some(code) = err.detail().and_then(|d| d.vendor_code.as_deref())
+        && is_quota_code(code)
+    {
+        return true;
+    }
+    matches!(err.class(), ProviderError::Auth(msg) | ProviderError::BadRequest(msg) | ProviderError::RateLimited(msg) if quota_hinted(msg))
+}
+
+pub fn quota_reset_in(err: &ProviderError) -> Option<Duration> {
+    if let Some(code) = err.detail().and_then(|d| d.vendor_code.as_deref())
+        && is_quota_code(code)
+    {
+        return code
+            .split(';')
+            .skip(1)
+            .find_map(|p| p.strip_prefix("reset_in="))
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_secs);
+    }
+    if is_quota_exhausted(err) {
+        return parse_quota_reset_delay(&err.to_string());
+    }
+    None
+}
+
 fn error_body_code(body: &str) -> Option<String> {
     let v: Value = serde_json::from_str(body.trim()).ok()?;
     v.pointer("/error/code")
@@ -1366,12 +1418,26 @@ pub(crate) fn classify_http_error(
     cf_ray: Option<&str>,
     req_id: Option<&str>,
 ) -> ProviderError {
+    let class = classify_http_error_inner(status, snippet, cf_ray, req_id);
+    let vendor_message = error_body_message(snippet);
+    let mut vendor_code = error_body_code(snippet);
+    if matches!(
+        class.class(),
+        ProviderError::Auth(_) | ProviderError::BadRequest(_)
+    ) && quota_hinted(snippet)
+    {
+        let resets_in = vendor_message
+            .as_deref()
+            .and_then(parse_quota_reset_delay)
+            .or_else(|| parse_quota_reset_delay(snippet));
+        vendor_code = Some(quota_vendor_code(vendor_code, resets_in));
+    }
     ProviderError::Detailed {
-        class: Box::new(classify_http_error_inner(status, snippet, cf_ray, req_id)),
+        class: Box::new(class),
         detail: gray_core::error::ProviderDetail {
             status: Some(status.as_u16()),
-            vendor_code: error_body_code(snippet),
-            vendor_message: error_body_message(snippet),
+            vendor_code,
+            vendor_message,
             cf_ray: cf_ray.map(str::to_string),
             request_id: req_id.map(str::to_string),
         },
@@ -1453,18 +1519,20 @@ pub(crate) fn is_retryable_error(err: &ProviderError) -> bool {
 }
 
 fn should_retry_request(err: &ProviderError, http_status: u16, attempt: usize) -> bool {
+    if is_quota_exhausted(err) {
+        return false;
+    }
     if is_retryable_error(err) {
         return true;
     }
-    let ProviderError::Auth(msg) = err.class() else {
-        return false;
-    };
-    let lower = msg.to_lowercase();
-    http_status == 403 && attempt == 1 && !QUOTA_EXHAUSTED_HINTS.iter().any(|h| lower.contains(h))
+    http_status == 403 && attempt == 1 && matches!(err.class(), ProviderError::Auth(_))
 }
 
-fn is_midstream_transport(err: &eventsource_stream::EventStreamError<reqwest::Error>) -> bool {
-    matches!(err, eventsource_stream::EventStreamError::Transport(_))
+fn is_midstream_transport(err: &SseReadError) -> bool {
+    matches!(
+        err,
+        SseReadError::Upstream(eventsource_stream::EventStreamError::Transport(_))
+    )
 }
 
 pub(crate) fn retry_notice_event(attempt: usize, max: usize, err: &ProviderError) -> StreamEvent {
@@ -1531,16 +1599,163 @@ fn parse_http_date_delay(raw: &str) -> Option<Duration> {
         return None;
     }
 
+    let target = days_from_civil(year, month, day) * 86400
+        + hour as i64 * 3600
+        + min as i64 * 60
+        + sec as i64;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+    Some(Duration::from_secs((target - now).max(0) as u64))
+}
+
+fn days_from_civil(year: i64, month: i64, day: u64) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
     let mp = (month + 9) % 12;
     let doy = (153 * mp + 2) / 5 + day as i64 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
-    let target = days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64;
+    era * 146097 + doe - 719468
+}
+
+fn parse_quota_reset_delay(text: &str) -> Option<Duration> {
+    let lower = text.to_lowercase();
+    let mut offset = 0;
+    while let Some(at) = lower[offset..].find("reset") {
+        let tail = lower[offset + at + 5..].trim_start();
+        offset += at + 5;
+        let tail = tail.strip_prefix('s').map(str::trim_start).unwrap_or(tail);
+        let tail = tail
+            .strip_prefix("back")
+            .map(str::trim_start)
+            .unwrap_or(tail);
+        for prep in ["in", "at", "on"] {
+            let Some(rest) = tail.strip_prefix(prep).map(str::trim_start) else {
+                continue;
+            };
+            let rest = rest.trim_start_matches(['~', '\u{2248}', ' ']);
+            let rest = rest
+                .strip_prefix("about")
+                .map(str::trim_start)
+                .unwrap_or(rest);
+            if let Some(d) = parse_reset_duration(rest)
+                .or_else(|| parse_reset_timestamp(rest))
+                .or_else(|| parse_http_date_delay(rest))
+            {
+                return Some(d);
+            }
+        }
+    }
+    None
+}
+
+fn parse_reset_duration(s: &str) -> Option<Duration> {
+    let nlen = s
+        .bytes()
+        .take_while(|b| b.is_ascii_digit() || *b == b'.')
+        .count();
+    if nlen == 0 {
+        return None;
+    }
+    let num: f64 = s[..nlen].parse().ok()?;
+    let unit = s[nlen..].trim_start();
+    let ulen = unit.bytes().take_while(|b| b.is_ascii_alphabetic()).count();
+    let secs: u64 = match &unit[..ulen] {
+        "s" | "sec" | "secs" | "second" | "seconds" => 1,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
+        "d" | "day" | "days" => 86400,
+        "w" | "week" | "weeks" => 604800,
+        _ => return None,
+    };
+    Some(Duration::from_secs_f64(num * secs as f64))
+}
+
+fn parse_reset_timestamp(s: &str) -> Option<Duration> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
-    Some(Duration::from_secs((target - now).max(0) as u64))
+    let digits = s.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits >= 10 {
+        let raw: i64 = s[..digits].parse().ok()?;
+        let epoch = if digits >= 13 { raw / 1000 } else { raw };
+        return Some(Duration::from_secs(epoch.saturating_sub(now).max(0) as u64));
+    }
+    if let Some(epoch) = parse_iso_reset_epoch(s) {
+        return Some(Duration::from_secs(epoch.saturating_sub(now).max(0) as u64));
+    }
+    let (clock, _) = parse_reset_clock(s)?;
+    let today = now - now.rem_euclid(86400);
+    let mut target = today + clock;
+    if target <= now {
+        target += 86400;
+    }
+    Some(Duration::from_secs((target - now) as u64))
+}
+
+fn parse_iso_reset_epoch(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let year: i64 = s[0..4].parse().ok()?;
+    let month: i64 = s[5..7].parse().ok()?;
+    let day: u64 = s[8..10].parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let rest = s[10..].trim_start_matches(['T', ' ']);
+    let (clock, used) = if rest.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        parse_reset_clock(rest)?
+    } else {
+        (0, 0)
+    };
+    let offset = parse_reset_tz_offset(rest[used..].trim_start());
+    Some(days_from_civil(year, month, day) * 86400 + clock - offset)
+}
+
+fn parse_reset_clock(s: &str) -> Option<(i64, usize)> {
+    let b = s.as_bytes();
+    if b.len() < 5 || b[2] != b':' {
+        return None;
+    }
+    let hour: i64 = s[0..2].parse().ok()?;
+    let min: i64 = s[3..5].parse().ok()?;
+    if hour > 23 || min > 59 {
+        return None;
+    }
+    let mut sec = 0i64;
+    let mut used = 5;
+    if b.get(5) == Some(&b':') {
+        sec = s.get(6..8)?.parse().ok()?;
+        if sec > 60 {
+            return None;
+        }
+        used = 8;
+        if b.get(8) == Some(&b'.') {
+            used += 1 + s[9..].bytes().take_while(|b| b.is_ascii_digit()).count();
+        }
+    }
+    Some((hour * 3600 + min * 60 + sec, used))
+}
+
+fn parse_reset_tz_offset(s: &str) -> i64 {
+    let (sign, rest) = match s.as_bytes().first() {
+        Some(b'+') => (1i64, &s[1..]),
+        Some(b'-') => (-1i64, &s[1..]),
+        _ => return 0,
+    };
+    let raw_len = rest
+        .bytes()
+        .take_while(|b| b.is_ascii_digit() || *b == b':')
+        .count();
+    let raw = &rest[..raw_len];
+    let (hour, min) = match raw.split_once(':') {
+        Some((h, m)) => (h.parse().unwrap_or(0), m.parse().unwrap_or(0)),
+        None if raw.len() > 2 => (
+            raw[..raw.len() - 2].parse().unwrap_or(0),
+            raw[raw.len() - 2..].parse().unwrap_or(0),
+        ),
+        None => (raw.parse().unwrap_or(0), 0),
+    };
+    sign * (hour * 3600 + min * 60)
 }
 
 pub(crate) fn backoff_delay(
@@ -1649,10 +1864,88 @@ async fn send_json_once(
     }
 }
 
-type BoxedEventStream = BoxStream<
-    'static,
-    Result<eventsource_stream::Event, eventsource_stream::EventStreamError<reqwest::Error>>,
->;
+type BoxedEventStream = BoxStream<'static, Result<eventsource_stream::Event, SseReadError>>;
+
+#[derive(Debug)]
+enum SseReadError {
+    Upstream(eventsource_stream::EventStreamError<reqwest::Error>),
+    Stalled(Duration),
+}
+
+impl std::fmt::Display for SseReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Upstream(e) => write!(f, "{e}"),
+            Self::Stalled(cap) => {
+                write!(f, "stream stalled: no output for {}s", cap.as_secs())
+            }
+        }
+    }
+}
+
+struct StallGuard {
+    inner: BoxedEventStream,
+    cap: Duration,
+    timer: Pin<Box<tokio::time::Sleep>>,
+    fired: bool,
+}
+
+impl Stream for StallGuard {
+    type Item = Result<eventsource_stream::Event, SseReadError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.fired {
+            return self.inner.as_mut().poll_next(cx);
+        }
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(item) => {
+                if !matches!(&item, Some(Ok(ev)) if ev.event == "ping" || ev.data.trim().is_empty())
+                {
+                    let deadline = tokio::time::Instant::now() + self.cap;
+                    self.timer.as_mut().reset(deadline);
+                }
+                Poll::Ready(item)
+            }
+            Poll::Pending => {
+                if self.timer.as_mut().poll(cx).is_ready() {
+                    self.fired = true;
+                    return Poll::Ready(Some(Err(SseReadError::Stalled(self.cap))));
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+fn stream_stall_cap() -> Duration {
+    std::env::var("GRAY_PROVIDER_STALL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_STREAM_STALL)
+}
+
+fn stall_guard(inner: BoxedEventStream, cap: Duration) -> BoxedEventStream {
+    StallGuard {
+        inner,
+        cap,
+        timer: Box::pin(tokio::time::sleep(cap)),
+        fired: false,
+    }
+    .boxed()
+}
+
+fn sse_event_stream(response: reqwest::Response) -> BoxedEventStream {
+    stall_guard(
+        response
+            .bytes_stream()
+            .eventsource()
+            .map(|item| item.map_err(SseReadError::Upstream))
+            .boxed(),
+        stream_stall_cap(),
+    )
+}
 
 #[derive(Default)]
 struct DynamicToolCall {
@@ -1995,10 +2288,22 @@ fn stream_failure(event: &Value, detail: String) -> ProviderError {
         .iter()
         .any(|h| code.contains(h) || lower.contains(h))
     {
-        ProviderError::Auth(detail)
-    } else {
-        ProviderError::Stream(detail)
+        let resets_in = parse_quota_reset_delay(&detail);
+        return ProviderError::Detailed {
+            class: Box::new(ProviderError::Auth(detail.clone())),
+            detail: gray_core::error::ProviderDetail {
+                status: None,
+                vendor_code: Some(quota_vendor_code(
+                    (!code.is_empty()).then_some(code),
+                    resets_in,
+                )),
+                vendor_message: Some(detail),
+                cf_ray: None,
+                request_id: None,
+            },
+        };
     }
+    ProviderError::Stream(detail)
 }
 
 async fn dynamic_step(
@@ -2027,7 +2332,7 @@ async fn dynamic_step(
                 .await
                 {
                     Ok(response) => {
-                        let event_stream = response.bytes_stream().eventsource().boxed();
+                        let event_stream = sse_event_stream(response);
                         state = DynamicState::Streaming {
                             event_stream,
                             tools: BTreeMap::new(),
@@ -2433,8 +2738,7 @@ fn stream_unfold_step(
                     .await
                     {
                         Ok(response) => {
-                            let event_stream: BoxedEventStream =
-                                response.bytes_stream().eventsource().boxed();
+                            let event_stream: BoxedEventStream = sse_event_stream(response);
                             state = StreamState::Streaming {
                                 event_stream,
                                 accumulated_tools: BTreeMap::new(),
@@ -2540,8 +2844,7 @@ fn stream_unfold_step(
                     .await
                     {
                         Ok(response) => {
-                            let event_stream: BoxedEventStream =
-                                response.bytes_stream().eventsource().boxed();
+                            let event_stream: BoxedEventStream = sse_event_stream(response);
 
                             let last_response_id = body.previous_response_id.clone();
                             state = StreamState::ResponsesStreaming {
@@ -3384,7 +3687,9 @@ fn stream_unfold_step(
                             };
                         }
                         Some(Err(err)) => {
-                            if stream_attempt < MAX_ATTEMPTS {
+                            if stream_attempt < MAX_ATTEMPTS
+                                && !matches!(err, SseReadError::Stalled(_))
+                            {
                                 log::warn!(target: "gray_provider", "responses stream error, resuming (stream attempt {stream_attempt}): {err}");
 
                                 tokio::time::sleep(backoff_delay(

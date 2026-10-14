@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +37,12 @@ pub enum CoreError {
 
     #[error("rate limited: {0}")]
     RateLimited(String),
+
+    #[error("quota exhausted: {message}")]
+    Quota {
+        message: String,
+        resets_in: Option<Duration>,
+    },
 
     #[error("bad request: {0}")]
     BadRequest(String),
@@ -93,6 +100,7 @@ impl CoreError {
         match self.class() {
             Self::Auth(_) => "auth_failed",
             Self::RateLimited(_) => "rate_limited",
+            Self::Quota { .. } => "quota_exhausted",
             Self::BadRequest(_) => "bad_request",
             Self::ContextOverflow(_) => "context_overflow",
             Self::ServerError(_) => "server_error",
