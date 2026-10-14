@@ -410,8 +410,8 @@ async fn tool_error_is_fed_back_and_model_recovers() {
 }
 
 #[tokio::test]
-async fn loop_guard_nudges_once_at_four_then_aborts_at_six() {
-    let scripts: Vec<Vec<StreamEvent>> = (0..6).map(|i| tool_script(&format!("c{i}"))).collect();
+async fn loop_guard_aborts_at_twelve_identical_rounds() {
+    let scripts: Vec<Vec<StreamEvent>> = (0..12).map(|i| tool_script(&format!("c{i}"))).collect();
     let provider = FakeProvider::new(scripts);
     let executor = FakeExecutor::new(ToolOutput::ok("ok"));
     let mut agent = Agent::new(Box::new(provider), Arc::new(executor)).with_tools(vec![tool_def()]);
@@ -419,19 +419,16 @@ async fn loop_guard_nudges_once_at_four_then_aborts_at_six() {
     let err = agent
         .run(Message::user("loop forever"), ToolContext::default())
         .await
-        .expect_err("six identical rounds must abort");
+        .expect_err("twelve identical rounds must abort");
 
     assert!(matches!(err, CoreError::LoopDetected(_)), "got {err:?}");
-    let nudges: Vec<usize> = agent
-        .messages()
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.injected && m.text_content().contains("tool calls were identical"))
-        .map(|(i, _)| i)
-        .collect();
-    assert_eq!(nudges.len(), 1, "exactly one stall reminder: {nudges:?}");
-
-    assert_eq!(nudges[0], 9, "reminder follows the 4th identical round");
+    assert!(
+        !agent
+            .messages()
+            .iter()
+            .any(|m| m.injected && m.text_content().contains("tool calls were identical")),
+        "abort without a stall reminder"
+    );
 }
 
 #[tokio::test]
@@ -897,6 +894,23 @@ async fn unknown_tool_name_skips_executor_with_error_result() {
 
     let hint = crate::tool_out::unknown_tool("lookpu", &[TOOL_NAME.to_string()]);
     assert!(hint.contains("'lookup'"), "got {hint}");
+
+    let namespaced = crate::tool_out::unknown_tool(
+        "read_file",
+        &["native__read_file".to_string(), "bash".to_string()],
+    );
+    assert!(
+        namespaced.contains("'native__read_file'"),
+        "unprefixed call should surface the namespaced tool: {namespaced}"
+    );
+    let unprefixed = crate::tool_out::unknown_tool(
+        "native__read_file",
+        &["read_file".to_string(), "bash".to_string()],
+    );
+    assert!(
+        unprefixed.contains("'read_file'"),
+        "namespaced call should surface the bare tool: {unprefixed}"
+    );
     assert_eq!(agent.messages()[1].role, Role::Assistant);
     assert!(matches!(
         &agent.messages()[2].content[0],

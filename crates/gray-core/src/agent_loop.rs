@@ -323,8 +323,6 @@ impl Agent {
 
         let mut empty_nudge_sent = false;
 
-        let mut stall_nudge_sent = false;
-
         let mut leak_nudges: u8 = 0;
 
         let mut hook_context = String::new();
@@ -903,8 +901,7 @@ impl Agent {
                 leak_nudges = 0;
             }
 
-            const SIGNATURE_ABORT_REPEATS: usize = 6;
-            const SIGNATURE_NUDGE_REPEATS: usize = 4;
+            const SIGNATURE_ABORT_REPEATS: usize = 12;
             {
                 let sig = tool_uses
                     .iter()
@@ -1218,13 +1215,6 @@ impl Agent {
                 last_sig = None;
             } else {
                 poll_rounds = 0;
-                if repeat == SIGNATURE_NUDGE_REPEATS && !stall_nudge_sent {
-                    stall_nudge_sent = true;
-                    log::info!(target: "gray_agent", "same tool call {repeat}x in a row; nudging once before the loop guard");
-                    self.messages.push(Message::user_injected(format!(
-                        "the last {repeat} tool calls were identical — repeating the call will not change its result, and the run stops after {SIGNATURE_ABORT_REPEATS}. Change approach: use what you already have, try a different command, or say what is blocking you"
-                    )));
-                }
             }
 
             emit!(AgentEvent::MessageBoundary);

@@ -1001,8 +1001,12 @@ impl Plugin for SidecarPlugin {
         match res {
             Ok(v) => ToolBefore::from_result(&v),
             Err(e) => {
-                log::warn!(target: "gray_plugin", "sidecar tool/before failed: {e}");
-                ToolBefore::Deny("plugin policy unavailable; tool not executed".to_string())
+                log::warn!(target: "gray_plugin", "sidecar {} tool/before failed: {e}", self.manifest.name);
+                ToolBefore::Deny(format!(
+                    "plugin '{}' policy check failed ({:.160}); tool not executed — retry may succeed",
+                    self.manifest.name,
+                    e.to_string()
+                ))
             }
         }
     }
