@@ -44,7 +44,7 @@ fn input_box_ghost_hint_shows_only_when_empty() {
 }
 
 #[test]
-fn home_box_is_the_flat_band_with_hints_stats_tip_and_notice_under_it() {
+fn home_box_is_the_flat_band_with_hints_stats_and_notice_under_it() {
     let home = HomeRows {
         notice: Some(
             "⚠ 3 interrupted sessions in ~/gray · /sessions to pick up · /sessions dismiss to clear",
@@ -64,12 +64,12 @@ fn home_box_is_the_flat_band_with_hints_stats_tip_and_notice_under_it() {
     assert_eq!((ibox.cur_row, ibox.cur_col), (1, 2));
 
     assert_eq!(rows.len(), 8, "{rows:?}");
-    assert!(rows[3].starts_with("● Tip"), "{rows:?}");
     assert!(rows[3].ends_with("/ commands"), "{rows:?}");
+    assert!(!rows[3].contains("Tip"), "{rows:?}");
     assert_eq!(
         display_width(&rows[3]),
         78,
-        "tip + hints span the box's width"
+        "hints span the box's width"
     );
     assert!(
         rows[5].starts_with("⚠ 3 interrupted sessions in ~/gray"),

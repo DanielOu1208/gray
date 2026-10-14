@@ -314,9 +314,8 @@ fn left_right_rows(
 
 fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
     let mut rows: Vec<Line<'static>> = Vec::new();
-    let tip = crate::composer::tip_spans();
-    let hints = crate::composer::hint_spans(w.saturating_sub(spans_width(&tip) + 2).max(1));
-    rows.extend(left_right_rows(w, tip, hints));
+    let hints = crate::composer::hint_spans(w.saturating_sub(1).max(1));
+    rows.extend(left_right_rows(w, vec![], hints));
     if home.notice.is_some() || home.stats.is_some() {
         rows.push(Line::default());
     }

@@ -428,42 +428,6 @@ pub enum TranscriptEntry {
 
 const WELCOME_HINTS: &[(&str, &str)] = &[("/", "commands")];
 
-const WELCOME_TIPS: &[(&str, &str)] = &[
-    ("/", "shows every command and skill"),
-    ("/models", "picks a model"),
-    ("/plugins", "manages installed plugins"),
-    ("/sessions", "reopens an earlier session"),
-    ("/compact", "summarizes context"),
-    ("/undo", "drops the last exchange"),
-    ("/retry", "asks again"),
-    ("/context", "sets the context window"),
-    ("/jobs", "lists background jobs"),
-    ("/update auto", "toggles auto-updates"),
-    ("/theme", "picks a color theme"),
-    ("/skills", "lists skills"),
-    ("/cron", "lists scheduled jobs"),
-    ("/usage", "shows session tokens"),
-    ("/hotkeys", "shows keybindings"),
-    ("/gateway", "shows connections"),
-    ("alt+enter", "inserts a newline"),
-    ("ctrl+v", "pastes an image from the clipboard"),
-    ("esc", "cancels the running turn"),
-    ("gray -p \"…\"", "runs one prompt and exits"),
-    ("gray cmd list", "lists commands for gateways"),
-    ("gray plugin update --check all", "finds stale plugins"),
-];
-
-fn welcome_tip_index() -> usize {
-    static PICK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *PICK.get_or_init(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as usize)
-            .unwrap_or(0)
-            % WELCOME_TIPS.len()
-    })
-}
-
 pub(crate) fn hint_spans(col_w: usize) -> Vec<Span<'static>> {
     let theme = crate::theme::theme();
     let hint_w = |hints: &[(&str, &str)]| -> usize {
@@ -492,16 +456,6 @@ pub(crate) fn hint_spans(col_w: usize) -> Vec<Span<'static>> {
         ));
     }
     spans
-}
-
-pub(crate) fn tip_spans() -> Vec<Span<'static>> {
-    let theme = crate::theme::theme();
-    let (key, text) = WELCOME_TIPS[welcome_tip_index()];
-    vec![
-        Span::styled("● Tip ", Style::default().fg(theme.text_bright)),
-        Span::styled(key, Style::default().fg(theme.text_bright)),
-        Span::styled(format!(" {text}"), Style::default().fg(theme.text_muted)),
-    ]
 }
 
 pub(crate) fn stats_spans(stats: &str) -> Vec<Span<'static>> {
