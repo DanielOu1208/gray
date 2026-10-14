@@ -220,7 +220,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
             rows,
         ));
         ibox.lines
-            .splice(0..0, std::iter::repeat_n(Line::default(), spacer));
+            .extend(std::iter::repeat_n(Line::default(), spacer));
     }
     let box_h = ibox.lines.len().max(1) as u16;
 
