@@ -38,7 +38,27 @@ unsafe extern "C" {
     fn setiopolicy_np(iotype: i32, scope: i32, policy: i32) -> i32;
 }
 
+/// Standalone fsearch has no host logger: engine diagnostics (log::) go to
+/// stderr exactly as they did when the sites were `eprintln!`.
+struct StderrLog;
+
+impl log::Log for StderrLog {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.level() <= log::LevelFilter::Info
+    }
+    fn log(&self, r: &log::Record) {
+        if self.enabled(r.metadata()) {
+            eprintln!("{} {}", query::now_secs(), r.args());
+        }
+    }
+    fn flush(&self) {}
+}
+
+static STDERR_LOG: StderrLog = StderrLog;
+
 pub fn main() {
+    let _ = log::set_logger(&STDERR_LOG);
+    log::set_max_level(log::LevelFilter::Info);
     // Never let a search download iCloud placeholders: opening or listing a
     // dataless file/dir fails fast instead of materializing it.
     // (IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS, OFF)

@@ -33,6 +33,6 @@ pub mod walk;
 #[cfg(unix)]
 pub use content::{Case, FileMatches, Grep, GrepResult, Hit, grep_file};
 #[cfg(unix)]
-pub use engine::{Engine, Found, Options, Status, default_dir, gated, has_full_disk_access, no_materialize};
+pub use engine::{Engine, Found, Options, Status, default_dir, gated, has_full_disk_access, no_materialize, diag};
 #[cfg(unix)]
 pub use query::{GrepMode, Query};

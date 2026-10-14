@@ -11,7 +11,7 @@ use crate::walk::{self, KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
@@ -138,14 +138,42 @@ struct Shared {
     /// Told the folders of each batch of disk changes (`Engine::on_change`).
     #[allow(clippy::type_complexity)]
     on_change: RwLock<Vec<Box<dyn Fn(&[(&[u8], bool)]) + Send + Sync>>>,
+    /// Scopes someone searched lately: the minute tick keeps just these
+    /// fresh (one lstat per folder under them, not per folder on the
+    /// disk), while the tail gets a full sweep every FULL_SWEEP_SECS.
+    hot: Mutex<std::collections::BTreeMap<Vec<u8>, HotScope>>,
+    /// `now_secs()` when the whole tree last passed a sweep — starts as
+    /// "at startup", which is when the index itself was listed or loaded.
+    verified_all: AtomicU32,
 }
+
+/// A scope the tick keeps fresh.
+#[derive(Clone, Copy)]
+struct HotScope {
+    /// Last search touching it; older than HOT_RETAIN it drops.
+    seen: Instant,
+    /// `now_secs()` when a sweep last covered it.
+    verified: u32,
+}
+
+/// The apply loop's cadence: the freshness bound a query can rely on.
+const TICK_SECS: u32 = 60;
+/// How often the cold tail (folders nobody searched) is swept.
+const FULL_SWEEP_SECS: u32 = 30 * 60;
+/// How long a searched scope stays hot.
+const HOT_RETAIN: Duration = Duration::from_secs(2 * 3600);
+/// Most scopes kept hot; least-recently-seen drops past it.
+const HOT_MAX: usize = 64;
 
 fn try_lock(f: &std::fs::File) -> bool {
     unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(f), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
-fn log(msg: impl AsRef<str>) {
-    eprintln!("{} {}", crate::query::now_secs(), msg.as_ref());
+/// Engine diagnostics go to the host's logger (gray.log under gray, the
+/// stderr logger `unix_main` installs standalone) — never raw stderr, which
+/// a UI host renders in its text area.
+pub fn diag(msg: impl AsRef<str>) {
+    log::info!("{}", msg.as_ref());
 }
 
 /// Never let indexing download iCloud placeholders: on the calling thread,
@@ -287,7 +315,7 @@ impl Engine {
             Some(v) => v.into_iter().map(|p| p.as_os_str().as_bytes().to_vec()).collect(),
             None if has_full_disk_access() && std::env::var_os("FSEARCH_RESTRICT").is_none() => Vec::new(),
             None => {
-                log(if cfg!(target_os = "macos") {
+                diag(if cfg!(target_os = "macos") {
                     "no Full Disk Access: skipping consent-gated folders (grant it to fsearch to index everything)"
                 } else {
                     "skipping pseudo-filesystems (/proc, /sys, /dev, /run, ...)"
@@ -341,6 +369,8 @@ impl Engine {
             content_ready,
             content_early: Mutex::new(Vec::new()),
             on_change: RwLock::new(Vec::new()),
+            hot: Mutex::new(std::collections::BTreeMap::new()),
+            verified_all: AtomicU32::new(crate::query::now_secs()),
         });
         if owner {
             start_content(&shared);
@@ -355,7 +385,7 @@ impl Engine {
             let was_loaded = loading.is_some();
             let (live, replay) = match loading {
                 Some(b) => {
-                    log(format!("loaded {} entries, replaying events since {}", b.n, b.event_id));
+                    diag(format!("loaded {} entries, replaying events since {}", b.n, b.event_id));
                     let from = b.event_id;
                     (Live::lazy(b).rooted(&s.root), Some(from))
                 }
@@ -419,8 +449,63 @@ impl Engine {
         }
     }
 
+    /// A query touched `scope`: keep it in the tick's sweep set, and if
+    /// it has not been verified inside the tick bound sweep it inline now
+    /// (a cold scope answers with the same staleness the tick gives the
+    /// hot ones — never lazier). Root is the cold tail's job.
+    fn saw_scope(&self, scope: Option<&[u8]>) {
+        let Some(scope) = scope.filter(|s| s.len() > 1) else { return };
+        {
+            let mut h = self.s.hot.lock().unwrap();
+            if let Some(r) = h.get_mut(scope) {
+                r.seen = Instant::now();
+            } else {
+                if h.len() >= HOT_MAX {
+                    if let Some(oldest) = h.iter().min_by_key(|(_, s)| s.seen).map(|(p, _)| p.clone()) {
+                        h.remove(&oldest);
+                    }
+                }
+                h.insert(scope.to_vec(), HotScope { seen: Instant::now(), verified: 0 });
+            }
+        }
+        let now = crate::query::now_secs();
+        let bound = now.saturating_sub(TICK_SECS);
+        let stale = {
+            let h = self.s.hot.lock().unwrap();
+            let cover = h
+                .iter()
+                .filter(|(p, _)| under(scope, p))
+                .map(|(_, s)| s.verified)
+                .max()
+                .unwrap_or(0);
+            cover.max(self.s.verified_all.load(Ordering::Relaxed))
+        };
+        if stale >= bound {
+            return;
+        }
+        let from = stale.saturating_sub(SYNC_MARGIN);
+        let mut dirs = {
+            let g = self.s.live.read().unwrap();
+            let Some(live) = g.as_ref() else { return };
+            live.changed_dirs_in(from, &[scope.to_vec()])
+        };
+        dirs.extend(self.s.content.read().unwrap().changed_dirs_in(from, &[scope.to_vec()]));
+        dirs.sort();
+        dirs.dedup();
+        let t = Instant::now();
+        let n = dirs.len();
+        apply_dirs(&self.s, dirs);
+        if let Some(r) = self.s.hot.lock().unwrap().get_mut(scope) {
+            r.verified = now;
+        }
+        if n > 0 {
+            diag(format!("cold scope {}: relisted {n} folders in {t:.2?}", String::from_utf8_lossy(scope)));
+        }
+    }
+
     /// Name search.
     pub fn search(&self, q: &Query) -> Result<Vec<Found>, String> {
+        self.saw_scope(q.scope.as_deref());
         WARM_UNTIL.store(0, Ordering::Relaxed);
         let (found, early) = self.s.with_names(q.scope.as_deref(), |live| {
             let mut p = Vec::new();
@@ -462,6 +547,7 @@ impl Engine {
     /// The bool says whether the content index answered (false: files were
     /// picked from the name index and read, for folders it doesn't cover).
     pub fn grep(&self, q: &Query, g: &Grep) -> Result<(GrepResult, bool), String> {
+        self.saw_scope(q.scope.as_deref());
         WARM_UNTIL.store(0, Ordering::Relaxed);
         let home = self.s.home.as_bytes();
         let indexed = q.scope.as_ref().is_none_or(|s| content::in_scope(s, home));
@@ -504,6 +590,7 @@ impl Engine {
     /// these directly, whatever its pattern. `None` until the content index
     /// holds `scope`. Only an answer once `status().content_pending == 0`.
     pub fn unheld_files(&self, scope: &[u8]) -> Option<Vec<Vec<u8>>> {
+        self.saw_scope(Some(scope));
         if !self.s.content_holds(Some(scope)) {
             return None;
         }
@@ -530,6 +617,7 @@ impl Engine {
     /// are. `None` when the answer may be incomplete or the index does not
     /// hold `scope`.
     pub fn held_matches(&self, scope: &[u8], pats: &[String], ignore_case: bool) -> Option<Vec<Vec<u8>>> {
+        self.saw_scope(Some(scope));
         if !self.s.content_holds(Some(scope)) {
             return None;
         }
@@ -639,7 +727,7 @@ impl Shared {
         let ls = folder_listings(dir);
         drop(hold);
         let live = Live::new(Index::build(ls, 0, 0, self.home.as_bytes()));
-        log(format!("listed {} first: {} entries in {:.2?}", String::from_utf8_lossy(dir), live.base.n, t.elapsed()));
+        diag(format!("listed {} first: {} entries in {:.2?}", String::from_utf8_lossy(dir), live.base.n, t.elapsed()));
         let e = Arc::new(Early { dir: dir.to_vec(), live, indexing: AtomicBool::new(false) });
         early.push(e.clone());
         Some(e)
@@ -686,7 +774,7 @@ impl Shared {
         if saved > ours
             && let Some(base) = Index::load(&path)
         {
-            log(format!("following the owner's save: {} entries, replaying since {}", base.n, base.event_id));
+            diag(format!("following the owner's save: {} entries, replaying since {}", base.n, base.event_id));
             self.watch(base.event_id);
             *self.live.write().unwrap() = Some(Live::new(base).rooted(&self.root));
         }
@@ -717,7 +805,7 @@ fn try_upgrade(s: &Arc<Shared>) -> bool {
         return false;
     }
     s.owner.store(true, Ordering::Relaxed);
-    log("took over the index from a previous owner");
+    diag("took over the index from a previous owner");
     *s.content.write().unwrap() = Content::open(s.dir.join("content"));
     rescan_unskipped(s);
     start_content(s);
@@ -740,7 +828,7 @@ fn note_skipped(dir: &Path) {
         out.push(b'\n');
     }
     if let Err(e) = std::fs::write(dir.join(SKIPPED), out) {
-        log(format!("save failed: {e}"));
+        diag(format!("save failed: {e}"));
     }
 }
 
@@ -768,7 +856,7 @@ fn rescan_unskipped(shared: &Shared) {
     if now.is_empty() {
         return;
     }
-    log(format!("rescanning {} folders the saved index lacked", now.len()));
+    diag(format!("rescanning {} folders the saved index lacked", now.len()));
     let _ = shared.wake.send(now);
     // Saved soon, so the next start doesn't rescan them again.
     shared.save_requested.store(true, Ordering::Relaxed);
@@ -802,7 +890,7 @@ fn files_under(live: &Live, scope: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
-fn under(path: &[u8], dir: &[u8]) -> bool {
+pub(crate) fn under(path: &[u8], dir: &[u8]) -> bool {
     path.starts_with(dir) && (path.len() == dir.len() || path[dir.len()] == b'/')
 }
 
@@ -1028,7 +1116,7 @@ fn sync_wants(shared: &Shared, pool: &rayon::ThreadPool, wants: Vec<(Vec<u8>, bo
         }
     }
     if n > 100 {
-        log(format!("content: indexed {n} files in {:.2?}", t.elapsed()));
+        diag(format!("content: indexed {n} files in {:.2?}", t.elapsed()));
     }
     release_memory();
 }
@@ -1100,10 +1188,10 @@ fn full_build(shared: &Shared, event_id: u64) -> Index {
     let idx = Index::build(ls, event_id, started, shared.home.as_bytes());
     let path = shared.dir.join("index.bin");
     if let Err(e) = idx.save(&path) {
-        log(format!("save failed: {e}"));
+        diag(format!("save failed: {e}"));
     }
     note_skipped(&shared.dir);
-    log(format!("indexed {} entries in {:.2?}", idx.n, t.elapsed()));
+    diag(format!("indexed {} entries in {:.2?}", idx.n, t.elapsed()));
     release_memory();
     // Re-map from the file so the index is clean, evictable page cache
     // rather than anonymous memory.
@@ -1141,41 +1229,29 @@ fn compact(shared: &Shared) {
     let idx = Index::build(ls, eid, synced, shared.home.as_bytes());
     let path = shared.dir.join("index.bin");
     if let Err(e) = idx.save(&path) {
-        log(format!("save failed: {e}"));
+        diag(format!("save failed: {e}"));
     }
     note_skipped(&shared.dir);
     let idx = Index::load(&path).unwrap_or(idx);
     let n = idx.n;
     *shared.live.write().unwrap() = Some(Live::new(idx).rooted(&shared.root));
     release_memory();
-    log(format!("compacted to {n} entries in {:.2?}", t.elapsed()));
+    diag(format!("compacted to {n} entries in {:.2?}", t.elapsed()));
 }
 
-/// FSEvents lost track of / (dropped events, or no history back to our
-/// save): relist every folder modified since we were last in sync, plus the
-/// folders of indexed text files edited since (an edit in place doesn't
-/// touch its folder). Seconds, instead of recrawling the whole disk.
-fn relist_changed(shared: &Shared, why: &str, flags: u32) {
-    let t = Instant::now();
-    let started = crate::query::now_secs();
-    // synced_at 0 (unknown) relists everything: a full crawl, done in place.
-    // So does a root that went missing (unmounted): while it is away the
-    // tree is offline — `apply` drops events under it instead of removing —
-    // and once it is back mtimes cannot say what changed, so all is relisted.
-    let (from, mut dirs) = {
-        let g = shared.live.read().unwrap();
-        let live = g.as_ref().unwrap();
-        let missing = crate::live::lstat(&live.root).is_none();
-        let was = live.root_missing.fetch_or(missing, Ordering::Relaxed);
-        let from = if missing || was { 0 } else { live.synced_at.saturating_sub(SYNC_MARGIN) };
-        (from, live.changed_dirs(from))
-    };
-    dirs.extend(shared.content.read().unwrap().changed_dirs(from));
-    dirs.sort();
-    dirs.dedup();
-    let stat_time = t.elapsed();
-    // Disk reads under the read lock, one folder per write, so searches keep
-    // answering meanwhile.
+/// Where a sweep starts from: `synced_at` back a safety margin, or 0 —
+/// a full crawl in place — when the root is missing or just returned.
+fn sweep_from(shared: &Shared) -> u32 {
+    let g = shared.live.read().unwrap();
+    let live = g.as_ref().unwrap();
+    let missing = crate::live::lstat(&live.root).is_none();
+    let was = live.root_missing.fetch_or(missing, Ordering::Relaxed);
+    if missing || was { 0 } else { live.synced_at.saturating_sub(SYNC_MARGIN) }
+}
+
+/// The folders `dirs` changed, relisted one write at a time so searches
+/// keep answering; the content index is told after.
+fn apply_dirs(shared: &Shared, dirs: Vec<Vec<u8>>) {
     for d in &dirs {
         let f = shared.live.read().unwrap().as_ref().unwrap().fetch(d, false);
         shared.live.write().unwrap().as_mut().unwrap().apply(f);
@@ -1183,16 +1259,90 @@ fn relist_changed(shared: &Shared, why: &str, flags: u32) {
     let trees = {
         let mut g = shared.live.write().unwrap();
         let live = g.as_mut().unwrap();
-        live.synced_at = started;
+        live.synced_at = crate::query::now_secs();
         std::mem::take(&mut live.trees)
     };
-    let n = dirs.len();
     let _ = shared.content_tx.send((dirs, trees));
     shared.on_change.read().unwrap().iter().for_each(|f| f(&[(&b"/"[..], true)]));
-    log(format!(
+}
+
+/// FSEvents lost track of / (dropped events, or no history back to our
+/// save): relist every folder modified since we were last in sync, plus the
+/// folders of indexed text files edited since (an edit in place doesn't
+/// touch its folder). Seconds, instead of recrawling the whole disk.
+fn relist_changed(shared: &Arc<Shared>, why: &str, flags: u32) {
+    let t = Instant::now();
+    let from = sweep_from(shared);
+    let mut dirs = {
+        let g = shared.live.read().unwrap();
+        g.as_ref().unwrap().changed_dirs(from)
+    };
+    dirs.extend(shared.content.read().unwrap().changed_dirs(from));
+    dirs.sort();
+    dirs.dedup();
+    let stat_time = t.elapsed();
+    let n = dirs.len();
+    apply_dirs(shared, dirs);
+    log::warn!(
         "FSEvents lost track of / ({why}, flags {flags:#x}): relisted {n} folders changed since {from} in {:.2?} ({stat_time:.2?} checking)",
         t.elapsed()
-    ));
+    );
+}
+
+/// The Linux minute tick: folders under scopes someone searched lately
+/// get the sweep (a few lstats where freshness is wanted), and every
+/// FULL_SWEEP_SECS the whole tree gets it so the cold tail stays honest.
+/// Nothing searched → the tick costs nothing.
+fn tick_reconcile(shared: &Arc<Shared>) {
+    let t = Instant::now();
+    let now = crate::query::now_secs();
+    let hot: Vec<Vec<u8>> = {
+        let mut h = shared.hot.lock().unwrap();
+        h.retain(|_, s| s.seen.elapsed() < HOT_RETAIN);
+        h.keys().cloned().collect()
+    };
+    let full_due = now >= shared.verified_all.load(Ordering::Relaxed).saturating_add(FULL_SWEEP_SECS);
+    if hot.is_empty() && !full_due {
+        return;
+    }
+    let from = sweep_from(shared);
+    let mut dirs = Vec::new();
+    if !hot.is_empty() {
+        dirs.extend({
+            let g = shared.live.read().unwrap();
+            g.as_ref().unwrap().changed_dirs_in(from, &hot)
+        });
+        dirs.extend(shared.content.read().unwrap().changed_dirs_in(from, &hot));
+    }
+    if full_due {
+        dirs.extend({
+            let g = shared.live.read().unwrap();
+            g.as_ref().unwrap().changed_dirs(from)
+        });
+        dirs.extend(shared.content.read().unwrap().changed_dirs(from));
+    }
+    dirs.sort();
+    dirs.dedup();
+    let stat_time = t.elapsed();
+    let n = dirs.len();
+    apply_dirs(shared, dirs);
+    if full_due {
+        shared.verified_all.store(now, Ordering::Relaxed);
+    }
+    {
+        // Only scopes in this tick's snapshot were swept; one inserted
+        // while it ran stays unverified until a query sweeps it inline.
+        let mut h = shared.hot.lock().unwrap();
+        for k in &hot {
+            if let Some(s) = h.get_mut(k) {
+                s.verified = now;
+            }
+        }
+    }
+    if n > 0 || full_due {
+        let what = if full_due { "full reconcile" } else { "reconcile" };
+        diag(format!("index {what}: relisted {n} folders changed since {from} in {:.2?} ({stat_time:.2?} checking)", t.elapsed()));
+    }
 }
 
 /// Folders are listed again as their events come, but a folder may spend
@@ -1285,10 +1435,11 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
             Ok(b) => b,
             Err(RecvTimeoutError::Timeout) => {
                 // Linux has no event stream to follow, so the minute tick
-                // is the watcher: relist folders whose mtimes moved.
+                // is the watcher — scoped to what is searched, sweeping the
+                // cold tail on a slow cadence.
                 #[cfg(target_os = "linux")]
                 if shared.owner() && shared.live.read().unwrap().is_some() {
-                    relist_changed(shared, "watcher tick", 0);
+                    tick_reconcile(shared);
                 }
                 Vec::new()
             }
@@ -1300,7 +1451,7 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
         // an old stream's HISTORY_DONE must not end the new one's replay.
         let stale = drop_stale_events(&mut events, shared.streams.load(Ordering::Relaxed));
         if stale > 0 {
-            log(format!("dropped {stale} events from a replaced stream"));
+            diag(format!("dropped {stale} events from a replaced stream"));
         }
         // The owner wrote the index files: a follower picks that up now
         // rather than at its next periodic check.
@@ -1331,7 +1482,7 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
                     last_good = last_good.max(e.id);
                 }
                 if e.flags & HISTORY_DONE != 0 {
-                    log("replay done");
+                    diag("replay done");
                     shared.replaying.store(false, Ordering::Relaxed);
                     if gap.is_none() {
                         replays = 0;
@@ -1397,7 +1548,7 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
             relist_changed(shared, why, root_flags);
             (gap, replays) = (None, 0);
         } else if let Some(from) = replay {
-            log(format!("FSEvents dropped events before we read them: replaying from {from}"));
+            diag(format!("FSEvents dropped events before we read them: replaying from {from}"));
             shared.watch(from);
             (gap, replays) = (None, replays + 1);
         } else if had_events && gap.is_none() && pace.held.is_empty() && !shared.replaying.load(Ordering::Relaxed) {
