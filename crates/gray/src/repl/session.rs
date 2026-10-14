@@ -55,7 +55,6 @@ pub(crate) fn print_exit_hint(session_state: &Option<SessionState>) {
 }
 
 #[allow(clippy::too_many_arguments)]
-
 pub(crate) async fn handle_resume(
     config: &mut Config,
     cwd: &Path,

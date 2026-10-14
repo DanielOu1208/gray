@@ -14,6 +14,8 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($PSCmdlet.ParameterSetName -ne 'Wsl') {
 
+    # Native is the default route. Reuse the tested native implementation and
+    # never fall back to WSL on failure.
     $installer = $null
     if ($PSScriptRoot) {
         $beside = Join-Path $PSScriptRoot 'install-native.ps1'

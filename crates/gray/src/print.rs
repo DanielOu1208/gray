@@ -1164,15 +1164,13 @@ async fn run_print_inner(
     let turn_duration_ms = turn_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     if run_result.is_ok()
         && let Some(output) = json.as_deref_mut()
-    {
-        if let Some(message) = agent
+        && let Some(message) = agent
             .messages()
             .last()
             .filter(|m| m.role == gray_core::message::Role::Assistant)
         {
             output.text = redact_message(message).text_content();
         }
-    }
 
     let checkpoint_failed = checkpoint_failed.load(std::sync::atomic::Ordering::Relaxed);
     let rewritten = agent.history_revision() != history_revision || checkpoint_failed;

@@ -120,7 +120,6 @@ fn render_input_row(frame: &mut Frame, inner: Rect, content: Line, colors: &Conn
 }
 
 #[allow(clippy::too_many_arguments)]
-
 pub(crate) fn render_selecting(
     frame: &mut Frame,
     area: Rect,

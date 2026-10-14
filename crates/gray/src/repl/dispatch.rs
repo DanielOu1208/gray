@@ -7,7 +7,6 @@ pub(crate) enum Flow {
 }
 
 #[allow(clippy::too_many_arguments)]
-
 pub(crate) async fn dispatch_command(
     cmd: ReplCommand,
     agent: &mut Option<Agent>,

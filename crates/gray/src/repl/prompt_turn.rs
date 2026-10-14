@@ -39,7 +39,6 @@ async fn run_streaming_cancellable(
 }
 
 #[allow(clippy::too_many_arguments)]
-
 pub(crate) async fn run_prompt_turn(
     prompt_text: String,
     pending_images: &mut Vec<std::path::PathBuf>,

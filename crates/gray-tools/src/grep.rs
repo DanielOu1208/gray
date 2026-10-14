@@ -578,10 +578,8 @@ impl Tool for GrepTool {
                         return fail(msg.to_string());
                     }
                 }
-            } else if !status.success() {
-                if !match_limit_reached {
-                    return fail("ripgrep was terminated".to_string());
-                }
+            } else if !status.success() && !match_limit_reached {
+                return fail("ripgrep was terminated".to_string());
             }
         }
 
