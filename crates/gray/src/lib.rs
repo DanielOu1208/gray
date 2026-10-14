@@ -13,6 +13,7 @@ pub mod cron_serve;
 pub mod cron_status;
 pub(crate) mod cron_tool;
 pub(crate) mod exe_watch;
+pub(crate) mod failed_turn;
 pub mod feedback;
 pub(crate) mod fusion;
 pub mod gateway;
