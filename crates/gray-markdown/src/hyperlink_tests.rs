@@ -300,7 +300,7 @@ fn link_inside_table_cell_emits_hyperlink_and_styling() {
     let text = "\
 | Name | Link |
 |------|------|
-| Foo  | [click](https:
+| Foo  | [click](https://example.com) |
 ";
     let (out, _) = render_markdown_ratatui_full(text, test_style::STYLE, true, None);
 
