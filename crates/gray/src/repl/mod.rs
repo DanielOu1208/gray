@@ -814,7 +814,7 @@ pub async fn run_repl_mode(
             let mut last_status = std::time::Instant::now();
             let exe_watch = crate::exe_watch::ExeWatch::capture();
             let mut last_exe_check = std::time::Instant::now();
-            let mut exe_notified = false;
+            let mut exe_notified = None;
             loop {
                 if ticker_stop.load(AtomicOrdering::Relaxed) {
                     break;
@@ -832,12 +832,13 @@ pub async fn run_repl_mode(
                         last_status = std::time::Instant::now();
                         t.tick_status();
                     }
-                    if !exe_notified
-                        && last_exe_check.elapsed() >= std::time::Duration::from_secs(30)
-                    {
+                    if last_exe_check.elapsed() >= std::time::Duration::from_secs(30) {
                         last_exe_check = std::time::Instant::now();
-                        if exe_watch.as_ref().is_some_and(|w| w.replaced()) {
-                            exe_notified = true;
+                        if let Some(w) = exe_watch.as_ref()
+                            && w.replaced()
+                            && exe_notified != w.disk_id()
+                        {
+                            exe_notified = w.disk_id();
                             let notice = "gray was updated — /restart to load it".to_string();
                             if t.is_home() {
                                 t.set_home_update(Some(notice));
