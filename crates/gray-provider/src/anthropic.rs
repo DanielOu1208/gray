@@ -1,12 +1,3 @@
-//! Native Anthropic Messages API provider (`POST /v1/messages`).
-//!
-//! The OpenAI-compatible endpoint Anthropic also serves does not support
-//! prompt caching, so a direct Claude key re-billed the whole prompt on every
-//! request. This speaks the native wire: `cache_control` breakpoints on the
-//! system prompt, the last tool and the last message (pi
-//! `applyAnthropicCacheControl`), thinking blocks replayed with their
-//! signatures, and the Messages SSE stream mapped onto gray's `StreamEvent`s.
-
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::Duration;
 
@@ -22,17 +13,13 @@ use crate::openai::{
     backoff_delay, classify_http_error, filter_valid_tools, parse_retry_after, wire_tool_output,
 };
 
-/// Default base URL; `/messages` is appended.
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 const API_VERSION: &str = "2023-06-01";
 const MAX_ATTEMPTS: usize = 4;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-/// `ReasoningItem::item_id` marking an Anthropic thinking replay: the
-/// `encrypted_content` is the response's thinking blocks as a JSON array,
-/// signatures included, so they go back byte for byte.
+
 pub const THINKING_ITEM_ID: &str = "anthropic";
 
-/// True when `base_url` is Anthropic's own API (the native wire applies).
 pub fn is_anthropic_base_url(base_url: &str) -> bool {
     Url::parse(base_url)
         .ok()
@@ -40,8 +27,6 @@ pub fn is_anthropic_base_url(base_url: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Anthropic Messages provider. `Debug` is hand-written: the struct carries
-/// a plaintext API key.
 #[derive(Clone)]
 pub struct AnthropicProvider {
     base_url: Url,
@@ -104,8 +89,6 @@ impl AnthropicProvider {
     }
 }
 
-/// Output cap when the request names none. Claude 3.x tops out at 8192;
-/// everything newer accepts 32000.
 fn default_max_tokens(model: &str) -> u32 {
     if model.to_lowercase().contains("claude-3") && !model.contains("3-7") {
         8192
@@ -114,7 +97,6 @@ fn default_max_tokens(model: &str) -> u32 {
     }
 }
 
-/// Thinking budget for an effort level (the chat mapper's table).
 fn thinking_budget(effort: Option<&str>) -> Option<u32> {
     match effort? {
         "off" => None,
@@ -125,10 +107,6 @@ fn thinking_budget(effort: Option<&str>) -> Option<u32> {
     }
 }
 
-/// The `thinking.budget_tokens` a request carries: the effort table
-/// clamped below `max_tokens` (the API demands 1024 tokens of headroom),
-/// or `None` when no budget fits — the request then sends no thinking
-/// at all.
 fn derived_budget(effort: Option<&str>, max_tokens: u32) -> Option<u32> {
     thinking_budget(effort)
         .map(|b| b.min(max_tokens.saturating_sub(1024)))
@@ -139,7 +117,6 @@ fn ephemeral() -> Value {
     json!({"type": "ephemeral"})
 }
 
-/// Maps a gray request onto the Messages API body.
 pub(crate) fn map_request(
     req: ChatRequest,
     model: &str,
@@ -148,16 +125,13 @@ pub(crate) fn map_request(
     top_p: Option<f32>,
 ) -> Result<Value, ProviderError> {
     let max_tokens = req.max_tokens.unwrap_or_else(|| default_max_tokens(model));
-    // A budget must leave room below `max_tokens` (min 1024): a request that
-    // cannot fit one sends no thinking rather than a 400.
+
     let budget = derived_budget(reasoning_effort, max_tokens);
 
     let mut messages: Vec<(Role, Vec<Value>)> = Vec::new();
     for msg in req.messages {
         let mut blocks = Vec::new();
-        // PDFs go as document blocks; video/audio fall back to their sheet,
-        // text or note. ponytail: no page-count check (Anthropic caps a PDF
-        // at 100 pages); count pages here if over-long PDFs start 400ing.
+
         let content = resolve_media(msg.content, |mt| mt == "application/pdf");
         for block in content {
             match block {
@@ -208,9 +182,7 @@ pub(crate) fn map_request(
                         "is_error": is_error,
                     }));
                 }
-                // Only this model's own signed blocks can go back; anything
-                // else (another provider's reasoning, a display-only run) is
-                // dropped, which Anthropic accepts for earlier turns.
+
                 ContentBlock::Thinking {
                     item_id,
                     encrypted_content,
@@ -228,8 +200,7 @@ pub(crate) fn map_request(
                 }
             }
         }
-        // A mid-conversation system note has no Messages slot: it rides as
-        // user text (the system prompt itself stays fixed for the cache).
+
         let role = match msg.role {
             Role::Assistant => Role::Assistant,
             Role::User | Role::System => Role::User,
@@ -249,7 +220,6 @@ pub(crate) fn map_request(
         );
     }
 
-    // Breakpoint 3: the last cacheable block of the last message.
     if let Some((_, blocks)) = messages.last_mut()
         && let Some(block) = blocks.iter_mut().rev().find(|b| {
             !matches!(
@@ -291,7 +261,7 @@ pub(crate) fn map_request(
     }
     match budget {
         Some(b) => body["thinking"] = json!({"type": "enabled", "budget_tokens": b}),
-        // Sampling knobs are rejected alongside thinking.
+
         None => {
             if let Some(t) = temperature {
                 body["temperature"] = json!(t.min(1.0));
@@ -304,9 +274,6 @@ pub(crate) fn map_request(
     Ok(body)
 }
 
-/// Anthropic rejects a `tool_use` whose result is not in the very next user
-/// message, and a `tool_result` with no `tool_use` before it. Missing results
-/// get a stub, strays become text, and results lead their message.
 fn pair_tool_results(messages: &mut Vec<(Role, Vec<Value>)>) {
     let ids = |blocks: &[Value], kind: &str, key: &str| -> Vec<String> {
         blocks
@@ -368,7 +335,6 @@ fn pair_tool_results(messages: &mut Vec<(Role, Vec<Value>)>) {
     }
 }
 
-/// Messages `usage` onto gray's inclusive [`Usage`].
 fn map_usage(u: &Value, into: &mut Usage) {
     let get = |k: &str| u.get(k).and_then(Value::as_u64).map(|n| n as usize);
     if let Some(n) = get("input_tokens") {
@@ -397,7 +363,6 @@ fn map_stop_reason(reason: &str) -> StopReason {
     }
 }
 
-/// One streamed content block, accumulated for the thinking replay.
 #[derive(Default)]
 struct Block {
     kind: String,
@@ -406,16 +371,12 @@ struct Block {
     data: String,
 }
 
-/// Folds Messages SSE events into `StreamEvent`s.
 #[derive(Default)]
 pub(crate) struct Decoder {
     usage: Usage,
     stop: Option<StopReason>,
     blocks: BTreeMap<usize, Block>,
-    /// The content block that most recently emitted visible text. A message
-    /// can carry several `text` blocks (thinking between them, a resumed
-    /// tool turn); deltas from a new block need a boundary the reader can
-    /// see, or `…now.` and `Sorry…` glue into one word.
+
     last_text: Option<usize>,
     pub(crate) finished: bool,
 }
@@ -578,7 +539,6 @@ struct State {
     done: bool,
 }
 
-/// POST with pre-stream retries on rate limits and server errors.
 async fn connect(
     http: &reqwest::Client,
     url: &Url,
@@ -614,7 +574,7 @@ async fn connect(
                     .chars()
                     .take(800)
                     .collect();
-                // 529 is Anthropic's "overloaded": a retryable server error.
+
                 let err = if status.as_u16() == 529 {
                     ProviderError::ServerError(format!("status 529 overloaded: {snippet}"))
                 } else {
@@ -676,11 +636,6 @@ impl Provider for AnthropicProvider {
         &self.model
     }
 
-    /// Anthropic keys the prompt cache on `thinking.budget_tokens`, which
-    /// is derived from `max_tokens`: a 1-token replay drops thinking
-    /// entirely and warms a different entry (or none). Replaying with
-    /// `budget + 1024` derives the identical budget — same cache key,
-    /// still a capped throwaway reply.
     fn warm_output_cap(&self, req: &ChatRequest) -> u32 {
         let max = req
             .max_tokens

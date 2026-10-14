@@ -1,5 +1,3 @@
-//! Feedback slash-command (split from `repl`).
-
 use super::*;
 
 pub(crate) fn handle_feedback(

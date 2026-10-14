@@ -159,7 +159,6 @@ fn a_dismissed_connect_leaves_the_session_as_it_was() {
         Ok(crate::setup::ConnectOutcome::Dismissed),
         Err(anyhow!("modal failed")),
     ] {
-        // Picking a row wrote its endpoint and key before the model step.
         let mut config = key_config("https://openrouter.ai/api/v1", Some("sk-picked"));
         settle_connect_config(&mut config, before.clone(), &outcome);
         assert!(config == before);
@@ -231,8 +230,7 @@ fn saved_key_connect_drops_the_plugin_identity() {
 fn saved_key_connect_from_a_plugin_on_the_same_url_still_switches() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");
-    // The stored base_url already matches the row's, but the connection is
-    // a plugin one: its model never belongs to the API-key endpoint.
+
     save_saved_config_at(&path, &plugin_saved("https://api.stepfun.ai/step_plan/v1")).unwrap();
     let mut config = plugin_config(&plugin_saved("https://api.stepfun.ai/step_plan/v1"));
     connect_saved_key_at(
@@ -298,7 +296,7 @@ fn only_a_changed_key_for_the_same_endpoint_is_adopted() {
     );
     assert_eq!(saved_key_update(&config, &saved(url, "sk-old")), None);
     assert_eq!(saved_key_update(&config, &saved(url, "  ")), None);
-    // Another window switched provider: that is not this session's key.
+
     assert_eq!(
         saved_key_update(&config, &saved("https://openrouter.ai/api/v1", "sk-or")),
         None

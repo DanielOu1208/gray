@@ -1,18 +1,3 @@
-//! Content lab: index one folder tree (no whole-disk crawl), list what the
-//! content index holds, and grep it the way the daemon does.
-//!
-//!   snap build <home> <dir>                 name index of <home> (and its ancestors) in
-//!                                           <dir>/index.bin, content index in <dir>/content
-//!   snap wants <home> <dir>                 the files a sync of <home> would index (reads
-//!                                           <dir>/index.bin, building it if missing)
-//!   snap measure <home> <tmp dir>           a first content build of <home>, a segment at a time,
-//!                                           each deleted once measured (peak disk: one segment)
-//!   snap docs <dir> <home>                  the indexed text files, one per line
-//!   snap try <dir> <home> <request.json>    a grep request (as the daemon's JSON op takes
-//!                                           it) against the index, answered as JSON
-//!   snap grep <dir> <home> <patterns.txt>   per pattern (one a line; `regex:` for a regex),
-//!                                           every file holding it, as JSON lines (smart case)
-
 use fsearch::content::{self, Content};
 use fsearch::index::Index;
 use fsearch::live::Live;
@@ -34,7 +19,6 @@ pub fn main() {
     }
 }
 
-/// `home`'s tree, under listings for each of its ancestors (listing 0 is "/").
 fn scan_home(home: &[u8]) -> Vec<Listing> {
     let mut ls = walk::scan(home, 8);
     let comps: Vec<&[u8]> = home.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
@@ -62,8 +46,7 @@ fn build(home: &str, dir: &Path) {
     idx.save(&dir.join("index.bin")).unwrap();
     let live = Live::new(Index::load(&dir.join("index.bin")).unwrap());
     let names_s = t.elapsed().as_secs_f64();
-    // As the engine's first content build: 8 threads at user-initiated QoS
-    // (one batch at a time).
+
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(8)
         .start_handler(|_| {
@@ -151,7 +134,6 @@ fn measure(home: &str, dir: &Path) {
     println!("{}", serde_json::json!({"content_s": t.elapsed().as_secs_f64(), "docs": docs, "text_docs": text, "segments": segs, "unmerged_bytes": bytes}));
 }
 
-/// The content side of the daemon's grep op (see server.rs), for testing.
 fn try_grep(dir: &Path, home: &str, req: &str) {
     use serde_json::{Value, json};
     let v: Value = serde_json::from_str(req).unwrap();

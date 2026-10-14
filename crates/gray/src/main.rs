@@ -1,5 +1,3 @@
-//! Gray binary entry point.
-
 use clap::Parser;
 use gray::Cli;
 use gray::config::Config;
@@ -30,11 +28,18 @@ fn read_structured_input(path: &Path) -> Result<Vec<u8>, InputError> {
     Ok(bytes)
 }
 
+fn main() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    if let Some(tool) = gray_tools::search_shim::invoked_as() {
+        gray_tools::search_shim::run(&tool);
+    }
+    gray_main()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn gray_main() -> anyhow::Result<()> {
     let result = run().await;
-    // A session-live refusal is routine contention, not a crash: render it
-    // as a `⬢`/`└` card (sibling of `Resumed session`), not an `Error:` dump.
+
     if let Err(e) = &result
         && let Some(gray::session_store::SessionError::Locked { id, pid }) =
             e.downcast_ref::<gray::session_store::SessionError>()
@@ -46,22 +51,23 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
+    gray::turn_caps::init_process_start();
     gray::logging::init();
     install_panic_hook();
     let _ = crossterm::terminal::disable_raw_mode();
     let cli = Cli::parse();
-    // A pure text file: no config, no provider, no TTY. It has to work from a
-    // bare shell, because the reader is another agent.
+
     if cli.skill {
         print!("{}", include_str!("../gray-skill.md"));
         return Ok(());
     }
-    // A local search is nobody's provider concern, and
-    // the bash tool claims `gray find`/`gray grep` so a model does not have to
-    // know `gray` is on its PATH. `gray spill` reads a local file for the same
-    // reason — it is the way back into a result the context had to leave out.
+
     if let Some(gray::Commands::Spill { cmd }) = &cli.command {
         return gray::spill::run_cli(cmd);
+    }
+    #[cfg(unix)]
+    if let Some(gray::Commands::SearchServe { root, sock }) = &cli.command {
+        return Ok(gray_tools::search_serve::serve(root, sock)?);
     }
     match &cli.command {
         Some(gray::Commands::Find {
@@ -111,7 +117,18 @@ async fn run() -> anyhow::Result<()> {
             }
         }
     }
-    // Plugin terminal commands do not depend on provider configuration.
+
+    if let Some(gray::Commands::Send {
+        session,
+        text,
+        attach,
+        from,
+        wait,
+    }) = &cli.command
+    {
+        return gray::session_send::run_cli(session, text, attach, from.as_deref(), *wait).await;
+    }
+
     if let Some(gray::Commands::External(args)) = &cli.command {
         let (name, rest) = args
             .split_first()
@@ -138,7 +155,7 @@ async fn run() -> anyhow::Result<()> {
     };
 
     let mut config = Config::resolve(&cli)?;
-    gray::turn_caps::init_process_start();
+    log::debug!(target: "gray_timing", "spawn config_loaded elapsed_ms={}", gray::turn_caps::process_start().elapsed().as_millis());
     if !config.bare {
         let saved_theme = gray::setup::saved_config_path()
             .ok()
@@ -178,6 +195,9 @@ async fn run() -> anyhow::Result<()> {
             gray::Commands::Cron { cmd } => {
                 return run_cron(cmd, &config).await;
             }
+            gray::Commands::Send { .. } => {
+                unreachable!("send dispatch happens before configuration")
+            }
             gray::Commands::Gateway { cmd } => {
                 return gray::gateway::run_cli(cmd, &config).await;
             }
@@ -190,20 +210,21 @@ async fn run() -> anyhow::Result<()> {
             gray::Commands::Cmd { cmd } => {
                 return gray::cmd::run_cli(cmd, &mut config).await;
             }
-            // Handled before Config::resolve so plugin commands work with no
-            // provider configured (fresh machine, venv-only install).
+
             gray::Commands::External(_) => {
                 unreachable!("plugin CLI dispatch happens before configuration")
             }
             gray::Commands::Find { .. }
             | gray::Commands::Grep { .. }
-            | gray::Commands::Spill { .. } => {
-                unreachable!("find/grep/spill CLI dispatch happens before configuration")
+            | gray::Commands::Spill { .. }
+            | gray::Commands::SearchServe { .. } => {
+                unreachable!(
+                    "find/grep/spill/search-serve CLI dispatch happens before configuration"
+                )
             }
         }
     }
-    // `-r` with no id is the `gray resume` picker; `-r <id>` is `--session <id>`
-    // (clap already made `-r`/`--session` mutually exclusive).
+
     if let Some(None) = &cli.resume {
         return run_resume_subcommand(&mut config, None, false, false).await;
     }
@@ -212,8 +233,9 @@ async fn run() -> anyhow::Result<()> {
         .as_ref()
         .and_then(|r| r.as_deref())
         .or(cli.session.as_deref());
+
     if let Some(prompt) = cli.print.as_deref() {
-        if cli.json {
+        let result = if cli.json {
             gray::print::run_print_mode_json(
                 &config,
                 prompt,
@@ -223,12 +245,13 @@ async fn run() -> anyhow::Result<()> {
                 cli.input_price,
                 cli.output_price,
             )
-            .await?;
+            .await
         } else {
-            run_print_mode_with_session(&config, prompt, session_arg, cli.continue_last).await?;
-        }
+            run_print_mode_with_session(&config, prompt, session_arg, cli.continue_last).await
+        };
+        exit_after_print(result);
     } else if let Some(input) = structured_input.as_ref() {
-        gray::print::run_print_mode_json_input(
+        let result = gray::print::run_print_mode_json_input(
             &config,
             input,
             session_arg,
@@ -237,20 +260,39 @@ async fn run() -> anyhow::Result<()> {
             cli.input_price,
             cli.output_price,
         )
-        .await?;
+        .await;
+        exit_after_print(result);
     } else {
         if !config.bare {
             gray::update::startup_check().await;
         }
         run_repl_mode(&mut config, cli.continue_last, session_arg).await?;
-        // Tokio's runtime drop can block on lingering spawn_blocking work
-        // (the provider model fetch): leave directly, like the signal exit.
+
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
         log::logger().flush();
         std::process::exit(0);
     }
-    Ok(())
+}
+
+fn exit_after_print(result: anyhow::Result<()>) -> ! {
+    let code = match result {
+        Ok(()) => 0,
+        Err(error) => {
+            if let Some(gray::session_store::SessionError::Locked { id, pid }) =
+                error.downcast_ref::<gray::session_store::SessionError>()
+            {
+                eprintln!("{}", gray::resume::locked_session_card(id, *pid));
+            } else {
+                eprintln!("Error: {error:?}");
+            }
+            1
+        }
+    };
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    log::logger().flush();
+    std::process::exit(code);
 }
 
 async fn run_resume_subcommand(
@@ -265,11 +307,10 @@ async fn run_resume_subcommand(
     };
     let store = JsonlSessionStore::new(root);
     let target_id = if let Some(raw) = session_id {
-        // Shared with `-p --session`: one validation, one error message.
         gray::resume::resolve_session_strict(&store, raw, all).await?
     } else if last {
         let cwd = std::env::current_dir().ok();
-        // Recall-first for the cwd-scoped case (`--all` keeps the scan).
+
         if !all
             && let Some(c) = cwd.as_deref()
             && let Some(rid) = store.recall_validated(c).await
@@ -293,7 +334,6 @@ async fn run_resume_subcommand(
     } else {
         use std::io::IsTerminal as _;
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-            // Scripts/pipes: the picker needs a real terminal — list instead.
             let summaries = gray::resume::recent_summaries(&store, all).await;
             if summaries.is_empty() {
                 if all {
@@ -312,13 +352,9 @@ async fn run_resume_subcommand(
             None => return Ok(()),
         }
     };
-    // Claim the session before announcing it: a session open in another
-    // gray process reports the holder's PID here instead of "Resumed"
-    // followed by the refusal the REPL would print.
+
     let _open_guard = store.acquire_open(&target_id).await?;
-    // Non-TTY (`resume <id> < /dev/null`, scripts): the REPL would hit EOF
-    // and exit silently, so announce what was resumed first — never exit 0
-    // with no output. Interactive terminals skip this (the TUI owns the screen).
+
     {
         use std::io::IsTerminal;
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -329,12 +365,9 @@ async fn run_resume_subcommand(
         }
     }
     let _ = crossterm::terminal::disable_raw_mode();
-    // NOTE: an earlier `PROMPT` positional was deleted —
-    // it was accepted and then discarded. To send a first message on resume,
-    // pipe it in or type it after the REPL opens.
+
     run_repl_mode(config, false, Some(target_id.as_str())).await?;
-    // Same as the REPL call above: never let runtime drop block on
-    // lingering blocking tasks.
+
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     log::logger().flush();
@@ -342,8 +375,6 @@ async fn run_resume_subcommand(
 }
 
 async fn run_plugin(cmd: gray::PluginCmd) -> anyhow::Result<()> {
-    // Uniform with `Check`: user-facing errors go to stderr as
-    // `error: …` with exit 1 (not anyhow's `Error: …` dump).
     let res = run_plugin_inner(cmd).await;
     if let Err(e) = res {
         eprintln!("error: {e:#}");
@@ -430,10 +461,6 @@ async fn run_plugin_inner(cmd: gray::PluginCmd) -> anyhow::Result<()> {
     }
 }
 
-/// `gray cron ...` (cron plan Task 5).
-///
-/// File-only surface: the store lives at `$GRAY_HOME/cron/jobs.json`.
-/// Delivery targets ride the record opaquely; no backend interprets them yet.
 fn cron_store() -> anyhow::Result<gray::cron::CronStore> {
     let home = gray::setup::gray_home()?;
     gray::cron::CronStore::open(home.join("cron"))
@@ -456,7 +483,7 @@ fn fmt_dur(mut secs: u64) -> String {
     if secs.is_multiple_of(3600) {
         return format!("{}h", secs / 3600);
     }
-    // Interval floor is 60s, so minutes are exact here.
+
     secs /= 60;
     format!("{secs}m")
 }
@@ -486,8 +513,6 @@ fn fmt_status(s: Option<gray::cron::RunStatus>) -> &'static str {
     }
 }
 
-/// `--deliver` flag: `origin`/`local` keywords (case-insensitive), anything
-/// else rides `Deliver::Target`, stored opaquely until a delivery backend exists.
 fn parse_deliver_flag(raw: Option<&str>) -> gray::cron::Deliver {
     match raw.map(str::trim).unwrap_or("local") {
         s if s.eq_ignore_ascii_case("origin") => gray::cron::Deliver::Origin,
@@ -496,10 +521,6 @@ fn parse_deliver_flag(raw: Option<&str>) -> gray::cron::Deliver {
     }
 }
 
-/// The chat a job belongs to, declared by the host that runs the turn
-/// (`GRAY_CRON_ORIGIN={"platform":"discord","chat":"...","route":"..."}`).
-/// Unparseable or empty is no declaration, never a failure: a job added
-/// outside a chat is just a local job.
 fn origin_from_env() -> Option<gray::cron::store::Origin> {
     let raw = std::env::var("GRAY_CRON_ORIGIN").ok()?;
     let v: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
@@ -523,8 +544,6 @@ fn origin_from_env() -> Option<gray::cron::store::Origin> {
     })
 }
 
-/// The gray session running this command (`GRAY_SESSION_ID`, exported to
-/// every bash-tool child), as a [`gray::cron_serve::SESSION_PLATFORM`] origin.
 fn session_origin_from_env() -> Option<gray::cron::store::Origin> {
     let sid = std::env::var("GRAY_SESSION_ID").ok()?;
     let sid = sid.trim();
@@ -536,7 +555,6 @@ fn session_origin_from_env() -> Option<gray::cron::store::Origin> {
     })
 }
 
-/// Default job name: prompt's first line, truncated to the store's 50-char cap.
 fn default_job_name(prompt: &str) -> String {
     let name: String = prompt
         .lines()
@@ -603,8 +621,7 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
                     fmt_status(j.last_status)
                 );
             }
-            // A schedule nothing ticks looks identical to a live one in the
-            // rows above; this line is the only place that says otherwise.
+
             let now = gray::cron::now_secs();
             println!(
                 "{}",
@@ -629,8 +646,6 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
             }
             let name = name.unwrap_or_else(|| {
                 if reminder {
-                    // A slug of the exact text: the reminder must not be
-                    // paraphrased into a tidier name than the user gave.
                     gray::cron_fire::reminder_name(&prompt)
                 } else {
                     default_job_name(&prompt)
@@ -652,13 +667,7 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
                     anyhow::bail!("unknown skill {s:?}");
                 }
             }
-            // A host (a chat plugin) declares the chat a job belongs to in
-            // the environment, so the model can add a job with a plain
-            // `gray cron add <schedule> <prompt>` and still have it come
-            // back to the conversation. Explicit flags always win. Inside a
-            // gray session (the bash tool exports `GRAY_SESSION_ID`) the
-            // conversation is that session: the REPL showing it gets the
-            // result as a new message and a turn.
+
             let env_origin = origin_from_env().or_else(session_origin_from_env);
             let deliver_kind = match (&deliver, &env_origin) {
                 (None, Some(_)) => gray::cron::Deliver::Origin,
@@ -685,7 +694,7 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
             } else {
                 None
             };
-            // Hosted chats are ticked by their host (`cron tick --json`).
+
             let chat_bound = origin.as_ref().is_some_and(gray::cron_serve::is_hosted);
             let id = store.add_full(
                 &name,
@@ -775,10 +784,7 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
             };
             let deliver = gray::cron_serve::SaveLocalDeliver { home: home.clone() };
             let rep = gray::cron_serve::tick_once(&store, &runner, &deliver, "cli").await?;
-            // `--json`: one line per spooled chat delivery, for the host that
-            // routes them (a chat plugin) — including fires by any other
-            // driver since its last tick. Core renders the frame; the
-            // platform only carries the bytes.
+
             if json {
                 for line in gray::cron_serve::drain_outbox(&home) {
                     println!("{line}");
@@ -853,8 +859,6 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
     }
 }
 
-/// Log panics (payload + location) before the default hook prints to stderr,
-/// which the TUI's screen-clearing would otherwise swallow.
 fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

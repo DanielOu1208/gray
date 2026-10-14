@@ -1,5 +1,3 @@
-//! Transcript cards: tool boxes (split from `transcript`).
-
 use super::*;
 
 pub(crate) fn format_tool_box_lines(
@@ -10,9 +8,6 @@ pub(crate) fn format_tool_box_lines(
     format_tool_box_lines_multi(std::slice::from_ref(&header), body, width)
 }
 
-/// [`format_tool_box_lines`] for a header that runs to several rows (a
-/// template `preview` with a second line). The first line keeps
-/// `header_rows`' ` · ` split; each later line wraps by width under it.
 pub(crate) fn format_tool_box_lines_multi(
     headers: &[Line<'static>],
     body: &[Line<'static>],
@@ -21,18 +16,9 @@ pub(crate) fn format_tool_box_lines_multi(
     let bg_color = crate::theme::theme().surface_bg;
     let bg_style = Style::default().bg(bg_color);
     let max_w = width.saturating_sub(4).max(1);
-    // Body rows carry their own 2-col lead (tool_fmt's `"  "`), so their
-    // budget is the header's painted total (`width - 2`), not `max_w`:
-    // tool_fmt pre-wraps numbered/diff rows to exactly `width - 2`, and
-    // re-wrapping them 2 cols narrower here orphaned each full row's last
-    // word ("lines", "5d") onto its own continuation row.
+
     let body_w = width.saturating_sub(2).max(1);
 
-    // One padding row above and one below, painted edge to edge with real
-    // cells: they are the card's own, so the header never touches its top
-    // edge. The unpainted blank row that separates the card from its
-    // neighbours is `ensure_gap`'s (codex's rule, one row between blocks),
-    // and a painted row never counts as that gap (`transcript_row_is_blank`).
     let margin_row = || -> Line<'static> {
         Line::from(Span::styled(" ".repeat(width.max(1)), bg_style)).style(bg_style)
     };
@@ -61,9 +47,6 @@ pub(crate) fn format_tool_box_lines_multi(
         box_lines.push(l);
     }
 
-    // One breathing-room row between the command header and its output,
-    // but only for substantive bodies — a single detail row (notices,
-    // job cards, compaction) sits flush under the header instead.
     if body.len() > 1 {
         box_lines.push(Line::from("").style(bg_style));
     }
@@ -91,10 +74,6 @@ pub(crate) fn format_tool_box_lines_multi(
                 }
             }
             if line_bg != bg_color {
-                // Diff rows (red/green) must run edge-to-edge: Paragraph only
-                // paints span cells, so padding to max_w leaves the last
-                // `width - max_w` cells in the card bg (dark strip on the
-                // right). Same unstyled-cells cause as the footer band.
                 let current_w: usize = l.spans.iter().map(|s| s.width()).sum();
                 if current_w < width {
                     l.spans.push(Span::styled(
@@ -110,10 +89,6 @@ pub(crate) fn format_tool_box_lines_multi(
     box_lines
 }
 
-/// Header rows for a card. The `· in background` detail
-/// always gets its own row under the verb, so the path never shares the
-/// command's row. Other ` · ` details stay inline and only break onto their
-/// own row when the header is too wide for the box.
 pub(crate) fn header_rows(header: Line<'static>, max_w: usize) -> Vec<Line<'static>> {
     const SEP: &str = " \u{00b7} ";
     let in_detail = header
@@ -135,7 +110,7 @@ pub(crate) fn header_rows(header: Line<'static>, max_w: usize) -> Vec<Line<'stat
     };
     let mut head = header.clone();
     let mut tail_spans = head.spans.split_off(cut);
-    // The detail sits under the verb, past the `⬢ ` bullet.
+
     let indent = "  ";
     let first = &tail_spans[0];
     tail_spans[0] = Span::styled(
@@ -143,7 +118,7 @@ pub(crate) fn header_rows(header: Line<'static>, max_w: usize) -> Vec<Line<'stat
         first.style,
     );
     let mut rows = wrap_styled_line(head, max_w);
-    // Further ` · ` parts after the first ride the same detail row.
+
     let tail_w = max_w.saturating_sub(indent.len()).max(1);
     let tail = Line::from(tail_spans).style(header.style);
     for mut row in wrap_styled_line(tail, tail_w) {

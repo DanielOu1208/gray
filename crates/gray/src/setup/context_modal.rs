@@ -1,10 +1,5 @@
-//! Context-window modal (split from `setup`).
-
 use super::*;
 
-/// Interactive `/context` visual: Codex-style 10×10 usage grid + per-category
-/// breakdown + editable window/reserve/keep. Mutates `config` (and the global
-/// override cells + saved config) on save. Returns true if anything changed.
 pub fn run_context_modal(
     config: &mut Config,
     parts: &ContextParts,
@@ -73,16 +68,16 @@ pub fn run_context_modal(
     let (_session, mut terminal) = super::open_modal()?;
 
     let box_bg = crate::theme::theme().surface_bg;
-    let accent_peach = crate::theme::theme().accent_soft; // soft pastel peach
+    let accent_peach = crate::theme::theme().accent_soft;
     let text_dim = crate::theme::theme().text_muted;
-    // soft pastel category colors
-    let c_sys = crate::theme::theme().ctx_system; // pastel slate
-    let c_ctx = crate::theme::theme().ctx_context; // pastel mint
-    let c_tools = crate::theme::theme().ctx_tools; // pastel sky blue
-    let c_skills = crate::theme::theme().ctx_skills; // pastel matcha
-    let c_msgs = crate::theme::theme().ctx_messages; // pastel warm butter
-    let c_free = crate::theme::theme().ctx_free; // muted slate
-    let c_reserve = crate::theme::theme().rose; // pastel rose
+
+    let c_sys = crate::theme::theme().ctx_system;
+    let c_ctx = crate::theme::theme().ctx_context;
+    let c_tools = crate::theme::theme().ctx_tools;
+    let c_skills = crate::theme::theme().ctx_skills;
+    let c_msgs = crate::theme::theme().ctx_messages;
+    let c_free = crate::theme::theme().ctx_free;
+    let c_reserve = crate::theme::theme().rose;
 
     let initial_window = config.context_window;
     let initial_reserve = config.context_reserve;
@@ -110,7 +105,7 @@ pub fn run_context_modal(
                 .and_then(|v| v.checked_div(window))
                 .unwrap_or(0);
             let cells = parts.grid_cells(window, reserve);
-            // cell kind per grid position: 0-4 categories, 5 free, 6 buffer
+
             let mut flat: Vec<usize> = Vec::with_capacity(100);
             for (kind, n) in cells.iter().enumerate() {
                 flat.extend(std::iter::repeat_n(kind, *n));
@@ -126,8 +121,7 @@ pub fn run_context_modal(
                 }
                 render_dimmed_background(frame, &bg_snapshot);
                 let modal_w = 76.min(area.width.saturating_sub(2)).max(60).min(area.width);
-                // Fixed content (10-row grid + 3 settings rows) ends at inner
-                // row 16; 21 leaves one spacer above the footer, no dead band.
+
                 let modal_h = 21
                     .min(area.height.saturating_sub(1))
                     .max(19)
@@ -285,7 +279,6 @@ pub fn run_context_modal(
                     }
                 }
 
-                // settings rows
                 let set_y = grid_y + 11;
                 let win_src = context_source(model);
                 let set_rows = [
@@ -332,7 +325,7 @@ pub fn run_context_modal(
                         );
                     }
                 }
-                // input / footer
+
                 let foot_y = inner.y + inner.height - 1;
                 if let Some(idx) = editing {
                     let line = format!("{} {}: {buf}█", icon("arrow"), setting_labels[idx]);
@@ -412,7 +405,6 @@ pub fn run_context_modal(
                             KeyCode::Enter => {
                                 let v = buf.trim().to_lowercase();
                                 let saved: Option<usize> = match idx {
-                                    // window: auto clears, else parse + clamp to model max
                                     0 => {
                                         if ["auto", "clear", "reset", "0"].contains(&v.as_str()) {
                                             config.context_window = None;
@@ -428,7 +420,7 @@ pub fn run_context_modal(
                                             })
                                         }
                                     }
-                                    // reserve: auto clears to default, else parse
+
                                     1 => {
                                         if ["auto", "clear", "reset", "default"]
                                             .contains(&v.as_str())
@@ -443,7 +435,7 @@ pub fn run_context_modal(
                                             })
                                         }
                                     }
-                                    // keep: auto clears, off/0 = summary only, else parse
+
                                     _ => {
                                         if ["auto", "clear", "reset", "default"]
                                             .contains(&v.as_str())

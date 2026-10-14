@@ -1,5 +1,3 @@
-//! Host-owned credential storage and refresh coordination.
-
 pub mod broker;
 pub mod store;
 

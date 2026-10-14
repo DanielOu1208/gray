@@ -1,17 +1,3 @@
-#!/usr/bin/env python3
-"""Bake `logo-intro-frames.txt` for the TUI intro from the pens model of
-`~/content/gray/logo/logo-intro-pens.py` (v1: two pens trace the rim from
-top-left, diagonals set off as a pen passes). Intro only — no hold, retract,
-settle scale or fade.
-
-Each frame is the union of every element's drawn geometry (pen polylines and
-diagonal strokes, BAND-wide, clipped to the hull) rasterized to braille cells
-(2x4 dots), plus a second plane flagging the cells near each element's live
-pen tip so the TUI can paint them bright.
-
-Run: python3 logo-intro-ascii.py   -> writes logo-intro-frames.txt here.
-"""
-
 import math
 import os
 import re
@@ -19,8 +5,6 @@ import sys
 
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
-
-# ---- geometry, verbatim from logo-intro-pens.py ----------------------------
 
 BAND = 5.893
 P = [(28.41797, 0.0), (118.27719, 0.0), (146.69458, 49.221035),
@@ -32,7 +16,6 @@ SIDES = [(i, (i + 1) % 6) for i in range(6)]
 DIAGS = [(0, 2), (0, 3), (0, 4), (1, 3), (1, 4), (1, 5), (2, 4), (2, 5), (3, 5)]
 SHORT = (2.0840, 1.2885)
 
-
 def offsets(i, j):
     k = (j - i) % 6
     if k == 3:
@@ -43,9 +26,8 @@ def offsets(i, j):
         return offsets(j, i)[::-1]
     return SHORT if i % 2 == 0 else SHORT[::-1]
 
-
 def stroke_seg(i, j):
-    """The band's clipped centreline segment, oriented i-end -> j-end."""
+
     (x1, y1), (x2, y2) = P[i], P[j]
     L = math.dist(P[i], P[j])
     ux, uy = (x2 - x1) / L, (y2 - y1) / L
@@ -63,18 +45,15 @@ def stroke_seg(i, j):
     a, b = min(ts), max(ts)
     return LineString([(A[0] + vx * a, A[1] + vy * a), (A[0] + vx * b, A[1] + vy * b)])
 
-
 rim = list(hull.buffer(-BAND / 2, join_style="mitre").exterior.coords)[:-1]
 k0 = min(range(6), key=lambda k: math.dist(rim[k], P[0]))
 rim = rim[k0:] + rim[:k0]
 if math.dist(rim[1], P[1]) > math.dist(rim[-1], P[1]):
     rim = rim[:1] + rim[:0:-1]
 
-
 def toward(p, q, e=0.3):
     d = math.dist(p, q)
     return (p[0] + (q[0] - p[0]) * e / d, p[1] + (q[1] - p[1]) * e / d)
-
 
 halves = [[rim[0], rim[1], rim[2], rim[3]], [rim[0], rim[5], rim[4], rim[3]]]
 pens = [[toward(h[0], o), *h, toward(h[3], f)]
@@ -83,9 +62,8 @@ pens = [[toward(h[0], o), *h, toward(h[3], f)]
 IN_OUT = (0.65, 0.0, 0.35, 1.0)
 OUT = (0.22, 1.0, 0.36, 1.0)
 
-
 def bezier_time(f, x1=0.65, y1=0.0, x2=0.35, y2=1.0):
-    """Time fraction at which the IN_OUT curve reaches progress f."""
+
     b = lambda s, p1, p2: 3 * (1 - s) ** 2 * s * p1 + 3 * (1 - s) * s * s * p2 + s ** 3
     lo, hi = 0.0, 1.0
     for _ in range(40):
@@ -93,9 +71,8 @@ def bezier_time(f, x1=0.65, y1=0.0, x2=0.35, y2=1.0):
         lo, hi = (m, hi) if b(m, y1, y2) < f else (lo, m)
     return b(lo, x1, x2)
 
-
 def bezier_eval(x, p):
-    """y of cubic-bezier(x1,y1,x2,y2) at x, by bisection on the parameter."""
+
     x1, y1, x2, y2 = p
     bx = lambda s: 3 * (1 - s) ** 2 * s * x1 + 3 * (1 - s) * s * s * x2 + s ** 3
     by = lambda s: 3 * (1 - s) ** 2 * s * y1 + 3 * (1 - s) * s * s * y2 + s ** 3
@@ -105,9 +82,6 @@ def bezier_eval(x, p):
         lo, hi = (m, hi) if bx(m) < x else (lo, m)
     return max(0.0, min(1.0, by((lo + hi) / 2)))
 
-
-# When a rim pen reaches each corner; a diagonal leaves whichever end is
-# reached first.
 reach = {0: 0.0, 3: 1.25}
 for h in halves:
     ls = LineString(h)
@@ -117,8 +91,6 @@ for h in halves:
         )
 diags = sorted(((i, j) if reach[i] <= reach[j] else (j, i) for i, j in DIAGS),
                key=lambda e: reach[e[0]])
-
-# ---- elements: (path, start, duration, easing, join) -----------------------
 
 T0, SIDE_DUR, DIAG_DUR = 0.15, 1.25, 0.85
 elements = []
@@ -131,9 +103,7 @@ FPS = 30
 T_END = max(start + dur for _, start, dur, _, _ in elements)
 N_FRAMES = int(T_END * FPS) + 1
 
-# ---- rasterization ----------------------------------------------------------
-
-CELLS_X, CELLS_Y = 16, 6                  # the banner's footprint in cells
+CELLS_X, CELLS_Y = 16, 6
 X0, X1 = min(p[0] for p in P), max(p[0] for p in P)
 Y0, Y1 = min(p[1] for p in P), max(p[1] for p in P)
 DOT_X = (X1 - X0) / (CELLS_X * 2)
@@ -142,9 +112,8 @@ DOT_Y = (Y1 - Y0) / (CELLS_Y * 4)
 BITS = {(0, 0): 0x01, (0, 1): 0x02, (0, 2): 0x04, (0, 3): 0x40,
         (1, 0): 0x08, (1, 1): 0x10, (1, 2): 0x20, (1, 3): 0x80}
 
-
 def winding_cover(subpaths):
-    """covers() implementing the SVG nonzero fill rule over signed subpaths."""
+
     polys = []
     for sp in subpaths:
         if len(sp) < 3:
@@ -158,13 +127,11 @@ def winding_cover(subpaths):
 
     return covers
 
-
 def rasterize(geom):
     return rasterize_pred(geom.covers)
 
-
 def rasterize_pred(cover_fn):
-    """Braille rows for anything answering covers(Point)."""
+
     rows = []
     for row in range(CELLS_Y):
         line = []
@@ -187,9 +154,8 @@ def rasterize_pred(cover_fn):
         rows.append("".join(line))
     return rows
 
-
 def _partial(path, dist):
-    """Vertex distances along `path` up to `dist`, then `dist` itself."""
+
     yield 0.0
     acc = 0.0
     coords = list(path.coords)
@@ -199,7 +165,6 @@ def _partial(path, dist):
             break
         yield acc
     yield dist
-
 
 def frame(t):
     geoms, tips = [], []
@@ -218,9 +183,8 @@ def frame(t):
     union = unary_union(geoms) if geoms else Polygon()
     return union, tips
 
-
 def edge_rows(tips):
-    """Cells holding a dot within ~1.5 dots of a live pen tip."""
+
     flag = [[False] * CELLS_X for _ in range(CELLS_Y)]
     for tip in tips:
         gx = (tip.x - X0) / DOT_X
@@ -239,7 +203,6 @@ def edge_rows(tips):
                            for col in range(CELLS_X)))
     return out
 
-
 def main():
     frames = []
     for n in range(N_FRAMES):
@@ -257,10 +220,6 @@ def main():
     ])
     final = rasterize(full)
 
-    # The settled frame is exactly the shipped banner (logo.txt): the
-    # band-union raster differs from it only in a handful of edge dots,
-    # so pinning it keeps the intro's last frame and the static banner
-    # cell-identical, and the count below reports the model's drift.
     here = os.path.dirname(os.path.abspath(__file__))
     ref = os.path.join(here, "logo.txt")
     if os.path.exists(ref):
@@ -290,14 +249,13 @@ def main():
                 for r, (a, b) in enumerate(zip(final, ref_rows)):
                     if a != b:
                         print(f"  row {r}: baked {a!r} vs svg {b!r}")
-        except Exception as e:  # noqa: BLE001 - reporting, not failing
+        except Exception as e:
             print(f"logo-dark.svg parse skipped: {e}")
 
     print(f"wrote {out}: {N_FRAMES} frames, {T_END:.2f}s at {FPS}fps")
 
-
 def dark_svg_subpaths(path):
-    """logo-dark.svg's path `d` as a list of closed point lists."""
+
     d = re.search(r'<path fill="#ffffff"[^>]*d="([^"]+)"',
                   open(path).read()).group(1)
     toks = re.findall(r'[MLlZzMm]|-?[\d.eE+-]+', d.replace(",", " "))
@@ -317,7 +275,7 @@ def dark_svg_subpaths(path):
             else:
                 cur.append(pen)
             i += 3
-            # implicit lineto pairs keep flowing until the next command
+
             while i < len(toks) and toks[i] not in "MLlZzMm":
                 x, y = float(toks[i]), float(toks[i + 1])
                 if cmd.islower():
@@ -333,7 +291,6 @@ def dark_svg_subpaths(path):
     if cur:
         subpaths.append(cur)
     return subpaths
-
 
 if __name__ == "__main__":
     main()

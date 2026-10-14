@@ -1,29 +1,17 @@
-//! Display-width helpers: terminal cells, not chars.
-//!
-//! One place for the wide-char rule (emoji/CJK occupy 2 cells, combining
-//! marks 0) so every renderer measures the same way. For pure-ASCII input
-//! these equal the char count — swapping them in is a no-op except where
-//! it fixes (the diff/panel/footer drift after emoji).
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Terminal cells occupied by `s`.
 pub fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
-/// Terminal cells occupied by one char (0 for control/combining marks).
 pub fn char_width(c: char) -> usize {
     UnicodeWidthChar::width(c).unwrap_or(0)
 }
 
-/// Display width of a char slice without allocating.
 pub fn chars_width(chars: &[char]) -> usize {
     chars.iter().map(|c| char_width(*c)).sum()
 }
 
-/// Length (in chars) of the longest prefix of `chars` fitting `max_w`
-/// cells. Never splits a char; yields at least 1 for non-empty input so
-/// wrapping loops always make progress.
 pub fn fit_char_count(chars: &[char], max_w: usize) -> usize {
     let mut w = 0usize;
     for (i, c) in chars.iter().enumerate() {
@@ -35,9 +23,6 @@ pub fn fit_char_count(chars: &[char], max_w: usize) -> usize {
     chars.len()
 }
 
-/// End index (exclusive, in chars) of the next window starting at `start`
-/// and fitting `max_w` cells: prefers the last space inside the budget so
-/// words are never split, hard-cuts a single overlong word. Always advances.
 pub fn word_window_end(chars: &[char], start: usize, max_w: usize) -> usize {
     let mut end = (start + fit_char_count(&chars[start..], max_w)).min(chars.len());
     if end < chars.len()

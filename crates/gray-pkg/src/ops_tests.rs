@@ -1,14 +1,8 @@
 #![allow(clippy::await_holding_lock)]
 use super::*;
 
-// Serializes the process-global GRAY_HOME mutation within this test
-// binary (cargo runs tests in one process on multiple threads).
-// Shared with `errors::tests` (same process-global env).
 pub(crate) static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// One panicked test holding ENV_GUARD must not poison ~30 unrelated
-/// suites (CI cascade). Recover the guard instead of propagating the
-/// panic; the panicking test still fails on its own assertion.
 pub(crate) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
     ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -98,10 +92,9 @@ async fn spawn_tarball(tgz: Vec<u8>) -> String {
     format!("http://127.0.0.1:{port}/pi-foo.tgz")
 }
 
-/// Point `GRAY_HOME` at a fresh tempdir. Must be called under `ENV_GUARD`.
 fn use_home_env() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
-    // SAFETY: serialized by ENV_GUARD.
+
     unsafe {
         std::env::set_var("GRAY_HOME", home.path());
     }
@@ -180,7 +173,7 @@ fn registered_executable_means_cli_argv_without_a_hash() {
         ..LockEntry::default()
     };
     assert!(is_registered_executable(&cli));
-    // An index install that adopted a CLI keeps its hash — and its updates.
+
     let mut index_cli = cli.clone();
     index_cli.hash = "sha256:abc".into();
     assert!(!is_registered_executable(&index_cli));
@@ -238,13 +231,12 @@ fn lock_roundtrips_exact_shape() {
 
 #[test]
 fn lock_enabled_defaults_true_and_roundtrips_false() {
-    // Old locks without `enabled` load as enabled.
     let old: LockFile = serde_json::from_str(
             r#"{"schema":1,"plugins":{"demo":{"ecosystem":"gray-native","version":"1.0.0","hash":"sha256:abc","source":"https://h/demo.tar.gz","argv":[],"adapter_version":"0.1.0","installed_at":"1","scope":"user"}}}"#,
         )
         .unwrap();
     assert!(old.plugins["demo"].enabled);
-    // New locks round-trip an explicit `false`.
+
     let mut lock = old.clone();
     lock.plugins.get_mut("demo").unwrap().enabled = false;
     let back: LockFile = serde_json::from_str(&serde_json::to_string(&lock).unwrap()).unwrap();
@@ -266,7 +258,7 @@ fn lock_cli_argv_roundtrips() {
         back.plugins["demo"].cli_argv.as_deref(),
         Some(&["/usr/bin/demo".to_string()][..])
     );
-    // Sidecar-only entries keep serializing without the field.
+
     let plain: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&LockEntry::default()).unwrap()).unwrap();
     assert!(plain.get("cli_argv").is_none());
@@ -274,8 +266,6 @@ fn lock_cli_argv_roundtrips() {
 
 #[test]
 fn set_enabled_flips_flag_and_bails_on_miss() {
-    // GRAY_HOME points at a tempdir so the real lockfile is never
-    // disturbed (serialized by ENV_GUARD).
     let _guard = env_guard();
     let _home = use_home_env();
     let mut lock = LockFile::default();
@@ -299,9 +289,6 @@ fn set_enabled_flips_flag_and_bails_on_miss() {
 
 #[test]
 fn set_enabled_preserves_plugin_owned_lock_fields() {
-    // gray_plugin::lock owns fields this crate does not model (grants,
-    // consent hash, runtime role). A gray-pkg rewrite must carry them or a
-    // disable/enable cycle silently re-grants every declared capability.
     let _guard = env_guard();
     let _home = use_home_env();
     let mut extra = serde_json::Map::new();
@@ -365,7 +352,7 @@ fn remove_rejects_traversal_and_empty_names() {
             "name {bad:?}"
         );
     }
-    // The lock entry and the plugins dir survive the rejections.
+
     assert!(list().unwrap().contains_key("demo"));
 }
 
@@ -454,7 +441,6 @@ fn archive_rollback_preserves_backup_when_cleanup_fails() {
     let archive = home.path().join("archive.tgz");
     std::fs::write(&archive, tiny_tgz()).unwrap();
     let error = replace_archive(&archive, "demo", || {
-        // A concurrent replacement prevents rollback cleanup of the directory.
         std::fs::remove_dir_all(&dest)?;
         std::fs::write(&dest, b"concurrent file")?;
         anyhow::bail!("record failed")
@@ -475,9 +461,9 @@ fn registry_lock_times_out_when_held() {
     use crate::ops::hold_registry_lock_timeout;
     let home = tempfile::tempdir().unwrap();
     let _g = ENV_GUARD.lock().unwrap();
-    // SAFETY: serialized by ENV_GUARD.
+
     unsafe { std::env::set_var("GRAY_HOME", home.path()) };
-    // Somebody else holds the registry lock for longer than the caller's patience.
+
     let lock_path = crate::plugins_dir().join(".registry.lock");
     std::fs::create_dir_all(crate::plugins_dir()).unwrap();
     let holder = std::fs::OpenOptions::new()
@@ -523,7 +509,7 @@ fn remove_keeps_files_when_the_registry_write_fails() {
         },
     );
     write_lock(&lock).unwrap();
-    // Make the registry file unwritable so the write fails mid-remove.
+
     let registry = crate::plugins_dir().join("lock.json");
     std::fs::write(&registry, "sentinel").unwrap();
     #[cfg(unix)]
@@ -533,8 +519,7 @@ fn remove_keeps_files_when_the_registry_write_fails() {
     }
     let err = remove("demo").expect_err("a failed registry write must propagate");
     assert!(!err.to_string().is_empty());
-    // The files are still there: the registry is committed only after it
-    // can be written, so a failed remove leaves a re-removable plugin.
+
     assert!(
         plugin_dir.join("marker").exists(),
         "files must survive a failed remove"

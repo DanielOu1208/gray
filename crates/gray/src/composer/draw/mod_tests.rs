@@ -3,19 +3,11 @@ use super::*;
 
 #[test]
 fn home_spacer_fills_to_the_last_row() {
-    // 100x30 home: 17 transcript rows visible above the band, a seam dock
-    // row + the footer (2 reserved) and a 6-row box leave 5 spacer rows,
-    // and the band lands exactly on the screen bottom: 17+2+6+5 = 30.
     assert_eq!(home_spacer_rows(17, 2, 6, 30), 5);
     assert_eq!(17 + 2 + 6 + home_spacer_rows(17, 2, 6, 30), 30);
-    // The contract the paint frame relies on: `visible_above` is the
-    // transcript actually on screen (the caller passes
-    // `min(transcript rows, band top)`), not the painted count — a
-    // `/theme` card that pushed two rows into scrollback used to size
-    // the spacer by 19 where 17 showed and ended the band a row short.
-    // With the visible count the band still fills to the last row.
+
     assert_eq!(home_spacer_rows(17, 2, 6, 30) + 17, 30 - 2 - 6);
-    // Saturates when the reserved rows alone would fill the screen.
+
     assert_eq!(home_spacer_rows(28, 2, 6, 30), 0);
     assert_eq!(home_spacer_rows(0, 0, 0, 30), 30);
 }
@@ -25,71 +17,58 @@ fn transcript_ends_blank_matches_ensure_gap() {
     use ratatui::style::Style;
     assert!(!transcript_ends_blank(&[]));
     assert!(transcript_ends_blank(&[Line::from("")]));
-    assert!(transcript_ends_blank(&[Line::from(" ")])); // left_pad-only row
+    assert!(transcript_ends_blank(&[Line::from(" ")]));
     assert!(!transcript_ends_blank(&[Line::from("text")]));
-    // card / code padding rows carry a bg: they are edges, not gaps
+
     let bg = Style::default().bg(crate::theme::GRAY_UI_THEME.surface_bg);
     assert!(!transcript_ends_blank(&[Line::from("").style(bg)]));
 }
 
 #[test]
 fn desired_viewport_exact_fit() {
-    // The idle box is measured, not hard-coded: 3 rows (top pad, `❯`, pad).
-    let box_rows = build_input_box("", 0, 80, None, None).lines.len() as u16;
+    let box_rows = build_input_box("", 0, 80, None, None, &[]).lines.len() as u16;
     assert_eq!(box_rows, 3, "top pad + prompt + bottom pad");
-    // Idle: box 3 + footer 1 = 4 rows (MIN_VIEWPORT_H).
+
     assert_eq!(
         desired_viewport_h(0, 0, 0, box_rows, 0, 0, viewport_cap(40)),
         MIN_VIEWPORT_H
     );
-    // Slash popup: box 3 + panel 6 + footer 1 = 10.
+
     assert_eq!(
         desired_viewport_h(0, 0, 0, box_rows, 6, 0, viewport_cap(40)),
         10
     );
-    // Running: status 2 + box 3 + footer 1 = 6.
+
     assert_eq!(
         desired_viewport_h(2, 0, 0, box_rows, 0, 0, viewport_cap(40)),
         6
     );
-    // Running + full panel: 3 + 3 + 6 + 1 = 13.
+
     assert_eq!(
         desired_viewport_h(3, 0, 0, box_rows, 6, 0, viewport_cap(40)),
         13
     );
-    // Question panel: expands up to available screen height to show all options.
+
     assert_eq!(desired_viewport_h(0, 0, 0, 0, 15, 0, 23), 16);
 }
 
-/// A multi-line input must not be clipped by the viewport cap.
-///
-/// The cap used to be `viewport_cap(40) + widget_h`, so the whole inline viewport --
-/// and therefore the input box -- was pinned near 14 rows. A pasted paragraph
-/// that wrapped to 12 content rows plus the margin row hit exactly 13 and
-/// lost its last row; anything longer was cut hard. The cap is the screen now.
 #[test]
 fn viewport_cap_is_screen_bounded_not_viewport_h() {
-    // A 40-row terminal must allow a far taller viewport than the 14-row idle
-    // transcript, otherwise a long input gets clipped.
     assert_eq!(viewport_cap(40), 38);
-    // Leaves the shell prompt row below, never the whole screen.
+
     assert!(viewport_cap(40) < 40);
-    // Small terminals still clamp to the idle floor.
+
     assert_eq!(viewport_cap(3), MIN_VIEWPORT_H);
     assert_eq!(viewport_cap(0), MIN_VIEWPORT_H);
 }
 
-/// The reported symptom: pasting a paragraph that wraps to 12 rows left only a
-/// couple of them visible, because the viewport could not grow to hold the box.
-/// Given a screen-bounded cap the box fits.
 #[test]
 fn multiline_input_is_not_clipped_by_the_viewport_cap() {
-    // 12 wrapped content rows + the bottom margin build_input_box adds.
     let box_rows: u16 = 13;
     let rows: u16 = 40;
     let cap = viewport_cap(rows);
     let desired = desired_viewport_h(0, 0, 0, box_rows, 0, 0, cap);
-    // The viewport must be tall enough for the whole box, not a couple of rows.
+
     assert!(
         desired > box_rows,
         "viewport {desired} cannot hold a {box_rows}-row input box"
@@ -97,10 +76,6 @@ fn multiline_input_is_not_clipped_by_the_viewport_cap() {
     assert!(desired <= cap);
 }
 
-/// The seam is the one gap under the transcript, idle or mid-turn: present
-/// above content, absent where the tail is already blank (only the welcome
-/// banner ends that way), absent on an empty transcript. Never both a blank
-/// tail and a seam: that pair is the doubled margin.
 #[test]
 fn the_seam_is_the_one_gap_under_the_transcript() {
     assert!(needs_seam(&[Line::from("text")]));
@@ -115,14 +90,26 @@ fn the_seam_is_the_one_gap_under_the_transcript() {
 }
 
 #[test]
+fn the_tail_margin_is_the_one_gap_above_the_status_line() {
+    assert_eq!(tail_gap_h(true, &[Line::from("streamed text")]), 1);
+    assert_eq!(tail_gap_h(false, &[Line::from("streamed text")]), 0);
+    assert_eq!(tail_gap_h(true, &[]), 0);
+    assert_eq!(tail_gap_h(true, &[Line::from("a"), Line::from("")]), 0);
+    assert_eq!(tail_block_h(3, 1), 3);
+    assert_eq!(tail_block_h(1, 1), 0);
+    assert_eq!(tail_block_h(0, 1), 0);
+    assert_eq!(tail_block_h(4, 0), 4);
+}
+
+#[test]
 fn queued_preview_renders_header_and_entries() {
     let mut q: std::collections::VecDeque<(String, Vec<std::path::PathBuf>)> =
         std::collections::VecDeque::new();
-    assert!(queued_preview_lines(&q, 80).is_empty());
+    assert!(queued_preview_lines(&q, &[], 80).is_empty());
     q.push_back(("hello".to_string(), vec![]));
     q.push_back(("second\nline".to_string(), vec![]));
-    let lines = queued_preview_lines(&q, 80);
-    assert_eq!(lines.len(), 4); // header + 2 entries + separator
+    let lines = queued_preview_lines(&q, &[], 80);
+    assert_eq!(lines.len(), 4);
     assert!(lines.last().is_some_and(|line| line.spans.is_empty()));
     let text: String = lines
         .iter()
@@ -141,17 +128,13 @@ fn queued_preview_renders_header_and_entries() {
 
 #[test]
 fn live_tool_viewport_height_counts_live_rows() {
-    // Live cards sit between queued preview and input: 1 live row grows
-    // the exact-fit viewport by exactly 1 (status 2 + live 1 + input 3).
     let without = desired_viewport_h(2, 0, 0, 3, 0, 0, viewport_cap(40));
     let with = desired_viewport_h(2, 0, 1, 3, 0, 0, viewport_cap(40));
     assert_eq!(with, without + 1, "live rows must reserve viewport space");
-    // Cap: 3 cards + `… +N more` overflow row, never unbounded.
+
     let capped = desired_viewport_h(2, 0, 4, 3, 0, 0, viewport_cap(40));
     assert_eq!(capped, without + 4, "3 live + overflow row: {capped}");
-    // Clamp holds at the top: the screen cap. `live_h = 40` is hypothetical --
-    // MAX_LIVE_TOOLS bounds it to 3 cards + 1 overflow row -- and exists only
-    // to prove the clamp still bites.
+
     let cap = viewport_cap(40);
     assert_eq!(desired_viewport_h(3, 4, 40, 3, 6, 1, cap), cap);
 }
@@ -172,21 +155,14 @@ fn footer_badge_snapshot_freezes_the_right_segment_mid_turn() {
     use crate::setup::context::model_supports_reasoning;
 
     let live_model = "footer-badge-tests/live-flag-model";
-    // The flag under the badge is a process-global cache that background
-    // discovery (provider /models, then models.dev) keeps writing while a
-    // turn streams: unresolved → some(true), provider arrives → some(false),
-    // models.dev lands → some(true). Each flip used to resize the
-    // right-anchored footer text and walk the model name across the bar.
+
     crate::setup::cache_model_reasoning(live_model, true);
     assert_eq!(model_supports_reasoning(live_model), Some(true));
 
-    // No snapshot (idle frames): resolution stays live, so the provider's
-    // converged answer still lands between turns.
     assert!(footer_badge_visible(live_model, None));
     crate::setup::cache_model_reasoning(live_model, false);
     assert!(!footer_badge_visible(live_model, None));
 
-    // Turn in flight: the snapshot wins, whatever the async caches wrote.
     let streaming = "footer-badge-tests/streaming-flag-model";
     assert!(footer_badge_visible(streaming, Some(true)));
     assert!(!footer_badge_visible(streaming, Some(false)));
@@ -195,32 +171,20 @@ fn footer_badge_snapshot_freezes_the_right_segment_mid_turn() {
     assert!(footer_badge_visible(live_model, Some(true)));
 }
 
-/// The footer gauge is the viewport's last row: a one-row shortfall in the
-/// pre-computed viewport estimate (mid-stream text wraps taller than the
-/// estimate) used to push `footer_y` past the frame bottom and skip the
-/// paint — the gauge vanished for that frame while tokens streamed. The
-/// clamp paints it on the frame's last row instead.
 #[test]
 fn footer_paint_row_clamps_into_the_frame_instead_of_vanishing() {
     let area = Rect::new(0, 10, 40, 6);
-    // In budget: unchanged.
+
     assert_eq!(footer_paint_row(15, area), Some(15));
-    // One row over: painted on the last frame row, never skipped.
+
     assert_eq!(footer_paint_row(16, area), Some(15));
     assert_eq!(footer_paint_row(20, area), Some(15));
-    // Zero-height frame paints nothing.
+
     assert_eq!(footer_paint_row(5, Rect::new(0, 0, 40, 0)), None);
 }
 
-/// The latched viewport: whenever the estimate short-cuts a dock segment
-/// (`status_h` re-read inside the frame after the ratchet latch re-arms),
-/// the floor must already cover the tallest possible frame so the measured
-/// rows fit without a second grow (the footer/padding flicker).
 #[test]
 fn latched_viewport_floor_covers_the_measured_frame_when_the_estimate_shortcuts_a_segment() {
-    // Estimate short-cut the dock entirely (status_h computed as 0 at
-    // sizing time): the frame can still measure up to 3 dock rows
-    // (seam + status + breath) plus the footer.
     for status_h in 0..=3u16 {
         let floor = latched_viewport_floor(status_h, 0, 0, 3, 0, viewport_cap(40));
         assert!(
@@ -228,21 +192,18 @@ fn latched_viewport_floor_covers_the_measured_frame_when_the_estimate_shortcuts_
             "status_h={status_h}: floor {floor} cannot hold dock {status_h} + box 3 + footer"
         );
     }
-    // A short-cut live-row reserve (estimate 0, frame measures 2) keeps
-    // the input box and footer inside the viewport too.
+
     let floor = latched_viewport_floor(0, 0, 2, 3, 0, viewport_cap(40));
-    // 0 status + 2 live + 3 box, plus the footer row.
+
     assert!(floor > 2 + 3);
-    // The floor never exceeds the screen cap.
+
     assert_eq!(latched_viewport_floor(3, 0, 0, 30, 0, 10), 10);
 }
 
 #[test]
 fn chrome_row_paints_the_whole_composer_band() {
     use ratatui::widgets::Widget;
-    // Plugin-widget / queued / ask-modal rows live between the live cards
-    // and the input box; painted transparent they showed as a stripe of the
-    // terminal's default background through the middle of the composer.
+
     let area = Rect::new(0, 0, 40, 1);
     let mut buffer = ratatui::buffer::Buffer::empty(area);
     chrome_row(Line::from("Build phase one")).render(area, &mut buffer);
@@ -255,66 +216,54 @@ fn chrome_row_paints_the_whole_composer_band() {
     );
 }
 
-/// The text area and the context footer always keep their rows: whatever
-/// the live cards, widget, ask modal and queued preview want, they are
-/// capped by what the screen has left after the rows that must survive.
 #[test]
 fn the_text_area_and_footer_are_never_trimmed_away() {
-    // 30-row screen, 3-row dock, 2-row box, 1-row footer: 24 rows of band.
     assert_eq!(band_budget(30, 3 + 2 + 1), 24);
-    // A 4-row box (a two-line draft) eats the band above it, never the reverse.
+
     assert_eq!(band_budget(30, 3 + 4 + 1), 22);
-    // Short screen: the budget floors at zero instead of going negative.
+
     assert_eq!(band_budget(6, 3 + 3 + 1), 0);
 }
 
-/// A busy turn is trimmed most-transient-first and the total never exceeds
-/// the allowance, so the box and the footer keep their rows.
 #[test]
 fn a_busy_band_is_trimmed_most_transient_first() {
-    // Counts in trim order: ask modal, queued follow-up, plugin widget,
-    // live tool cards. 6 rows of allowance on a busy turn: the blocking
-    // ask modal and the user's own text keep their rows, the widget
-    // decoration is cut, the elastic live cards take what is left.
     let mut counts = [2, 2, 4, 10];
     trim_to_allowance(&mut counts, 6);
     assert_eq!(counts, [2, 2, 2, 0]);
-    // An allowance with no room trims everything and never goes negative.
+
     let mut counts = [2, 2, 4, 10];
     trim_to_allowance(&mut counts, 0);
     assert_eq!(counts, [0, 0, 0, 0]);
-    // Room to spare leaves the counts alone.
+
     let mut counts = [10, 2];
     trim_to_allowance(&mut counts, 40);
     assert_eq!(counts, [10, 2]);
 }
 
-/// The reported bug: the box kept painting "Please continue…" while the
-/// resumed turn was already streaming. The flag is armed when the REPL loop
-/// blocks on input — before that turn is submitted — so mid-turn it is stale.
 #[test]
 fn continue_ghost_hides_while_a_turn_runs() {
-    // Idle with a resume pending: the hint is the point of the feature.
     assert_eq!(
         continue_ghost(true, false, ""),
         Some(crate::repl::CONTINUE_GHOST)
     );
-    // Streaming: never, whatever the stale flag says.
+
     assert_eq!(continue_ghost(true, true, ""), None, "no ghost mid-turn");
-    // Typing, or no pending resume: no hint either.
+
     assert_eq!(continue_ghost(true, false, "hi"), None);
     assert_eq!(continue_ghost(false, false, ""), None);
-    // The flag is dropped at turn start, so the input gate is honest too.
-    // (`begin_turn` needs a TTY; the predicate above is the testable seam.)
 }
 
-/// The plugin band's cap scales with the screen: two-fifths of it, never under
-/// four rows. The subagents plugin's full widget is 15 rows, so a 40-row
-/// screen shows all of it; a 24-row one shows the top and says what it cut.
 #[test]
 fn widget_band_takes_two_fifths_of_the_screen() {
     assert_eq!(widget_row_cap(40), 16);
     assert_eq!(widget_row_cap(24), 9);
     assert_eq!(widget_row_cap(10), 4);
     assert_eq!(widget_row_cap(0), 4);
+}
+
+#[test]
+fn a_video_chip_says_video_not_file() {
+    let cells = attachment_cells(&[std::path::PathBuf::from("/tmp/clip.mp4")], "");
+    let text: String = cells.iter().map(|(c, _)| *c).collect();
+    assert!(text.starts_with(" Video "), "got {text:?}");
 }

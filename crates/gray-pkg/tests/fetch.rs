@@ -1,8 +1,3 @@
-//! Task 2.2: fetch integration tests — hash verify, https policy,
-//! tar traversal guard, 64 MiB cap. Hermetic: loopback servers only.
-
-// Deliberate: the env lock must span each whole test (env is read inside
-// the awaited calls), so holding a std guard across await is the point.
 #![allow(clippy::await_holding_lock)]
 
 use std::sync::Mutex;
@@ -12,11 +7,9 @@ use sha2::{Digest, Sha256};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-/// Point `GRAY_HOME` at a fresh tempdir (isolates `plugins/tmp`).
-/// Returns the tempdir (must stay alive for the test's duration).
 fn use_env() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
-    // SAFETY: under ENV_LOCK; no other test thread touches env concurrently.
+
     unsafe {
         std::env::set_var("GRAY_HOME", home.path());
     }
@@ -48,16 +41,13 @@ async fn spawn_bytes(body: Vec<u8>) -> String {
     format!("http://127.0.0.1:{port}/x.tar.gz")
 }
 
-/// Raw-HTTP server streaming `total` zero bytes (avoids buffering 64 MiB
-/// in axum and needs no extra stream deps). `download` enforces its cap by
-/// counting streamed chunks, so this must exceed `MAX_BYTES` for real.
 async fn spawn_big_server(total: u64) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
-        // Consume request headers first.
+
         let mut buf = vec![0u8; 4096];
         let mut seen = Vec::new();
         loop {
@@ -80,7 +70,7 @@ async fn spawn_big_server(total: u64) -> String {
         let mut left = total;
         while left > 0 {
             let n = left.min(chunk.len() as u64) as usize;
-            // The client bails after the cap; a broken pipe then is expected.
+
             if sock.write_all(&chunk[..n]).await.is_err() {
                 break;
             }
@@ -145,7 +135,6 @@ async fn loopback_http_allowed_with_correct_hash() {
     std::fs::remove_file(&path).unwrap();
 }
 
-/// Hand-crafted ustar (the tar builder itself refuses `..` at write time).
 fn evil_tar_gz(name: &str) -> Vec<u8> {
     use std::io::Write;
     let mut hdr = [0u8; 512];

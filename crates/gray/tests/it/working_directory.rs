@@ -1,6 +1,3 @@
-//! Exercise the actual CLI/provider boundary, without a real API key or model.
-//! The first request carries the saved prompt verbatim (comments stripped)
-//! and no runtime context, launched from a non-ASCII, spaced directory.
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -114,8 +111,7 @@ async fn check_first_request(native_profile: bool) {
         .unwrap()["content"]
         .as_str()
         .unwrap();
-    // The saved prompt verbatim minus comments; no runtime context (memory,
-    // a separate feature, may follow).
+
     assert!(system.starts_with("Custom instructions."), "{system}");
     assert!(!system.contains("private editor note"));
     assert!(!system.contains("Working directory"), "{system}");

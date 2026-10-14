@@ -3,14 +3,11 @@ use gray_core::agent::ToolContext;
 
 #[tokio::test]
 async fn read_redacts_secret_shaped_assignment() {
-    // `*_token=<value>` hits SECRET_NAME_MARKERS ("token"); the name is
-    // assembled at runtime so no secret-shaped literal sits in source.
     let name: String = [109u8, 121, 95, 116, 111, 107, 101, 110]
         .iter()
         .map(|b| *b as char)
         .collect();
-    // "value123": lowercase + digits, no shape of its own — only the
-    // secret-bearing name triggers redaction.
+
     let val = "value123";
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join("cfg.txt"), format!("{name}={val}\n")).unwrap();

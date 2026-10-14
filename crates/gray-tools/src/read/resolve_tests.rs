@@ -27,32 +27,30 @@ fn candidates_keep_spec_order_and_dedup() {
     assert_eq!(c.len(), 1, "no-op spellings dedup to as-given: {c:?}");
     let c = candidates("caf\u{E9} it's.txt");
     assert_eq!(c[0], "caf\u{E9} it's.txt");
-    assert!(c.contains(&"cafe\u{301} it's.txt".to_string())); // (3) NFD
-    assert!(c.contains(&"caf\u{E9} it\u{2019}s.txt".to_string())); // (6) curly
-    assert!(c.contains(&"cafe\u{301} it\u{2019}s.txt".to_string())); // (7) NFD+curly
+    assert!(c.contains(&"cafe\u{301} it's.txt".to_string()));
+    assert!(c.contains(&"caf\u{E9} it\u{2019}s.txt".to_string()));
+    assert!(c.contains(&"cafe\u{301} it\u{2019}s.txt".to_string()));
     assert_eq!(
         c.len(),
         c.iter().collect::<std::collections::HashSet<_>>().len()
     );
 }
 
-/// All 7 spellings, one row each (6 has both quote directions).
-/// Each row lives in its own subdir so NFC/NFD byte shapes never collide.
 #[test]
 fn table_all_seven_spellings_resolve() {
     let rows: &[(&str, &str, &str)] = &[
-        ("s1", "hello.txt", "hello.txt"),                  // (1) as given
-        ("s2", "cafe\u{301}.txt", "caf\u{E9}.txt"),        // (2) NFC
-        ("s3", "caf\u{E9}.txt", "cafe\u{301}.txt"),        // (3) NFD
-        ("s4", "with\u{202F}space.txt", "with space.txt"), // (4) NBSP→space
+        ("s1", "hello.txt", "hello.txt"),
+        ("s2", "cafe\u{301}.txt", "caf\u{E9}.txt"),
+        ("s3", "caf\u{E9}.txt", "cafe\u{301}.txt"),
+        ("s4", "with\u{202F}space.txt", "with space.txt"),
         (
             "s5",
             "Screenshot 3.04 PM.png",
             "Screenshot 3.04\u{202F}PM.png",
-        ), // (5) space→U+202F
-        ("s6", "it's.md", "it\u{2019}s.md"),               // (6a) ascii→curly
-        ("s6r", "it\u{2019}s-rev.md", "it's-rev.md"),      // (6b) curly→ascii
-        ("s7", "caf\u{E9}'s.md", "cafe\u{301}\u{2019}s.md"), // (7) NFD+curly
+        ),
+        ("s6", "it's.md", "it\u{2019}s.md"),
+        ("s6r", "it\u{2019}s-rev.md", "it's-rev.md"),
+        ("s7", "caf\u{E9}'s.md", "cafe\u{301}\u{2019}s.md"),
     ];
     let outer = tempfile::tempdir().unwrap();
     for (dir, given, actual) in rows {
@@ -60,7 +58,7 @@ fn table_all_seven_spellings_resolve() {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join(actual), "x").unwrap();
         let got = resolve_existing(&sub.join(given));
-        // macOS APFS stores café.txt NFD on disk: compare NFD→NFC folded.
+
         let got = got.unwrap_or_else(|| panic!("row {dir}: {given:?} did not resolve"));
         assert_eq!(
             to_nfc(&got.display().to_string()),
@@ -83,7 +81,7 @@ fn nbsp_variant_u00a0_also_maps_to_space() {
 #[test]
 fn as_given_wins_and_missing_returns_none() {
     let outer = tempfile::tempdir().unwrap();
-    // Both shapes exist: the literal wins (stop at first that exists).
+
     std::fs::write(outer.path().join("caf\u{E9}.txt"), "nfc").unwrap();
     std::fs::write(outer.path().join("cafe\u{301}.txt"), "nfd").unwrap();
     assert_eq!(
@@ -101,7 +99,7 @@ fn repair_never_changes_directories() {
     std::fs::create_dir_all(&a).unwrap();
     std::fs::create_dir_all(&b).unwrap();
     std::fs::write(b.join("cafe\u{301}.txt"), "x").unwrap();
-    // Same spelling in the sibling dir must NOT leak across.
+
     assert_eq!(resolve_existing(&a.join("caf\u{E9}.txt")), None);
     assert!(!same_parent(&a.join("x"), &b.join("x")));
     assert!(same_parent(&a.join("x"), &a.join("y")));

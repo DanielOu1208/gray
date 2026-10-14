@@ -1,4 +1,3 @@
-//! Real REPL regression: a plugin command must work before the first model turn.
 #[test]
 fn plugin_command_initializes_lazy_agent_without_provider_call() {
     use std::io::Write;

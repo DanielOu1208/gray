@@ -10,7 +10,6 @@ fn join(chunks: &[&str]) -> String {
 
 #[test]
 fn inserts_space_at_bare_sentence_boundaries() {
-    // The reported muse-spark shape: sentence-sized deltas, stripped space.
     assert_eq!(
         join(&["text appears truncated.", "Identifying that leading"]),
         "text appears truncated. Identifying that leading"
@@ -35,7 +34,6 @@ fn never_doubles_existing_whitespace() {
 
 #[test]
 fn leaves_mid_word_bpe_splits_glued() {
-    // Well-behaved providers emit sub-word continuations bare and correct.
     assert_eq!(join(&["Anal", "yzing"]), "Analyzing");
     assert_eq!(join(&["trunca", "ted"]), "truncated");
     assert_eq!(join(&["reflow", "OnResize"]), "reflowOnResize");

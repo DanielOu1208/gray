@@ -67,9 +67,8 @@ fn live_rows_mark_running_cards() {
 
 #[test]
 fn live_rows_update_in_place_without_reorder() {
-    // pi `updateArgs`: same id replaces the header, first-seen order kept.
     let mut tools = vec![live("a", "old", false), live("b", "bee", false)];
-    // mirror of `upsert_live_tool` ordering (pure, no Tui::new/TTY):
+
     if let Some(slot) = tools.iter_mut().find(|t| t.id == "a") {
         slot.header = vec![Line::from(vec![Span::raw("new".to_string())])];
         slot.running = true;
@@ -83,7 +82,7 @@ fn live_rows_update_in_place_without_reorder() {
 fn running_label_does_not_orphan_a_trailing_status() {
     for command in ["sleep 5", "echo café 日本語", &"x".repeat(100)] {
         let tool = bash_live(command, true);
-        // The replacement verb needs four more cells than "Ran", not a tail row.
+
         let width = tool.header[0].width() + 4;
         let rows = live_tool_rows(&[tool], Duration::ZERO, 80);
         let wrapped = crate::composer::transcript::wrap_styled_line(rows[0].clone(), width);
@@ -123,11 +122,9 @@ fn other_tools_keep_their_identity_and_empty_headers_are_safe() {
 
 #[test]
 fn template_second_line_stays_plain_under_a_running_headline() {
-    // A template preview's second line is its own row under the headline.
-    // The running shimmer marks the headline (the first row) only.
     let tool = LiveTool {
-        id: "rlm".into(),
-        name: "rlm_spawn".into(),
+        id: "subagent".into(),
+        name: "subagent_spawn".into(),
         header: vec![
             Line::from(vec![
                 Span::raw("\u{2b22} ".to_string()),
@@ -173,5 +170,68 @@ fn multi_line_card_draws_both_header_rows_then_body() {
     assert!(
         texts.iter().any(|t| t.contains("ok")),
         "body missing: {texts:?}"
+    );
+}
+
+#[test]
+fn tool_card_commit_keeps_emission_order_with_stream_text() {
+    let mut tui = Tui::test_tui(80, 30);
+    tui.is_task_running = true;
+    tui.enable_reveal_pacing();
+
+    let card = |tag: &str| vec![Line::from(vec![Span::raw(format!("bash {tag} card"))])];
+    let row_idx = |tui: &Tui, needle: &str| {
+        tui.transcript
+            .iter()
+            .position(|l| row_text(l).contains(needle))
+    };
+    let entry_idx = |tui: &Tui, needle: &str| {
+        tui.history_entries.iter().position(|e| match e {
+            TranscriptEntry::StyledLines { lines, .. } => {
+                lines.iter().any(|l| row_text(l).contains(needle))
+            }
+            TranscriptEntry::ToolBoxLines { header, .. } => {
+                header.iter().any(|l| row_text(l).contains(needle))
+            }
+            _ => false,
+        })
+    };
+
+    tui.stream_text("alpha paragraph\n\n");
+    tui.flush_markdown();
+    tui.end_thinking();
+    tui.mark_stream_round_boundary();
+    tui.upsert_live_tool("t1", "bash", card("one"), false);
+
+    tui.stream_text("beta paragraph");
+    tui.remove_live_tool("t1");
+    tui.push_tool_box_lines(card("one"), vec![Line::from("done")]);
+
+    tui.stream_text("gamma paragraph");
+    tui.remove_live_tool("t2");
+    tui.push_tool_box_lines(card("two"), vec![Line::from("done")]);
+
+    let needles = [
+        "alpha paragraph",
+        "beta paragraph",
+        "one card",
+        "gamma paragraph",
+        "two card",
+    ];
+    let rows: Vec<usize> = needles
+        .iter()
+        .map(|n| row_idx(&tui, n).unwrap_or_else(|| panic!("transcript row missing: {n}")))
+        .collect();
+    let entries: Vec<usize> = needles
+        .iter()
+        .map(|n| entry_idx(&tui, n).unwrap_or_else(|| panic!("history entry missing: {n}")))
+        .collect();
+    assert!(
+        rows.windows(2).all(|w| w[0] < w[1]),
+        "transcript rows out of emission order: {rows:?}"
+    );
+    assert!(
+        entries.windows(2).all(|w| w[0] < w[1]),
+        "history entries out of emission order: {entries:?}"
     );
 }

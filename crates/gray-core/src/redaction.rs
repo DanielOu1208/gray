@@ -1,45 +1,13 @@
-// Vendored from Hmbown/CodeWhale (MIT) — crates/workflow/src/redaction.rs.
-// Copyright (c) 2024-2025 DeepSeek CLI Contributors. See THIRD_PARTY_NOTICES.md.
-//! Redaction for anything that can reach a log, a span, or a durable receipt.
-//!
-//! Two classes of content are stripped before text is allowed to leave the
-//! process — either onto a provider's wire or into a journal:
-//!
-//! 1. **Absolute paths.** `/Users/hunter/src/app`, `/home/x/...`, `C:\Users\…`
-//!    and `~/…` carry the operator's username, home directory, and machine
-//!    layout. A journal travels further than the machine that wrote it.
-//! 2. **Repo-relative paths.** `crates/tui/src/main.rs`, `./deploy.sh`,
-//!    `../../secret/notes.md` — and their escaped spellings, `crates\/tui\/…`
-//!    and `crates\\tui\\…`. An absolute path discloses the machine; a relative
-//!    one discloses the private tree's shape, which is exactly as much as the
-//!    reader of a routing summary at another provider needs to reconstruct it.
-//!    The rule is deliberately conservative — see `looks_relative` — because
-//!    the failure it must not trade for is mangling ordinary prose or a
-//!    `provider/model` label.
-//! 3. **Secret-shaped tokens.** Provider keys, bearer tokens, and
-//!    `SOMETHING_KEY=value` assignments. These have no business in a routing
-//!    summary and must never be persisted next to one.
-//!
-//! Redaction is *recorded*, not silent: [`Redaction::kinds`] names what was
-//! removed so a receipt can disclose the fact without disclosing the content.
-
 use std::collections::BTreeSet;
 
-/// A redaction kind, as it appears on a disclosure. These are stable labels —
-/// receipts persist them.
 pub const REDACTION_ABSOLUTE_PATH: &str = "absolute_path";
 pub const REDACTION_RELATIVE_PATH: &str = "relative_path";
 pub const REDACTION_SECRET: &str = "secret";
 
-/// Placeholder substituted for a removed absolute path.
 const PATH_PLACEHOLDER: &str = "<path>";
-/// Placeholder substituted for a removed secret-shaped token.
-/// Placeholder substituted for a removed secret. Public so callers that mask a
-/// known value verbatim (e.g. a credential read out of `auth.json`) produce the
-/// same marker instead of inventing a second spelling.
+
 pub const REDACTED: &str = "<redacted>";
 
-/// Case-insensitive substrings that mark an identifier as secret-bearing.
 const SECRET_NAME_MARKERS: &[&str] = &[
     "api_key",
     "apikey",
@@ -55,14 +23,6 @@ const SECRET_NAME_MARKERS: &[&str] = &[
     "session_key",
 ];
 
-/// Prefixes that are themselves a credential, whatever they are attached to.
-///
-/// Every entry here must be *unambiguously* a credential prefix. A prefix that
-/// is also an ordinary English word — `bearer`, `asia` — belongs nowhere near
-/// this list: it would redact prose and, worse, would report a `secret`
-/// redaction kind on a receipt that removed nothing but a word. The AWS key ids
-/// that motivated `asia`/`akia` are handled by
-/// [`looks_like_aws_access_key`], which requires the full shape.
 const SECRET_VALUE_PREFIXES: &[&str] = &[
     "sk-",
     "sk_",
@@ -75,48 +35,18 @@ const SECRET_VALUE_PREFIXES: &[&str] = &[
     "xapp-",
 ];
 
-/// HTTP authorization scheme keywords, in their canonical HTTP capitalization.
-///
-/// These are *never* the secret — the secret is the token that follows them.
-/// Redacting the keyword and stopping there is the failure this list exists to
-/// prevent: `Authorization: Bearer <token>` would keep the token and still
-/// claim on the receipt that a secret had been removed.
-///
-/// The capitalization is stored, not normalized away, because it carries
-/// evidence: `Bearer` is HTTP syntax and `bearer` is an English noun. See
-/// [`is_canonical_auth_scheme`].
 const AUTH_SCHEMES: &[&str] = &["Bearer", "Basic", "Digest", "Token"];
 
-/// The one scheme keyword whose canonical capitalization is, by itself, enough
-/// to treat the following token as a credential.
-///
-/// The asymmetry is deliberate and is the whole of the false-positive story.
-/// `Basic`, `Digest`, and `Token` are ordinary capitalized English words —
-/// "Basic auth is enabled", "Token holders vote", "Digest the results" — and
-/// arming on them would redact the next word of perfectly ordinary prose. `Bearer`
-/// capitalized is, in a technical corpus, the HTTP scheme essentially every
-/// time. So `Bearer qqq` loses `qqq` even though a three-letter lowercase token
-/// looks like nothing at all, while the other three need header context first.
-///
-/// The residual cost is stated plainly: `Bearer tokens are rotated weekly`
-/// redacts `tokens`. That is a capitalized-`Bearer` sentence, which is header
-/// syntax by shape; ordinary prose says "bearer", and lowercase never arms on
-/// its own.
 const SELF_EVIDENT_AUTH_SCHEME: &str = "Bearer";
 
-/// AWS access-key-id prefixes. Matched case-sensitively and only against the
-/// full 20-character shape, so the word `Asia` is prose and `ASIA…` is a key.
 const AWS_KEY_ID_PREFIXES: &[&str] = &[
     "AKIA", "ASIA", "AGPA", "AIDA", "AROA", "ANPA", "ANVA", "ASCA", "ABIA", "ACCA",
 ];
 
-/// Minimum length of an AWS access key id (`AKIA` + 16).
 const AWS_KEY_ID_LEN: usize = 20;
 
-/// Minimum length before a bare token is treated as a credential value.
 const CREDENTIAL_VALUE_MIN_LEN: usize = 16;
 
-/// The result of redacting one string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Redaction {
     text: String,
@@ -124,71 +54,38 @@ pub struct Redaction {
 }
 
 impl Redaction {
-    /// The redacted text.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
     }
 
-    /// Consume the redaction, yielding the redacted text.
     #[must_use]
     pub fn into_text(self) -> String {
         self.text
     }
 
-    /// Whether anything was removed.
     #[must_use]
     pub fn redacted(&self) -> bool {
         !self.kinds.is_empty()
     }
 
-    /// Whether a secret was removed (as opposed to only paths).
-    ///
-    /// Durable tool/session surfaces gate on this: secret-bearing text is
-    /// scrubbed aggressively (paths in the same unit go too), while
-    /// secret-free tool data — absolute paths, fence markup like
-    /// `</untrusted-output>` — stays verbatim. Scrubbing paths out of shell
-    /// output would break the shell fence contract and the tool's utility;
-    /// see `redact_bytes_for_log`.
     #[must_use]
     pub fn has_secret(&self) -> bool {
         self.kinds.iter().any(|k| k == REDACTION_SECRET)
     }
 
-    /// Which classes of content were removed — never the content itself.
     #[must_use]
     pub fn kinds(&self) -> Vec<String> {
         self.kinds.iter().cloned().collect()
     }
 }
 
-/// How strongly the preceding tokens claim that the *next* token is a
-/// credential.
-///
-/// A credential is routinely written as two or three tokens
-/// (`Authorization: Bearer <token>`), so the decision cannot be made per token.
-/// But the evidence for "a credential follows" is not uniform, and collapsing it
-/// to a boolean is what produces either a leak or a mangled sentence:
-///
-/// - `Authorization: Bearer qqq` — the credential is `qqq`, three lowercase
-///   letters, indistinguishable in shape from a word. Only the *context* says
-///   it is a secret, and the context says so unambiguously.
-/// - `authorization: bearer shares responsibility` — the same context markers,
-///   lowercase, and the next token is an English verb. Redacting `shares` would
-///   destroy a sentence and put a false `secret` kind on a receipt.
-///
-/// So the arming carries its own strength, and the shape test is applied only
-/// where the context is weak enough to need it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CredentialArm {
-    /// Nothing is expected; the next token is judged on its own.
     None,
-    /// The next token is the credential only if it also *looks* like one.
-    /// Lowercase scheme words and bare `Authorization:` land here.
+
     IfShaped,
-    /// The next token is the credential whatever it looks like. Reached by
-    /// canonical HTTP capitalization — `Authorization: Bearer …`, or a bare
-    /// `Bearer` — where the syntax alone settles it.
+
     Certain,
 }
 
@@ -198,13 +95,9 @@ impl CredentialArm {
     }
 }
 
-/// What one token resolved to, and whether it armed the *next* token.
 struct TokenOutcome {
-    /// `None` keeps the token verbatim.
     text: Option<String>,
-    /// Whether — and how strongly — the following token carries the credential
-    /// this one introduced. `Authorization:` and a bare `Bearer` reveal nothing
-    /// themselves; the value after them is the whole secret.
+
     arm: CredentialArm,
 }
 
@@ -228,23 +121,8 @@ impl TokenOutcome {
     }
 }
 
-/// Redact absolute paths and secret-shaped tokens from `input`.
-///
-/// Operates token-by-token over whitespace-free runs, which is enough for the
-/// bounded, already whitespace-collapsed text this crate transmits and keeps
-/// the rule set auditable without a regex dependency.
-///
-/// One piece of state crosses token boundaries, and it has to: a credential is
-/// routinely written as *two* tokens (`Authorization: Bearer <token>`), so a
-/// purely per-token rule either leaks the value or redacts the English word
-/// `bearer`. Carrying "the next token is the credential" forward — and *how
-/// certainly*, see `CredentialArm` — is what lets this do neither.
 #[must_use]
 pub fn redact_for_disclosure(input: &str) -> Redaction {
-    // The tokenizer below splits on `' '` only, so `'\n'` glues neighbouring
-    // lines into one token: a secret on a later line escaped, and one that
-    // fired armed the *next* glued token, deleting every line after it. Tool
-    // output is multi-line by default, so redact line by line.
     if input.contains('\n') {
         let mut kinds = BTreeSet::new();
         let text = input
@@ -269,11 +147,6 @@ pub fn redact_for_disclosure(input: &str) -> Redaction {
             continue;
         }
         if arm.is_armed() {
-            // `Authorization: Bearer <token>` — the scheme keyword is not the
-            // secret, so it survives and the arming carries past it. A
-            // canonically capitalized keyword also *upgrades* the arming: the
-            // header name alone left the shape in doubt, and `Bearer` settles
-            // it.
             if is_auth_scheme(token) {
                 if is_canonical_auth_scheme(token) {
                     arm = CredentialArm::Certain;
@@ -281,18 +154,13 @@ pub fn redact_for_disclosure(input: &str) -> Redaction {
                 out.push((*token).to_string());
                 continue;
             }
-            // Weak arming still defers to shape, so an `authorization:` that
-            // introduces a sentence rather than a secret leaves the sentence
-            // intact — and leaves the receipt honest about having removed
-            // nothing.
+
             if arm == CredentialArm::Certain || looks_like_credential_value(token) {
                 kinds.insert(REDACTION_SECRET.to_string());
                 out.push(REDACTED.to_string());
                 arm = CredentialArm::None;
                 continue;
             }
-            // Fall through: the token is judged on its own merits, and the
-            // arming state is replaced wholesale by `redact_token` below.
         }
 
         let next = tokens[index + 1..]
@@ -310,13 +178,7 @@ pub fn redact_for_disclosure(input: &str) -> Redaction {
     }
 }
 
-/// Redact one whitespace-free token, recording what was removed.
-///
-/// `next` is the following non-empty token, used only to decide whether a bare
-/// authorization scheme keyword is introducing a credential or is just a word.
 fn redact_token(token: &str, next: Option<&str>, kinds: &mut BTreeSet<String>) -> TokenOutcome {
-    // `NAME=value` / `NAME:value` — a secret-bearing name redacts its value and
-    // keeps the name, which is the useful half.
     for separator in ['=', ':'] {
         let Some((name, value)) = token.split_once(separator) else {
             continue;
@@ -326,9 +188,6 @@ fn redact_token(token: &str, next: Option<&str>, kinds: &mut BTreeSet<String>) -
             .iter()
             .any(|marker| lowered.contains(marker));
         if secret_name {
-            // `Authorization:Bearer` carries no secret of its own; the
-            // credential is the next token. Canonical capitalization on the
-            // scheme makes that certain; `authorization:bearer` does not.
             if is_auth_scheme(value) {
                 return TokenOutcome::keep_and_arm(if is_canonical_auth_scheme(value) {
                     CredentialArm::Certain
@@ -336,12 +195,7 @@ fn redact_token(token: &str, next: Option<&str>, kinds: &mut BTreeSet<String>) -
                     CredentialArm::IfShaped
                 });
             }
-            // A bare `Authorization:` only introduces a credential when one
-            // actually follows. `authorization: needed before merge` is a
-            // sentence, and redacting `needed` would report a secret that was
-            // never there. The arming stays weak here even when a scheme word
-            // follows — the scheme token itself decides, on the next pass,
-            // whether its capitalization upgrades it.
+
             if value.is_empty() {
                 return if next
                     .is_some_and(|next| is_auth_scheme(next) || looks_like_credential_value(next))
@@ -354,18 +208,13 @@ fn redact_token(token: &str, next: Option<&str>, kinds: &mut BTreeSet<String>) -
             kinds.insert(REDACTION_SECRET.to_string());
             return TokenOutcome::replace(format!("{name}{separator}{REDACTED}"));
         }
-        // A path assigned to a variable is still a path.
+
         if let Some(kind) = classify_path(value) {
             kinds.insert(kind.to_string());
             return TokenOutcome::replace(format!("{name}{separator}{PATH_PLACEHOLDER}"));
         }
     }
 
-    // A bare `Bearer` in canonical HTTP capitalization introduces a credential
-    // on its own — that is what makes `Bearer qqq` lose `qqq`, which no shape
-    // test could ever do. Any other scheme keyword, and any other
-    // capitalization, needs something credential-shaped to actually follow:
-    // `bearer of bad news` and `Token holders vote` are prose.
     if unwrap_token(token) == SELF_EVIDENT_AUTH_SCHEME {
         return TokenOutcome::keep_and_arm(CredentialArm::Certain);
     }
@@ -373,8 +222,6 @@ fn redact_token(token: &str, next: Option<&str>, kinds: &mut BTreeSet<String>) -
         return TokenOutcome::keep_and_arm(CredentialArm::IfShaped);
     }
 
-    // Prefixes are checked on the unwrapped token and on any `NAME=value` value,
-    // so markdown wrapping (`key=`sk-…``) cannot hide a secret-shaped value.
     let lowered = unwrap_token(token).to_ascii_lowercase();
     let value_lowered = token
         .split_once(['=', ':'])
@@ -397,7 +244,6 @@ fn redact_token(token: &str, next: Option<&str>, kinds: &mut BTreeSet<String>) -
     TokenOutcome::keep()
 }
 
-/// Strip the punctuation a token picks up from surrounding prose.
 fn unwrap_token(token: &str) -> &str {
     token
         .trim_start_matches(['(', '[', '"', '\'', '<', '`', '*'])
@@ -406,8 +252,6 @@ fn unwrap_token(token: &str) -> &str {
         ])
 }
 
-/// Whether a token is an HTTP authorization scheme keyword (and nothing else),
-/// in any capitalization.
 fn is_auth_scheme(token: &str) -> bool {
     let word = unwrap_token(token);
     !word.is_empty()
@@ -417,22 +261,10 @@ fn is_auth_scheme(token: &str) -> bool {
             .any(|scheme| scheme.eq_ignore_ascii_case(word))
 }
 
-/// Whether a token is a scheme keyword spelled the way HTTP spells it —
-/// `Bearer`, not `bearer` or `BEARER`.
-///
-/// This is the evidence that separates syntax from prose. It is a weak signal
-/// read honestly: capitalization is *suggestive*, so it upgrades an arming that
-/// header context already established, and stands alone only for
-/// [`SELF_EVIDENT_AUTH_SCHEME`].
 fn is_canonical_auth_scheme(token: &str) -> bool {
     AUTH_SCHEMES.contains(&unwrap_token(token))
 }
 
-/// Whether a token has the shape of an opaque credential value.
-///
-/// Deliberately conservative: long, punctuation-free-ish, and mixing letters
-/// with digits. Ordinary words — however long — never qualify, which is what
-/// keeps `bearer of responsibility` out of the redactor.
 fn looks_like_credential_value(token: &str) -> bool {
     let value = unwrap_token(token);
     if value.chars().count() < CREDENTIAL_VALUE_MIN_LEN {
@@ -452,11 +284,6 @@ fn looks_like_credential_value(token: &str) -> bool {
     has_digit && has_alpha
 }
 
-/// Whether a token is an AWS access key id.
-///
-/// Requires the exact uppercase prefix *and* the full length, so `Asia` and
-/// `ASIA` (the continent, in prose or in a shouted heading) are left alone
-/// while `ASIA` + 16 key characters is removed.
 fn looks_like_aws_access_key(token: &str) -> bool {
     let value = unwrap_token(token);
     if value.len() < AWS_KEY_ID_LEN {
@@ -473,10 +300,6 @@ fn looks_like_aws_access_key(token: &str) -> bool {
         .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
 }
 
-/// Whether a token is an absolute or home-relative filesystem path.
-///
-/// A lone `/` or `~` is punctuation, not a path; a Windows drive letter needs
-/// its `:\` to count.
 fn looks_absolute(token: &str) -> bool {
     let trimmed = token.trim_start_matches(['(', '[', '"', '\'']);
     if trimmed.len() < 2 {
@@ -498,18 +321,6 @@ fn looks_absolute(token: &str) -> bool {
     )
 }
 
-/// Which path kind a token is, if any — the single decision both the bare-token
-/// and the `NAME=value` rules ask, so an assignment can never be classified
-/// differently from the same value standing alone.
-///
-/// Escaped spellings are resolved first: a path that arrives inside a JSON
-/// string is written `crates\/tui\/src\/main.rs` or `crates\\tui\\src\\main.rs`,
-/// and reading only the literal characters would let either spelling through
-/// while the receipt claimed nothing was removed.
-///
-/// A URL is not a filesystem path and is left to the URL-bearing-input guard
-/// that already refuses such a task, so a token carrying a scheme is declined
-/// here rather than silently reclassified.
 fn classify_path(token: &str) -> Option<&'static str> {
     let raw = trim_path_punctuation(token);
     let unescaped = unescape_path(raw);
@@ -517,10 +328,7 @@ fn classify_path(token: &str) -> Option<&'static str> {
     if candidate.contains("://") {
         return None;
     }
-    // Both spellings are asked, because unescaping is lossy in one direction
-    // that matters: a UNC share is *literally* `\\host\share`, and collapsing
-    // its leading pair would demote a machine-identifying path to a relative
-    // one.
+
     if looks_absolute(raw) || looks_absolute(candidate) {
         return Some(REDACTION_ABSOLUTE_PATH);
     }
@@ -530,8 +338,6 @@ fn classify_path(token: &str) -> Option<&'static str> {
     None
 }
 
-/// Strip the punctuation a path picks up from surrounding prose, including the
-/// escaped quotes it picks up from a JSON string.
 fn trim_path_punctuation(token: &str) -> &str {
     token
         .trim_start_matches(['(', '[', '{', '"', '\'', '<', '`'])
@@ -540,10 +346,6 @@ fn trim_path_punctuation(token: &str) -> &str {
         ])
 }
 
-/// Resolve `\/` and `\\` to the separator they escape, and drop escaped quotes.
-///
-/// Returns an owned string only because most tokens need no work; the borrowed
-/// fast path is not worth a second code path in a function this small.
 fn unescape_path(token: &str) -> String {
     let mut out = String::with_capacity(token.len());
     let mut chars = token.chars().peekable();
@@ -564,31 +366,13 @@ fn unescape_path(token: &str) -> String {
             Some('"') | Some('\'') => {
                 chars.next();
             }
-            // A lone backslash is a separator in its own right (`C:\Users`).
+
             _ => out.push('\\'),
         }
     }
     out
 }
 
-/// Whether a token is a repo-relative filesystem path, judged conservatively.
-///
-/// Two signals, and nothing else, because the cost of a false positive here is
-/// paid in the operator's own summary: a redacted word plus a `relative_path`
-/// kind on a receipt that removed prose.
-///
-/// 1. **Explicit relative syntax** — `./x`, `../x`, and their backslash forms.
-///    Nothing but a path is spelled that way.
-/// 2. **A file extension on the last segment** of a multi-segment token: stem
-///    plus 1–8 ASCII *alphabetic* characters. The alphabetic requirement is
-///    what keeps `zai/glm-5.2` a model label rather than a file, and the
-///    multi-segment requirement is what keeps every bare `provider/model` pair
-///    — `deepseek/deepseek-v4-flash`, `anthropic/claude-opus-5` — intact.
-///
-/// The deliberate gap is an extension-less directory (`crates/tui/src`), which
-/// stays. Catching it would need a rule that cannot tell a directory from
-/// `read/write/execute`, and shredding prose to hide a directory name is the
-/// worse trade.
 fn looks_relative(candidate: &str) -> bool {
     if !candidate.contains(['/', '\\']) {
         return false;
@@ -613,29 +397,15 @@ fn looks_relative(candidate: &str) -> bool {
         && extension.chars().all(|ch| ch.is_ascii_alphabetic())
 }
 
-/// Whether a string contains anything this module would redact.
-///
-/// Used by assertions and by durable-write guards that must fail loudly rather
-/// than persist a path or a key.
 #[must_use]
 #[cfg(test)]
 pub fn contains_redactable(input: &str) -> bool {
     redact_for_disclosure(input).redacted()
 }
 
-/// Redact one shell-output chunk for a durable transcript-log write.
-///
-/// Secret-bearing chunks go through [`redact_for_disclosure`]; anything else
-/// — including absolute paths and fence markup — passes through untouched so
-/// logs stay byte-faithful tool data. Returns the input borrowed when nothing
-/// secret fired (no copy on the hot path).
 #[must_use]
 pub fn redact_bytes_for_log(chunk: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     let Ok(text) = std::str::from_utf8(chunk) else {
-        // Non-UTF8 chunks used to bypass redaction entirely (one 0xFF byte
-        // laundered a secret into the durable log): lossy-scan instead.
-        // Clean binary still borrows the original below — only the lossy
-        // copy is scanned, never returned.
         let lossy = String::from_utf8_lossy(chunk);
         let redaction = redact_for_disclosure(&lossy);
         if redaction.has_secret() {
@@ -652,9 +422,6 @@ pub fn redact_bytes_for_log(chunk: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     }
 }
 
-/// Scrub one string for durable persistence: full [`redact_for_disclosure`]
-/// when it carries a secret, verbatim otherwise (see
-/// [`Redaction::has_secret`]).
 fn scrub_if_secret(s: &str) -> String {
     let redaction = redact_for_disclosure(s);
     if redaction.has_secret() {
@@ -686,15 +453,6 @@ fn redact_json_value(value: &mut serde_json::Value) {
     }
 }
 
-/// Clone a conversation message for durable session persistence.
-///
-/// Each free-text block (`Text`, `Thinking`, `ToolResult`) is scrubbed only
-/// when it carries a secret; secret-free blocks — file paths, commands,
-/// prose — persist verbatim so resumed sessions keep their fidelity.
-/// Structured `ToolUse` args round-trip through their JSON spelling the same
-/// way (falling back to the original args when the redacted form ever stops
-/// parsing, so a redactor change can never corrupt a persisted call).
-/// Image payloads and reasoning replay blobs are left alone.
 #[must_use]
 pub fn redact_message(msg: &crate::message::Message) -> crate::message::Message {
     use crate::message::ContentBlock;
@@ -722,7 +480,7 @@ pub fn redact_message(msg: &crate::message::Message) -> crate::message::Message 
             ContentBlock::StructuredInput { payload, .. } => {
                 redact_json_value(payload);
             }
-            // Fallbacks carry text (PDF text, notes) that can hold secrets.
+
             ContentBlock::Media { fallback, .. } => {
                 for b in fallback {
                     if let ContentBlock::Text { text } = b {

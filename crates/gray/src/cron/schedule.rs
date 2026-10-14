@@ -1,19 +1,9 @@
-//! Schedule expressions (pure math, no I/O).
-//!
-//! Gray-minimal kinds:
-//! `"in 10m"` / ISO `"2026-02-03T14:00:00Z"` -> Once;
-//! `"every 10m"` / bare `"10m"` -> Interval;
-//! 5-field `"0 9 * * *"` -> Cron (seconds prepended for the `cron` crate),
-//! evaluated in the host's local timezone — `0 9 * * *` means 9am here;
-//! `"daily 9am"` / `"weekdays 9:00"` / `"every monday 6pm"` compile to it.
-
 use std::str::FromStr;
 
 use chrono::{DateTime, Local, TimeZone, Utc};
 
-/// Minimum honored period: the daemon ticker runs every 60s.
 pub const MIN_INTERVAL_SECS: u64 = 60;
-/// One-shot fire grace after its time passes (claim_due retires older).
+
 pub const ONESHOT_GRACE_SECS: i64 = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -56,7 +46,6 @@ const DAYS: [&str; 7] = [
     "saturday",
 ];
 
-/// `9am`, `9:30pm`, `18:00`, `noon`, `midnight` -> (hour, minute).
 fn parse_clock(raw: &str) -> Option<(u32, u32)> {
     let t = raw.trim();
     match t {
@@ -81,7 +70,6 @@ fn parse_clock(raw: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// `monday`, `mon`, `mondays`, `mon,wed` -> cron day-of-week list.
 fn parse_days(raw: &str) -> Option<String> {
     let days = raw
         .split(',')
@@ -101,9 +89,6 @@ fn parse_days(raw: &str) -> Option<String> {
     )
 }
 
-/// Human schedules compiled to 5-field cron: `hourly`, `daily 9am`,
-/// `every day at 9:00`, `weekdays 9am`, `weekends noon`,
-/// `every monday 18:00`, `mon,wed 6:30pm`. No time means midnight.
 fn natural_cron(input: &str) -> Option<String> {
     let lower = input.to_ascii_lowercase();
     let s = lower.strip_prefix("every ").unwrap_or(&lower).trim();
@@ -173,8 +158,6 @@ pub fn parse_schedule(input: &str) -> anyhow::Result<Schedule> {
 pub fn next_run(after: i64, s: &Schedule) -> Option<i64> {
     match s {
         Schedule::Interval { secs } => {
-            // Persisted schedules can carry a bad interval; a zero/backwards
-            // one would fire on every ticker pass.
             if *secs < MIN_INTERVAL_SECS {
                 return None;
             }
@@ -186,8 +169,6 @@ pub fn next_run(after: i64, s: &Schedule) -> Option<i64> {
     }
 }
 
-/// Next fire of a 5-field cron `expr` strictly after `after`, with the
-/// fields read as wall-clock time in `tz`.
 pub(crate) fn next_cron_in<Tz: TimeZone>(after: i64, expr: &str, tz: &Tz) -> Option<i64> {
     let sched = cron::Schedule::from_str(&format!("0 {}", expr)).ok()?;
     let after_dt = tz.timestamp_opt(after, 0).single()?;

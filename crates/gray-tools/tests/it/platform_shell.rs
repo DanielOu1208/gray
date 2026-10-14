@@ -1,10 +1,3 @@
-//! Native shell release gate, run unchanged on Unix and Windows + Git Bash.
-//!
-//! Exit text alone is insufficient: the old Windows signal stub reports a
-//! timeout while leaving descendants alive. A delayed write proves whether
-//! cancellation actually stopped the tree. Fixtures expire on their own so a
-//! failing implementation cannot leave a permanent process on the CI runner.
-
 use std::time::Duration;
 
 use gray_core::agent::{Tool, ToolContext};
@@ -13,8 +6,6 @@ use serde_json::json;
 
 #[tokio::test]
 async fn shell_preserves_command_cwd_and_nonzero_exit() {
-    // Deliberately exercise a native cwd containing spaces and Unicode. Pass
-    // cwd through the process API, not shell interpolation or slash rewriting.
     let dir = tempfile::Builder::new()
         .prefix("gray shell café ")
         .tempdir()
@@ -60,8 +51,7 @@ async fn stopped_tree_cannot_write_later(cancel: bool) {
         tool.execute(
             &ctx,
             json!({
-                // Parent waits for a background subshell and its sleep child.
-                // Killing only the top-level shell must fail this regression.
+
                 "command": "printf 'ready\\n'; (sleep 4; printf escaped > escaped.txt) & wait",
                 "timeout": if cancel { 10 } else { 1 }
             }),
@@ -83,8 +73,6 @@ async fn stopped_tree_cannot_write_later(cancel: bool) {
         out.content
     );
     if !cancel {
-        // A timeout never kills: the model stops the job with the command
-        // the notice advertises (`kill -- -<pgid>`, `taskkill /T` on Windows).
         let stop = out
             .content
             .split("Stop: `")
@@ -99,8 +87,7 @@ async fn stopped_tree_cannot_write_later(cancel: bool) {
             stopped.content
         );
     }
-    // Observe the side effect after the fixture's deadline even if the tool
-    // returned quickly. Otherwise a root-only kill could look successful.
+
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert!(
         !dir.path().join("escaped.txt").exists(),

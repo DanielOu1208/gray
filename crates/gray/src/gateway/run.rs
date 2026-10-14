@@ -1,12 +1,3 @@
-//! `gray gateway run`: the foreground daemon the supervisor executes.
-//!
-//! Three things run here: the control socket, the brain (events → turns →
-//! outbox; see `brain.rs`), and the 60s cron ticker on
-//! its own thread. Shutdown is deliberate (hermes drain doctrine): a stop
-//! signal interrupts turns in flight (their admission records resume them
-//! on the next start), gives an in-flight cron fire a bounded drain window,
-//! closes the socket, releases the pid claim, and records why we stopped.
-
 use std::time::Duration;
 
 use crate::config::Config;
@@ -14,21 +5,15 @@ use crate::config::Config;
 use crate::gateway::socket;
 use crate::gateway::{pid, state};
 
-/// How long an in-flight cron fire may keep running after a stop signal.
-/// Bounded: the claim TTL (300s) releases whatever we abandon.
 const DRAIN_SECS: u64 = 65;
 
-/// The ticker heartbeat kind every surface reports (`cron list`, `/cron`).
 const TICK_KIND: &str = "gateway";
 
 pub async fn run_foreground(config: &Config) -> anyhow::Result<()> {
     let home = crate::setup::gray_home()?;
     let record = pid::claim(&home)?;
     let started_at = record.started_at;
-    // Post-mortem observability only: chain (never replace) the `main.rs`
-    // hook, and best-effort record the panic so `gateway status` stops
-    // reporting a stale `running` after a crash. Writes via the same atomic
-    // state path as the normal stop record.
+
     let panic_home = home.clone();
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -47,8 +32,7 @@ pub async fn run_foreground(config: &Config) -> anyhow::Result<()> {
         record.pid,
         home.display()
     );
-    // The same restart record chat adapters keep: a run that never said
-    // goodbye is logged as a crash, not as a quiet start.
+
     let lifecycle_dir = home.join("gateway");
     match crate::gateway::lifecycle::boot(&lifecycle_dir) {
         crate::gateway::lifecycle::Previous::Crashed => {
@@ -61,10 +45,6 @@ pub async fn run_foreground(config: &Config) -> anyhow::Result<()> {
         &state::record(state::STATE_STARTING, None, started_at),
     );
 
-    // Socket first (after the claim, hermes order): liveness answers before
-    // the first tick, and a bind failure is loud but non-fatal.
-    // Unix-only: on Windows there is no control socket — pid + state files
-    // still answer `gateway status`.
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     #[cfg(unix)]
     let socket_task = {
@@ -87,9 +67,6 @@ pub async fn run_foreground(config: &Config) -> anyhow::Result<()> {
         &state::record(state::STATE_RUNNING, None, started_at),
     );
 
-    // Cron runs on its own thread (its agent future is not `Send`), so a
-    // ten-minute job no longer freezes the event loop or the
-    // socket. It drains on the same stop signal.
     let (cron_stop_tx, cron_stop_rx) = tokio::sync::watch::channel(false);
     let cron_thread = {
         let (config, home) = (config.clone(), home.clone());
@@ -98,7 +75,6 @@ pub async fn run_foreground(config: &Config) -> anyhow::Result<()> {
             .spawn(move || cron_thread(config, home, cron_stop_rx))?
     };
 
-    // The brain: events → lanes → child turns → outbox.
     let gray_bin = crate::exe_watch::on_disk_exe().unwrap_or_else(|_| "gray".into());
     let runner = std::sync::Arc::new(crate::gateway::turn::ChildRunner {
         gray_bin,
@@ -144,12 +120,11 @@ pub async fn run_foreground(config: &Config) -> anyhow::Result<()> {
             }
         }
     }
-    // Turns that already finished are delivered, not re-run next boot.
+
     while let Ok(finished) = done.try_recv() {
         brain.finish(finished);
     }
-    // Turns in flight are interrupted, not waited for (they can run for
-    // half an hour); their admission records resume them on next start.
+
     brain.abort_all();
     let _ = cron_stop_tx.send(true);
     let _ = tokio::task::spawn_blocking(move || {
@@ -173,8 +148,6 @@ pub async fn run_foreground(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Seconds between brain polls (trigger files, waiting
-/// events written by other processes). Socket requests nudge it at once.
 const POLL_SECS: u64 = 2;
 
 async fn auto_update_pass(bare: bool) {
@@ -186,8 +159,6 @@ async fn auto_update_pass(bare: bool) {
     }
 }
 
-/// The 60s cron ticker, on its own current-thread runtime. A stop request
-/// lets an in-flight fire drain (bounded) before the thread ends.
 fn cron_thread(
     config: Config,
     home: std::path::PathBuf,
@@ -216,8 +187,7 @@ fn cron_thread(
             follow_switches: true,
         };
         let deliver = crate::cron_serve::SaveLocalDeliver { home: home.clone() };
-        // Aligned to wall-clock :00 so recurring schedules fire on minute
-        // boundaries instead of drifting.
+
         let first = tokio::time::Instant::now()
             + Duration::from_secs(60 - (crate::cron::now_secs() as u64 % 60));
         let mut interval = tokio::time::interval_at(first, Duration::from_secs(60));
@@ -244,8 +214,6 @@ fn cron_thread(
     });
 }
 
-/// Portable stop signal: SIGTERM/SIGINT on unix, Ctrl-C on Windows.
-/// Yields a static reason string so the state file says why we stopped.
 #[cfg(unix)]
 fn stop_signal() -> tokio::sync::mpsc::UnboundedReceiver<&'static str> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -262,8 +230,6 @@ fn stop_signal() -> tokio::sync::mpsc::UnboundedReceiver<&'static str> {
     rx
 }
 
-/// Portable stop signal: SIGTERM/SIGINT on unix, Ctrl-C on Windows.
-/// Yields a static reason string so the state file says why we stopped.
 #[cfg(not(unix))]
 fn stop_signal() -> tokio::sync::mpsc::UnboundedReceiver<&'static str> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -274,7 +240,6 @@ fn stop_signal() -> tokio::sync::mpsc::UnboundedReceiver<&'static str> {
     rx
 }
 
-/// Bounded drain for an in-flight fire (see module docs).
 async fn drain<F: std::future::Future<Output = anyhow::Result<crate::cron_serve::TickReport>>>(
     tick: std::pin::Pin<&mut F>,
 ) {

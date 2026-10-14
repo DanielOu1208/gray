@@ -10,18 +10,17 @@ fn semver_compare() {
 
 #[test]
 fn semver_prereleases_order_by_full_precedence() {
-    // Same triple: identifiers order numerically, not lexically.
     assert!(is_newer("1.0.0-alpha.2", "1.0.0-alpha.1"));
     assert!(!is_newer("1.0.0-alpha.1", "1.0.0-alpha.2"));
     assert!(is_newer("1.0.0-alpha.10", "1.0.0-alpha.9"));
-    // Numeric identifiers sort below alphanumeric ones.
+
     assert!(is_newer("1.0.0-alpha.beta", "1.0.0-alpha.1"));
-    // Fewer fields sort lower.
+
     assert!(is_newer("1.0.0-alpha.1.1", "1.0.0-alpha.1"));
-    // A release outranks every one of its prereleases.
+
     assert!(is_newer("1.0.0", "1.0.0-beta.1"));
     assert!(!is_newer("1.0.0-beta.1", "1.0.0"));
-    // Build metadata is ignored entirely.
+
     assert!(!is_newer("1.2.3+build.1", "1.2.3"));
     assert!(is_newer("1.2.4+build.1", "1.2.3+build.9"));
 }
@@ -55,7 +54,7 @@ fn check_due_logic() {
     assert!(update_check_due(None, 1_000_000));
     assert!(!update_check_due(Some(1_000_000), 1_000_000 + 3600));
     assert!(update_check_due(Some(1_000_000), 1_000_000 + 24 * 3600));
-    assert!(update_check_due(Some(2_000_000), 1_000_000)); // clock skew never blocks
+    assert!(update_check_due(Some(2_000_000), 1_000_000));
 }
 
 #[test]
@@ -92,8 +91,7 @@ fn update_lock_release_is_not_delayed_by_an_inherited_descriptor() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("update.lock");
     let guard = acquire_update_lock_at(&path).unwrap();
-    // A concurrent fork can retain this descriptor until its exec/exit. Model
-    // that lifetime deterministically rather than depending on spawn timing.
+
     let inherited = guard.0.try_clone().unwrap();
     let probe = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
     assert!(probe.try_lock().is_err());
@@ -128,8 +126,7 @@ fn shadow_warning_stays_quiet_when_path_resolves_the_updated_build() {
 #[test]
 fn shadow_warning_reports_any_differing_path_without_running_it() {
     let installed = Path::new("/home/u/.local/bin/gray");
-    // The candidate is never executed, so its version is unknown and every
-    // differing path is reported rather than silently cleared.
+
     for other in ["/opt/gray", "/home/u/.cargo/bin/gray"] {
         let w = shadow_warning(installed, "0.1.1", Path::new(other))
             .expect("a differing path must be reported");
@@ -161,7 +158,6 @@ fn first_gray_in_prefers_the_earliest_path_entry() {
     assert_eq!(first_gray_in(&[dir.path().join("nowhere")]), None);
 }
 
-/// A runnable stub, which on Unix means the executable bit.
 fn write_launcher(path: &Path) {
     std::fs::write(path, b"stub").unwrap();
     #[cfg(unix)]
@@ -179,7 +175,7 @@ fn first_gray_in_skips_a_gray_the_shell_could_not_run() {
     let real = dir.path().join("real");
     std::fs::create_dir_all(&data).unwrap();
     std::fs::create_dir_all(&real).unwrap();
-    // A plain data file named `gray` cannot shadow anything.
+
     std::fs::write(data.join("gray"), b"not a program").unwrap();
     write_launcher(&real.join("gray"));
 
@@ -192,7 +188,7 @@ fn first_gray_in_skips_a_gray_the_shell_could_not_run() {
 }
 
 #[test]
-#[cfg(windows)] // the launcher is gray.exe there, not gray
+#[cfg(windows)]
 fn first_gray_in_finds_gray_exe() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("gray.exe"), b"stub").unwrap();
@@ -205,7 +201,7 @@ fn first_gray_in_finds_gray_exe() {
 }
 
 #[test]
-#[cfg(unix)] // symlink farms are the Unix case; Windows needs privileges for this
+#[cfg(unix)]
 fn same_binary_sees_symlinked_install_dirs() {
     let dir = tempfile::tempdir().unwrap();
     let real = dir.path().join("real");
@@ -222,8 +218,6 @@ fn same_binary_sees_symlinked_install_dirs() {
     ));
 }
 
-/// Serializes the env-mutating shadow tests below (same pattern as the
-/// compact switch tests).
 static SHADOW_ENV_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn write_fake_gray(path: &Path, version: &str) {
@@ -235,7 +229,6 @@ fn write_fake_gray(path: &Path, version: &str) {
     }
 }
 
-/// Runs `body` with `GRAY_INSTALL_DIR`/`HOME`/`PATH` replaced, then restores.
 fn with_update_env(vars: &[(&str, Option<&Path>)], body: impl FnOnce()) {
     let _serial = SHADOW_ENV_SERIAL.lock().unwrap();
     let saved: Vec<(String, Option<std::ffi::OsString>)> = vars
@@ -258,7 +251,7 @@ fn with_update_env(vars: &[(&str, Option<&Path>)], body: impl FnOnce()) {
 }
 
 #[test]
-#[cfg(unix)] // spawns `#!/bin/sh` fakes; Windows cannot execute them
+#[cfg(unix)]
 fn shadow_guard_catches_a_stale_copy_that_wins_path() {
     let dir = tempfile::tempdir().unwrap();
     let fresh = dir.path().join("fresh");
@@ -278,8 +271,7 @@ fn shadow_guard_catches_a_stale_copy_that_wins_path() {
         ],
         || {
             let w = post_update_shadow_warning().expect("stale gray first on PATH must warn");
-            // The installed build's version is read from the installer's own
-            // file; the candidate's never is, because it is never executed.
+
             assert!(w.contains("0.1.1"), "{w}");
             assert!(!w.contains("0.1.0"), "{w}");
             assert!(w.contains(&*stale.join("gray").to_string_lossy()), "{w}");
@@ -301,10 +293,8 @@ fn shadow_guard_catches_a_stale_copy_that_wins_path() {
 }
 
 #[test]
-#[cfg(unix)] // asserts dist/install.sh's default; spawns `#!/bin/sh` fakes
+#[cfg(unix)]
 fn shadow_guard_uses_the_default_local_bin_destination() {
-    // A root process installs to /usr/local/bin and never consults HOME, so
-    // the default this test pins exists only on a non-root runner.
     #[cfg(unix)]
     if unsafe { libc::geteuid() } == 0 {
         return;
@@ -336,7 +326,7 @@ fn shadow_guard_uses_the_default_local_bin_destination() {
 }
 
 #[test]
-#[cfg(windows)] // asserts dist/install-native.ps1's default; spawn-free
+#[cfg(windows)]
 fn shadow_guard_uses_the_windows_default_destination() {
     let dir = tempfile::tempdir().unwrap();
     let local = dir.path().join("AppData").join("Local");
@@ -377,15 +367,14 @@ fn divergence_warning_ignores_the_binary_already_running() {
 #[test]
 fn divergence_warning_reports_an_older_candidate_too() {
     let current = Path::new("/home/u/.cargo/bin/gray");
-    // The candidate is never executed, so "older" cannot be established and
-    // the differing path is reported either way.
+
     let w = divergence_warning(current, "0.1.1", Path::new("/opt/gray"))
         .expect("a differing path must be reported");
     assert!(w.contains("/opt/gray"), "{w}");
 }
 
 #[test]
-#[cfg(unix)] // spawns `#!/bin/sh` fakes; Windows cannot execute them
+#[cfg(unix)]
 fn divergence_guard_fires_when_a_different_gray_wins_path() {
     let dir = tempfile::tempdir().unwrap();
     let first = dir.path().join("first");
@@ -396,14 +385,12 @@ fn divergence_guard_fires_when_a_different_gray_wins_path() {
     with_update_env(&[("PATH", Some(path.as_os_str().as_ref()))], || {
         let w = path_divergence_warning().expect("a different gray first on PATH must warn");
         assert!(w.contains(&*first.join("gray").to_string_lossy()), "{w}");
-        // Path-only: the candidate's version is never read, so it cannot appear.
+
         assert!(!w.contains("9.9.9"), "{w}");
         assert!(w.contains("relaunch `gray`"), "{w}");
     });
 }
 
-/// The security contract: a PATH-resolved candidate is untrusted search-path
-/// output. Both guards must report it by path and never run it (CWE-426).
 #[test]
 #[cfg(unix)]
 fn path_guards_never_execute_the_path_candidate() {
@@ -447,12 +434,8 @@ fn path_guards_never_execute_the_path_candidate() {
     );
 }
 
-/// A pin mismatch must leave nothing behind in the shared temp dir. The old
-/// path built `gray-installer-<pid>` with `create_dir_all` and removed it
-/// only on success, so every refused run kept the downloaded script around
-/// (in a directory another local user could pre-create and watch).
 #[test]
-#[cfg(unix)] // drives `sh -c curl`; native Windows refuses self-update earlier
+#[cfg(unix)]
 fn a_pin_mismatch_leaves_no_scratch_dir() {
     use std::fs;
     let scratch = tempfile::tempdir().unwrap();
@@ -465,8 +448,6 @@ fn a_pin_mismatch_leaves_no_scratch_dir() {
         .expect_err("a wrong pin must refuse to run the script");
     assert!(format!("{err}").contains("checksum mismatch"), "{err}");
 
-    // Other tests' tempdirs live here too, so ask the real question: did
-    // *our* scratch directory survive?
     let leftovers: Vec<_> = fs::read_dir(&temp_root)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())

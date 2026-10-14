@@ -72,10 +72,6 @@ fn empty_input_is_usage_not_silent_default() {
     assert!(err.contains("/model"), "{err}");
 }
 
-// ── the modal paints before the network answers ──
-
-/// A `/models` endpoint that answers with two models, served on a real
-/// port so the fetch path is exercised end to end.
 fn mock_models_server(body: &'static str) -> u16 {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -100,8 +96,6 @@ fn mock_models_server(body: &'static str) -> u16 {
 
 #[test]
 fn the_live_fetch_works_from_a_thread_with_no_runtime() {
-    // The refresher thread has no ambient runtime: before this split the
-    // call returned an empty list there and the modal never filled in.
     let body = r#"{"data":[{"id":"m-one","name":"Model One"},{"id":"m-two","name":"Model Two"}]}"#;
     let port = mock_models_server(body);
     let base = format!("http://127.0.0.1:{port}/v1");
@@ -120,8 +114,6 @@ fn the_live_fetch_works_from_a_thread_with_no_runtime() {
 
 #[test]
 fn saved_models_need_no_network() {
-    // Whatever the saved config holds, this must not fail or block: it is
-    // what the first frame is drawn from.
     let _ = super::saved_models_for("http://127.0.0.1:1/v1", "http://127.0.0.1:1/v1");
 }
 
@@ -137,10 +129,7 @@ fn a_live_list_merges_into_the_saved_ordering() {
     assert!(ids.contains(&"zeta/1") && ids.contains(&"alpha/1"));
 }
 
-// ── recent/all divider ──
-
 fn sorted_models() -> Vec<(String, String)> {
-    // What `sort_models` yields: current first, then recents, then the rest.
     vec![
         ("cur/m".to_string(), "Current".to_string()),
         ("a/1".to_string(), "A".to_string()),
@@ -177,7 +166,6 @@ fn recent_prefix_stops_at_the_first_unknown() {
 
 #[test]
 fn head_first_lifts_the_head_and_keeps_the_tail_order() {
-    // UNRUN (cargo test banned under X — verified via check + clippy only).
     let models = sorted_models();
     let refs: Vec<&(String, String)> = models.iter().collect();
     let head = vec!["c/3".to_string(), "a/1".to_string()];
@@ -218,8 +206,6 @@ use super::split_effort_variant;
 
 #[test]
 fn collapsed_variant_splits_to_base_and_tier() {
-    // The picker collapses swe-2-{high,medium,max} into one `swe-2` row;
-    // a stale or hand-typed variant id resolves to the row + its tier.
     let rows = vec![
         ("swe-2".to_string(), "SWE-2".to_string()),
         ("swe-1-7".to_string(), "SWE-1.7".to_string()),
@@ -236,7 +222,6 @@ fn collapsed_variant_splits_to_base_and_tier() {
 
 #[test]
 fn declared_row_never_splits() {
-    // `qwen3-max` listed as its own model is not a tier of `qwen3`.
     let rows = vec![
         ("qwen3".to_string(), "Qwen 3".to_string()),
         ("qwen3-max".to_string(), "Qwen 3 Max".to_string()),
@@ -257,8 +242,6 @@ use super::{compose_fast_model, decompose_model_variant};
 
 #[test]
 fn fast_variant_decomposes_to_base_tier_fast() {
-    // The devin-sub catalog serves speed baked into the id:
-    // claude rows use `-fast`, gpt rows `-priority`.
     let rows = vec![
         ("claude-opus-5-5".to_string(), "Opus 5.5".to_string()),
         (
@@ -292,17 +275,17 @@ fn fast_variant_without_tier_and_tier_without_fast() {
         ("swe-1-6-fast".to_string(), "SWE-1.6 Fast".to_string()),
         ("swe-2".to_string(), "SWE-2".to_string()),
     ];
-    // No effort stem: fast flag alone.
+
     assert_eq!(
         decompose_model_variant("swe-1-6-fast", &rows),
         Some(("swe-1-6".to_string(), None, true))
     );
-    // Effort stem alone (the stale/hand-typed path).
+
     assert_eq!(
         decompose_model_variant("swe-2-max", &rows),
         Some(("swe-2".to_string(), Some("max".to_string()), false))
     );
-    // Plain rows and unknown ids don't decompose.
+
     assert_eq!(decompose_model_variant("swe-2", &rows), None);
     assert_eq!(decompose_model_variant("swe-9-max-fast", &rows), None);
 }
@@ -314,7 +297,7 @@ fn fast_suffix_case_insensitive_and_unresolvable_stem() {
         decompose_model_variant("GLM-5-2-Fast", &rows),
         Some(("glm-5-2".to_string(), None, true))
     );
-    // `-fast` in the product name with no resolvable base is not a variant.
+
     let rows = vec![("some-fast-model".to_string(), "X".to_string())];
     assert_eq!(decompose_model_variant("some-fast-model", &rows), None);
 }
@@ -352,7 +335,7 @@ fn compose_fast_model_picks_catalog_spelling() {
         compose_fast_model("claude-opus-5-5", Some("medium"), &rows).as_deref(),
         Some("claude-opus-5-5-medium-fast")
     );
-    // Effort "off" maps to the catalog's `-none-` product spelling.
+
     assert_eq!(
         compose_fast_model("gpt-6-sol", Some("off"), &rows).as_deref(),
         Some("gpt-6-sol-none-priority")
@@ -361,22 +344,20 @@ fn compose_fast_model_picks_catalog_spelling() {
         compose_fast_model("gpt-6-sol", Some("high"), &rows).as_deref(),
         Some("gpt-6-sol-high-priority")
     );
-    // Effort-free fast row.
+
     assert_eq!(
         compose_fast_model("swe-1-6", Some("high"), &rows).as_deref(),
         Some("swe-1-6-fast")
     );
-    // No fast sibling → None (caller sends the base id).
+
     assert_eq!(compose_fast_model("swe-2", Some("high"), &rows), None);
     assert_eq!(compose_fast_model("swe-2", Some("max"), &rows), None);
-    // An id already carrying the suffix never re-composes.
+
     assert_eq!(
         compose_fast_model("swe-1-6-fast", Some("high"), &rows),
         None
     );
 }
-
-// ── per-row effort (←/→ in the picker) ──
 
 use super::{RowEfforts, commit_row_effort, initial_row_effort};
 use crate::config::Config;
@@ -411,8 +392,6 @@ fn effort_config(model: &str, effort: Option<&str>) -> Config {
     }
 }
 
-/// The step family always reasons at low/medium/high/max — a fixed,
-/// cache-independent level list to step through.
 const STEP_MODEL: &str = "step-3";
 
 #[test]
@@ -420,7 +399,7 @@ fn arrows_step_within_supported_levels_and_clamp_at_the_ends() {
     let config = effort_config("other/live-model", Some("low"));
     let saved = SavedConfig::default();
     let mut efforts = RowEfforts::default();
-    // Not the live model, nothing remembered: the `high` default.
+
     assert_eq!(efforts.shown(&config, &saved, STEP_MODEL), Some("high"));
     assert!(!efforts.was_stepped(STEP_MODEL));
     efforts.step(&config, &saved, STEP_MODEL, true);
@@ -440,7 +419,7 @@ fn arrows_step_within_supported_levels_and_clamp_at_the_ends() {
         "← clamps at the bottom; `off` is not a step-family level"
     );
     assert!(efforts.was_stepped(STEP_MODEL));
-    // Stepping one row never touches another.
+
     assert!(!efforts.was_stepped("other/live-model"));
 }
 
@@ -462,16 +441,16 @@ fn a_model_without_reasoning_shows_no_effort_and_ignores_arrows() {
 fn rows_open_at_the_remembered_effort_and_the_live_level() {
     let mut saved = SavedConfig::default();
     saved.remember_effort(&effort_memory_key("", PICKER_BASE, STEP_MODEL), "medium");
-    // Another model is live: the row shows this model's own memory.
+
     let config = effort_config("other/live-model", Some("max"));
     assert_eq!(
         initial_row_effort(&config, &saved, STEP_MODEL),
         Some("medium")
     );
-    // The live model's row shows what it actually runs at.
+
     let config = effort_config(STEP_MODEL, Some("low"));
     assert_eq!(initial_row_effort(&config, &saved, STEP_MODEL), Some("low"));
-    // An unsupported remembered level clamps to what the model accepts.
+
     let mut saved = SavedConfig::default();
     saved.remember_effort(&effort_memory_key("", PICKER_BASE, STEP_MODEL), "xhigh");
     let config = effort_config("other/live-model", None);
@@ -480,7 +459,6 @@ fn rows_open_at_the_remembered_effort_and_the_live_level() {
 
 #[test]
 fn enter_commits_model_and_row_effort_together() {
-    // Enter already set `config.model` to the picked row.
     let mut config = effort_config(STEP_MODEL, Some("high"));
     let mut saved = SavedConfig::default();
     commit_row_effort(&mut config, &mut saved, Some("low"), true);
@@ -518,8 +496,6 @@ fn fit_chars_marks_a_cut() {
     assert_eq!(super::fit_chars("Claude Opus", 7), "Claude…");
     assert_eq!(super::fit_chars("abc", 0), "");
 }
-
-// ── picker rendering helpers ──
 
 use super::{
     METER_W, PickerKey, PickerToggles, effort_label, list_window, meter_fill, per_million,
@@ -562,19 +538,18 @@ fn effort_labels_read_as_words() {
 
 #[test]
 fn the_list_window_keeps_the_selection_in_view_and_hints_hidden_rows() {
-    // Everything fits: no hints, no scroll.
     assert_eq!(list_window(5, 4, 0, 8), (0, 5));
-    // At the top: rows below hide behind one hint slot.
+
     assert_eq!(list_window(20, 0, 0, 8), (0, 7));
-    // Moving past the window scrolls; both hints take a slot.
+
     let (top, shown) = list_window(20, 10, 0, 8);
     assert!(top > 0 && top <= 10 && 10 < top + shown, "{top} {shown}");
     assert_eq!(shown, 6, "a hint above and below");
-    // At the bottom: the tail fills, only the above hint remains.
+
     assert_eq!(list_window(20, 19, 0, 8), (13, 7));
-    // A stale scroll past the end snaps back so the slots stay full.
+
     assert_eq!(list_window(20, 19, 18, 8), (13, 7));
-    // Too short for hints: plain scrolling.
+
     assert_eq!(list_window(20, 19, 0, 2), (18, 2));
 }
 
@@ -589,7 +564,6 @@ fn prices_read_per_million_tokens() {
 
 #[test]
 fn the_price_level_is_absolute_bands_on_blended_per_million() {
-    // Free/flashy models sit at the bottom whatever else is listed.
     assert_eq!(price_level(0.0), 1, "free");
     assert_eq!(price_level(0.20), 1, "sub-$0.50");
     assert_eq!(price_level(0.60), 2);
@@ -597,7 +571,7 @@ fn the_price_level_is_absolute_bands_on_blended_per_million() {
     assert_eq!(price_level(18.0), 4, "Kimi K3 territory");
     assert_eq!(price_level(30.0), 5, "frontier");
     assert_eq!(price_level(60.0), 5, "priciest known");
-    // Band edges belong to the lower level.
+
     assert_eq!(price_level(0.5), 1);
     assert_eq!(price_level(20.0), 4);
 }
@@ -668,7 +642,7 @@ fn toggles_stay_pending_and_commit_only_what_changed() {
     assert_eq!(saved.fast_mode, Some(true));
     assert_eq!(config.show_reasoning, Some(false));
     assert_eq!(saved.show_reasoning, Some(false));
-    // Toggled twice is untouched: nothing is written.
+
     let mut toggles = PickerToggles::from_config(&config);
     toggles.toggle_reasoning();
     toggles.toggle_reasoning();
@@ -678,24 +652,21 @@ fn toggles_stay_pending_and_commit_only_what_changed() {
     assert_eq!(saved.fast_mode, None);
 }
 
-// ── structured variants + composite dropdowns ──
-
 use super::{DropState, PickLevel, enter_level, esc_level, open_option, option_parts, step_option};
 use crate::setup::variants::{Parts, RowShape, cache_row_shape, row_shape};
 
 #[test]
 fn enter_walks_a_composites_slots_and_esc_backs_out() {
-    // Plain row: Enter applies from the list; Esc there cancels.
     assert_eq!(enter_level(PickLevel::List, 0), (PickLevel::List, true));
     assert_eq!(esc_level(PickLevel::List), None);
-    // Fusion: list → lead → sidekick → apply.
+
     assert_eq!(enter_level(PickLevel::List, 2), (PickLevel::Slot(0), false));
     assert_eq!(
         enter_level(PickLevel::Slot(0), 2),
         (PickLevel::Slot(1), false)
     );
     assert_eq!(enter_level(PickLevel::Slot(1), 2), (PickLevel::List, true));
-    // Esc: sidekick → lead → list.
+
     assert_eq!(esc_level(PickLevel::Slot(1)), Some(PickLevel::Slot(0)));
     assert_eq!(esc_level(PickLevel::Slot(0)), Some(PickLevel::List));
 }
@@ -729,7 +700,6 @@ fn fusion_shape() -> RowShape {
                 lead_sidekick("opus", "a"),
             ),
             var("f-opus-b-high", "high", false, lead_sidekick("opus", "b")),
-            // `c` only pairs with sonnet.
             var("f-sonnet-c-low", "low", false, lead_sidekick("sonnet", "c")),
         ],
         slots: vec![
@@ -760,15 +730,14 @@ fn sidekicks_without_a_variant_for_the_lead_are_unservable_and_skipped() {
         None,
         "c never pairs with opus"
     );
-    // ↓ from `b` cannot land on `c`: stays put.
+
     assert_eq!(step_option(&shape, &cur, 1, 1, true), 1);
-    // Switching the lead keeps a servable sidekick, else takes the first
-    // one that pairs with the new lead.
+
     assert_eq!(
         option_parts(&shape, &cur, 0, "sonnet"),
         Some(lead_sidekick("sonnet", "c"))
     );
-    // The dropdown opens on the current pick.
+
     assert_eq!(open_option(&shape, &cur, 0), 0);
     assert_eq!(open_option(&shape, &lead_sidekick("sonnet", "c"), 1), 2);
 }
@@ -783,25 +752,25 @@ fn variant_rows_take_their_knobs_from_the_catalog() {
     config.model_parts = lead_sidekick("opus", "a");
     let saved = SavedConfig::default();
     let mut efforts = RowEfforts::default();
-    // Standard serving: opus+a offers high and max.
+
     assert_eq!(efforts.shown(&config, &saved, id), Some("high"));
     efforts.step(&config, &saved, id, true);
     assert_eq!(efforts.shown(&config, &saved, id), Some("max"));
-    // Fast: only high exists, so the shown level clamps into it.
+
     efforts.fast = true;
     assert_eq!(efforts.shown(&config, &saved, id), Some("high"));
-    // opus+b has a single level: no effort knob at all.
+
     efforts.fast = false;
     efforts.parts.insert(id.into(), lead_sidekick("opus", "b"));
     assert_eq!(efforts.shown(&config, &saved, id), None);
-    // Each lead keeps its own stepped level.
+
     let drop = DropState {
         row: id.into(),
         slot: 0,
         sel: 0,
     };
     assert_eq!(drop.slot, 0);
-    // The wire id resolves with the composite's parts, fast falling back.
+
     let resolved = crate::setup::variants::resolve_variant(
         &shape.variants,
         Some("max"),
@@ -813,14 +782,12 @@ fn variant_rows_take_their_knobs_from_the_catalog() {
     assert!(row_shape(id).is_none());
 }
 
-// ── composite rows lead; the blank gap is drawn, never stored ──
-
 #[test]
 fn composite_rows_lead_and_the_plain_rows_keep_their_order() {
     let (lead, other) = ("picker-test/lead-fusion", "picker-test/other-fusion");
     cache_row_shape(lead, Vec::new(), fusion_shape().slots);
     cache_row_shape(other, Vec::new(), fusion_shape().slots);
-    let list = vec![
+    let list = [
         ("a/1".to_string(), "A".to_string()),
         (lead.to_string(), "Fusion".to_string()),
         ("b/2".to_string(), "B".to_string()),
@@ -837,7 +804,7 @@ fn composite_rows_lead_and_the_plain_rows_keep_their_order() {
         [lead, other, "a/1", "b/2", "c/3"],
         "composites first, each group in order"
     );
-    // No composite anywhere: the order is untouched.
+
     let plain = sorted_models();
     let refs: Vec<&(String, String)> = plain.iter().collect();
     let ids: Vec<&str> = super::composites_first(&refs)
@@ -847,6 +814,36 @@ fn composite_rows_lead_and_the_plain_rows_keep_their_order() {
     assert_eq!(ids, ["cur/m", "a/1", "b/2", "c/3"]);
     cache_row_shape(lead, Vec::new(), Vec::new());
     cache_row_shape(other, Vec::new(), Vec::new());
+}
+
+#[test]
+fn a_composite_leads_the_sorted_list_above_the_active_model() {
+    let fusion = "picker-test/fusion-lead";
+    let shape = fusion_shape();
+    cache_row_shape(fusion, shape.variants, shape.slots);
+    let list = || {
+        vec![
+            ("a/sonnet".to_string(), "Sonnet".to_string()),
+            (fusion.to_string(), "Fusion".to_string()),
+            ("a/opus".to_string(), "Opus".to_string()),
+        ]
+    };
+    let recent: SavedConfig = serde_json::from_value(serde_json::json!({
+        "base_url": "https://a/v1", "model": "a/opus",
+        "recent_models": {"https://a/v1": ["a/opus", fusion]}
+    }))
+    .unwrap();
+    let bare: SavedConfig = serde_json::from_value(serde_json::json!({
+        "base_url": "https://a/v1", "model": "a/opus"
+    }))
+    .unwrap();
+    for saved in [&recent, &bare] {
+        let mut models = list();
+        saved.sort_models("https://a/v1", &mut models);
+        let ids: Vec<&str> = models.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, [fusion, "a/opus", "a/sonnet"], "{ids:?}");
+    }
+    cache_row_shape(fusion, Vec::new(), Vec::new());
 }
 
 #[test]
@@ -861,7 +858,7 @@ fn the_blank_gap_takes_a_slot_and_never_a_row() {
             assert_eq!(super::row_at(g, gap), None, "the gap's slot holds no row");
         }
     }
-    // Five rows with a gap above row 1 are drawn in six slots.
+
     assert_eq!(super::slot_of(0, Some(1)), 0);
     assert_eq!(super::slot_of(1, Some(1)), 2);
     assert_eq!(super::rows_before(2, Some(1)), 1);
@@ -883,10 +880,6 @@ fn the_window_keeps_the_selection_in_view_with_the_gap_counted() {
     }
 }
 
-/// Paints the picker for `list` laid out as the loop lays it out: composites
-/// first, an open dropdown's options under its row, the gap above the first
-/// plain row. `sel` is the highlighted data row (an option while one is open).
-/// Returns the screen rows and the scroll position the draw left behind.
 fn painted_picker(
     list: &[(String, String)],
     drop: Option<&super::DropState>,
@@ -988,8 +981,7 @@ fn an_open_dropdown_sits_under_its_composite_with_the_gap_below_it() {
         slot: 0,
         sel: 0,
     };
-    // The first option is highlighted: the composite is data row 0, so the
-    // option is visual row 1.
+
     let (screen, _) = painted_picker(&list, Some(&drop), 1, 0);
     let fusion_at = screen
         .iter()
@@ -1001,7 +993,7 @@ fn an_open_dropdown_sits_under_its_composite_with_the_gap_below_it() {
         screen[fusion_at + 3].trim().is_empty(),
         "the gap sits below the options, not under the composite: {screen:?}"
     );
-    // The two plain rows scroll below the gap and are still counted.
+
     assert!(
         screen.iter().any(|r| r.contains("2 more below")),
         "{screen:?}"
@@ -1030,11 +1022,11 @@ fn the_gap_counts_toward_the_scroll_window() {
     cache_row_shape(fusion, shape.variants, shape.slots);
     let mut list = vec![(fusion.to_string(), "Fusion".to_string())];
     list.extend((0..30).map(|i| (format!("m/{i:02}"), format!("Model {i:02}"))));
-    // The last plain row is the last data row: it must be reachable.
+
     let (screen, scrolled) = painted_picker(&list, None, 30, 0);
     assert!(scrolled > 0, "the list scrolled to reach the last row");
     assert!(screen.iter().any(|r| r.contains("Model 29")), "{screen:?}");
-    // Back at the top, the composite is in view again.
+
     let (screen, _) = painted_picker(&list, None, 0, scrolled);
     assert!(screen.iter().any(|r| r.contains("Fusion")), "{screen:?}");
     cache_row_shape(fusion, Vec::new(), Vec::new());

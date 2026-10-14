@@ -1,9 +1,3 @@
-//! Temporary PTY repro harness (deleted after the fix lands).
-//! Replays one live turn: reasoning -> tool boundary -> reasoning ->
-//! multi-paragraph answer -> stray trailing reasoning -> turn end.
-//! Dumps `tui.transcript` to /tmp/opencode/tui_repro.txt for counting
-//! "Thought for" lines and blank runs.
-
 use std::io::Write;
 
 use gray::composer::Tui;
@@ -21,16 +15,14 @@ fn is_blank(l: &Line<'static>) -> bool {
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut tui = Tui::new(false)?;
+    let mut tui = Tui::new()?;
     tui.push_user_prompt("do the thing", &[], true);
     tui.begin_turn("Thinking");
 
-    // Round 1 reasoning.
     tui.stream_thinking("Let me think about this problem carefully.\n");
     tui.stream_thinking("I need to check the files first.\n");
     std::thread::sleep(std::time::Duration::from_millis(60));
 
-    // Tool boundary (mirrors ToolCallStart/ToolCallEnd/ToolResult dispatch).
     tui.flush_markdown();
     tui.end_thinking();
     tui.set_status(Some("Preparing tool: read"));
@@ -38,11 +30,9 @@ fn main() -> anyhow::Result<()> {
     tui.push_tool_box(Line::from("read Cargo.toml"), vec![Line::from("[package]")]);
     std::thread::sleep(std::time::Duration::from_millis(30));
 
-    // Round 2 reasoning.
     tui.stream_thinking("The file looks good, now I will answer.\n");
     std::thread::sleep(std::time::Duration::from_millis(60));
 
-    // Multi-paragraph answer in small chunks (like token streaming).
     for chunk in [
         "First paragraph of",
         " the answer, streamed bit by bit.\n\n",
@@ -53,10 +43,8 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
-    // Stray trailing reasoning chunk after the answer (re-opens the run).
     tui.stream_thinking("trailing note");
 
-    // TurnEnd dispatch tail.
     tui.flush_markdown();
     tui.end_thinking();
     tui.set_turn_billed(4045);

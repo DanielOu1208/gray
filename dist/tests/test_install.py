@@ -1,4 +1,3 @@
-"""Exercise the shipped installer with local, checksum-verified tarballs."""
 import hashlib
 import io
 import os
@@ -22,7 +21,7 @@ class InstallerTests(unittest.TestCase):
                     info.size, info.mode = len(content), 0o755
                     tar.addfile(info, io.BytesIO(content))
                 digest = '0' * 64 if corrupt else hashlib.sha256(archive.read_bytes()).hexdigest()
-                # Only channel-specific sums: old global manifests cannot mask a bug.
+
                 line = f'{digest}  {archive.name}\n'
                 (root / f'SHA256SUMS-{channel}').write_text(line)
             dest = root / 'bin'

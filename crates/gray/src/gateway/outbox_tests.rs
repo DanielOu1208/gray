@@ -17,9 +17,9 @@ fn pull_leases_and_ack_removes() {
     let got = pull(dir.path(), "discord", 100, 10);
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].attempts, 1);
-    // Leased: a second pull inside the lease sees nothing.
+
     assert!(pull(dir.path(), "discord", 100 + LEASE_SECS - 1, 10).is_empty());
-    // Other platforms never see it.
+
     assert!(pull(dir.path(), "telegram", 1000, 10).is_empty());
     assert_eq!(ack(dir.path(), std::slice::from_ref(&i.id)), 1);
     assert!(pull(dir.path(), "discord", 10_000, 10).is_empty());

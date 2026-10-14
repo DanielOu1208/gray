@@ -1,6 +1,3 @@
-//! The daemon: one `Engine`, answering JSON lines over a unix socket.
-//! `fsearch stdio`, `fsearch mcp` and the CLI are thin clients.
-
 use crate::frecency::{self, Frecency};
 use crate::git::{self, Git};
 use fsearch::walk::{KIND_DIR, KIND_FILE, KIND_LINK, KIND_OTHER};
@@ -19,10 +16,8 @@ pub fn socket_path(dir: &Path) -> PathBuf {
 }
 
 pub fn serve(dir: PathBuf, home: String) {
-    // One daemon per socket. (The engine's own lock decides who writes the
-    // index: an app embedding fsearch may own it while the daemon follows.)
     std::fs::create_dir_all(&dir).ok();
-    // Opened without truncating: a loser must not wipe the owner's pid.
+
     let Ok(mut lock) = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(dir.join("socket.lock")) else {
         return;
     };
@@ -30,12 +25,11 @@ pub fn serve(dir: PathBuf, home: String) {
         eprintln!("{} another fsearch daemon is running", fsearch::query::now_secs());
         return;
     }
-    // The pid lets `stop` find us.
+
     let _ = lock.set_len(0).and_then(|_| write!(lock, "{}", std::process::id()));
     let git = Git::new(&home);
     git::kill_on_term();
-    // FSEARCH_ROOT narrows the scan for a test corpus or a chroot-style
-    // deployment; unset means the whole disk.
+
     let root = std::env::var_os("FSEARCH_ROOT").map(PathBuf::from);
     let engine = match Engine::start(Options { dir: dir.clone(), home, root, skip: None }) {
         Ok(e) => e,
@@ -56,8 +50,6 @@ pub fn serve(dir: PathBuf, home: String) {
     }
 }
 
-/// What requests reach: the engine, the git status of what it finds, and
-/// what you opened lately.
 struct Ctx {
     engine: Engine,
     git: Arc<Git>,
@@ -68,9 +60,6 @@ fn try_lock(f: &std::fs::File) -> bool {
     unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(f), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
-/// Stop the daemon serving `dir`, if one is running, and wait until it has
-/// let go of the socket lock. One already on its way out (say, after a
-/// launchd bootout) is just waited for.
 pub fn stop(dir: &Path) -> Result<(), String> {
     let path = dir.join("socket.lock");
     let Ok(lock) = std::fs::File::open(&path) else {
@@ -95,12 +84,9 @@ pub fn stop(dir: &Path) -> Result<(), String> {
     })
 }
 
-/// How long the cores stay clocked up after an answer to a client that is
-/// still connected (typing): most gaps between keystrokes are shorter.
 const WARM: Duration = Duration::from_millis(250);
 
 fn handle(mut conn: UnixStream, cx: &Ctx) {
-    // Content searches run on this thread: keep them on performance cores.
     #[cfg(target_os = "macos")]
     unsafe {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
@@ -123,16 +109,12 @@ fn handle(mut conn: UnixStream, cx: &Ctx) {
     }
 }
 
-/// The client is still connected with nothing more to ask yet: a session
-/// whose next request is a keystroke away. (One-shot clients like the CLI
-/// close their side as soon as the request is out.)
 fn waiting(conn: &UnixStream) -> bool {
     let mut b = 0u8;
     let n = unsafe { libc::recv(std::os::fd::AsRawFd::as_raw_fd(conn), (&raw mut b).cast(), 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
     n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
 }
 
-/// The answer to one request line, as one line of JSON.
 fn respond(line: &str, cx: &Ctx, out: &mut Vec<u8>) {
     let v: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -171,14 +153,10 @@ fn put(out: &mut Vec<u8>, v: &impl serde::Serialize) {
 
 enum Reply {
     Value(Value),
-    /// Name-search results, the search's own time (µs), for a paged request
-    /// where the next page starts, and whether to give each hit's git
-    /// status: the hot path, written straight from the results.
+
     Hits(Vec<Found>, u64, Option<usize>, bool),
 }
 
-/// The JSON of a name-search answer. Keys in sorted order, the order every
-/// other answer (a `Value` object) prints in.
 #[derive(serde::Serialize)]
 struct Hits<'a> {
     hits: Vec<Hit<'a>>,
@@ -214,7 +192,6 @@ fn run(v: &Value, cx: &Ctx) -> Result<Reply, String> {
         }
         _ if is_grep => grep(v, cx).map(Reply::Value),
         "open" => {
-            // An editor or agent opened these: they rank higher for a while.
             let paths: Vec<&str> = match (v.get("path"), v.get("paths")) {
                 (Some(Value::String(p)), _) => vec![p],
                 (_, Some(Value::Array(a))) => a.iter().filter_map(Value::as_str).collect(),
@@ -225,16 +202,12 @@ fn run(v: &Value, cx: &Ctx) -> Result<Reply, String> {
             Ok(Reply::Value(json!({"ok": true, "scores": scores})))
         }
         "recent" => {
-            // What you worked on lately (under `in:`, passing the query),
-            // best first: opens and your commits (see `frecent`).
             let (q, _) = parse_request(v, engine.home())?;
             let top = frecent(cx, q.scope.as_deref(), fsearch::query::now_secs());
             let hits = top.into_iter().filter_map(|(p, s)| Some(Found { score: (s * 100.0) as i32, ..found(&q, &p)? }));
             Ok(Reply::Hits(hits.take(q.limit).collect(), 0, None, v.get("git") == Some(&Value::Bool(true))))
         }
         "git" => {
-            // The repo holding a folder, its status read in the background
-            // (`fsearch mcp` asks at start, so the first search has it).
             let p = v.get("path").and_then(Value::as_str).ok_or("git needs a path")?;
             let r = cx.git.load(&[&real(p)[..], b"/."].concat());
             let snap = r.as_ref().and_then(|r| r.snap(Duration::ZERO));
@@ -264,7 +237,7 @@ fn run(v: &Value, cx: &Ctx) -> Result<Reply, String> {
             }
             x.ready(cx, &q)?;
             let path = |f: &Found| f.path.as_os_str().as_bytes().to_vec();
-            // Boosts reorder a fixed window, whatever the page.
+
             let reranks = x.boost || x.near.is_some();
             let (limit, want) = (q.limit, if reranks { x.offset.saturating_add(q.limit).max(RERANK) } else { x.offset.saturating_add(q.limit) });
             let (mut found, cut) = if x.listed() {
@@ -293,24 +266,13 @@ fn run(v: &Value, cx: &Ctx) -> Result<Reply, String> {
     }
 }
 
-/// What a request may add to the query language: a page offset (`offset`;
-/// answers then say where the next page starts); globs a path must
-/// (`src/**/*.rs`) or must not (`!test/`) match, relative to the `in:`
-/// folder, else `cwd`, else `/`; `git:` filters in `q` (`git:modified`,
-/// `!git:ignored`; without `in:`, within `cwd`); each hit's git status
-/// (`"git": true`); and leaving out what git ignores where its status is
-/// known (`"ignored": false`); and, for a name search, reordering the best
-/// hits by frecency (`"boost": true`) and nearness to the file you're in
-/// (`"near": path`), see `rerank`. The `glob` op lists what its `pattern`
-/// matches.
 #[derive(Default)]
 struct Extras {
     offset: usize,
     paged: bool,
-    /// Checked on each hit: the negative globs, and positive ones past the
-    /// first (which the query applies itself, as its `path:` regex).
+
     globs: Vec<(Regex, bool)>,
-    /// `git:` filters, true if negated.
+
     sels: Vec<(git::Sel, bool)>,
     annotate: bool,
     hide_ignored: bool,
@@ -319,24 +281,20 @@ struct Extras {
     near: Option<Vec<u8>>,
 }
 
-/// Request fields `Extras` reads, not query filters.
 const EXTRAS: &[&str] = &["offset", "cursor", "glob", "cwd", "git", "ignored", "boost", "near"];
-/// Frecency reorders this many of the best hits (a fixed window, so pages
-/// agree). Replays did as well with 32-200: a file needs to be among them.
+
 const RERANK: usize = 256;
 
-/// How long a `git:` filter waits for a repo's first `git status`.
 const GIT_WAIT: Duration = Duration::from_secs(5);
-/// The most repos below its folder a `git:` filter reads...
+
 const MAX_REPOS: usize = 16;
-/// ...and folders git lists whole (untracked, ignored) it searches.
+
 const MAX_DIRS: usize = 64;
 
 impl Extras {
     fn parse(v: &Value, q: &mut Query, sels: Vec<(git::Sel, bool)>, glob_op: bool, grep: bool) -> Result<Extras, String> {
         let cwd = v.get("cwd").and_then(Value::as_str).map(real);
-        // `cursor` too, except in a grep: there it is where the content
-        // index's ranking resumes (see `grep`), not a count of files shown.
+
         let at = v.get("offset").or(v.get("cursor").filter(|_| !grep));
         let mut x = Extras {
             offset: 0,
@@ -350,7 +308,6 @@ impl Extras {
             near: v.get("near").and_then(Value::as_str).map(real),
         };
         if let Some(o) = at {
-            // Past what a page can be fetched from, every page is empty.
             x.offset = (o.as_u64().or_else(|| o.as_str()?.parse().ok()).ok_or("offset must be a number")?).min(MAX_FETCH as u64) as usize;
         }
         let mut globs: Vec<&str> = match v.get("glob") {
@@ -363,7 +320,7 @@ impl Extras {
             globs.insert(0, v.get("pattern").and_then(Value::as_str).ok_or("glob needs a pattern")?);
             q.kind = q.kind.or(Some(KIND_FILE));
         }
-        // `git:` filters are about one repo: without `in:`, the one holding `cwd`.
+
         if !x.sels.is_empty()
             && q.scope.is_none()
             && let Some(c) = &x.cwd
@@ -378,9 +335,7 @@ impl Extras {
                 x.globs.push((re, neg));
                 continue;
             }
-            // The first positive glob narrows the search itself: to the
-            // folder its leading literal part names, to its extensions,
-            // and as the query's path regex.
+
             if let Some(dir) = glob_dir(g, &base)
                 && q.scope.as_ref().is_none_or(|s| within(&dir, s))
             {
@@ -394,31 +349,25 @@ impl Extras {
         Ok(x)
     }
 
-    /// Nothing beyond the query language: answered exactly as before.
     fn plain(&self) -> bool {
         !self.paged && self.globs.is_empty() && self.sels.is_empty() && !self.annotate && !self.hide_ignored && !self.boost && self.near.is_none()
     }
 
-    /// A positive `git:` filter for statuses git lists (modified...): its
-    /// hits come from the repos' status, not a search.
     fn listed(&self) -> bool {
         self.sels.iter().any(|&(s, neg)| !neg && s.listed())
     }
 
-    /// The folder the git parts are about: the scope, else `cwd`.
     fn base<'a>(&'a self, q: &'a Query) -> Option<&'a [u8]> {
         q.scope.as_deref().or(self.cwd.as_deref())
     }
 
-    /// Have the status of the repo in question read: waited for by `git:`
-    /// filters (an error if it takes too long), started for the rest.
     fn ready(&self, cx: &Ctx, q: &Query) -> Result<(), String> {
         let Some(base) = self.base(q).filter(|_| !self.sels.is_empty() || self.annotate || self.hide_ignored || self.boost) else { return Ok(()) };
         if self.sels.is_empty() {
             cx.git.load(&[base, b"/."].concat());
             return Ok(());
         }
-        // A `git:` filter is about the repo holding the folder and those below it.
+
         let deadline = Instant::now() + GIT_WAIT;
         for r in repos_at(cx, Some(base)) {
             if r.snap(deadline.saturating_duration_since(Instant::now())).is_none() {
@@ -439,8 +388,6 @@ impl Extras {
         self.sels.iter().all(|&(sel, neg)| sel.test(s) != neg) && !(self.hide_ignored && s.is_some_and(|s| s & git::IGNORED != 0))
     }
 
-    /// Cut `v` (every result so far, best first) to the page at the
-    /// offset; where the next page starts, if one does.
     fn cut<T>(&self, v: &mut Vec<T>, limit: usize) -> Option<usize> {
         let want = self.offset.saturating_add(limit);
         let more = v.len() > want;
@@ -450,12 +397,6 @@ impl Extras {
     }
 }
 
-/// The hits of a query with a positive `git:` filter for listed statuses:
-/// the files that status lists in the repos at or under the scope (else
-/// `cwd`; else every repo searched so far), as the rest of the query
-/// matches them, best first. A folder git lists whole (untracked, ignored)
-/// is searched within the scope, at most MAX_DIRS of them, and at most
-/// `want` hits from each.
 fn from_git(cx: &Ctx, q: &Query, x: &Extras, want: usize) -> Vec<Found> {
     let deadline = Instant::now() + GIT_WAIT;
     let pass = |bits: u8| x.sels.iter().filter(|(s, neg)| !neg && s.listed()).all(|(s, _)| s.test(Some(bits)));
@@ -473,7 +414,7 @@ fn from_git(cx: &Ctx, q: &Query, x: &Extras, want: usize) -> Vec<Found> {
         }
     }
     dirs.sort();
-    // Within the scope: the folder, or the scope itself if it's inside one.
+
     let inside = dirs.into_iter().filter_map(|d| match &q.scope {
         Some(s) if !within(&d, s) => within(s, &d).then(|| s.clone()),
         _ => Some(d),
@@ -488,9 +429,6 @@ fn from_git(cx: &Ctx, q: &Query, x: &Extras, want: usize) -> Vec<Found> {
     out
 }
 
-/// The repos a `git:` filter is about: the one holding `base` and those
-/// below it (by their `.git` in the index, at most MAX_REPOS), their status
-/// read if it isn't yet; without `base`, every repo searched so far.
 fn repos_at(cx: &Ctx, base: Option<&[u8]>) -> Vec<Arc<git::Repo>> {
     let Some(base) = base else { return cx.git.known_under(b"/") };
     let mut repos: Vec<Arc<git::Repo>> = cx.git.load(&[base, b"/."].concat()).into_iter().collect();
@@ -506,12 +444,10 @@ fn repos_at(cx: &Ctx, base: Option<&[u8]>) -> Vec<Arc<git::Repo>> {
     repos
 }
 
-/// Is `path` `dir` or inside it (by whole folder names: /p/abc isn't in /p/a)?
 fn within(path: &[u8], dir: &[u8]) -> bool {
     path.starts_with(dir) && (path.len() == dir.len() || dir.ends_with(b"/") || path[dir.len()] == b'/')
 }
 
-/// A path as a hit, if it exists and the query matches it.
 fn found(q: &Query, path: &[u8]) -> Option<Found> {
     use std::os::unix::fs::MetadataExt;
     let m = std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(path)).ok()?;
@@ -530,7 +466,6 @@ fn found(q: &Query, path: &[u8]) -> Option<Found> {
     Some(Found { path: PathBuf::from(std::ffi::OsStr::from_bytes(path)), kind, size, mtime, score })
 }
 
-/// The top folder of the repo holding `dir`, if any.
 fn git_root(dir: &[u8]) -> Option<Vec<u8>> {
     let mut d = dir;
     loop {
@@ -541,7 +476,6 @@ fn git_root(dir: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// A path as the index has it: `~` expanded, symlinks resolved.
 fn real(p: &str) -> Vec<u8> {
     let p = match p.strip_prefix('~') {
         Some(rest) => format!("{}{rest}", std::env::var("HOME").unwrap_or_default()),
@@ -550,15 +484,10 @@ fn real(p: &str) -> Vec<u8> {
     std::fs::canonicalize(&p).map_or_else(|_| p.into_bytes(), |c| c.as_os_str().as_bytes().to_vec())
 }
 
-/// The most hits a search looks through for a page that passes its globs.
 const MAX_FETCH: usize = 20_000;
-/// The most files a grep looks through for a page that passes its globs.
+
 const MAX_GREP: usize = 2_000;
 
-/// Results passing `keep`, best first, more than `want` of them unless
-/// the search runs dry, stops early (out of time: then true) or reaches
-/// `cap`. `search(n)` gives the best `n` (and whether it stopped early);
-/// it's asked for more and more until enough pass.
 fn fetch_kept<T>(
     x: &Extras,
     want: usize,
@@ -566,8 +495,6 @@ fn fetch_kept<T>(
     keep: impl Fn(&T) -> bool,
     mut search: impl FnMut(usize) -> Result<(Vec<T>, bool), String>,
 ) -> Result<(Vec<T>, bool), String> {
-    // Room for some to fail the filters (not for ignored files: few name
-    // or content hits are); more if too many do.
     let mut fetch = if x.globs.is_empty() && x.sels.is_empty() { want.saturating_add(1) } else { want.saturating_mul(2).saturating_add(16) };
     loop {
         let n = fetch.min(cap);
@@ -581,9 +508,6 @@ fn fetch_kept<T>(
     }
 }
 
-/// The files under `dir` (None: anywhere) you worked on lately, most
-/// first, with their frecency: opens, and your commits in the repo holding
-/// `dir`. (Recent mtimes count for hits, but listing them takes a scan.)
 fn frecent(cx: &Ctx, dir: Option<&[u8]>, now: u32) -> Vec<(Vec<u8>, f32)> {
     let mut m: std::collections::HashMap<Vec<u8>, f32> = std::collections::HashMap::new();
     let commits = dir.map(|d| cx.git.history_under(d, now)).unwrap_or_default();
@@ -595,11 +519,6 @@ fn frecent(cx: &Ctx, dir: Option<&[u8]>, now: u32) -> Vec<(Vec<u8>, f32)> {
     v
 }
 
-/// Reorder the best RERANK of `hits` (all kept so far, best first) by
-/// score plus frecency (`boost`: opens, your commits, and the file's mtime
-/// as one more open, see `frecency::boost`) and nearness to the `near` file
-/// (`nearness`). What it can't do: lift a file the query ranks below them
-/// (the ranking in `query.rs` knows nothing of either).
 fn rerank(cx: &Ctx, hits: &mut [Found], boost: bool, near: Option<&[u8]>) {
     let now = fsearch::query::now_secs();
     let n = hits.len().min(RERANK);
@@ -612,15 +531,10 @@ fn rerank(cx: &Ctx, hits: &mut [Found], boost: bool, near: Option<&[u8]>) {
             f.score += nearness(near, p);
         }
     }
-    // Stable: equals keep their order.
+
     hits[..n].sort_by_key(|f| std::cmp::Reverse(f.score));
 }
 
-/// How near `path` is to `near` (the file you're in): +12 in its folder,
-/// 3 less per folder between them; the file itself -20 (it isn't what you
-/// are looking for). Replaying Linux history (`near`: another file of the
-/// commit), the file searched for ranks first for its name 84% -> 89%
-/// on top of frecency, and an unrelated `near` costs nothing measurable.
 fn nearness(near: &[u8], path: &[u8]) -> i32 {
     if path == near {
         return -20;
@@ -632,12 +546,6 @@ fn nearness(near: &[u8], path: &[u8]) -> i32 {
     (12 - 3 * (dirs(near).count() + dirs(path).count() - 2 * common) as i32).max(0)
 }
 
-/// A glob as a case-insensitive regex over whole paths, relative to `base`
-/// (empty: `/`). With a `/` in it, it is anchored there (`src/**/*.rs`;
-/// `/etc/*.conf`); without one, it matches a name at any depth below
-/// (`*.rs`); a trailing `/` matches a folder at any depth below and all
-/// that's in it (`tests/`). `**` spans folders, `*` and `?` stay within one,
-/// `[...]` and `{a,b}` as in a shell.
 fn glob_regex(glob: &str, base: &[u8]) -> Result<Regex, String> {
     let g = glob.strip_prefix("./").unwrap_or(glob);
     let (body, dir) = g.strip_suffix('/').map_or((g, false), |b| (b, true));
@@ -713,8 +621,6 @@ fn translate(g: &str, re: &mut String) -> Result<(), String> {
     if braces > 0 { Err(format!("unclosed {{ in glob {g}")) } else { Ok(()) }
 }
 
-/// The folder an anchored glob's leading literal part names, as a real path
-/// (`src/ui/**/*.rs` in /p: /p/src/ui): nothing it matches is outside it.
 fn glob_dir(g: &str, base: &[u8]) -> Option<Vec<u8>> {
     let g = g.strip_prefix("./").unwrap_or(g);
     if g.ends_with('/') || !g.contains('/') {
@@ -735,8 +641,6 @@ fn glob_dir(g: &str, base: &[u8]) -> Option<Vec<u8>> {
     Some(real)
 }
 
-/// The extensions a glob's name part allows, if it names them all (`*.rs`,
-/// `*.{ts,tsx}`): they narrow the search before any path is built.
 fn glob_exts(g: &str) -> Vec<Vec<u8>> {
     let name = g.rsplit('/').next().unwrap_or(g);
     let Some(rest) = name.strip_prefix("*.") else { return Vec::new() };
@@ -746,13 +650,6 @@ fn glob_exts(g: &str) -> Vec<Vec<u8>> {
     if plain { exts } else { Vec::new() }
 }
 
-/// Content search. The pattern comes from `pattern` (+ `mode`), `patterns`
-/// (any of these literals) or from a `grep:`/`regex:`/`sym:` filter in `q`;
-/// the rest of the query narrows which files are read, or `file` names the
-/// one to read. Also: `case`, `context` / `before` / `after` (lines around
-/// matches), `defs` (mark definitions),
-/// `cursor` (the `next` of the page before; with `offset`, globs or `git:`
-/// the `next` is an offset instead).
 fn grep(v: &Value, cx: &Ctx) -> Result<Value, String> {
     let engine = &cx.engine;
     let (mut q, sels) = parse_request(v, engine.home())?;
@@ -782,7 +679,7 @@ fn grep(v: &Value, cx: &Ctx) -> Result<Value, String> {
         None => f.to_string(),
     });
     let num = |k: &str| v.get(k).and_then(Value::as_u64).map(|n| n as usize);
-    // One file: its matching lines, up to 200 unless told.
+
     g.max_per_file = num("per_file").unwrap_or(if file.is_some() { 200 } else { g.max_per_file });
     if let Some(ms) = v.get("budget_ms").and_then(Value::as_u64) {
         g.budget = (ms > 0).then(|| Duration::from_millis(ms));
@@ -801,7 +698,6 @@ fn grep(v: &Value, cx: &Ctx) -> Result<Value, String> {
         let next = r.next;
         (r, source(indexed), next)
     } else if x.listed() {
-        // Only the files git lists (modified...), newest first: read them.
         x.ready(cx, &q)?;
         let mut paths = from_git(cx, &q.clone_for_scan(), &x, MAX_GREP);
         paths.retain(|f| f.kind & 3 == KIND_FILE && f.size <= fsearch::content::MAX_FILE && x.keep(&cx.git, f.path.as_os_str().as_bytes()));
@@ -872,9 +768,6 @@ fn grep(v: &Value, cx: &Ctx) -> Result<Value, String> {
     Ok(out)
 }
 
-/// `q` is the query language; any filter key may also be given as its own
-/// JSON field (`{"q": "main", "ext": "rs", "in": "~/Developer"}`). Its
-/// `git:` filters come back apart (see `Extras`).
 fn parse_request(v: &Value, home: &str) -> Result<(Query, Vec<(git::Sel, bool)>), String> {
     let (rest, sels) = take_git(v.get("q").and_then(Value::as_str).unwrap_or(""))?;
     let mut q = Query::parse(&rest, home)?;
@@ -897,7 +790,6 @@ fn parse_request(v: &Value, home: &str) -> Result<(Query, Vec<(git::Sel, bool)>)
     Ok((q, sels))
 }
 
-/// A query's `git:` words (`git:modified`, `!git:ignored`), and the rest.
 #[allow(clippy::type_complexity)]
 fn take_git(q: &str) -> Result<(std::borrow::Cow<'_, str>, Vec<(git::Sel, bool)>), String> {
     if !q.contains("git:") {
@@ -927,7 +819,6 @@ fn kind_name(k: u8) -> &'static str {
     }
 }
 
-/// Connect to the daemon, starting it if it isn't running.
 pub fn connect(dir: &Path) -> std::io::Result<UnixStream> {
     let sock = socket_path(dir);
     if let Ok(s) = UnixStream::connect(&sock) {
@@ -936,15 +827,14 @@ pub fn connect(dir: &Path) -> std::io::Result<UnixStream> {
     let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("daemon.log"))?;
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
-    // Own session: closing the terminal that started it doesn't kill it.
+
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
             Ok(())
         });
     }
-    // Set here too, so the daemon a search starts needn't restart itself
-    // in it (main.rs `space_efficient`): 4 ms off that first answer.
+
     cmd.env("MallocSpaceEfficient", "1");
     cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log).spawn()?;
     for _ in 0..1500 {

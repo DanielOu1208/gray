@@ -25,11 +25,9 @@ fn leaves_non_prefix_lines_alone() {
 
 #[test]
 fn strip_set_gates_on_old_text_both_or_neither() {
-    // oldText without a prefix → nothing to retry (None): newText alone
-    // is never stripped.
     let only_new = vec![e("foo", "   3\tbar")];
     assert!(strip_edit_prefixes(&only_new).is_none());
-    // oldText with a prefix → both stripped together.
+
     let both = vec![e("   3\tfoo", "   3\tbar")];
     let got = strip_edit_prefixes(&both).unwrap();
     assert_eq!(got[0].old_text, "foo");
@@ -65,7 +63,7 @@ fn multiple_occurrences_defaults_to_first_with_note() {
 #[test]
 fn multiple_occurrences_disambiguated_by_line_hint() {
     let content = "line 1\nmatch\nline 3\nline 4\nmatch\nline 6\n";
-    // Second match is at line 5
+
     let edits = vec![Edit {
         line_hint: Some(5),
         ..e("match", "second")
@@ -82,7 +80,7 @@ fn multiple_occurrences_disambiguated_by_line_hint() {
 #[test]
 fn multiple_occurrences_disambiguated_by_occurrence_index() {
     let content = "one\nmatch\ntwo\nmatch\nthree\nmatch\n";
-    // Target 2nd occurrence
+
     let edits2 = vec![Edit {
         occurrence: Some(2),
         ..e("match", "HIT")
@@ -90,7 +88,6 @@ fn multiple_occurrences_disambiguated_by_occurrence_index() {
     let res2 = apply_edits_to_normalized_content(content, &edits2, "f.txt").unwrap();
     assert_eq!(res2.new_content, "one\nmatch\ntwo\nHIT\nthree\nmatch\n");
 
-    // Target last occurrence (-1)
     let edits_last = vec![Edit {
         occurrence: Some(-1),
         ..e("match", "LAST")
@@ -117,7 +114,7 @@ fn multiple_occurrences_replace_all() {
 #[test]
 fn cat_n_prefix_disambiguates_multiple_occurrences() {
     let content = "line 1\nfoo\nline 3\nline 4\nfoo\nline 6\n";
-    // User passed cat -n prefix targeting line 5
+
     let prefixed = vec![e("     5\tfoo", "     5\tbar")];
     assert!(apply_edits_to_normalized_content(content, &prefixed, "f.txt").is_err());
     let stripped = strip_edit_prefixes(&prefixed).unwrap();

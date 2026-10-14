@@ -1,37 +1,8 @@
-//! `/update` and `/restart` — the two commands that make a running gray
-//! become a *current* gray.
-//!
-//! Both exist because a self-update is a two-step thing nobody completes:
-//! `gray update` installs a new binary and tells you to restart, and the
-//! thing that needs restarting is not the shell you typed it in. It is the
-//! REPL you are sitting in, and the gateway daemon, which keeps running the
-//! build it started with until someone restarts it. So `/update` installs and
-//! then says "run /restart", and `/restart` does both halves.
-//!
-//! Neither codex nor hermes has these: codex shows an update *popup* at
-//! startup and hands you a `brew upgrade` line, and hermes-rs's `restart`
-//! tears down LSP clients. A CLI that installs its own updates owes the user
-//! a way to actually land on them.
-//!
-//! The re-exec is the delicate part. `/restart` restores the terminal before
-//! spawning, exactly like the account commands do, and re-enters the
-//! conversation with `resume --last` when it was an interactive session — a
-//! restart that silently dropped your conversation would be a worse bug than
-//! not shipping it.
-
 use super::TuiOpt;
 use crate::gateway::service;
 
-/// How long a version check may take before we call the network a day. Same
-/// budget as the startup check: this is a convenience, not a dependency.
 const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 
-/// `/update` — check the channel, and install when there is something newer.
-///
-/// Installs only after the user says so: the installer is a mutable HTTPS
-/// script, so `/update` asks the way `gray update` does and reports exactly
-/// what happened, including the PATH-shadowing warning that bites right after
-/// a self-update.
 pub(crate) async fn handle_update(tui: &TuiOpt, arg: Option<String>) {
     let shared = tui.as_ref().map(|(s, _)| s);
     if arg.as_deref().map(str::trim) == Some("everything") {
@@ -101,8 +72,6 @@ pub(crate) async fn handle_update(tui: &TuiOpt, arg: Option<String>) {
         return;
     }
 
-    // The installer is a child process writing to the real terminal, so raw
-    // mode has to go for the duration and the composer re-anchors after.
     let result = with_terminal(shared, crate::update::install);
     match result {
         Ok(()) => {
@@ -116,11 +85,6 @@ pub(crate) async fn handle_update(tui: &TuiOpt, arg: Option<String>) {
     }
 }
 
-/// `/restart` — put the running gray on the binary that is on disk.
-///
-/// Both halves, in the order that makes the message true: the gateway first
-/// (it is a separate process on the old build), then this REPL re-exec'd on
-/// the new one. The conversation survives via `resume --last`.
 pub(crate) async fn handle_restart(tui: &TuiOpt) {
     restart_with(tui, true).await;
 }
@@ -137,8 +101,6 @@ pub(crate) async fn restart_with(tui: &TuiOpt, resume: bool) {
         GatewayRestart::Failed(e) => super::say(shared, &format!("gateway restart failed: {e}")),
     }
 
-    // A turn may still be flushing its transcript; a restart that truncates
-    // the last exchange is the one thing this command must not do.
     super::drain_in_flight_turn(std::time::Duration::from_millis(1500)).await;
 
     let exe = match crate::exe_watch::on_disk_exe() {
@@ -159,9 +121,6 @@ pub(crate) async fn restart_with(tui: &TuiOpt, resume: bool) {
     };
     let resumed = args.first().map(|a| a == "resume").unwrap_or(false);
 
-    // Hand the terminal back before the child takes it: raw mode off, cursor
-    // visible, the composer's viewport re-anchored — otherwise the child
-    // inherits a terminal this process still owns.
     let _ = crossterm::terminal::disable_raw_mode();
     super::restore_viewport(shared);
     let line = if resumed {
@@ -184,8 +143,6 @@ pub(crate) async fn restart_with(tui: &TuiOpt, resume: bool) {
         Err(e) => Err(e),
     };
     if let Err(e) = spawned {
-        // The spawn failed, so this process is still the one running and
-        // still usable: say so rather than exiting into a dead shell.
         let _ = crossterm::terminal::enable_raw_mode();
         super::say(
             shared,
@@ -197,12 +154,11 @@ pub(crate) async fn restart_with(tui: &TuiOpt, resume: bool) {
 enum GatewayRestart {
     Restarted(String),
     NotRunning,
-    /// `$GRAY_HOME` is a scratch home: the system gateway is not ours to touch.
+
     Skipped,
     Failed(String),
 }
 
-/// True when `$GRAY_HOME` is set to a home other than `$HOME/.gray`.
 fn scratch_gray_home() -> bool {
     let Some(set) =
         std::env::var_os("GRAY_HOME").filter(|v| !v.to_string_lossy().trim().is_empty())
@@ -213,29 +169,11 @@ fn scratch_gray_home() -> bool {
     is_scratch_home(std::path::Path::new(&set), default.as_deref())
 }
 
-/// `set` is scratch unless it is the default home. With no `HOME` to compare
-/// against, stay on the safe side and call it scratch.
 fn is_scratch_home(set: &std::path::Path, default: Option<&std::path::Path>) -> bool {
     default != Some(set)
 }
 
-/// Restart the gateway, and only ever leave it in a better state than we
-/// found it.
-///
-/// Three cases, in the order that decides who owns the process:
-///
-/// 1. **Installed under a supervisor** — the supervisor restarts it. That is
-///    the right owner and the only one that knows the service contract.
-/// 2. **Running with nobody supervising it** — a `gray gateway run` someone
-///    launched by hand, which is the common shape on a box without a service
-///    installed. Nothing else will bring it back, so we stop it *and* start
-///    it again on the new build. Stopping without the relaunch would take a
-///    working gateway down and call it a restart.
-/// 3. **Not running** — say so and move on; `/restart` is about picking up a
-///    new build, not about resurrecting a daemon the user did not start.
 async fn restart_gateway() -> GatewayRestart {
-    // A scratch home (tests, a second checkout) must never reach the system
-    // gateway: `service::detect` finds the installed unit whatever home is set.
     if scratch_gray_home() {
         return GatewayRestart::Skipped;
     }
@@ -246,8 +184,7 @@ async fn restart_gateway() -> GatewayRestart {
     if supervised {
         match service::restart() {
             Ok(line) => return GatewayRestart::Restarted(line),
-            // Installed and failing is a real failure worth printing. Not
-            // installed is not: fall through and handle the process directly.
+
             Err(e) if !e.to_string().contains("no service installed") => {
                 return GatewayRestart::Failed(e.to_string());
             }
@@ -261,8 +198,7 @@ async fn restart_gateway() -> GatewayRestart {
     let Some(rec) = crate::gateway::pid::running(&home) else {
         return GatewayRestart::NotRunning;
     };
-    // `stop` waits up to 20s for the pid to go and refuses to return while it
-    // is still up, so the relaunch below cannot race a dying daemon.
+
     if let Err(e) = service::stop() {
         return GatewayRestart::Failed(format!("could not stop the running gateway: {e}"));
     }
@@ -275,11 +211,6 @@ async fn restart_gateway() -> GatewayRestart {
     }
 }
 
-/// Start the gateway again, detached, on the binary that is on disk.
-///
-/// Its own process group, so a closed terminal or a SIGHUP aimed at this
-/// REPL's group does not take the daemon with it — the same shape as the
-/// `gateway run` the user had launched by hand.
 fn relaunch(home: &std::path::Path, old_pid: u32) -> anyhow::Result<String> {
     use std::process::Stdio;
     let exe = crate::exe_watch::on_disk_exe()?;
@@ -304,7 +235,6 @@ fn relaunch(home: &std::path::Path, old_pid: u32) -> anyhow::Result<String> {
     }
     cmd.spawn()?;
 
-    // Report what is true, not what we hope: a spawn is not a running daemon.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         if let Some(now) = crate::gateway::pid::running(home) {
@@ -322,16 +252,6 @@ fn relaunch(home: &std::path::Path, old_pid: u32) -> anyhow::Result<String> {
     ))
 }
 
-/// What the child process gets. An interactive session (a bare `gray`, no
-/// subcommand) resumes the conversation it was having; anything else — a
-/// `-p` prompt, `resume --last`, a subcommand — is passed through verbatim,
-/// because re-running a one-shot prompt or a subcommand is the caller's
-/// business, not ours.
-/// Rebuild argv for the post-restart process. An argv that already names a
-/// session (`resume`, `-r`, `-c`, `--session`) keeps it. Anything else lands
-/// back on THIS session — plain `--last` resumes whatever was touched most
-/// recently, and a sibling window's newer session wins that race and holds
-/// a live lock, so the restart would refuse itself into a fresh session.
 pub(crate) fn restart_argv(original: Vec<String>, current: Option<&str>) -> Vec<String> {
     let Some(sid) = current else {
         return if original.is_empty() {
@@ -346,7 +266,6 @@ pub(crate) fn restart_argv(original: Vec<String>, current: Option<&str>) -> Vec<
     vec!["resume".into(), sid.to_string()]
 }
 
-/// Does the argv already name a session to reopen?
 fn has_session_selector(args: &[String]) -> bool {
     args.iter().any(|a| {
         matches!(
@@ -395,16 +314,13 @@ fn strip_resume_args(args: &[String]) -> Vec<String> {
     out
 }
 
-/// One keypress, y/N, read the way the TUI reads keys.
-///
-/// Not `update::confirm()`: that helper switches raw mode off when it is
-/// done, which is right for a shell and wrong here — the composer owns raw
-/// mode and would be left reading a cooked terminal. Dispatch runs between
-/// input events, so nobody else is reading stdin at this moment.
 async fn confirm_yn() -> bool {
     use crossterm::event::{self, Event, KeyCode, KeyEvent};
-    // Callers run under the multi-thread runtime `main` installs, which
-    // `block_in_place` requires.
+
+    if crate::composer::input::stdin_gone() {
+        return false;
+    }
+
     let got = tokio::task::block_in_place(event::read);
     matches!(
         got,
@@ -415,8 +331,6 @@ async fn confirm_yn() -> bool {
     )
 }
 
-/// Run a blocking child-process flow with the terminal in cooked mode, then
-/// put the composer back. Same contract as the account commands.
 pub(crate) fn with_terminal<T>(
     shared: Option<&crate::composer::SharedTui>,
     f: impl FnOnce() -> T,
@@ -438,7 +352,7 @@ mod tests {
     #[test]
     fn a_scratch_gray_home_never_reaches_the_system_gateway() {
         let default = std::path::Path::new("/home/me/.gray");
-        // A GRAY_HOME elsewhere, including a trailing-slash spelling of the default.
+
         assert!(is_scratch_home(
             std::path::Path::new("/tmp/vp_home"),
             Some(default)
@@ -452,21 +366,16 @@ mod tests {
 
     #[test]
     fn a_bare_session_resumes_its_own_conversation() {
-        // The conversation is the session: restart must land back on THIS
-        // one — `--last` can pick a sibling window's newer session and hit
-        // its live lock (the "already open in another process" refusal).
         assert_eq!(
             restart_argv(vec![], Some("viscous-lithium-meridian")),
             vec!["resume", "viscous-lithium-meridian"]
         );
-        // No live session yet (first launch before any prompt): `--last`
-        // is the best pointer available.
+
         assert_eq!(restart_argv(vec![], None), vec!["resume", "--last"]);
     }
 
     #[test]
     fn anything_the_user_typed_is_passed_through() {
-        // An argv that already names a session is kept verbatim.
         for args in [
             vec!["resume".to_string(), "--last".to_string()],
             vec!["-r".to_string(), "other-session".to_string()],
@@ -478,7 +387,7 @@ mod tests {
                 args
             );
         }
-        // No session to return to: selector-less argv still passes through.
+
         assert_eq!(
             restart_argv(vec!["-p".to_string(), "hello".to_string()], None),
             vec!["-p", "hello"]

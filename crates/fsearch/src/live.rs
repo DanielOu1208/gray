@@ -1,11 +1,3 @@
-//! The index as it is right now: the immutable base, a bitset of base
-//! entries that are gone, and a small overlay of entries added since.
-//!
-//! Every FSEvents directory event is handled the same way: list that one
-//! directory and diff it against what we have. The diff is idempotent, so
-//! replaying history, duplicate events, and events that race a compaction
-//! are all harmless.
-
 use crate::index::{Index, enc_size};
 use crate::walk::{self, FLAG_MOUNT, KIND_DIR, Listing, NONE, RawEnt};
 use std::collections::{BTreeMap, HashMap};
@@ -16,27 +8,21 @@ pub struct OEnt {
     pub kind: u8,
     pub size: u64,
     pub mtime: u32,
-    /// `index::name_mask` of the entry's name, so a search rejects most of
-    /// the overlay with one AND.
+
     pub mask: u64,
-    /// Location prior of the nearest folder the base knows (set on insert).
+
     pub prior: i8,
-    /// Its slot in `Live::flat` (set on insert).
+
     slot: u32,
 }
 
 impl OEnt {
-    /// `path` may be the whole path or just the name.
     pub fn new(path: &[u8], kind: u8, size: u64, mtime: u32) -> OEnt {
         let name = &path[path.iter().rposition(|&b| b == b'/').map_or(0, |p| p + 1)..];
         OEnt { kind, size, mtime, mask: crate::index::name_mask(name), prior: 0, slot: 0 }
     }
 }
 
-/// The overlay laid out for searches: every entry's name mask in one array
-/// to scan (walking the map cost ~7 ns an entry, 0.35 ms a search at 50k
-/// entries), its path and value in the same slot. A removed entry's slot
-/// is reused; until then its mask is 0, which no name has.
 #[derive(Default)]
 pub struct Flat {
     pub masks: Vec<u64>,
@@ -67,33 +53,27 @@ impl Flat {
 
 pub struct Live {
     pub base: Index,
-    /// The tree this index covers (`/` unless `Options.root` narrowed it).
-    /// Paths outside it are never fetched: the synthetic ancestors a rooted
-    /// build grafts above the root can never grow real siblings.
+
     pub root: Vec<u8>,
     dead: Vec<u64>,
     pub dead_count: usize,
     pub over: BTreeMap<Vec<u8>, OEnt>,
-    /// `over` laid out for searches.
+
     pub flat: Flat,
-    /// Last FSEvents id fully applied.
+
     pub event_id: u64,
-    /// Paths of directories added or removed since last drained; the
-    /// content index re-syncs these whole subtrees.
+
     pub trees: Vec<Vec<u8>>,
-    /// The last name search's scored names, reused while you type.
+
     pub names_cache: crate::query::NameCache,
-    /// Wall-clock second up to which every change is known applied.
+
     pub synced_at: u32,
-    /// The scanned root is gone (unmounted): the tree is offline — events
-    /// under it are dropped, nothing removed — until it is back, when what
-    /// changed meanwhile is unknowable and a rescan runs (see `apply`).
+
     pub root_missing: AtomicBool,
-    /// Overlay folder -> prior of its nearest base folder.
+
     priors: HashMap<Vec<u8>, i8>,
 }
 
-/// What `Live::fetch` read from disk for one folder update.
 pub struct Fetched {
     path: Vec<u8>,
     recursive: bool,
@@ -105,7 +85,7 @@ pub struct Fetched {
 
 pub enum Applied {
     Done,
-    /// The whole disk needs rescanning (history lost at the root).
+
     Rebuild,
 }
 
@@ -115,8 +95,6 @@ impl Live {
         Live::lazy(base)
     }
 
-    /// `new` without faulting the index in first: a restart's first search
-    /// runs on it as mapped, and `Index::prefault` follows.
     pub fn lazy(base: Index) -> Live {
         let words = base.n.div_ceil(64);
         let event_id = base.event_id;
@@ -137,18 +115,15 @@ impl Live {
         }
     }
 
-    /// `new` with the scanned root (`Options.root`), see `root`.
     pub fn rooted(mut self, root: &[u8]) -> Live {
         self.root = root.to_vec();
         self
     }
 
-    /// `p` inside the scanned tree (the root itself counts).
     fn under_root(&self, p: &[u8]) -> bool {
         in_tree(p, &self.root)
     }
 
-    /// Put an entry in the overlay, stamping the prior it ranks with.
     fn put(&mut self, path: Vec<u8>, mut e: OEnt) {
         let cut = path.iter().rposition(|&b| b == b'/').unwrap_or(0);
         e.prior = match self.priors.get(&path[..cut]) {
@@ -211,12 +186,10 @@ impl Live {
                 self.flat.clear(o);
             }
         }
-        // Cached priors of the gone dirs would shadow the base's if the
-        // paths ever came back.
+
         self.priors.retain(|k, _| !in_tree(k, path));
     }
 
-    /// Alive base entry for a path, if the base has one.
     fn base_alive(&self, path: &[u8]) -> Option<u32> {
         self.base.lookup(path).filter(|&e| !self.is_dead(e))
     }
@@ -229,33 +202,25 @@ impl Live {
         self.drop_over_subtree(path);
     }
 
-    /// Bring one directory (or, with `recursive`, its whole subtree) in line
-    /// with the disk.
     pub fn apply_dir(&mut self, path: &[u8], recursive: bool) -> Applied {
         let f = self.fetch(path, recursive);
         self.apply(f)
     }
 
-    /// The disk half of `apply_dir`: list the folder (or stat it) and scan
-    /// any folder that will be new to the index. Needs only `&self`, so the
-    /// caller does this under a read lock and searches keep answering.
     pub fn fetch(&self, path: &[u8], recursive: bool) -> Fetched {
         let p = normalize(path);
         let mut f = Fetched { path: p, recursive, blocked: false, attrs: None, listing: None, scans: HashMap::new() };
-        // Not even an lstat inside folders we may not touch.
+
         if walk::blocked(&f.path) {
             f.blocked = true;
             return f;
         }
-        // Outside the scanned root there's nothing to graft (and no lstat
-        // to reveal it exists): leave the synthetic ancestors alone.
+
         if !self.under_root(&f.path) {
             f.blocked = true;
             return f;
         }
-        // Offline (root gone): nothing under it is read — though an event
-        // there is still a chance to spot the root back, and this fetch then
-        // becomes the root's own, which `apply` turns into the rescan.
+
         if self.root_missing.load(Ordering::Relaxed) && f.path != self.root {
             if lstat(&self.root).is_none() {
                 f.blocked = true;
@@ -276,7 +241,7 @@ impl Live {
             f.attrs = lstat(&f.path);
             return f;
         };
-        // Children that will be added as folders get their subtree scanned now.
+
         let cur = self.current_children(&f.path);
         for r in &listing.ents {
             if r.kind & 3 != KIND_DIR || r.kind & FLAG_MOUNT != 0 {
@@ -298,8 +263,6 @@ impl Live {
         f
     }
 
-    /// Children the index holds for `p`: name -> base entry, or None for an
-    /// overlay entry.
     fn current_children(&self, p: &[u8]) -> HashMap<Vec<u8>, Option<u32>> {
         let mut cur: HashMap<Vec<u8>, Option<u32>> = HashMap::new();
         if let Some(d) = self.base_alive(p).and_then(|e| self.base.dir_of(e)) {
@@ -319,41 +282,32 @@ impl Live {
         cur
     }
 
-    /// The memory half of `apply_dir`: diff what `fetch` read into the index.
     pub fn apply(&mut self, mut f: Fetched) -> Applied {
         if f.blocked {
             return Applied::Done;
         }
         let p = std::mem::take(&mut f.path);
         if f.recursive && p == b"/" {
-            // A rescan of everything is also the reappeared root's answer.
             self.root_missing.store(false, Ordering::Relaxed);
             return Applied::Rebuild;
         }
         if p == self.root {
             if f.attrs.is_none() && f.listing.is_none() {
-                // The root gone is the tree offline, not deleted: dropping
-                // it here would wipe the index on an unmount.
                 self.root_missing.store(true, Ordering::Relaxed);
                 return Applied::Done;
             }
             if self.root_missing.swap(false, Ordering::Relaxed) {
-                // Back (remounted): a diff of the root alone can't say what
-                // changed under it — a recursive fetch already rescanned, a
-                // plain one asks for the relist.
                 let rec = f.recursive;
                 self.synced_at = if rec { crate::query::now_secs() } else { 0 };
                 let r = self.apply_diff(p, f);
                 return if rec { r } else { Applied::Rebuild };
             }
         } else if self.root_missing.load(Ordering::Relaxed) {
-            // Still offline: nothing under the root is added or removed.
             return Applied::Done;
         }
         self.apply_diff(p, f)
     }
 
-    /// `apply` without the root-offline checks.
     fn apply_diff(&mut self, p: Vec<u8>, mut f: Fetched) -> Applied {
         if f.recursive {
             self.remove_path(&p);
@@ -384,8 +338,7 @@ impl Live {
                     let was_kind = self.base.kind(c);
                     if was_kind & 3 != now.kind & 3 {
                         self.kill_subtree(c as u32);
-                        // Entries added under the dir while it lived sit in
-                        // the overlay — the base's subtree kill misses them.
+
                         if was_kind & 3 == KIND_DIR {
                             self.drop_over_subtree(&child);
                         }
@@ -429,8 +382,6 @@ impl Live {
         Applied::Done
     }
 
-    /// Add an entry and, if it is a directory, its subtree (`scan`, read
-    /// ahead by `fetch`; scanned here if missing).
     fn add_new(&mut self, path: Vec<u8>, e: OEnt, scan: Option<Vec<Listing>>) {
         let is_dir = e.kind & 3 == KIND_DIR && e.kind & FLAG_MOUNT == 0;
         self.put(path.clone(), e);
@@ -445,11 +396,6 @@ impl Live {
         });
     }
 
-    /// Folders whose listing may have changed since `since` (a wall-clock
-    /// second): adding, removing or renaming an entry bumps its folder's
-    /// mtime. One lstat per folder, in parallel, under a read lock;
-    /// relisting the few that changed is `apply_dir`'s job. This is how lost
-    /// FSEvents history is recovered without crawling the whole disk.
     pub fn changed_dirs(&self, since: u32) -> Vec<Vec<u8>> {
         use rayon::prelude::*;
         let idx = &self.base;
@@ -476,7 +422,6 @@ impl Live {
         out
     }
 
-    /// Everything alive, as listings for Index::build.
     pub fn to_listings(&self) -> Vec<Listing> {
         let mut by_parent: HashMap<&[u8], Vec<(&[u8], OEnt)>> = HashMap::new();
         for (k, v) in &self.over {
@@ -485,7 +430,7 @@ impl Live {
             by_parent.entry(parent).or_default().push((&k[cut + 1..], *v));
         }
         let mut out = Vec::new();
-        // (base dir id if alive in base, path, listing id)
+
         let mut stack: Vec<(Option<u32>, Vec<u8>, u32)> = vec![(Some(0), b"/".to_vec(), 0)];
         let mut next = 1u32;
         while let Some((bd, path, id)) = stack.pop() {
@@ -527,12 +472,10 @@ impl Live {
     }
 }
 
-/// Threads for bulk lstat: path lookups scale further than opens do.
 pub fn stat_pool() -> rayon::ThreadPool {
     rayon::ThreadPoolBuilder::new().num_threads(12).start_handler(|_| crate::no_materialize()).build().unwrap()
 }
 
-/// Visit every entry of a scan with its full path.
 pub fn for_each_path(ls: &[Listing], root: &[u8], mut f: impl FnMut(Vec<u8>, &RawEnt)) {
     let mut by_id: HashMap<u32, &Listing> = HashMap::with_capacity(ls.len());
     for l in ls {
@@ -569,17 +512,14 @@ pub fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
     p
 }
 
-/// `p` is `dir` itself or strictly under it — a '/' boundary, so "/a/bb"
-/// is not in "/a/b"'s tree.
 fn in_tree(p: &[u8], dir: &[u8]) -> bool {
     p == dir || (p.starts_with(dir) && (dir == b"/" || p[dir.len()] == b'/'))
 }
 
-/// Key range holding everything strictly under `path`.
 fn subtree_bounds(path: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let lo = join(path, b"");
     let mut hi = lo.clone();
-    *hi.last_mut().unwrap() += 1; // '/' + 1 == '0'
+    *hi.last_mut().unwrap() += 1;
     (lo, hi)
 }
 
@@ -611,7 +551,6 @@ mod tests {
         l
     }
 
-    /// "/" with "a", holding dirs "b" (file x) and "bb" (file y).
     fn base() -> Index {
         Index::build(
             vec![
@@ -635,7 +574,7 @@ mod tests {
         let mut live = Live::new(base());
         live.put(b"/a/b/n".to_vec(), OEnt::new(b"n", walk::KIND_FILE, 1, 1));
         live.put(b"/a/bb/n".to_vec(), OEnt::new(b"n", walk::KIND_FILE, 1, 1));
-        // "/a" relisted without "b": its tree dies, "/a/bb" is not under it.
+
         live.apply(listing_of(b"/a", &[(b"bb", KIND_DIR, NONE)]));
         let gone = |p: &[u8]| live.base.lookup(p).is_none_or(|e| live.is_dead(e));
         assert!(gone(b"/a/b") && gone(b"/a/b/x"));
@@ -653,8 +592,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("f"), b"x").unwrap();
         let root_b = root.as_os_str().as_encoded_bytes().to_vec();
-        // One listing per ancestor, down to the root holding file "f"
-        // (what `scan_rooted` grafts for a rooted build).
+
         let comps: Vec<&[u8]> = root_b.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
         let mut ls: Vec<Listing> = comps.iter().enumerate().map(|(i, c)| listing(i as u32, &[(*c, KIND_DIR, i as u32 + 1)])).collect();
         ls.push(listing(comps.len() as u32, &[(b"f", walk::KIND_FILE, NONE)]));
@@ -663,15 +601,12 @@ mod tests {
         let present = |live: &Live| live.over.contains_key(fpath.as_slice()) || live.base.lookup(&fpath).is_some_and(|e| !live.is_dead(e));
         assert!(matches!(live.apply_dir(&root_b, false), Applied::Done) && present(&live));
 
-        // Unmounted: offline — the tree stays, events under it are dropped.
         let moved = dir.join("moved");
         std::fs::rename(&root, &moved).unwrap();
         assert!(matches!(live.apply_dir(&root_b, false), Applied::Done));
         assert!(live.root_missing.load(Ordering::Relaxed) && present(&live));
         assert!(matches!(live.apply_dir(&fpath, false), Applied::Done) && present(&live));
 
-        // Back: an event under it notices, and asks for the rescan a diff
-        // can't provide.
         std::fs::rename(&moved, &root).unwrap();
         assert!(matches!(live.apply_dir(&fpath, false), Applied::Rebuild));
         assert!(!live.root_missing.load(Ordering::Relaxed) && live.synced_at == 0);

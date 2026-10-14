@@ -1,14 +1,7 @@
-//! `/cron`: the read-only dashboard (headless) and the job picker (TTY),
-//! both rendered from one row builder.
-
 use std::path::Path;
 
 use crate::setup::{ManagerItem, ManagerSpec, run_install_manager};
 
-/// One line per job: name, id-prefix, schedule, next run, last status.
-/// Ends with the ticker's liveness (has anything driven this store?) instead
-/// of a bare promise that due jobs fire. Pure: the store stays in dispatch,
-/// so the caller hands in the health snapshot it already read.
 pub(crate) fn format_cron_dashboard(
     jobs: &[crate::cron::CronJob],
     health: Option<&crate::cron::CronHealth>,
@@ -51,15 +44,6 @@ const CRON_SPEC: ManagerSpec = ManagerSpec {
     keep_stale_on_relist_error: false,
 };
 
-/// One picker row per job: the dashboard's fields in the manager's shape,
-/// plus the ticker's liveness line (the answer to "is anything driving this
-/// store?") as a trailing read-only row.
-///
-/// A row carries a switch only when flipping it means something: `claim_due`
-/// fires a job only when it is `Active` *and* `enabled`, so a paused job
-/// toggles, while a disabled job (`enabled: false`) and a finished one-shot
-/// (`Done`) render read-only and tagged — resuming either would change state
-/// without changing whether the job runs.
 pub(crate) fn items(
     jobs: &[crate::cron::CronJob],
     health: Option<&crate::cron::CronHealth>,
@@ -100,8 +84,7 @@ pub(crate) fn items(
             }
         })
         .collect();
-    // The ticker row only rides along when there are jobs to tick: on an empty
-    // store it would crowd out the add-a-job hint.
+
     if !jobs.is_empty()
         && let Some(h) = health
     {
@@ -117,9 +100,6 @@ pub(crate) fn items(
     out
 }
 
-/// The job picker: `space` pauses/resumes via the store's own toggle (which
-/// recomputes `next_run_at` on resume); `u` twice removes a job. Adding
-/// stays on the CLI.
 pub(crate) fn run_cron_modal(
     bg: Option<&crate::setup::BackgroundSnapshot>,
     home: &Path,
@@ -163,30 +143,24 @@ fn idle_ctx(cwd: &Path, sid: &str) -> gray_core::agent::ToolContext {
     }
 }
 
-/// One thing the idle wake paints before its turn.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum WakeCard {
-    /// A cron delivery: painted as a box (see [`cron_card_lines`]).
     Cron(crate::cron_serve::CronCard),
-    /// A finished background job: painted as a box (see [`job_card_lines`]).
+
     Job(JobCard),
-    /// A one-line notice (legacy inbox entries, unparsed notices).
+
     Text(String),
 }
 
-/// The parts of a background-job notice worth showing the user.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct JobCard {
     pub id: String,
-    /// `exit 0`, `exit 2`, `killed`, ...
+
     pub outcome: String,
     pub elapsed: String,
     pub log: String,
 }
 
-/// Parses `Background job {id} finished ({outcome}) after {t} · log {path}`
-/// (see `gray-tools` `bash/jobs.rs`). The trailing "Read its output…" line
-/// is for the model only, so it is dropped.
 pub(super) fn parse_job_notice(notice: &str) -> Option<JobCard> {
     let head = notice.lines().next()?;
     let rest = head.strip_prefix("Background job ")?;
@@ -201,7 +175,6 @@ pub(super) fn parse_job_notice(notice: &str) -> Option<JobCard> {
     })
 }
 
-/// `⬢ <verb><title>` in the same type as tool-call headers.
 pub(super) fn card_header_spans(
     verb: &str,
     title: String,
@@ -235,8 +208,6 @@ pub(super) fn card_header_spans(
     ]
 }
 
-/// Header + dim body rows of a notice card: `⬢ <verb>`, then `detail` one row
-/// per line. Every command notice shares this shape (see `push_notice`).
 pub(super) fn notice_card(
     verb: &str,
     detail: &str,
@@ -256,14 +227,11 @@ pub(super) fn notice_card(
     (header, body)
 }
 
-/// Pushes a notice card onto the transcript (see `notice_card`).
 pub(super) fn push_notice(t: &mut crate::composer::Tui, verb: &str, detail: &str, failed: bool) {
     let (header, body) = notice_card(verb, detail, failed);
     t.push_tool_box(header, body);
 }
 
-/// Header + body rows of a background-job box:
-/// `⬢ Background job bwrap-5 · exit 0 · 4m26s`, then the log path.
 pub(super) fn job_card_lines(
     card: &JobCard,
 ) -> (
@@ -302,9 +270,6 @@ pub(super) fn job_card_lines(
     (Line::from(spans), body)
 }
 
-/// Header + body rows of a cron delivery box: `⬢ Cron name · done · 18s`, then
-/// the final answer as markdown. A reminder is the user's own words, so its
-/// header is just "Reminder" and its body is verbatim.
 pub(super) fn cron_card_lines(
     card: &crate::cron_serve::CronCard,
     width: usize,
@@ -315,8 +280,7 @@ pub(super) fn cron_card_lines(
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
     let th = crate::theme::theme();
-    // Subagent-completion deliveries name themselves `subagent/<run>` —
-    // they get their own header word instead of "Cron".
+
     let subagent = card.name.strip_prefix("subagent/");
     let mut spans = if card.reminder && !card.failed {
         card_header_spans("Reminder", String::new(), false)
@@ -367,18 +331,15 @@ pub(super) fn cron_card_lines(
     (header, body)
 }
 
-/// What the idle REPL owes the model, as `(cards, prompt)`: cron deliveries
-/// waiting in this session's inbox, then background-job notices nobody has
-/// drained since the last turn. The cards paint first; the prompt (user-role,
-/// persisted like a typed one) starts a turn so the model reacts in chat.
 pub(super) fn idle_wake(
     agent: Option<&gray_core::agent::Agent>,
     sid: Option<&str>,
     cwd: &Path,
-) -> Option<(Vec<WakeCard>, String)> {
+) -> Option<(Vec<WakeCard>, String, Vec<crate::session_send::SendMsg>)> {
     let sid = sid?;
     let mut cards = Vec::new();
     let mut prompts = Vec::new();
+    let mut sends = Vec::new();
     if let Ok(home) = crate::setup::gray_home() {
         for d in crate::cron_serve::drain_session_inbox(&home, sid) {
             cards.push(match d.cron {
@@ -387,6 +348,11 @@ pub(super) fn idle_wake(
             });
             prompts.push(d.prompt);
         }
+
+        for m in crate::session_send::claim_all(&home, sid) {
+            prompts.push(crate::session_send::prompt_for(&m.from, &m.text));
+            sends.push(m);
+        }
     }
     if let Some(agent) = agent {
         for notice in agent.drain_background_notifications(&idle_ctx(cwd, sid)) {
@@ -394,17 +360,13 @@ pub(super) fn idle_wake(
                 Some(job) => WakeCard::Job(job),
                 None => WakeCard::Text(notice.lines().next().unwrap_or_default().to_string()),
             });
-            // Same framing the agent loop gives a notice it drains mid-run.
+
             prompts.push(format!("[Background task notification]\n{notice}"));
         }
     }
-    (!prompts.is_empty()).then(|| (cards, prompts.join("\n\n")))
+    (!prompts.is_empty()).then(|| (cards, prompts.join("\n\n"), sends))
 }
 
-/// Arms the idle wake for background jobs: while the session has unfinished
-/// jobs, a task waits for the first to settle and wakes the prompt. Re-armed
-/// at every idle point (the caller aborts the previous one), so jobs started
-/// during the last turn are covered.
 pub(super) fn arm_background_wake(
     agent: Option<&gray_core::agent::Agent>,
     sid: Option<&str>,
@@ -418,8 +380,6 @@ pub(super) fn arm_background_wake(
     Some(tokio::spawn(wait_then_wake(exec, ctx, WAKE_WAIT_SLICE)))
 }
 
-/// One bounded wait on the executor; the waiter re-waits while jobs are
-/// still pending, so a job of any length wakes the prompt when it settles.
 const WAKE_WAIT_SLICE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 async fn wait_then_wake(

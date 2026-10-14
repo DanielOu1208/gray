@@ -1,4 +1,3 @@
-# Hermetic real-installer tests; works with both Windows PowerShell 5.1 and pwsh.
 param([Parameter(Mandatory=$true)][string]$Binary)
 $ErrorActionPreference = 'Stop'
 $installer = Join-Path $PSScriptRoot '..\install-native.ps1'
@@ -14,8 +13,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\..\LICENSE') -Destination $p
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\..\THIRD_PARTY_NOTICES.md') -Destination $payload
 Compress-Archive -Path (Join-Path $payload '*') -DestinationPath $archive
 $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
-# The payload binary's own digest: the archive checksum above covers the ZIP,
-# so an installed gray.exe must be compared against this, not against $digest.
+
 $binaryDigest = (Get-FileHash -LiteralPath $Binary -Algorithm SHA256).Hash
 function Expect-Failure([scriptblock]$Action, [string]$Message) {
     $failed = $false
@@ -28,55 +26,48 @@ function Expect-Failure([scriptblock]$Action, [string]$Message) {
 try {
     $pathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
     & $installer -ArchivePath $archive -Sha256 $digest -InstallDir $install -NoPath
-    # Public entry point must route native installs without invoking WSL.
+
     $entry = Join-Path $PSScriptRoot '..\install.ps1'
     & $entry -Native -ArchivePath $archive -Sha256 $digest -InstallDir $install -NoPath
     Expect-Failure { & $entry -Native -ArchivePath $archive -Sha256 ('0' * 64) -InstallDir $install -NoPath } 'checksum mismatch'
     Expect-Failure { & $entry -Native -Wsl } 'parameter set'
-    # Native is the default route: a bare invocation, with no -Native and no
-    # -Wsl, must install into a fresh directory without any WSL routing. If the
-    # default regressed to the WSL set, this runner has no distro, so the
-    # install would fail or exit without placing the binary.
+
     $bareDir = Join-Path $root 'bare-default'
     [IO.Directory]::CreateDirectory($bareDir) | Out-Null
     $bareLog = Join-Path $root 'bare.log'
-    # No exit-code check: StrictMode (dot-sourced from the installer) makes
-    # $LASTEXITCODE undefined until a native command runs, and the assertions
-    # below already catch a route that failed or installed nothing.
+
     & $entry -ArchivePath $archive -Sha256 $digest -InstallDir $bareDir -NoPath *> $bareLog
     if (-not [IO.File]::Exists((Join-Path $bareDir 'gray.exe'))) {
         throw "Bare invocation did not install gray.exe: $(Get-Content -LiteralPath $bareLog -Raw)"
     }
     $bareText = Get-Content -LiteralPath $bareLog -Raw
-    # Routing evidence only: the installer's own final line names WSL to say it
-    # is not required, so match the compat route's wording instead of the word.
+
     if ($bareText -match 'wsl\.exe|into WSL|No WSL distro|WSL is not installed') {
         throw "Bare invocation routed through WSL: $bareText"
     }
-    # The installed binary is the payload we staged, not a distro passthrough.
+
     if ((Get-FileHash -LiteralPath (Join-Path $bareDir 'gray.exe') -Algorithm SHA256).Hash -ne $binaryDigest) {
         throw 'Bare invocation installed an unexpected binary'
     }
     $isolated = Join-Path $root 'entry-only'
     [IO.Directory]::CreateDirectory($isolated) | Out-Null
     Copy-Item -LiteralPath $entry -Destination (Join-Path $isolated 'install.ps1')
-    # Saved alone (or piped to iex) it fetches install-native.ps1 from the site,
-    # and only ever over HTTPS.
+
     Expect-Failure { & (Join-Path $isolated 'install.ps1') -Native -BaseUri 'http://127.0.0.1/dl/' } 'require HTTPS'
-    # Checksums come from the channel's SHA256SUMS file: one exact line or nothing.
+
     $sums = @("$('a' * 64)  gray-stable-x86_64-linux.tar.gz", "$('b' * 64)  gray-stable-x86_64-windows.zip")
     if ((Get-GrayDigest $sums 'gray-stable-x86_64-windows.zip') -cne ('b' * 64)) { throw 'Wrong digest picked' }
     Expect-Failure { Get-GrayDigest $sums 'gray-beta-x86_64-windows.zip' } 'invalid archive checksum'
     Expect-Failure { Get-GrayDigest ($sums + $sums[1]) 'gray-stable-x86_64-windows.zip' } 'invalid archive checksum'
     $installed = Join-Path $install 'gray.exe'
     $before = (Get-FileHash -LiteralPath $installed).Hash
-    # Reinstall uses the existing-file replacement path, stable and beta alike.
+
     & $installer -ArchivePath $archive -Sha256 $digest -InstallDir $install -NoPath -Channel stable
     if ((Get-FileHash -LiteralPath $installed).Hash -ne $before) { throw 'Reinstall changed binary bytes' }
     if ([Environment]::GetEnvironmentVariable('Path', 'User') -cne $pathBefore) { throw '-NoPath modified user PATH' }
     Expect-Failure { & $installer -ArchivePath $archive -Sha256 ('0' * 64) -InstallDir $install -NoPath } 'checksum mismatch'
     Expect-Failure { & $installer -ArchivePath $archive -InstallDir $install -NoPath } 'requires -Sha256'
-    # FileShare.None models another process holding the executable open.
+
     $held = [IO.File]::Open($installed, 'Open', 'Read', 'None')
     try { Expect-Failure { & $installer -ArchivePath $archive -Sha256 $digest -InstallDir $install -NoPath } 'Close all Gray' }
     finally { $held.Dispose() }

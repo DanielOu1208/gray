@@ -18,9 +18,7 @@ fn registry_from_plugins_collects_in_order() {
     let plugins: Vec<Arc<dyn gray_plugin::Plugin>> =
         vec![Arc::new(Stub("one")), Arc::new(Stub("two"))];
     let (reg, manifests) = from_plugins(&plugins);
-    // The builtin surface is not a plugin: `bash` is registered directly by
-    // the builder, and manifests carry real installs only — `plugin list`
-    // and `--dump-manifest` never show a tools entry.
+
     assert_eq!(reg.tool_names(), vec!["bash"]);
     assert_eq!(manifests.len(), 2);
     assert_eq!(manifests[0].name, "one");

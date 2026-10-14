@@ -1,16 +1,3 @@
-//! Speed rig: times every kind of search against a frozen copy of an index,
-//! in-process, and fingerprints the results so a speedup can be checked for
-//! identical output.
-//!
-//!   rig gen <snap dir> <corpus.json>            sample queries from the index
-//!   rig run <snap dir> <corpus.json> <out.json> [kinds]   time them
-//!
-//! kinds: comma-separated subset of name,idle,typing,grep (default all).
-//!
-//! `<snap dir>` holds `index.bin` and `content/` (APFS clones of the live
-//! ones, so the daemon keeps running untouched). Compare builds with
-//! `demo/abba.py`.
-
 use fsearch::Grep;
 use fsearch::content::{self, Content};
 use fsearch::index::Index;
@@ -20,7 +7,6 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// The daemon's allocator, so timings are the daemon's.
 #[global_allocator]
 static ALLOC: fsearch::alloc::Alloc = fsearch::alloc::Alloc;
 
@@ -37,7 +23,6 @@ fn home() -> String {
     std::env::var("HOME").unwrap()
 }
 
-/// Deterministic xorshift, so every build samples the same corpus.
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -58,12 +43,11 @@ fn gen_corpus(snap: &Path, out: &str) {
     let mut names: Vec<(String, String)> = Vec::new();
     let mut push = |cat: &str, q: String| names.push((cat.into(), q));
 
-    // Unique names people would type: the exact name, then one typo of it.
     let mut targets = Vec::new();
     while targets.len() < 60 {
         let k = rng.below(idx.u);
         let n = text(k);
-        // Words, not cache hashes: mostly letters, no long hex runs.
+
         let letters = n.chars().filter(char::is_ascii_alphabetic).count();
         let hexy = n.as_bytes().windows(8).any(|w| w.iter().all(u8::is_ascii_hexdigit));
         if idx.ents(k as u32).len() == 1 && (6..=32).contains(&n.len()) && n.is_ascii() && !n.contains(' ') && letters * 10 >= n.len() * 7 && !hexy {
@@ -87,7 +71,7 @@ fn gen_corpus(snap: &Path, out: &str) {
         }
         push("typo", s.into_iter().collect());
     }
-    // Common short words (names many entries share), and folder + name pairs.
+
     let mut words = std::collections::BTreeSet::new();
     while words.len() < 30 {
         let k = rng.below(idx.u);
@@ -117,8 +101,6 @@ fn gen_corpus(snap: &Path, out: &str) {
     }
     let typing: Vec<Vec<String>> = targets.iter().take(10).map(|(_, t)| (1..=t.len()).map(|n| t[..n].to_string()).collect()).collect();
 
-    // Content: rare identifiers from random indexed files, then common words,
-    // regexes, definitions, scoped and unindexed-folder searches.
     let content = Content::open_shared(snap.join("content"));
     let ident = regex::Regex::new(r"\b[a-z][a-z0-9_]{9,30}\b").unwrap();
     let mut rare = std::collections::BTreeSet::new();
@@ -166,8 +148,6 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1e3
 }
 
-/// A name search as the daemon answers it: parse, search, then each hit's
-/// path. Returns the result fingerprint.
 fn name_search(live: &Live, pool: &rayon::ThreadPool, q: &str, home: &str) -> u64 {
     let q = Query::parse(q, home).unwrap();
     let hits = pool.install(|| Searcher { live }.search(&q));
@@ -180,8 +160,6 @@ fn name_search(live: &Live, pool: &rayon::ThreadPool, q: &str, home: &str) -> u6
     h
 }
 
-/// A content search as the daemon answers it (see `Engine::grep`); `all`:
-/// every matching line of every file. Its time, and a digest of its results.
 fn grep_search(live: &Live, content: &Content, pool: &rayon::ThreadPool, q: &str, home: &str, budget: Option<Duration>, all: bool) -> (f64, u64) {
     let t = Instant::now();
     let mut q = Query::parse(q, home).unwrap();
@@ -241,8 +219,7 @@ fn run(snap: &Path, corpus: &str, out: &str, kinds: &str) {
     };
     let names: Vec<(String, String)> =
         corpus["names"].as_array().unwrap().iter().map(|v| (v["cat"].as_str().unwrap().into(), v["q"].as_str().unwrap().into())).collect();
-    // Warm: one pass to fault things in, then rounds where every query
-    // follows a different one (so the name cache never answers).
+
     for (_, q) in &names {
         name_search(&live, &pool, q, &home);
     }
@@ -253,7 +230,7 @@ fn run(snap: &Path, corpus: &str, out: &str, kinds: &str) {
             record("name", cat, q, ms(t.elapsed()), d);
         }
     }
-    // After an idle spell the daemon has dropped its cache and spare buffers.
+
     for _ in 0..if want("idle") { 3 } else { 0 } {
         for (cat, q) in &names {
             live.names_cache.trim_if_idle(Duration::ZERO);
@@ -262,7 +239,7 @@ fn run(snap: &Path, corpus: &str, out: &str, kinds: &str) {
             record("idle", cat, q, ms(t.elapsed()), d);
         }
     }
-    // Typing: each keystroke is a query; the run's total is what you wait.
+
     for _ in 0..if want("typing") { 5 } else { 0 } {
         for run in corpus["typing"].as_array().unwrap() {
             live.names_cache.trim_if_idle(Duration::ZERO);
@@ -285,7 +262,7 @@ fn run(snap: &Path, corpus: &str, out: &str, kinds: &str) {
             record("grep", cat, q, t, d);
         }
     }
-    // Every match of the common words and regexes (a warm-up pass first).
+
     for round in 0..if want("all") { 4 } else { 0 } {
         for (cat, q) in greps.iter().filter(|(c, _)| c == "common" || c == "regex") {
             let (t, d) = grep_search(&live, &content, &pool, q, &home, None, true);

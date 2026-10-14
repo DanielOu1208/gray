@@ -65,8 +65,7 @@ fn guard_reports_unannounced_changes_and_consumes_an_announcement() {
         g.observe("m", &req("sys", &["summary"])),
         Some((Change::HistoryAt(0), Some("compaction")))
     );
-    // The announcement is spent: an appending request after it is clean,
-    // and the next unannounced rewrite is loud again.
+
     assert_eq!(g.observe("m", &req("sys", &["summary", "c"])), None);
     assert_eq!(
         g.observe("m", &req("sys2", &["summary", "c"])),

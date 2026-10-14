@@ -1,6 +1,5 @@
 use super::context::{format_context_length, friendly_model_name, model_context_info};
 
-/// Snapshot of background UI to render dimmed underneath popups.
 #[derive(Debug, Clone, Default)]
 pub struct BackgroundSnapshot {
     pub transcript: Vec<ratatui::text::Line<'static>>,
@@ -11,6 +10,13 @@ pub struct BackgroundSnapshot {
     pub prompt_text: String,
     pub used_tokens: usize,
     pub cache_hit_rate: f64,
+    pub home: bool,
+    pub home_notice: Option<String>,
+    pub plugin_stats: Option<String>,
+    pub home_update: Option<String>,
+    pub home_qol: Option<String>,
+    pub home_session: Option<String>,
+    pub attachments: Vec<std::path::PathBuf>,
 }
 
 impl BackgroundSnapshot {
@@ -30,6 +36,13 @@ impl BackgroundSnapshot {
             prompt_text: String::new(),
             used_tokens: 0,
             cache_hit_rate: 0.0,
+            home: true,
+            home_notice: None,
+            plugin_stats: None,
+            home_update: None,
+            home_qol: None,
+            home_session: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -52,8 +65,7 @@ pub fn dim_color(c: ratatui::style::Color) -> ratatui::style::Color {
             let b2 = ((b as f32) * k).round() as u8;
             Color::Rgb(r2, g2, b2)
         }
-        // Named brights dim to the arithmetic blend, same as before
-        // (was: White→(85,85,85)); Reset reads through to the theme's text.
+
         Color::White => Color::Rgb(85, 85, 85),
         Color::Gray => Color::Rgb(60, 60, 60),
         Color::DarkGray => crate::theme::theme().text_faint,
@@ -69,12 +81,6 @@ pub fn dim_color(c: ratatui::style::Color) -> ratatui::style::Color {
     }
 }
 
-/// Backdrop for alternate-screen modals: the terminal default (`Reset`), so the
-/// dimmed background matches the inline composer (transparent transcript over
-/// the terminal bg) instead of painting a mismatched pure-black screen. Every
-/// dimmed style still carries an explicit bg so no unpainted cells remain; the
-/// initial `Clear` plus full-height row-by-row rendering keeps stale
-/// alt-screen cells from bleeding through behind the popup.
 pub(crate) fn backdrop_bg() -> ratatui::style::Color {
     let w = crate::theme::theme().window_bg;
     if w == ratatui::style::Color::Reset {
@@ -93,10 +99,6 @@ pub fn dim_style(style: ratatui::style::Style) -> ratatui::style::Style {
         s = s.fg(crate::theme::theme().text_faint);
     }
     if let Some(bg) = style.bg {
-        // Every backdrop background dims uniformly: transcript user cards
-        // crush to the same near-black as the input box, so the whole
-        // background visibly drops behind the modal instead of glowing
-        // through at full composer gray.
         s = s.bg(dim_color(bg));
     }
     s
@@ -118,9 +120,6 @@ pub fn dim_line(line: &ratatui::text::Line<'_>) -> ratatui::text::Line<'static> 
     new_line
 }
 
-/// Pads a backdrop line to the full width with opaque spaces so no
-/// transparent cells remain (composer `draw.rs` popup-row parity).
-/// Padding keeps the row's own bg (prompt box stays composer gray, transcript black).
 fn pad_backdrop_line(
     mut line: ratatui::text::Line<'static>,
     w: usize,
@@ -149,22 +148,16 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
     if w == 0 || h == 0 {
         return;
     }
-    // Opaque base: without this, backdrop rows with transparent cells leave
-    // stale alt-screen content / terminal transparency visible behind modals.
+
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::default().style(Style::default().bg(backdrop_bg())),
         area,
     );
 
-    // Composer gray: the live input box and every modal use (22,22,22).
-    // The backdrop's copy of the INPUT BOX is chrome, not content: paint it
-    // dimmed so the textarea visibly drops behind modals. Transcript user
-    // cards dim through the same path (no preservation branch).
     let box_bg = crate::theme::theme().surface_bg;
     let input_bg = dim_color(box_bg);
-    // dim through the color map, not just SGR faint — terminals
-    // that ignore Modifier::DIM showed these at full brightness behind modals.
+
     let faint_dimmed = dim_color(crate::theme::theme().text_faint);
     let prompt_arrow_color = faint_dimmed;
     let text_dimmed_color = faint_dimmed;
@@ -179,8 +172,7 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
             .bg(input_bg),
     );
     let cont_span = Span::styled("   ", Style::default().bg(input_bg));
-    // Mirror the composer input box: wrap the live prompt so a long /
-    // multi-line draft grows the box instead of breaking a single row.
+
     let content_w = w.saturating_sub(4).max(1);
     let mut prompt_rows: Vec<Line<'static>> = Vec::new();
     if bg.prompt_text.is_empty() {
@@ -230,8 +222,7 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
     let cache_display = format!("{:.1}% cache", bg.cache_hit_rate * 100.0);
 
     let model_display = friendly_model_name(&bg.model_name);
-    // Provider-driven (opencode parity): no effort badge when the provider
-    // says this model doesn't reason. Unknown → show, as before.
+
     let show_effort = super::context::model_supports_reasoning(&bg.model_name) != Some(false);
     let right_text = if model_display.is_empty() {
         if show_effort {
@@ -293,8 +284,52 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
 
     let transcript = bg.rebuild_transcript(w);
 
-    // Live TUI parity: ensure breathing room (a gap row) between transcript and
-    // composer input box whenever transcript does not already end blank.
+    if bg.home {
+        let home = crate::composer::draw::HomeRows {
+            notice: bg.home_notice.as_deref(),
+            stats: bg.plugin_stats.as_deref(),
+            above: bg.home_update.as_deref(),
+            session: bg.home_session.as_deref(),
+            qol: bg.home_qol.as_deref(),
+        };
+        let chips = crate::composer::draw::attachment_cells(&bg.attachments, &bg.prompt_text);
+        let ibox =
+            crate::composer::draw::build_input_box(&bg.prompt_text, 0, w, None, Some(home), &chips);
+        let band = ibox.lines;
+        let bx = ibox.x;
+        let transcript_avail_h = h.saturating_sub(band.len() + 1);
+        let tail: &[Line<'static>] = if transcript.len() <= transcript_avail_h {
+            &transcript
+        } else {
+            &transcript[transcript.len() - transcript_avail_h..]
+        };
+
+        let mut full_screen_lines: Vec<Line<'static>> = Vec::with_capacity(h);
+        for l in tail {
+            full_screen_lines.push(pad_backdrop_line(dim_line(l), w));
+        }
+        let left_pad = Span::styled(" ".repeat(bx), Style::default().bg(backdrop_bg()));
+        for l in band {
+            let mut line = dim_line(&l);
+            line.spans.insert(0, left_pad.clone());
+            full_screen_lines.push(pad_backdrop_line(line, w));
+        }
+        while full_screen_lines.len() + 1 < h {
+            full_screen_lines.push(pad_backdrop_line(Line::from(""), w));
+        }
+        full_screen_lines.push(pad_backdrop_line(footer_line, w));
+        full_screen_lines.truncate(h);
+
+        for (i, line) in full_screen_lines.into_iter().enumerate() {
+            let y = area.y + i as u16;
+            if y >= area.y + area.height {
+                break;
+            }
+            frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+        }
+        return;
+    }
+
     let transcript_ends_blank = transcript.last().is_some_and(|l| {
         (l.style.bg.is_none() || l.style.bg == Some(backdrop_bg()))
             && l.spans.iter().all(|s| {
@@ -316,10 +351,6 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
 
     let mut full_screen_lines: Vec<Line<'static>> = Vec::with_capacity(h);
 
-    // Live TUI: the transcript starts at the top of the terminal,
-    // followed by the gap, composer input box, and footer, with empty filler
-    // at the bottom of the screen. Anchoring filler at the top (top_pad)
-    // caused the whole UI to jump down to the bottom of the screen.
     for l in tail {
         full_screen_lines.push(pad_backdrop_line(dim_line(l), w));
     }
@@ -336,8 +367,6 @@ pub fn render_dimmed_background(frame: &mut ratatui::Frame, bg: &BackgroundSnaps
     }
     full_screen_lines.truncate(h);
 
-    // Row-by-row (composer `draw.rs` parity): a single multi-line Paragraph
-    // would wrap long transcript lines and shift the whole backdrop.
     for (i, line) in full_screen_lines.into_iter().enumerate() {
         let y = area.y + i as u16;
         if y >= area.y + area.height {

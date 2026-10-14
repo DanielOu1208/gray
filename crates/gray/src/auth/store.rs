@@ -1,5 +1,3 @@
-//! Strict mixed credential storage for API keys, legacy OAuth, and plugins.
-
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
@@ -13,13 +11,11 @@ use crate::setup::catalog::{self, AuthEntry};
 
 pub type StoredCredential = CredentialEnvelope;
 
-/// The private auth store owns mutation of `<gray-home>/auth.json`.
 #[derive(Clone, Debug)]
 pub struct CredentialStore {
     path: PathBuf,
 }
 
-/// A held advisory lock for one auth file.
 pub struct AuthLock {
     _file: File,
 }
@@ -43,10 +39,6 @@ impl CredentialStore {
         self.replace_locked(next)
     }
 
-    /// The write half of [`Self::replace`]; the caller holds the lock.
-    ///
-    /// Read-modify-write must run under one lock: loading before locking let
-    /// two writers overwrite each other, and the loser's credential was gone.
     pub(crate) fn replace_locked(&self, next: &BTreeMap<String, AuthEntry>) -> anyhow::Result<()> {
         let value = serde_json::to_value(next)?;
         if serde_json::to_vec(&value)?.len() > MAX_AUTH_BYTES {
@@ -130,9 +122,6 @@ impl CredentialStore {
         Ok(keys.len())
     }
 
-    /// The store's advisory lock. `pub(crate)` so the catalog's own
-    /// read-modify-write on the same file takes it too, instead of
-    /// duplicating the flock.
     pub(crate) fn lock(&self) -> anyhow::Result<AuthLock> {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         #[cfg(unix)]

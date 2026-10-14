@@ -99,7 +99,6 @@ fn disabled_argvs_come_from_user_lock() {
 
 #[test]
 fn project_overlay_wins_on_the_flag_only() {
-    // Project disables an enabled user entry (by its argv).
     let project = LockFile {
         schema: 1,
         plugins: BTreeMap::from([named("on-sidecar", vec!["other-bin"], false)]),
@@ -111,14 +110,13 @@ fn project_overlay_wins_on_the_flag_only() {
             vec!["sidecar-bin".to_string()]
         ]
     );
-    // Project re-enables a user-disabled entry.
+
     let project = LockFile {
         schema: 1,
         plugins: BTreeMap::from([named("off-sidecar", vec![], true)]),
     };
     assert!(disabled_sidecar_argvs(&user_lock(), &project).is_empty());
-    // Project-only names have no known argv: the overlay toggles, it never
-    // discovers.
+
     let project = LockFile {
         schema: 1,
         plugins: BTreeMap::from([named("ghost", vec!["ghost-bin"], false)]),

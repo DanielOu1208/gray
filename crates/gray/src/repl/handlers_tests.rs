@@ -15,10 +15,7 @@ fn temp_skill_cwd_for_handlers_test(name: &str) -> tempfile::TempDir {
 #[test]
 fn skill_paste_is_what_the_model_gets() {
     crate::project_trust::assume_trusted_for_test();
-    // The visible paste and the model turn must be the same string:
-    // what you see in chat is what the model gets.
-    // The paste contract is not the trust gate; trust is granted explicitly
-    // so this fixture never depends on the real trust list.
+
     crate::project_trust::assume_trusted_for_test();
     let dir = temp_skill_cwd_for_handlers_test("paste-me");
     let cwd = dir.path();
@@ -32,7 +29,7 @@ fn skill_paste_is_what_the_model_gets() {
         "envelope leaked: {expanded}"
     );
     assert!(expanded.contains("# temp"), "body missing: {expanded}");
-    // Args ride along in the same text.
+
     let dir2 = temp_skill_cwd_for_handlers_test("paste-args");
     let skill_dir = dir2.path().join(".gray").join("skills").join("paste-args");
     std::fs::write(
@@ -110,7 +107,7 @@ fn skills_auto_toggle_persists_and_on_clears_disabled_set() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.json");
     assert!(crate::setup::skills_auto_enabled_at(&cfg));
-    // Off persists as an explicit false; per-skill disables survive it.
+
     let mut saved = crate::setup::load_saved_config_at(&cfg);
     saved.disabled_skills.insert("demo".to_string());
     crate::setup::save_saved_config_at(&cfg, &saved).unwrap();
@@ -122,7 +119,7 @@ fn skills_auto_toggle_persists_and_on_clears_disabled_set() {
             .disabled_skills
             .contains("demo")
     );
-    // On clears the flag (back to missing = default) and the disabled set.
+
     let msg = apply_skills_auto_toggle(&cfg, true).unwrap();
     assert!(msg.contains("on"), "{msg}");
     assert!(crate::setup::skills_auto_enabled_at(&cfg));
@@ -131,7 +128,7 @@ fn skills_auto_toggle_persists_and_on_clears_disabled_set() {
             .disabled_skills
             .is_empty()
     );
-    // Missing key reads as enabled.
+
     std::fs::write(&cfg, r#"{"model":"m"}"#).unwrap();
     assert!(crate::setup::skills_auto_enabled_at(&cfg));
 }
@@ -139,8 +136,7 @@ fn skills_auto_toggle_persists_and_on_clears_disabled_set() {
 #[test]
 fn skills_named_on_off_still_invoke_instead_of_toggling_global() {
     crate::project_trust::assume_trusted_for_test();
-    // A skill literally named `on`/`enable` stays invokable: the global
-    // branch yields to an exact discovery hit.
+
     let dir = temp_skill_cwd_for_handlers_test("on");
     let out = expand_skill_command(parse_command("/skills on"), dir.path(), None, false);
     assert!(
@@ -154,11 +150,11 @@ fn skill_toggle_persists_and_validates_against_discovery() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.json");
     let discovered = vec![test_skill_entry("demo")];
-    // Unknown name errors and stores nothing.
+
     let err = apply_skill_toggle(&cfg, &discovered, false, "nope").unwrap_err();
     assert!(err.contains("nope"), "{err}");
     assert!(!cfg.exists());
-    // Disable persists.
+
     let msg = apply_skill_toggle(&cfg, &discovered, false, "demo").unwrap();
     assert!(msg.contains("disabled"), "{msg}");
     assert!(
@@ -166,7 +162,7 @@ fn skill_toggle_persists_and_validates_against_discovery() {
             .disabled_skills
             .contains("demo")
     );
-    // Enable removes.
+
     let msg = apply_skill_toggle(&cfg, &discovered, true, "demo").unwrap();
     assert!(msg.contains("enabled"), "{msg}");
     assert!(
@@ -183,7 +179,7 @@ fn format_skill_paste_body_and_args() {
     assert!(!text.contains("</skill>"), "{text}");
     assert!(text.contains("Do things."), "{text}");
     assert!(text.contains("**ARGUMENTS:** fast"), "{text}");
-    // Explicit invocation must read as binding, not background reading.
+
     assert!(text.contains("\"ts\" skill"), "skill not named: {text}");
     assert!(text.contains("binding"), "no binding directive: {text}");
     assert!(text.contains("mid-task"), "no mid-task re-anchor: {text}");
@@ -192,9 +188,6 @@ fn format_skill_paste_body_and_args() {
     assert!(!bare.contains("<skill"), "{bare}");
 }
 
-// UNRUN (cargo test banned under X): run in TTY/CI.
-// reload_agent with no model configured fails soft through say()
-// (headless println path) and preserves the previous agent.
 #[tokio::test]
 async fn reload_agent_failure_preserves_agent() {
     let config = Config {
@@ -242,11 +235,11 @@ fn subsystem_toggle_parses_bare_switch_words_only() {
     assert_eq!(parse_on_off("Disable"), Some(false));
     assert_eq!(parse_on_off(""), None);
     assert_eq!(parse_on_off("  off  "), Some(false));
-    // Extras and names are not switches — each command keeps its own shape.
+
     assert_eq!(parse_on_off("off now"), None);
     assert_eq!(parse_on_off("memory"), None);
     assert_eq!(parse_on_off("on/off"), None);
-    // Both subsystems share the parser.
+
     for sub in [Subsystem::Cron, Subsystem::Gateway] {
         assert!(parse_on_off("off").is_some());
         assert!(!sub.label().is_empty());
@@ -258,29 +251,26 @@ fn subsystem_toggle_persists_per_subsystem_and_reports_the_manual_path() {
     use super::{Subsystem, apply_subsystem_toggle};
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.json");
-    // Off persists as an explicit false and names the manual path.
+
     let msg = apply_subsystem_toggle(&cfg, Subsystem::Cron, false).unwrap();
     assert!(msg.contains("cron off"), "{msg}");
     assert!(!crate::setup::cron_auto_enabled_at(&cfg));
-    // The other switch is independent.
+
     assert!(crate::setup::gw_auto_enabled_at(&cfg));
     assert!(msg.contains("/cron still runs them"), "{msg}");
     let msg = apply_subsystem_toggle(&cfg, Subsystem::Gateway, false).unwrap();
     assert!(msg.contains("status/stop still work"), "{msg}");
     assert!(!crate::setup::gw_auto_enabled_at(&cfg));
-    // On clears the flag (back to missing = default on).
+
     let msg = apply_subsystem_toggle(&cfg, Subsystem::Cron, true).unwrap();
     assert!(msg.contains("cron on"), "{msg}");
     assert!(crate::setup::cron_auto_enabled_at(&cfg));
-    // A missing config reads as enabled for both.
+
     let missing = dir.path().join("nope.json");
     assert!(crate::setup::cron_auto_enabled_at(&missing));
     assert!(crate::setup::gw_auto_enabled_at(&missing));
 }
 
-/// `/undo` cuts on the last *user* turn: the model never decides where the
-/// conversation rewinds, and the cut must not land between a tool call and
-/// its result.
 #[test]
 fn undo_cut_lands_on_the_last_user_turn() {
     let messages = vec![
@@ -292,8 +282,6 @@ fn undo_cut_lands_on_the_last_user_turn() {
     assert_eq!(undo_cut(&messages), Some(2));
 }
 
-/// A conversation with no user turn has nothing to undo, and a cut at 0 (the
-/// first message) is a real answer, not a miss.
 #[test]
 fn undo_cut_reports_a_conversation_it_cannot_rewind() {
     assert_eq!(undo_cut(&[]), None);

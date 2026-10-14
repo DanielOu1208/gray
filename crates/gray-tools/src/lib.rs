@@ -1,10 +1,3 @@
-//! gray-tools: builtin file/shell tools and the tool registry behind the
-//! `ToolExecutor` seam. (The `Tool` trait itself lives in `gray-core::agent`.)
-//!
-//! Truncation policy (applied to every tool output): results are capped at
-//! 2000 lines / 50 KiB, keeping head + tail with a `[truncated ...]`
-//! annotation; error outputs are additionally hard-capped at 2 KiB.
-
 pub mod edit;
 pub mod edit_diff;
 pub mod find;
@@ -17,6 +10,13 @@ pub mod read;
 pub mod search_cmd;
 #[cfg(unix)]
 pub mod search_index_fs;
+pub mod search_plan;
+#[cfg(unix)]
+pub mod search_serve;
+#[cfg(unix)]
+pub mod search_shim;
+#[cfg(target_os = "linux")]
+pub mod search_watch;
 pub mod shell;
 pub mod stats;
 pub mod truncate;
@@ -44,16 +44,12 @@ pub use read::ReadTool;
 pub use shell::tools::bash::BashTool;
 pub use write::WriteTool;
 
-/// Ordered collection of tools with name lookup, wired into the agent loop
-/// via [`ToolExecutor`]. Plugin assembly (manifests, builtin plugin sets)
-/// lives in `gray::profile` — this crate only holds the tools.
 #[derive(Default)]
 pub struct Registry {
     tools: Vec<Arc<dyn Tool>>,
 }
 
 impl Registry {
-    /// Collects tools in order; on name conflict later entries win.
     pub fn new(tools: Vec<Arc<dyn Tool>>) -> Self {
         let mut out: Vec<Arc<dyn Tool>> = Vec::new();
         for t in tools {
@@ -66,24 +62,19 @@ impl Registry {
         Self { tools: out }
     }
 
-    /// Tool definitions in registration order (for the chat request).
     pub fn defs(&self) -> Vec<ToolDef> {
         self.tools.iter().map(|t| t.def()).collect()
     }
 
-    /// Clones an owned handle so execution futures can be `'static`.
     fn lookup(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.iter().find(|t| t.def().name == name).cloned()
     }
 
-    /// Names of registered tools in registration order.
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.iter().map(|t| t.def().name.clone()).collect()
     }
 }
 
-/// Legacy arg-name aliases applied before schema lookup (old -> canonical).
-/// Single table on purpose: add a row, don't add a system.
 static ALIASES: &[(&str, &str)] = &[
     ("file_path", "path"),
     ("filePath", "path"),
@@ -129,7 +120,6 @@ static ALIASES: &[(&str, &str)] = &[
     ("secs", "seconds"),
 ];
 
-/// Strips trivial framing: markdown fences, then outer prose around `{…}`.
 fn strip_framing(s: &str) -> &str {
     let mut t = s.trim();
     if t.starts_with("```") {
@@ -158,9 +148,6 @@ fn strip_framing(s: &str) -> &str {
     t
 }
 
-/// Coerces loose model args into schema-typed values: string->int/float/bool,
-/// JSON-encoded-string->array/object, bare scalar->single-elem array, and
-/// null/"null"->None (dropped) only where the schema leaves it optional.
 fn coerce_args(def: &ToolDef, args: Value) -> Value {
     let mut args = match args {
         Value::String(s) => {
@@ -171,7 +158,7 @@ fn coerce_args(def: &ToolDef, args: Value) -> Value {
     let Value::Object(ref mut map) = args else {
         return args;
     };
-    // Schema property names (for schema-gated aliases below).
+
     let has_prop = |name: &str| {
         def.parameters
             .get("properties")
@@ -179,9 +166,6 @@ fn coerce_args(def: &ToolDef, args: Value) -> Value {
             .is_some_and(|o| o.contains_key(name))
     };
     for (old, new) in ALIASES {
-        // Rename only when the schema defines the new name and not the old
-        // one: a plugin whose schema legitimately declares `text` must keep
-        // it, not have it rewritten to `content`.
         if map.contains_key(*old)
             && !map.contains_key(*new)
             && has_prop(new)
@@ -227,8 +211,6 @@ fn coerce_args(def: &ToolDef, args: Value) -> Value {
                 .map(Value::from)
                 .or_else(|| {
                     s.trim().parse::<f64>().ok().and_then(|n| {
-                        // No lossy truncation: only integral, in-range
-                        // floats convert ("2.0" ok; "2.5", overflow, NaN stay strings).
                         (n.fract() == 0.0 && n.abs() < 9.223372036854776e18)
                             .then_some(Value::from(n as i64))
                     })
@@ -276,8 +258,6 @@ fn coerce_args(def: &ToolDef, args: Value) -> Value {
     let drop: Vec<String> = map
         .iter()
         .filter_map(|(k, v)| {
-            // Only real JSON nulls drop (and only when optional): the literal
-            // string "null" is a valid value and must survive.
             if v.is_null() && !required.iter().any(|r| r == k) {
                 Some(k.clone())
             } else {
@@ -291,9 +271,6 @@ fn coerce_args(def: &ToolDef, args: Value) -> Value {
     args
 }
 
-/// Meter label for one call: `path` when the tool takes one, else the
-/// truncated `command` (bash), else empty. 80 chars keeps a heredoc or a
-/// long pipeline from bloating every record.
 fn meter_label(args: &Value) -> String {
     let raw = args
         .get("path")
@@ -318,9 +295,6 @@ impl ToolExecutor for Registry {
         timeout: std::time::Duration,
     ) -> BoxFuture<'static, Option<()>> {
         for tool in &self.tools {
-            // `as_any` (no downcast-rs dep) hands back the bash tool when
-            // the registry owns one; its wait future is owned, so it is
-            // 'static without cloning the tool itself.
             if tool.as_any().downcast_ref::<BashTool>().is_some() {
                 let ctx = ctx.clone();
                 let fut = tool
@@ -384,12 +358,7 @@ impl ToolExecutor for Registry {
         let name = name.to_string();
         Box::pin(async move {
             log::info!(target: "gray_tools", "tool start: {name}");
-            // Captured before `coerced` moves into execute (the Some arm
-            // consumes it): the meter's label. `path` for file tools, the
-            // (truncated) `command` for bash — gray's default surface, where
-            // an empty label would make the record useless for the waste
-            // analysis it feeds. Computed only when the gate is on, so the
-            // default configuration pays nothing.
+
             let meter_on = crate::stats::enabled();
             let stat_path = if meter_on {
                 meter_label(&coerced)
@@ -405,10 +374,7 @@ impl ToolExecutor for Registry {
             } else {
                 log::info!(target: "gray_tools", "tool {name} done");
             }
-            // T0.2 meter with the retrieval/action class (arXiv:2608.13568):
-            // one no-op-unless-enabled record per call for every tool that
-            // does not self-report (see `stats::SELF_REPORTING`), so the
-            // tokens-to-success split covers the whole surface.
+
             if meter_on && !crate::stats::SELF_REPORTING.contains(&name.as_str()) {
                 crate::stats::ToolStats {
                     tool: &name,

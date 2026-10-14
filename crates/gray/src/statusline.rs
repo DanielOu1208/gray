@@ -1,28 +1,3 @@
-//! The configurable footer ("status line").
-//!
-//! The footer is two lists of named segments, left and right, joined by a
-//! separator. Empty segments drop out together with their separator, so a
-//! cold cache timer never leaves a trailing ` · `. Configured in
-//! `config.json` under `status_line`:
-//!
-//! ```json
-//! "status_line": {
-//!   "left":  ["context", "cache", "timer", "work", "branch"],
-//!   "right": ["status", "model", "effort"],
-//!   "separator": " · ",
-//!   "command": "~/bin/gray-status",
-//!   "interval_ms": 5000
-//! }
-//! ```
-//!
-//! Segment names: `location` (`⣿ ~cwd (branch)`), `context`, `cache`,
-//! `timer`, `work`, `state` (`○ idle` / `⠋ working`), `model`, `effort`,
-//! `dir`, `cwd`, `branch`, `command` (first line of `command`'s stdout),
-//! `status` (every plugin status) and `status:<key>` (one). An entry with
-//! `{name}` placeholders is a template (`"⎇ {branch}"`); any other unknown
-//! entry is literal text. `command` runs every `interval_ms` with a JSON
-//! snapshot (cwd, model, context) on stdin, Claude Code style.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_LEFT: &[&str] = &["model", "effort"];
 pub const DEFAULT_RIGHT: &[&str] = &["context", "cache", "timer", "work", "status"];
 pub const DEFAULT_SEPARATOR: &str = " ";
-/// The right group's default gap: plain spaces, no rule.
+
 pub const DEFAULT_RIGHT_SEPARATOR: &str = "  ";
 const DEFAULT_INTERVAL_MS: u64 = 5_000;
 const MIN_INTERVAL_MS: u64 = 500;
@@ -71,8 +46,7 @@ impl StatusLineConfig {
             .clone()
             .unwrap_or_else(|| DEFAULT_SEPARATOR.to_string())
     }
-    /// A configured `separator` joins both groups; the stock right group
-    /// is spaced, not ruled.
+
     pub fn right_separator(&self) -> String {
         self.separator
             .clone()
@@ -87,14 +61,11 @@ impl StatusLineConfig {
     }
 }
 
-/// One painted piece of the footer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Seg {
     pub text: String,
     pub color: Color,
-    /// Per-piece coloring within the segment (`text` stays the full string
-    /// for width math): `Some` renders each `(text, color)` piece as its
-    /// own span instead of one `color` span.
+
     pub parts: Option<Vec<(String, Color)>>,
 }
 
@@ -108,9 +79,6 @@ impl Seg {
     }
 }
 
-/// Resolves `spec` into painted segments, separators included. `known`
-/// answers built-in names (`None` = unknown name, `Some("")` = known but
-/// empty right now). Empty segments vanish with their separator.
 pub fn compose(
     spec: &[String],
     known: &dyn Fn(&str) -> Option<Seg>,
@@ -136,7 +104,6 @@ pub fn compose(
     out
 }
 
-/// Cuts `segs` to `max_w` columns, ending in `…` when anything was cut.
 pub fn clip(segs: Vec<Seg>, max_w: usize) -> Vec<Seg> {
     use crate::text_width::{chars_width, display_width, fit_char_count};
     if segs.iter().map(|s| display_width(&s.text)).sum::<usize>() <= max_w {
@@ -182,7 +149,6 @@ fn resolve_item(item: &str, known: &dyn Fn(&str) -> Option<Seg>, text_color: Col
     Some(Seg::new(item, text_color))
 }
 
-/// `{name}` → the segment's text; unknown names render empty; `{{` is `{`.
 pub fn render_template(tpl: &str, known: &dyn Fn(&str) -> Option<Seg>) -> String {
     let mut out = String::new();
     let mut rest = tpl;
@@ -212,10 +178,6 @@ pub fn render_template(tpl: &str, known: &dyn Fn(&str) -> Option<Seg>) -> String
     out
 }
 
-// ---------------------------------------------------------------------------
-// Shared state: config, plugin statuses, command output.
-// ---------------------------------------------------------------------------
-
 static CONFIG: RwLock<Option<StatusLineConfig>> = RwLock::new(None);
 static PLUGIN_STATUS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 static COMMAND_OUT: Mutex<String> = Mutex::new(String::new());
@@ -226,8 +188,6 @@ fn bump() {
     VERSION.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Changes whenever anything the footer shows from here changed; the
-/// composer ticker repaints when it moves.
 pub fn version() -> u64 {
     VERSION.load(Ordering::Relaxed)
 }
@@ -250,8 +210,6 @@ pub fn set_config(cfg: Option<StatusLineConfig>) {
     bump();
 }
 
-/// Loads `status_line` from `config.json` and starts the command runner
-/// if a command is set. Returns whether a custom layout is active.
 pub fn init_from_saved_config() -> bool {
     let cfg = crate::setup::saved_config_path()
         .ok()
@@ -268,8 +226,6 @@ pub fn init_from_saved_config() -> bool {
     custom
 }
 
-/// pi's `ctx.ui.setStatus(key, text)`: a plugin's footer entry. `None` or
-/// blank clears it.
 pub fn set_status(key: &str, text: Option<&str>) {
     let Ok(mut m) = PLUGIN_STATUS.lock() else {
         return;
@@ -288,7 +244,6 @@ pub fn status(key: &str) -> Option<String> {
     PLUGIN_STATUS.lock().ok()?.get(key).cloned()
 }
 
-/// Every plugin status, in key order, joined by `sep`.
 pub fn all_statuses(sep: &str) -> String {
     PLUGIN_STATUS
         .lock()
@@ -300,7 +255,6 @@ pub fn command_output() -> String {
     COMMAND_OUT.lock().map(|o| o.clone()).unwrap_or_default()
 }
 
-/// The snapshot handed to `command` on stdin; the draw loop refreshes it.
 pub fn publish_facts(facts: serde_json::Value) {
     if let Ok(mut f) = FACTS.lock() {
         *f = Some(facts);
@@ -316,9 +270,6 @@ fn one_line(s: &str) -> String {
         .to_string()
 }
 
-/// Starts the background runner for `status_line.command` (once per
-/// process). It re-reads the config every round, so `/reload` can add,
-/// change or drop the command without a restart.
 pub fn spawn_command_runner() {
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
@@ -350,8 +301,6 @@ pub fn spawn_command_runner() {
     });
 }
 
-/// Runs `cmd` through `sh -c` with `facts` on stdin; stdout on success.
-/// Killed after a few seconds so a hung script cannot pin the footer.
 pub fn run_command(cmd: &str, facts: &serde_json::Value) -> Option<String> {
     use std::io::{Read, Write};
     use std::process::{Command, Stdio};
@@ -392,14 +341,9 @@ fn expand_tilde(cmd: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Git branch (cheap: reads .git/HEAD, cached briefly per cwd).
-// ---------------------------------------------------------------------------
-
 type BranchCache = Option<(PathBuf, Instant, String)>;
 static BRANCH: Mutex<BranchCache> = Mutex::new(None);
 
-/// Current branch (or short detached sha) for `cwd`; empty outside a repo.
 pub fn git_branch(cwd: &Path) -> String {
     const TTL: Duration = Duration::from_secs(2);
     if let Ok(g) = BRANCH.lock()
@@ -423,7 +367,6 @@ pub fn read_branch(cwd: &Path) -> Option<String> {
         let git_dir = if dotgit.is_dir() {
             Some(dotgit)
         } else if dotgit.is_file() {
-            // Worktree / submodule: `gitdir: <path>`.
             let body = std::fs::read_to_string(&dotgit).ok()?;
             let p = body.trim().strip_prefix("gitdir:")?.trim().to_string();
             let p = PathBuf::from(p);
@@ -444,7 +387,6 @@ pub fn read_branch(cwd: &Path) -> Option<String> {
     None
 }
 
-/// `~`-relative display of `cwd`.
 pub fn short_cwd(cwd: &str) -> String {
     if let Some(home) = gray_core::paths::user_home() {
         let home = home.display().to_string();

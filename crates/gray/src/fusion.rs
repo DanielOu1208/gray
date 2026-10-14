@@ -1,26 +1,3 @@
-//! Local fusion: a synthesized `fusion` composite row for providers that
-//! don't declare one natively, plus the `handoff` tool that runs the
-//! sidekick half of ANY composite selection.
-//!
-//! Fusion's sidekick is client-side orchestration, never a server
-//! feature: a composite row is only catalog metadata — something on the
-//! client's side must offer the lead a delegation tool and spawn the
-//! cheaper model. Devin declares its row natively but runs the sidekick
-//! inside Devin CLI's own agent loop, so a `fusion` selection through
-//! any other client — this one included — silently degrades to the lead
-//! alone unless the client orchestrates. Gray therefore runs it for
-//! every composite row: a lead that streams as the variant's wire id,
-//! a persistent sidekick the lead drives through a `handoff` tool
-//! backed by `gray -p … --json` children, and lead-framing context
-//! injected per turn while the selection is composite.
-//!
-//! Providers without a declared composite get the same UX via a row
-//! synthesized from the cached model lists ([`synthesize_row`]). Its
-//! sidekick options are qualified `provider:model` ids — the ':' a
-//! native composite's parts never carry (upstream slot options are bare
-//! catalog ids naming the lead provider's own models). [`is_local_parts`]
-//! tells those apart; a bare id resolves against the lead's provider.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,32 +9,21 @@ use gray_plugin::{Manifest, ModelSlot, ModelVariant, Plugin, SlotOption};
 
 use crate::setup::variants::{CachedModel, CachedRow, Parts};
 
-/// The synthesized row's id — provider-scoped (`provider_models.json`
-/// keeps one list per provider), so it never clashes with a native
-/// composite on another provider.
 pub(crate) const ROW_ID: &str = "fusion";
-/// Env the sidekick child runs under. Its presence suppresses `handoff`
-/// injection so a sidekick cannot chain sidekicks of its own.
+
 pub(crate) const ENV_SIDEKICK: &str = "GRAY_FUSION_SIDEKICK";
 
-/// Slot-option caps bound the cross product (leads × sidekicks = variant
-/// count; each variant is two strings and a two-entry map).
 const MAX_LEADS: usize = 60;
 const MAX_SIDEKICKS: usize = 60;
-/// Hard stop on one handoff; the whole process group dies with it.
+
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(600);
-/// One NDJSON line, capped like the gateway reader (1 MiB).
+
 const LINE_CAP: usize = 1024 * 1024;
-/// stderr is only ever an error hint; the last 2 KiB is plenty.
+
 const STDERR_TAIL: usize = 2 * 1024;
-/// A dead child reaps instantly; the bound covers a failed group kill.
+
 const REAP_GRACE: Duration = Duration::from_secs(5);
 
-/// Lead framing, appended to the system prompt while the selection is a
-/// composite — adapted from Devin CLI's own fusion lead prompt. Without
-/// it the lead has a `handoff` tool it never thinks to call. Rides the
-/// system prompt rather than `prompt_context`: hooks are skipped under
-/// the default lean prompt.
 const LEAD_PROMPT: &str = r#"\
 You have a `handoff` tool: a persistent sidekick subagent that works alongside you on the same machine (shared filesystem and repos; its shell sessions are separate from yours). You are the lead: you own the outcome and the user-facing and authority actions — talking to the user, planning, and directing the sidekick. The user interacts with one agent: you. Unless they explicitly ask about the sidekick, do not mention it or distinguish its work from yours; own the combined result and present it in the first person.
 
@@ -66,9 +32,6 @@ You have a `handoff` tool: a persistent sidekick subagent that works alongside y
 - It remembers previous handoffs and its runtime state persists (dev servers, background jobs, in-flight commands) — don't re-explain what it already knows. For work involving servers or long-running processes, say what may still be running and whether to leave it up.
 - Never make the sidekick redo work you already did: results you derived go into the brief as settled inputs. And review the evidence it reports back (diffs, logs, test output, artifact paths) instead of re-running its verification — check yourself only when the evidence is missing or suspicious."#;
 
-/// Prepended to the first task of a fresh sidekick session (a resumed
-/// session already carries it in history) — adapted from Devin's
-/// sidekick prompt: its report is all the lead ever sees.
 const SIDEKICK_CONTRACT: &str = "<sidekick_contract>
 You are the sidekick: a persistent collaborator agent executing task briefs handed off by the lead agent. You do not see the user's messages or the lead's conversation — everything you need is in the brief. Work autonomously with your own tools and verify your work before reporting.
 
@@ -81,16 +44,6 @@ You are the sidekick: a persistent collaborator agent executing task briefs hand
 Brief:
 ";
 
-// ---------------------------------------------------------------------------
-// Row synthesis
-// ---------------------------------------------------------------------------
-
-/// The `provider` half of a qualified sidekick id for one
-/// `provider_models.json` key. A plugin list (`plugin:<plugin>:<pid>`)
-/// contributes the bare provider id; an HTTP list contributes the catalog
-/// provider id whose base URL it is, else the custom-endpoint slug with
-/// ':' flattened to '-' (the qualified id's only ':' stays the
-/// provider/model separator — and therefore the local-fusion marker).
 fn provider_token(list_key: &str) -> String {
     if let Some(pid) = list_key.strip_prefix("plugin:") {
         return pid.rsplit(':').next().unwrap_or(pid).to_string();
@@ -106,9 +59,6 @@ fn provider_token(list_key: &str) -> String {
         .replace(|c: char| !(c.is_ascii_alphanumeric() || c == '-'), "-")
 }
 
-/// A `provider_models.json` key's auth-store id: the catalog provider id
-/// or the endpoint's `custom:<slug>` key (unsanitized — auth keys use the
-/// raw id; only the qualified sidekick id flattens it).
 fn provider_auth_pid(list_key: &str) -> String {
     if let Ok(catalog) = crate::setup::load_catalog()
         && let Some((id, _)) = catalog
@@ -120,7 +70,6 @@ fn provider_auth_pid(list_key: &str) -> String {
     crate::setup::catalog::custom_key_id(list_key)
 }
 
-/// The non-composite rows of `rows` as `(id, name)` pairs.
 fn plain_rows(rows: &[CachedRow]) -> Vec<(String, String)> {
     rows.iter()
         .filter(|r| !matches!(r, CachedRow::Full(m) if !m.slots.is_empty()))
@@ -128,18 +77,6 @@ fn plain_rows(rows: &[CachedRow]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The `fusion` row `list_key`'s catalog gets locally: `Lead` options are
-/// its own non-composite rows, `Sidekick` options every provider's
-/// non-composite models (its own first) qualified as `provider:model`.
-/// Variants are the cross product, each `id` = the lead's row id — the
-/// wire id a turn sends — with `effort: None` so the user's level rides
-/// as the ordinary request parameter.
-///
-/// `own` is the provider's own row list (a fresh live list wins over the
-/// stale disk copy under the same key); `lists` is every provider's
-/// cached rows, `list_key`'s disk entry included — it is ignored in
-/// favor of `own`. `None` when the provider already declares a composite
-/// (native fusion wins) or has no rows to pair.
 pub(crate) fn synthesize_row(
     list_key: &str,
     own: &[CachedRow],
@@ -170,8 +107,7 @@ pub(crate) fn synthesize_row(
     for row in &leads {
         push(&own_token, row);
     }
-    // Plugin providers' rows before custom endpoints' — the native
-    // catalogs are the likelier sidekicks when order caps the list.
+
     for (key, rows) in lists {
         if key == list_key || !key.starts_with("plugin:") {
             continue;
@@ -232,10 +168,6 @@ pub(crate) fn synthesize_row(
     })
 }
 
-/// Appends the synthesized fusion row to `rows` when `list_key`'s catalog
-/// qualifies (the caller registers/shapes it like any other row). Never
-/// persisted: it is derived from the cached lists at every read, so a
-/// later catalog can't strand stale sidekick options on disk.
 pub(crate) fn extend_with_fusion(home: &Path, list_key: &str, rows: &mut Vec<CachedRow>) {
     let mut lists = crate::setup::context::provider_model_lists(home);
     lists.insert(list_key.to_string(), rows.clone());
@@ -244,24 +176,10 @@ pub(crate) fn extend_with_fusion(home: &Path, list_key: &str, rows: &mut Vec<Cac
     }
 }
 
-// ---------------------------------------------------------------------------
-// The `handoff` tool
-// ---------------------------------------------------------------------------
-
-/// Whether `parts` picks a local-fusion sidekick — the ':' in a qualified
-/// `provider:model` option id, which native composite parts never carry.
 pub(crate) fn is_local_parts(parts: &Parts) -> bool {
     parts.get("sidekick").is_some_and(|s| s.contains(':'))
 }
 
-/// The qualified sidekick id of the live selection, when it is a
-/// composite row — local (synthesized) or provider-declared alike: the
-/// declaration only describes the pairing, gray always runs the sidekick
-/// half itself. Reads the saved config so a mid-session `/model` switch
-/// is seen on the next turn without a rebuild (the plugin's `tools()` is
-/// resolved per turn — see below). The env guard runs first: a sidekick's
-/// own `gray` spawns with [`ENV_SIDEKICK`], so it can never offer
-/// `handoff` — sidekicks cannot chain sidekicks.
 fn local_sidekick() -> Option<String> {
     if std::env::var_os(ENV_SIDEKICK).is_some() {
         return None;
@@ -277,7 +195,7 @@ fn local_sidekick() -> Option<String> {
     } else {
         crate::setup::normalize_custom_base_url(saved.base_url.as_deref()?)
     };
-    // Loads (and registers) the row shapes the parts resolve against.
+
     let _ = crate::setup::context::load_provider_model_list(&list_key);
     let shape = crate::setup::variants::row_shape(model)?;
     if !shape.is_composite() {
@@ -297,10 +215,7 @@ fn local_sidekick() -> Option<String> {
         saved.model_parts.clone()
     };
     let sidekick = parts.get("sidekick")?;
-    // A qualified id already names its provider (synthesized options);
-    // a bare id — the only form native rows offer — names one of the
-    // lead provider's own models, so qualify it with that provider's
-    // token for `resolve_sidekick` to map back.
+
     Some(if is_local_parts(&parts) {
         sidekick.clone()
     } else {
@@ -308,13 +223,7 @@ fn local_sidekick() -> Option<String> {
     })
 }
 
-/// Carries `handoff` as a protocol-1.3 plugin: registered on every
-/// full-surface build so `LiveRegistry` resolves [`Self::tools`] per
-/// turn — the tool exists exactly while the live selection is a local
-/// fusion, appearing and dropping with `/model` and needing no rebuild.
 pub(crate) struct FusionPlugin {
-    /// Serializes calls to one sidekick: the session it continues is a
-    /// single history, so concurrent handoffs would interleave it.
     gate: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -361,26 +270,16 @@ impl Plugin for FusionPlugin {
     }
 }
 
-/// The lead framing for the current selection: `Some` exactly while a
-/// local fusion is selected (the same gate as [`FusionPlugin::tools`]).
-/// Consumed by `build_agent`'s system-prompt assembly, which — unlike
-/// `prompt_context` hooks — is never suppressed by the lean prompt.
 pub(crate) fn lead_framing() -> Option<&'static str> {
     local_sidekick().is_some().then_some(LEAD_PROMPT)
 }
 
-/// `handoff {task, label?}`: runs the sidekick as a `gray -p --json`
-/// child in the same `GRAY_HOME`, pooling the session id it reports so
-/// the agent — and its context — persists across handoffs.
 struct HandoffTool {
-    /// Wire name: `handoff` is the canonical alias, `native__handoff`
-    /// matches the name Devin-trained leads emit for this tool.
     name: &'static str,
-    /// `provider:model` from `model_parts.sidekick`.
+
     qualified: String,
     home: PathBuf,
-    /// The gray executable: `GRAY_BIN`, else the running binary; a stub
-    /// script in tests.
+
     bin: PathBuf,
     timeout: Duration,
     gate: Arc<tokio::sync::Mutex<()>>,
@@ -413,7 +312,7 @@ impl Tool for HandoffTool {
                 },
                 "required": ["task"]
             }),
-            // Transcripts show the brief as the arg preview.
+
             label: None,
             preview: Some("task".to_string()),
         }
@@ -456,8 +355,7 @@ impl Tool for HandoffTool {
             .filter(|s| !s.is_empty());
         let _permit = self.gate.lock().await;
         let mut out = self.run(&spec, task, stored.as_deref(), ctx).await;
-        // A dead stored session turns the whole call into an error once —
-        // the retry below runs without it rather than failing forever.
+
         if out.error.is_some() && stored.is_some() && !out.killed {
             let _ = std::fs::remove_file(&file);
             out = self.run(&spec, task, None, ctx).await;
@@ -483,8 +381,6 @@ impl Tool for HandoffTool {
     }
 }
 
-/// Where a sidekick's pooled session id lives; the qualified id's hash
-/// keeps the name unique per pairing and filesystem-safe.
 fn session_file(home: &Path, qualified: &str) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -493,22 +389,12 @@ fn session_file(home: &Path, qualified: &str) -> PathBuf {
         .join(format!("sidekick-{:016x}.session", h.finish()))
 }
 
-/// The child's resolved identity: the bare model id for `--model` plus
-/// the env that points `Config::resolve` at its provider connection —
-/// plugin credentials ride `GRAY_PROVIDER_*`, HTTP ones
-/// `GRAY_BASE_URL`/`GRAY_API_KEY`.
 struct SidekickSpec {
     model: String,
     env: Vec<(String, String)>,
     env_remove: Vec<String>,
 }
 
-/// `provider:model` → the child's model and env. The provider token maps
-/// back to a `provider_models.json` key ([`provider_token`]); from there
-/// a plugin key resolves through the installed-provider cache and an
-/// HTTP key through the catalog id / custom slug its auth key is stored
-/// under. `None` when the token matches no known provider — a stale
-/// part from a provider whose list has since gone.
 fn resolve_sidekick(home: &Path, qualified: &str) -> Option<SidekickSpec> {
     let (token, model) = qualified.split_once(':')?;
     if token.is_empty() || model.is_empty() {
@@ -537,9 +423,6 @@ fn resolve_sidekick(home: &Path, qualified: &str) -> Option<SidekickSpec> {
         ));
         spec.env_remove.push("GRAY_API_KEY".into());
     } else {
-        // Empty strings are the override: they clear whatever plugin
-        // identity the saved config (the lead's provider) holds, so the
-        // child resolves as a plain API-key connection.
         for k in [
             "GRAY_PROVIDER_ID",
             "GRAY_CREDENTIAL_SOURCE",
@@ -558,29 +441,23 @@ fn resolve_sidekick(home: &Path, qualified: &str) -> Option<SidekickSpec> {
             });
         match key_value {
             Some(k) => spec.env.push(("GRAY_API_KEY".into(), k)),
-            // Keyless endpoint (local server): nothing to send — and the
-            // lead's own key must not leak to a different host.
+
             None => spec.env_remove.push("GRAY_API_KEY".into()),
         }
     }
     Some(spec)
 }
 
-/// One child run's parsed outcome (`error` set ⇒ the rest is noise).
 #[derive(Default)]
 struct SidekickOutcome {
     session_id: Option<String>,
     text: String,
     error: Option<String>,
-    /// The timeout or a cancel killed it — never retried.
+
     killed: bool,
 }
 
 impl HandoffTool {
-    /// `gray -p <task> --json --model <m> [--session <sid>]` in `ctx.cwd`,
-    /// same `GRAY_HOME`, marked a sidekick. Own process group so a
-    /// timeout takes grandchildren down too (gateway's `ChildRunner`
-    /// pattern).
     async fn run(
         &self,
         spec: &SidekickSpec,
@@ -589,8 +466,7 @@ impl HandoffTool {
         ctx: &ToolContext,
     ) -> SidekickOutcome {
         let mut out = SidekickOutcome::default();
-        // A fresh sidekick session gets the role contract once; a resumed
-        // one already carries it in its history.
+
         let brief;
         let task = if session.is_none() {
             brief = format!("{SIDEKICK_CONTRACT}\n{task}");
@@ -734,8 +610,6 @@ impl HandoffTool {
     }
 }
 
-/// One stdout row: `session_id` rides any row, `result`/`error` close the
-/// outcome. Non-JSON lines are child noise and dropped.
 fn handle_row(line: &str, out: &mut SidekickOutcome) {
     let Ok(row) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
         return;
@@ -765,8 +639,6 @@ fn handle_row(line: &str, out: &mut SidekickOutcome) {
     }
 }
 
-/// SIGKILL the child's whole process group; the `pre_exec` setpgid made
-/// it the leader. Off unix there is no group — the child alone dies.
 #[cfg(unix)]
 async fn kill_tree(child: &mut tokio::process::Child, pid: u32) {
     if pid != 0 {

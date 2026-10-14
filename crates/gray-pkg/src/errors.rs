@@ -1,14 +1,7 @@
-//! Persistent error registry backing the future Errors tab.
-//!
-//! Best-effort append-only log at `$GRAY_HOME/errors.json`, capped at
-//! [`MAX_ENTRIES`] (oldest dropped). All entry points swallow IO errors:
-//! recording must never break the operation that failed.
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// One recorded operation failure. On disk oldest-first; [`list`] flips.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorEntry {
     pub ts_secs: u64,
@@ -17,7 +10,6 @@ pub struct ErrorEntry {
     pub message: String,
 }
 
-/// Cap on stored entries; oldest are dropped beyond it.
 pub const MAX_ENTRIES: usize = 100;
 
 fn errors_path() -> PathBuf {
@@ -31,8 +23,6 @@ fn read_all() -> Vec<ErrorEntry> {
     }
 }
 
-/// Append `{now, source, item, message}`, dropping oldest beyond the cap.
-/// Never panics, never errors — IO failures are ignored.
 pub fn record(source: &str, item: &str, message: String) {
     let mut entries = read_all();
     entries.push(ErrorEntry {
@@ -52,14 +42,12 @@ pub fn record(source: &str, item: &str, message: String) {
     }
 }
 
-/// Newest-first. Missing/corrupt file → empty vec, no error.
 pub fn list() -> Vec<ErrorEntry> {
     let mut entries = read_all();
     entries.reverse();
     entries
 }
 
-/// Drop all entries (best-effort; missing file is a no-op).
 pub fn clear() {
     let _ = std::fs::remove_file(errors_path());
 }

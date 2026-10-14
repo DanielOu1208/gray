@@ -1,40 +1,3 @@
-//! Inline terminal for the composer band, on codex's viewport model
-//! (`codex-rs/tui/src/custom_terminal.rs`, `insert_history.rs`,
-//! `tui.rs::draw`, `tui/scrollback.rs`).
-//!
-//! The band (status dock, live cards, input box, footer) is an inline
-//! viewport that sits directly under the last transcript row, wherever that
-//! row is: on a short session it is near the top of the screen, and it only
-//! reaches the bottom once the transcript fills the rows above it. It is
-//! never pinned to the bottom, so there is never a dead gap between the
-//! transcript and the input box. Three rules move it:
-//!
-//! - **A height change keeps its top.** Growth past the screen bottom
-//!   scrolls the transcript above it into scrollback by the overflow; a
-//!   shrink clears the rows it gave up. One shrink is lifted instead: when
-//!   an attachment's rows come back out of a band that sits on the screen
-//!   bottom, the screen scrolls down by what those rows' growth scrolled
-//!   away, so the transcript returns above the band and the footer is on
-//!   the last row at once (`set_viewport_height`). The band repaints in
-//!   full either way.
-//! - **A history insert never touches the band's cells.** While there are
-//!   free rows under it, the band is shifted down into them (reverse index
-//!   inside a scroll region from its top to the screen bottom) and the new
-//!   rows are drawn in the gap it left. Once it sits on the bottom, line
-//!   feeds at the bottom margin of a scroll region ending just above it
-//!   push the oldest rows into scrollback, and the new rows land in the
-//!   freed rows (`insert_before`).
-//! - **Nothing re-anchors it from a cursor probe.** An alternate-screen
-//!   modal leaves the main screen as it was, so the band is cleared and
-//!   repainted where it already is (`clear`); a resize rebuilds the whole
-//!   transcript from the top (`Tui::reflow_on_resize`).
-//!
-//! Where a partial scroll region drops rows instead of moving them into
-//! scrollback (Windows Terminal), and for a one-row history region (DECSTBM
-//! needs two rows), codex's full-screen path runs instead: the band is
-//! cleared, the rows are written from its top with whole-screen scrolling,
-//! and the next frame repaints the band under them.
-
 use std::io::{self, Write};
 
 use ratatui::backend::{Backend, ClearType};
@@ -62,14 +25,10 @@ impl Frame<'_> {
     }
 }
 
-/// How rows reach scrollback on this terminal (codex `ScrollbackStrategy`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scrollback {
-    /// DEC scroll regions and line feeds: the band's cells never move
-    /// under it, so an insert costs no repaint.
     Regions,
-    /// Whole-screen scrolling. Windows Terminal drops the rows a partial
-    /// scroll region scrolls out instead of keeping them in scrollback.
+
     FullScreen,
 }
 
@@ -94,15 +53,6 @@ where
     pub viewport_area: Rect,
     pub last_known_screen_size: Size,
     scrollback: Scrollback,
-    /// Rows that growth of the attachment rows scrolled past the screen
-    /// bottom into scrollback and no shrink has given back yet: the
-    /// transcript sits this far above where the band's rows put it. Their
-    /// removal gives back at most this much, and an insert that shifts the
-    /// band down into free rows spends it.
-    displaced: u16,
-    /// Attachment rows the last paint frame drew in the input box. Only a
-    /// change in them lifts a shrink or earns growth its credit.
-    chip_rows: u16,
 }
 
 impl<B> Drop for CustomTerminal<B>
@@ -121,8 +71,6 @@ impl<B> CustomTerminal<B>
 where
     B: Backend + Write,
 {
-    /// An empty band on the cursor's row: the first frame gives it its
-    /// height, and the first inserts push it down under the banner.
     pub fn with_options(mut backend: B) -> io::Result<Self> {
         let screen_size = backend.size()?;
         let cursor_pos = backend
@@ -136,9 +84,6 @@ where
         ))
     }
 
-    /// An empty band at row `y` of a `screen_size` screen, no terminal
-    /// query: a resize reflow knows the cursor is home, and tests drive a
-    /// screen model that has no tty to probe.
     pub(crate) fn at_row(backend: B, screen_size: Size, y: u16, scrollback: Scrollback) -> Self {
         let y = y.min(screen_size.height.saturating_sub(1));
         let viewport_area = Rect::new(0, y, screen_size.width, 0);
@@ -150,8 +95,6 @@ where
             viewport_area,
             last_known_screen_size: screen_size,
             scrollback,
-            displaced: 0,
-            chip_rows: 0,
         };
         term.set_viewport_area(viewport_area);
         term
@@ -163,41 +106,9 @@ where
         self.viewport_area = area;
     }
 
-    /// Gives the band `height` rows (codex `Tui::draw`). Its top stays put,
-    /// so it keeps sitting under the last transcript row. Growth past the
-    /// screen bottom scrolls the transcript above it into scrollback by the
-    /// overflow, and the band rises with it. A shrink keeps its top too,
-    /// leaving blank rows under the footer for the next inserts to shift the
-    /// band into. The exception is the attachment rows: a paint frame that
-    /// takes them back out of a band on the screen bottom scrolls the screen
-    /// down by what their growth scrolled away, so the transcript returns
-    /// above the band and the footer lands on the last row at once. Popups,
-    /// the status dock and settles keep their top, so they leave no blank
-    /// rows in history. Any change clears from the band's new top, so the
-    /// frame repaints it whole. `chip_rows` is the attachment rows the input
-    /// box shows on this frame.
-    pub fn set_viewport_height(
-        &mut self,
-        height: u16,
-        screen_size: Size,
-        paint: bool,
-        chip_rows: u16,
-    ) -> io::Result<()> {
-        // A shorter screen is about to be reflowed from the top
-        // (`Tui::reflow_on_resize`); scrolling now would push rows into
-        // scrollback that the reflow writes again.
+    pub fn set_viewport_height(&mut self, height: u16, screen_size: Size) -> io::Result<()> {
         let screen_shrank = screen_size.height < self.last_known_screen_size.height;
         self.last_known_screen_size = screen_size;
-        // Only a paint frame moves the count: a settle is followed by an
-        // insert, and the paint after it must still see the change.
-        let chips_delta = if paint {
-            let delta = i32::from(chip_rows) - i32::from(self.chip_rows);
-            self.chip_rows = chip_rows;
-            delta
-        } else {
-            0
-        };
-
         let old = self.viewport_area;
         let mut area = old;
         area.height = height.min(screen_size.height);
@@ -207,23 +118,6 @@ where
         if wanted_bottom > screen_size.height && !screen_shrank {
             let overflow = wanted_bottom - screen_size.height;
             self.scroll_history_up(old.y, overflow)?;
-            if old.y > 0 && chips_delta > 0 {
-                self.displaced = self.displaced.saturating_add(overflow);
-            }
-        }
-
-        // Only the attachment rows lift, and never on a settle: the insert
-        // that follows spends the rows (`insert_before`).
-        let shrink = old.height.saturating_sub(area.height);
-        let on_bottom = old.bottom() == screen_size.height;
-        let lifts = paint && on_bottom && !screen_shrank && chips_delta < 0;
-        if lifts && shrink > 0 && self.displaced > 0 {
-            let lift = shrink.min(self.displaced);
-            self.scroll_screen_down(lift)?;
-            self.displaced -= lift;
-            area.y = old.y + lift;
-            self.set_viewport_area(area);
-            return self.clear_after_position(area.as_position());
         }
 
         if area != self.viewport_area {
@@ -241,16 +135,11 @@ where
     pub fn clear_after_position(&mut self, position: Position) -> io::Result<()> {
         self.backend.set_cursor_position(position)?;
         self.backend.clear_region(ClearType::AfterCursor)?;
-        // The screen under the band is blank now: the next frame diffs
-        // against blank and repaints every cell it draws.
+
         self.buffers[1 - self.current].reset();
         Ok(())
     }
 
-    /// Erases the band and everything under it; the next frame repaints
-    /// the band in place. This is the whole re-anchor after a modal: the
-    /// alternate screen left the main screen and the band's row as they
-    /// were, so a cursor probe could only get the position wrong.
     pub fn clear(&mut self) -> io::Result<()> {
         if self.viewport_area.is_empty() {
             return Ok(());
@@ -258,17 +147,11 @@ where
         self.clear_after_position(self.viewport_area.as_position())
     }
 
-    /// Purges scrollback and the screen and puts an empty band on row 0
-    /// (codex `clear_scrollback_and_visible_screen_ansi`): the start of a
-    /// resize reflow, which writes the whole transcript back from the top.
-    /// The cursor is known to be home, so nothing is probed.
     pub(crate) fn clear_scrollback_and_screen(&mut self, screen_size: Size) -> io::Result<()> {
-        // Reset scroll region and style, home, clear screen, purge scrollback.
         write!(self.backend, "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H")?;
         Backend::flush(&mut self.backend)?;
         self.last_known_screen_size = screen_size;
         self.set_viewport_area(Rect::new(0, 0, screen_size.width, 0));
-        self.displaced = 0;
         self.buffers[1 - self.current].reset();
         Ok(())
     }
@@ -335,11 +218,6 @@ where
         Ok(())
     }
 
-    /// Writes `height` transcript rows, rendered by `draw_fn`, above the
-    /// band (codex `insert_history_lines`). Free rows under the band are
-    /// spent first by shifting it down into them; after that the rows above
-    /// it scroll. Either way the band's own cells are moved by the terminal,
-    /// never erased, so the frame after an insert has nothing to repaint.
     pub fn insert_before<F>(&mut self, height: u16, draw_fn: F) -> io::Result<()>
     where
         F: FnOnce(&mut Buffer),
@@ -348,7 +226,6 @@ where
         if height == 0 || self.last_known_screen_size.height == 0 {
             return Ok(());
         }
-        let top_before = self.viewport_area.y;
         let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
         draw_fn(&mut buffer);
         let all_rows: Vec<&[Cell]> = buffer.content.chunks(width as usize).collect();
@@ -360,8 +237,6 @@ where
             if area.bottom() < screen_h {
                 let shift = rows.len().min(usize::from(screen_h - area.bottom()));
                 if !area.is_empty() {
-                    // Rows top..screen bottom slide down by `shift`: the band
-                    // moves with its cells, and only blank rows fall off.
                     write!(self.backend, "\x1b[{};{}r", area.top() + 1, screen_h)?;
                     self.backend
                         .set_cursor_position(Position::new(0, area.top()))?;
@@ -388,18 +263,10 @@ where
         if !rows.is_empty() {
             self.insert_full_screen(rows)?;
         }
-        // Rows the band moved down into were free, so the transcript above
-        // it moved down too: that much less is displaced.
-        let moved = self.viewport_area.y.saturating_sub(top_before);
-        self.displaced = self.displaced.saturating_sub(moved);
         Backend::flush(&mut self.backend)?;
         Ok(())
     }
 
-    /// Codex's full-screen insertion: clear the band so no stale composer
-    /// row scrolls into scrollback, write the rows from its top, scrolling
-    /// the whole screen as they run out of room, and leave the band its
-    /// height under them. The cleared band repaints on the next frame.
     fn insert_full_screen(&mut self, mut rows: &[&[Cell]]) -> io::Result<()> {
         let screen_h = self.last_known_screen_size.height;
         let mut area = self.viewport_area;
@@ -423,9 +290,6 @@ where
         Ok(())
     }
 
-    /// Scrolls the transcript above a band whose top is `top` up by `n`
-    /// rows (codex `ScrollbackStrategy::grow_viewport`): the oldest `n` go
-    /// into scrollback and the `n` rows just above the band come free.
     fn scroll_history_up(&mut self, top: u16, n: u16) -> io::Result<()> {
         if n == 0 || top == 0 {
             return Ok(());
@@ -433,17 +297,11 @@ where
         if self.scrollback == Scrollback::Regions && top > 1 {
             return self.scroll_region_up(top, n);
         }
-        // The band rides the whole-screen scroll: blank it first, so its
-        // rows move up as blanks and none of them lands in scrollback.
+
         self.clear_after_position(Position::new(0, top))?;
         self.scroll_screen_up(n)
     }
 
-    /// Line feeds at the bottom margin of the scroll region `0..top`.
-    /// `CSI S` would be shorter, but some terminals (codex names
-    /// QTermWidget and xterm.js) drop the departing rows instead of
-    /// keeping them in scrollback; a line feed never does. DECSTBM needs
-    /// two rows, so `top` is at least 2.
     fn scroll_region_up(&mut self, top: u16, n: u16) -> io::Result<()> {
         write!(self.backend, "\x1b[1;{top}r")?;
         self.backend
@@ -468,26 +326,6 @@ where
         Ok(())
     }
 
-    /// Moves the whole screen down by `n` rows: reverse index from row 0
-    /// with the margins reset. The bottom `n` rows fall off, and they are
-    /// the band's own cells, which the caller clears and repaints. Reverse
-    /// index never feeds scrollback, so the top `n` rows come up blank and
-    /// nothing is added to history.
-    fn scroll_screen_down(&mut self, n: u16) -> io::Result<()> {
-        if n == 0 {
-            return Ok(());
-        }
-        write!(self.backend, "\x1b[r")?;
-        self.backend.set_cursor_position(Position::new(0, 0))?;
-        for _ in 0..n {
-            write!(self.backend, "\x1bM")?;
-        }
-        Ok(())
-    }
-
-    /// Draws whole rows onto blank screen rows starting at `y`. A wide
-    /// glyph covers the cell after it, so that cell is not printed: it
-    /// would land one column late and push the rest of the row right.
     fn draw_rows(&mut self, y: u16, rows: &[&[Cell]]) -> io::Result<()> {
         let mut cells = Vec::new();
         for (dy, row) in rows.iter().enumerate() {
@@ -505,9 +343,6 @@ where
     }
 }
 
-/// Columns a cell's glyph takes. A hyperlinked cell carries its OSC 8
-/// wrapper in the symbol (`push_styled_lines_with_hyperlinks`), and only
-/// the glyph between the escapes is visible.
 fn glyph_width(symbol: &str) -> usize {
     let glyph = symbol
         .strip_prefix("\x1b]8;;")

@@ -1,5 +1,3 @@
-//! Protocol 1.2 provider declarations and authenticated sidecar payloads.
-
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -43,11 +41,7 @@ pub struct ProviderAuthorizationDecl {
 pub struct ProviderRequestPolicyDecl {
     #[serde(default)]
     pub prompt_cache_key: bool,
-    /// Opt-in: the host may verbatim-replay this provider's requests for
-    /// prompt-cache warming. Only for transports the host calls directly
-    /// (a real HTTPS endpoint); relay sidecars that spawn per-turn
-    /// children must leave it off. Skipped when false so declarations
-    /// that don't opt in keep their existing profile binding.
+
     #[serde(default, skip_serializing_if = "is_false")]
     pub warm_replay: bool,
     #[serde(default)]
@@ -62,9 +56,7 @@ pub struct ProviderRequestPolicyDecl {
     pub parallel_tool_calls: Option<bool>,
     #[serde(default)]
     pub text_verbosity: Option<String>,
-    /// Idle lifetime of this provider's prompt cache, in seconds. The host
-    /// uses it for cold-cache detection, the warmth timer and cache-miss
-    /// notices. `None` = the 5-minute default.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_ttl_secs: Option<u64>,
 }
@@ -248,9 +240,6 @@ impl fmt::Debug for ProviderModelsRequest {
     }
 }
 
-/// `provider/usage` request: subscription-quota probe (Claude's `get_usage`,
-/// Devin's plan info, …). Same envelope as `provider/models` — subscription
-/// plugins that keep their own login answer to an empty credential.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderUsageRequest {
     pub provider: String,
@@ -270,55 +259,47 @@ impl fmt::Debug for ProviderUsageRequest {
     }
 }
 
-/// One subscription window the provider reports (`five_hour`, `seven_day`,
-/// a monthly credit bucket, …).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProviderUsageWindow {
-    /// Stable provider id for the window (`five_hour`, `seven_day`,
-    /// `iguana_necktie`, `monthly_acu`, …).
     pub id: String,
-    /// Display label: "Session", "Weekly", "Weekly · Opus", "Monthly".
+
     pub label: String,
-    /// Bucket class: session | weekly | monthly | credits | other.
+
     #[serde(default)]
     pub kind: String,
-    /// Window length in minutes when the provider declares one.
+
     #[serde(default)]
     pub duration_mins: Option<u64>,
-    /// 0–100 fill of the window.
+
     #[serde(default)]
     pub used_percent: Option<f64>,
-    /// Absolute usage + cap for unit-metered windows (dollars, ACUs).
+
     #[serde(default)]
     pub used: Option<f64>,
     #[serde(default)]
     pub limit: Option<f64>,
-    /// Unit for `used`/`limit` ("USD", "ACU", "credits").
+
     #[serde(default)]
     pub unit: Option<String>,
-    /// ISO-8601 reset instant.
+
     #[serde(default)]
     pub resets_at: Option<String>,
 }
 
-/// The `provider/usage` result: what a `/usage` panel can draw for one
-/// connected subscription.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProviderUsageLimits {
-    /// False when the plugin cannot read subscription usage for this
-    /// login — API-key plans have no windows to show.
     #[serde(default)]
     pub available: bool,
-    /// Plan/tier name when known ("Pro", "Max", "Devin Max").
+
     #[serde(default)]
     pub plan: Option<String>,
-    /// Display title for the section row ("Claude", "Devin").
+
     #[serde(default)]
     pub title: Option<String>,
-    /// RFC-3339 instant the data was fetched.
+
     #[serde(default)]
     pub checked_at: Option<String>,
-    /// Freeform caveat ("hourly-aggregated, up to 1h stale").
+
     #[serde(default)]
     pub note: Option<String>,
     #[serde(default)]
@@ -351,8 +332,6 @@ pub struct ProviderChatResult {
 
 impl fmt::Debug for ProviderChatResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Both fields carry the per-turn bearer: relay_url embeds it in its
-        // path, relay_token is it. Neither may reach a log.
         f.debug_struct("ProviderChatResult")
             .field("relay_url", &"<redacted>")
             .finish_non_exhaustive()
@@ -372,41 +351,34 @@ pub struct ProviderModel {
     pub context_window: Option<u32>,
     #[serde(default)]
     pub reasoning_efforts: Vec<String>,
-    /// Prompt size in tokens above which this model bills a higher price tier,
-    /// as the provider's public pricing page declares it (e.g. the
-    /// "(for prompts over N tokens)" rows). `None` = no cliff declared; the
-    /// host compacts at `window - reserve` as before.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_cliff_tokens: Option<u32>,
-    /// Concrete wire ids behind this row. Empty = the row id is the only wire id
-    /// (legacy behavior: effort travels as a request parameter).
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<ModelVariant>,
-    /// Composite rows (e.g. Fusion): sub-selections the user makes. Each variant's
-    /// `parts` names one option id per slot key.
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slots: Vec<ModelSlot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelVariant {
-    /// Wire id sent as the chat model.
     pub id: String,
-    /// Effort this id is pinned to ("off" for no-thinking ids); None = provider default.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fast: bool,
-    /// slot key -> option id, for composite rows.
+
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub parts: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSlot {
-    /// Slot key referenced by `ModelVariant::parts` ("lead" | "sidekick").
     pub key: String,
-    /// Human label ("Lead" | "Sidekick").
+
     pub label: String,
     pub options: Vec<SlotOption>,
 }
@@ -516,9 +488,7 @@ impl ProviderDecl {
         transport
             .headers
             .sort_by_key(|h| h.name.to_ascii_lowercase());
-        // The ops list is part of the contract the credential was issued
-        // against: adding `chat` must rebind rather than silently widening
-        // what an existing profile is allowed to do.
+
         let mut operations = self
             .auth_methods
             .iter()

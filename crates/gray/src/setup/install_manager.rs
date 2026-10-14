@@ -1,61 +1,32 @@
-//! Interactive install-manager modal backing `/skills` and `/plugins`:
-//! navigate items, two-press `u`/`Delete` uninstalls, plus a read-only
-//! Errors tab fed by `gray_pkg::errors`. The skills manager lists all
-//! *discovered* skills (global + project dirs); only `~/.gray/skills`
-//! entries are removable — `u` on an externally-managed skill says where
-//! it lives instead.
-//!
-//! The managers were ~85% identical (same chrome, keys, confirm flow), so
-//! they share one parameterized loop ([`run_install_manager`]). Only what
-//! differs lives in [`ManagerSpec`] plus the per-manager
-//! list/remove/toggle closures: title, empty hint, error verb, whether
-//! Enter/Space toggles, whether `u` removes, whether an Errors tab exists,
-//! and whether a failed re-list after an op keeps the stale list (plugins)
-//! or clears it (skills). Sync modal returning whether anything changed.
-//!
-//! `/gateway` (connections), `/cron` (jobs) and `/memory` (entries) ride the
-//! same loop from their own modules: a listing-only panel sets
-//! `supports_toggle`/`supports_remove` false and marks every row
-//! `read_only`.
-
 use super::tabs::{Tab, tab_segments};
 use super::*;
 
 use gray_pkg::errors::ErrorEntry;
 
-/// One installed row in the manager's own display terms.
 #[derive(Clone)]
 pub(crate) struct ManagerItem {
     pub name: String,
     pub row: String,
-    /// Lit rows render white; dim rows (disabled plugins) render dim.
+
     pub lit: bool,
-    /// Current toggle state; only read when the spec supports toggling.
+
     pub enabled: bool,
-    /// Rows the toggle/remove branches skip: separators, pointers at another
-    /// command, and every row of a read-only listing.
+
     pub read_only: bool,
-    /// Enter runs the setup/start flow (not the toggle) when the panel
-    /// passed one — set when the app needs first-time setup OR is set up
-    /// but stopped, so Enter can (re)start the daemon.
+
     pub needs_setup: bool,
 }
 
-/// The setup flow a panel may bind to Enter on a needs-setup row.
 pub(crate) type SetupAction<'a> = &'a dyn Fn(&ManagerItem) -> anyhow::Result<()>;
 
-/// What Enter does to the selected row. A pure decision the tests own.
 pub(crate) enum EnterAction {
-    /// Run the panel's setup flow for this row.
     Setup,
-    /// Flip `enabled` (today's behavior).
+
     Toggle,
-    /// Nothing: a separator, a pointer, or a remove-only manager.
+
     Ignore,
 }
 
-/// Enter routes to setup only for a flagged row when the panel supplied a
-/// flow; every other row toggles exactly as before.
 pub(crate) fn enter_action(
     item: Option<&ManagerItem>,
     has_setup: bool,
@@ -76,7 +47,6 @@ pub(crate) fn enter_action(
     EnterAction::Ignore
 }
 
-/// The footer's Enter hint, separator included; empty when Enter does nothing.
 pub(crate) fn enter_label(
     item: Option<&ManagerItem>,
     has_setup: bool,
@@ -89,21 +59,17 @@ pub(crate) fn enter_label(
     }
 }
 
-/// The only axes the managers differ on.
 pub(crate) struct ManagerSpec {
     pub title: &'static str,
     pub empty_hint: &'static str,
-    /// Verb prefix for the op-error line: "remove failed" / "toggle failed".
+
     pub error_verb: &'static str,
     pub supports_toggle: bool,
-    /// Whether `u`/`Delete` arms the two-press remove. Listing-only panels
-    /// (cron jobs, memory entries) leave removal to their own command.
+
     pub supports_remove: bool,
-    /// Whether the Errors tab exists at all. Package-install errors are
-    /// noise on a connections or cron listing.
+
     pub errors_tab: bool,
-    /// After a successful op, when re-listing fails: keep the stale list
-    /// (plugins) or clear it (skills).
+
     pub keep_stale_on_relist_error: bool,
 }
 
@@ -127,8 +93,6 @@ const PLUGINS_SPEC: ManagerSpec = ManagerSpec {
     keep_stale_on_relist_error: true,
 };
 
-/// Display label for a lockfile ecosystem: known sources get friendly
-/// names, anything else shows the raw ecosystem string.
 fn source_label(ecosystem: &str) -> &str {
     match ecosystem {
         "gray-native" => "Gray Index",
@@ -137,9 +101,6 @@ fn source_label(ecosystem: &str) -> &str {
     }
 }
 
-/// Pure row renderer: `✓ name version (scope) [source]` when enabled,
-/// dim `○ … [disabled]` when disabled. Fields (not the lock struct) so both
-/// lock types (`gray-pkg` sidecars, `gray-plugin` CLI commands) share it.
 pub(crate) fn format_plugin_row_parts(
     name: &str,
     version: &str,
@@ -155,14 +116,10 @@ pub(crate) fn format_plugin_row_parts(
     }
 }
 
-/// Pure row renderer for the Errors tab: `<source> <item>: <message>`.
 pub(crate) fn format_error_row(entry: &ErrorEntry) -> String {
     format!("{} {}: {}", entry.source, entry.item, entry.message)
 }
 
-/// Bare `/skills` manager: navigate discovered skills, `u`/`Delete`
-/// two-press uninstalls `~/.gray/skills` entries via `skills_ops::remove`.
-/// Returns true when anything changed (uninstall or errors cleared).
 pub fn run_skills_modal(
     bg: Option<&BackgroundSnapshot>,
     cwd: &std::path::Path,
@@ -196,44 +153,33 @@ pub fn run_skills_modal(
                     .collect(),
             )
         },
-        |name| {
-            match gray_pkg::skills_ops::remove(name) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    // Discovered-but-external skills (opencode/agents/claude
-                    // dirs) aren't managed here — point at the directory
-                    // instead of reporting "not installed".
-                    if let Some(hit) = crate::skills::discover_skills(cwd)
-                        .skills
-                        .iter()
-                        .find(|s| s.name == name)
-                    {
-                        anyhow::bail!(
-                            "'{}' lives outside ~/.gray/skills ({}) — delete it manually",
-                            name,
-                            hit.file_path.display()
-                        );
-                    }
-                    Err(e)
+        |name| match gray_pkg::skills_ops::remove(name) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if let Some(hit) = crate::skills::discover_skills(cwd)
+                    .skills
+                    .iter()
+                    .find(|s| s.name == name)
+                {
+                    anyhow::bail!(
+                        "'{}' lives outside ~/.gray/skills ({}) — delete it manually",
+                        name,
+                        hit.file_path.display()
+                    );
                 }
+                Err(e)
             }
         },
-        // Never called: the skills manager is remove-only.
         |_, _| Ok(()),
     )
 }
 
-/// Bare `/plugin` picker: navigate installed plugins, Enter/Space toggles
-/// `enabled` and stays open. Returns true when anything changed (toggle,
-/// uninstall, or errors cleared).
 pub fn run_plugins_modal(bg: Option<&BackgroundSnapshot>) -> anyhow::Result<bool> {
     run_install_manager(
         bg,
         None,
         &PLUGINS_SPEC,
         || {
-            // The unified `lock.json` registry (a corrupt file reads as
-            // no rows).
             crate::plugin_cli::list_rows().ok().map(|rows| {
                 rows.into_iter()
                     .map(|r| ManagerItem {
@@ -280,12 +226,9 @@ pub(crate) fn run_install_manager(
     let mut sel = 0usize;
     let mut changed = false;
     let mut op_err: Option<String> = None;
-    // Armed uninstall confirm: first `u` arms, second `u` on the same entry
-    // removes it.
+
     let mut pending_remove: Option<String> = None;
 
-    // Refresh after a successful op; a failed re-list keeps the stale list
-    // or clears it depending on the spec.
     let relist = |items: &mut Vec<ManagerItem>| {
         if let Some(fresh) = load() {
             *items = fresh;
@@ -316,15 +259,13 @@ pub(crate) fn run_install_manager(
                     .min(area.width);
                 let pad_x = 3u16;
                 let inner_w = modal_w.saturating_sub(pad_x * 2);
-                // Row count of the active tab (empty states render one line).
+
                 let tab_count = match tab {
                     Tab::Installed => items.len(),
                     Tab::Errors => error_entries.len(),
                 };
                 let rows = tab_count.max(1) as u16;
-                // header(1) + tabs(1) + rows + gap(1) + footer(1)
-                // + 2 for modal top/bottom padding; a manager without an
-                // Errors tab drops the tab line.
+
                 let needed_h = rows + if spec.errors_tab { 6 } else { 5 };
                 let modal_h = needed_h
                     .clamp(10, 24)
@@ -359,8 +300,7 @@ pub(crate) fn run_install_manager(
                     Paragraph::new(header_line),
                     Rect::new(inner.x, inner.y, inner.width, 1),
                 );
-                // Tab bar on the line below the header (shared scaffolding;
-                // same code path renders both tabs).
+
                 if spec.errors_tab {
                     let tabs = [
                         ("Installed", None),
@@ -405,15 +345,13 @@ pub(crate) fn run_install_manager(
                 let mut cur_y = inner.y + if spec.errors_tab { 2 } else { 1 };
                 let bottom = inner.y + inner_h;
                 let footer_y = (inner.y + inner_h).saturating_sub(1);
-                // Reserve the line above the footer for an op error or an
-                // armed uninstall confirm, if any.
+
                 let rows_cap = if op_err.is_some() || pending_remove.is_some() {
                     footer_y.saturating_sub(1).max(inner.y + 2)
                 } else {
                     bottom
                 };
-                // Row texts + lit flag (installed rows dim when disabled)
-                // for the active tab; one shared render loop below.
+
                 let tab_rows: Vec<(String, bool)> = match tab {
                     Tab::Installed => items
                         .iter()
@@ -445,7 +383,7 @@ pub(crate) fn run_install_manager(
                             break;
                         }
                         let is_selected = idx == sel;
-                        // Truncate to the inner width so long rows never wrap.
+
                         let row: String = row.chars().take(inner.width as usize).collect();
                         let fill = (inner.width as usize).saturating_sub(row.chars().count());
                         let row_bg = if is_selected { accent_peach } else { box_bg };
@@ -532,9 +470,7 @@ pub(crate) fn run_install_manager(
                         Span::styled(v, Style::default().fg(text_dim).bg(box_bg)),
                     ]
                 }
-                // Tab-specific (key, description) pairs, then the shared tail.
-                // Enter's verb follows the selected row: a setup/start row
-                // announces the flow, everything else toggles as before.
+
                 let enter = enter_label(items.get(sel), setup.is_some(), spec);
                 let middle: Vec<(&str, &str)> = match tab {
                     Tab::Errors => vec![("c ", "clear · ")],
@@ -629,9 +565,7 @@ pub(crate) fn run_install_manager(
                         match enter_action(items.get(sel), setup.is_some(), spec) {
                             EnterAction::Setup => {
                                 let item = items[sel].clone();
-                                // The nested modal owns the screen while it
-                                // runs: leave alternate mode (raw stays on,
-                                // both modals want it), then take it back.
+
                                 let _ = crossterm::execute!(
                                     std::io::stdout(),
                                     LeaveAlternateScreen,
@@ -647,8 +581,7 @@ pub(crate) fn run_install_manager(
                                     Ok(()) => {
                                         changed = true;
                                         op_err = None;
-                                        // Re-read and stay open, as the toggle does;
-                                        // items only ever come from a fresh list().
+
                                         relist(&mut items);
                                     }
                                     Err(e) => {
@@ -664,8 +597,7 @@ pub(crate) fn run_install_manager(
                                     Ok(()) => {
                                         changed = true;
                                         op_err = None;
-                                        // Re-read and stay open (toggle-stays-open pattern);
-                                        // items only ever come from a fresh list().
+
                                         relist(&mut items);
                                     }
                                     Err(e) => {

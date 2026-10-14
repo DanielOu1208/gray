@@ -1,13 +1,3 @@
-//! Live tool resolution for protocol-1.3 plugins.
-//!
-//! A static [`Registry`] snapshots every plugin's tools at build time. A
-//! protocol-1.3 sidecar (one bridging an external tool server, say)
-//! changes its tool set while the session runs, so its tools are not
-//! snapshotted: the `LiveRegistry` wraps the static registry and resolves
-//! those plugins' tools by name at call time, and reports the merged
-//! definitions through [`ToolExecutor::live_defs`] so the agent
-//! re-advertises them every turn.
-
 use std::sync::Arc;
 
 use gray_core::agent::{ToolContext, ToolExecutor, ToolOutput};
@@ -19,7 +9,6 @@ use crate::Plugin;
 
 type BoxFut<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'static>>;
 
-/// Static registry plus the plugins whose tools are resolved per call.
 pub struct LiveRegistry {
     static_: Arc<Registry>,
     live: Vec<Arc<dyn Plugin>>,
@@ -43,10 +32,6 @@ impl ToolExecutor for LiveRegistry {
         self.static_.drain_notifications(ctx)
     }
 
-    /// The build-time session pin reaches live plugins again when the
-    /// host session materializes after the agent was built (first turn,
-    /// `/new`): without this every wire point but `tool/call` reports
-    /// `session.id` as empty for the session's whole life.
     fn repin_session(&self, id: &str) {
         for p in &self.live {
             p.set_session_id(id);
@@ -77,9 +62,6 @@ impl ToolExecutor for LiveRegistry {
         self.static_.running_jobs_note(ctx)
     }
 
-    /// Static defs first, then live ones; a live tool that collides with a
-    /// static name is dropped (the static registry owns it, and `execute`
-    /// routes that name there).
     fn live_defs(&self) -> Option<Vec<ToolDef>> {
         let mut defs = self.static_.defs();
         for p in &self.live {
@@ -94,9 +76,6 @@ impl ToolExecutor for LiveRegistry {
     }
 
     fn execute(&self, ctx: &ToolContext, name: &str, args: Value) -> BoxFut<ToolOutput> {
-        // Static names go through the registry so its arg coercion and
-        // metering keep applying; unknown names fall through to it too for
-        // the uniform "does not exist" error.
         if self.static_.tool_names().iter().any(|n| n == name) {
             return self.static_.execute(ctx, name, args);
         }

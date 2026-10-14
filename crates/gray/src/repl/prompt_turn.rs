@@ -1,28 +1,9 @@
-//! REPL prompt turn (split from `repl`).
-
 use super::*;
 
-/// How long a cancelled run gets to observe the token and run its own
-/// cleanup before the drop preempts it. The loop's own grace is
-/// [`gray_core::parallel::CANCEL_REPORT_GRACE`] (3s, waiting out a tool's
-/// report); the extra second covers its synthetic backfill and `turn_end`.
-/// Past this the transcript is repaired here instead — see below.
 const TURN_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// The history line an interrupted turn leaves behind (codex's
-/// `■ Conversation interrupted`, dim like codex's secondary text).
 pub(crate) const INTERRUPTED_NOTICE: &str = "■ Conversation interrupted";
 
-/// One streaming attempt with cooperative cancel: on Ctrl-C, `ctx` shares
-/// the token so the run is already signalled — give it a bounded window to
-/// observe cancel and execute its own cleanup/transcript-repair paths
-/// (partial-text salvage, turn_end) before the drop preempts it.
-///
-/// A run can still outlast the window: nothing interrupts a plugin
-/// `tool_before`/`pre_tool` hook, an in-flight compaction, or a tool that
-/// ignores cancellation. Dropping it then skips that cleanup entirely, so
-/// the transcript is repaired on the way out — an interrupted turn must
-/// persist as a complete, answerable transcript, never half of one.
 async fn run_streaming_cancellable(
     agent: &mut Agent,
     msg: Message,
@@ -30,8 +11,6 @@ async fn run_streaming_cancellable(
     cancel: &tokio_util::sync::CancellationToken,
     on_event: &mut dyn FnMut(&AgentEvent),
 ) -> Result<Vec<AgentEvent>, CoreError> {
-    // The loop keeps its salvage buffer in locals a drop destroys; this copy
-    // is what the repair below hands back to the transcript.
     let mut seen_thinking = String::new();
     let mut seen_text = String::new();
     let mut sink = |ev: &AgentEvent| {
@@ -48,9 +27,7 @@ async fn run_streaming_cancellable(
         _ = cancel.cancelled() => {
             cancel.cancel();
             let observed = tokio::time::timeout(TURN_CANCEL_GRACE, &mut run_future).await;
-            // A run that ignored cancel is still pending; the drop preempts
-            // it. The entry guards blank input and owns no cross-turn state,
-            // so no external abort is needed.
+
             let preempted = observed.is_err();
             drop(run_future);
             if preempted {
@@ -62,7 +39,6 @@ async fn run_streaming_cancellable(
 }
 
 #[allow(clippy::too_many_arguments)]
-// Mechanical split of `run_repl_mode`: params are the loop state the turn borrows.
 pub(crate) async fn run_prompt_turn(
     prompt_text: String,
     pending_images: &mut Vec<std::path::PathBuf>,
@@ -97,13 +73,12 @@ pub(crate) async fn run_prompt_turn(
                     *unconfigured = false;
                     push_provider_connected(config, tui, None);
                 }
-                // Nothing to build yet after a removal: the next prompt
-                // re-opens the picker with the provider gone.
+
                 Ok(crate::setup::ConnectOutcome::Removed(_))
                 | Ok(crate::setup::ConnectOutcome::Dismissed) => {
                     if let Some((shared, _)) = tui {
                         let mut t = shared.lock().expect("tui lock");
-                        // Dismissed picker: gap so the card doesn't jam the input box.
+
                         t.ensure_gap();
                         let _ = t.draw();
                     }
@@ -124,12 +99,7 @@ pub(crate) async fn run_prompt_turn(
                 }
             }
         }
-        // Fresh sessions built the provider with session None (per-process
-        // fallback cache shard) and minted the real SessionId only after the
-        // first turn — the reused agent then sat on the fallback shard all
-        // session. Ensure the real sid BEFORE the first build so the provider
-        // gets it from turn one. Gated on model so the no-model REPL still
-        // opens session-free (lazy build).
+
         if super::session::should_ensure_session_before_build(
             session_state.is_some(),
             config.model.as_deref(),
@@ -139,10 +109,7 @@ pub(crate) async fn run_prompt_turn(
         let sid = session_state
             .as_ref()
             .map(|s| s.session_id.as_str().to_string());
-        // Status on BEFORE the first build: skill discovery + provider setup
-        // can take ~1s with nothing else painting (ticker skips while status
-        // is unset), which left the fresh viewport blank after the user card
-        // shifted it. Ticker keeps the elapsed ticking from here.
+
         if let Some(s) = &tui_stream {
             s.lock().expect("tui lock").begin_turn("Working");
         }
@@ -157,15 +124,12 @@ pub(crate) async fn run_prompt_turn(
             }
             Err(e) => {
                 if tui_stream.is_some() {
-                    // Live viewport: never raw println! over it (ghost input
-                    // on the next draw) — render through the composer.
                     say(tui_stream.as_ref(), &format!("{e}"));
                     if let Some(s) = &tui_stream {
                         let mut t = s.lock().unwrap_or_else(|e| e.into_inner());
                         t.set_status(None);
                         t.is_task_running = false;
-                        // begin_turn armed the cache pause before agent setup;
-                        // this path returns without the normal end_turn.
+
                         t.resume_cache();
                         let _ = t.draw();
                     }
@@ -176,15 +140,15 @@ pub(crate) async fn run_prompt_turn(
             }
         }
     }
-    // Mid-turn steer: the composer already accepts typing while a turn runs and
-    // queues it on Enter. That queue now feeds the turn in flight instead of
-    // waiting for it to end, so a correction lands on the model's next request
-    // (see `steer_queued_input`). Installed per turn because the queue lives in
-    // this turn's Tui handle.
+
     if let Some(ag) = agent.as_mut() {
         let steer_tui = tui_stream.clone();
+        let steer_sid = session_state
+            .as_ref()
+            .map(|s| s.session_id.as_str().to_string());
         ag.set_steer(std::sync::Arc::new(move || {
             steer_queued_input(steer_tui.as_ref())
+                .or_else(|| steer_direct_send(steer_tui.as_ref(), steer_sid.as_deref()))
         }));
         let out_tui = tui_stream.clone();
         ag.set_tool_output_hook(Some(std::sync::Arc::new(move |id: &str, chunk: &[u8]| {
@@ -198,9 +162,7 @@ pub(crate) async fn run_prompt_turn(
     let agent = agent.as_mut().expect("agent built above");
     let cancel = tokio_util::sync::CancellationToken::new();
     *TURN_STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel.clone());
-    // From here to the last persist the turn owns the transcript: the
-    // double-press exit waits on this flag instead of killing the process
-    // mid-cleanup.
+
     let _turn_in_flight = super::mark_turn_in_flight();
     let ctx = ToolContext {
         cwd: cwd.to_path_buf(),
@@ -210,8 +172,18 @@ pub(crate) async fn run_prompt_turn(
             .map(|s| s.session_id.as_str().to_string()),
     };
     let mut images = std::mem::take(&mut *pending_images);
-    // Typed/pasted-text file links (never paste-attached) still carry vision.
-    for p in super::attachments::extract_inline_image_paths(&prompt_text, cwd) {
+
+    let link_scan: String = {
+        let mut s = String::with_capacity(prompt_text.len());
+        let mut last = 0usize;
+        for (range, _) in super::attachments::attachment_markers(&prompt_text) {
+            s.push_str(&prompt_text[last..range.start]);
+            last = range.end;
+        }
+        s.push_str(&prompt_text[last..]);
+        s
+    };
+    for p in super::attachments::extract_inline_image_paths(&link_scan, cwd) {
         if !images.contains(&p) {
             images.push(p);
         }
@@ -235,13 +207,6 @@ pub(crate) async fn run_prompt_turn(
         .await;
     }
 
-    // Cold cache (arXiv:2607.25066): past the TTL the next request re-bills
-    // the whole prefix whatever it holds, so masking every stale tool output
-    // now is free — the rewrite costs no extra miss, and the shorter prompt
-    // is what gets cached from here on. Warm cache: leave it alone, the
-    // loop's batched mask waits for a full batch instead. Relay providers
-    // (`prefix_rewrite_ok` off) never mask here: the rewritten prefix would
-    // throw away the upstream native session.
     if agent.prefix_rewrite_ok()
         && let Some(s) = &tui_stream
         && s.lock().expect("tui lock").cache_is_cold()
@@ -249,15 +214,10 @@ pub(crate) async fn run_prompt_turn(
         agent.mask_stale_tool_output();
     }
 
-    // status row on; events stream straight into the composer
-    // (already begun above when the agent was built; re-assert here so the
-    // normal path keeps its exact paint).
     if let Some(s) = &tui_stream {
         s.lock().expect("tui lock").begin_turn("Working");
     }
 
-    // Raw mode swallows ^C (no SIGINT), so a watcher must read
-    // key events during the turn and translate Ctrl-C into cancel.
     let watch_cancel = cancel.clone();
     let watch_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watcher_stopped = watch_stop.clone();
@@ -288,18 +248,12 @@ pub(crate) async fn run_prompt_turn(
     let mut turn_usage: Option<gray_core::event::Usage> = None;
     let turn_start = std::time::Instant::now();
     let mut turn_duration_ms: Option<u64> = None;
-    // Streaming-only clock: every tps readout divides by this, never by the
-    // whole-turn duration (tool waits included).
+
     let mut stream_clock = super::session::TurnStreamClock::default();
     let history_revision = agent.history_revision();
-    // Persist the turn step by step, not only when it ends: a kill -9, crash,
-    // or power cut mid-turn then loses at most the step in flight. The hook
-    // stops on any history rewrite (compaction saves the full file itself)
-    // and on the first failed append (the end-of-turn path owns repair).
+
     super::session::ensure_session_state(&mut *session_state, config, cwd).await;
-    // A session ensured after the agent was built (first turn, `/new`)
-    // re-pins live plugins — until now every wire point but `tool/call`
-    // reported `session.id` as empty for the session's whole life.
+
     if let Some(sid) = session_state.as_ref().map(|s| s.session_id.as_str()) {
         agent.repin_session_id(sid);
     }
@@ -335,9 +289,7 @@ pub(crate) async fn run_prompt_turn(
             },
         )));
     }
-    // Display-only headlines snapshot: `dispatch_agent_event` takes the
-    // labels by ref, and the closure already mutably borrows `agent` for
-    // the run — a shared snapshot sidesteps the double borrow.
+
     let turn_labels: std::collections::HashMap<String, String> = agent
         .tool_defs()
         .iter()
@@ -360,9 +312,7 @@ pub(crate) async fn run_prompt_turn(
                 .map(|x| (t.name.clone(), x.to_string()))
         })
         .collect();
-    // The miss identity is the wire id: an effort/variant change resolves
-    // to a different upstream model (on devin-sub a fresh session) and
-    // re-bills the prompt exactly like a model switch.
+
     let wire_model = crate::setup::wire_model_for(config)
         .unwrap_or_else(|| config.model.clone().unwrap_or_default());
     let mut run_result = {
@@ -386,7 +336,7 @@ pub(crate) async fn run_prompt_turn(
         };
         run_streaming_cancellable(agent, user_msg, ctx, &cancel, &mut on_event).await
     };
-    // overflow recovery (one retry only)
+
     if let Err(ref e) = run_result
         && maybe_overflow_compact(
             agent,
@@ -439,10 +389,7 @@ pub(crate) async fn run_prompt_turn(
     }
     TURN_STATE.lock().unwrap_or_else(|e| e.into_inner()).take();
     agent.set_checkpoint(None);
-    // Whatever the checkpoints already wrote must not be appended twice. A
-    // checkpoint pass is atomic per line but not per pass: a failure midway
-    // leaves earlier lines on disk, so the only safe end-of-turn write is a
-    // full-history replacement — blind appends would duplicate them.
+
     if checkpoint_failed.load(std::sync::atomic::Ordering::Relaxed) {
         if let Some(state) = session_state.as_mut() {
             state.full_save_pending = true;
@@ -450,8 +397,7 @@ pub(crate) async fn run_prompt_turn(
     } else {
         initial_count = initial_count.max(checkpointed.load(std::sync::atomic::Ordering::Relaxed));
     }
-    // Stop and join before the idle reader starts. Otherwise the old watcher
-    // can steal its first key between poll() and read(). No TUI lock held here.
+
     watch_stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = key_watcher.await;
     if turn_duration_ms.is_none() {
@@ -504,12 +450,7 @@ pub(crate) async fn run_prompt_turn(
                     let mut t = shared.lock().expect("tui lock");
                     t.end_thinking();
                     t.discard_held_punctuation();
-                    // Codex parity (`on_interrupted_turn`): the interrupt is a
-                    // fact about this turn, so it goes into history as a dim
-                    // `■` line that stays true forever. "Press Enter to
-                    // continue" is NOT history: it is a promise about the idle,
-                    // empty composer that outlived the turn it described, so
-                    // only the idle ghost (`continue_ghost`) says it.
+
                     t.ensure_gap();
                     t.push_dim(INTERRUPTED_NOTICE.to_string());
                 }
@@ -530,8 +471,7 @@ pub(crate) async fn run_prompt_turn(
             )
             .await;
             let msg = format_core_error(&e, &config.base_url);
-            // A key rewritten on disk by another window reached this session
-            // only on restart; pick it up now so Enter retries with it.
+
             let previous_key = config.api_key.clone();
             let mut reloaded = matches!(e.class(), gray_core::error::CoreError::Auth(_))
                 && crate::setup::adopt_saved_key(config);
@@ -542,16 +482,14 @@ pub(crate) async fn run_prompt_turn(
                         let history = agent.messages().to_vec();
                         *agent = built.with_messages(history);
                     }
-                    // Keep config and agent on the same key.
+
                     Err(_) => {
                         config.api_key = previous_key;
                         reloaded = false;
                     }
                 }
             }
-            // Rejected credentials: queue the login for this provider so the
-            // key prompt / login opens by itself instead of telling the user
-            // to type /connect.
+
             if !reloaded
                 && interactive
                 && tui.is_some()
@@ -566,8 +504,7 @@ pub(crate) async fn run_prompt_turn(
                     let mut t = shared.lock().expect("tui lock");
                     t.end_thinking();
                     t.ensure_gap();
-                    // The error is history; the instruction to continue is a
-                    // property of the idle composer (see the interrupt arm).
+
                     t.push_error(&msg);
                     if reloaded {
                         super::cron::push_notice(&mut t, "API key reloaded", RELOADED, false);
@@ -586,14 +523,12 @@ pub(crate) async fn run_prompt_turn(
             .expect("tui lock")
             .end_turn(stream_clock.streamed_ms().unwrap_or(0));
     }
-    // if we queued input while working, start it immediately
+
     if interactive && let Some((shared, _)) = tui {
         let mut t = shared.lock().expect("tui lock");
         if let Some(text) = t.local_command.take() {
-            // Esc mid-turn: command already echoed; run locally, never to the AI
             drop(t);
-            // `local: true` collapses every Skill to Empty too — a `/skill`
-            // draft canceled mid-turn can never reach the model.
+
             let parsed = parse_command(&text);
             if parsed.runs_local() || matches!(parsed, ReplCommand::Skill(_)) {
                 shared.lock().expect("tui lock").retract_slash_echo(&text);
@@ -618,13 +553,6 @@ pub(crate) async fn run_prompt_turn(
     Ok(())
 }
 
-/// Remove and return the oldest text-only input waiting to steer the running
-/// turn.
-///
-/// Attachments are left alone: steering carries text, and an entry with images
-/// still runs as its own turn after this one, with its images. Whatever is left
-/// in the queue is picked up by the post-turn drain, so nothing is sent twice
-/// and nothing is dropped.
 fn take_steerable(
     queued: &mut std::collections::VecDeque<(String, Vec<std::path::PathBuf>)>,
 ) -> Option<String> {
@@ -632,12 +560,42 @@ fn take_steerable(
     queued.remove(position).map(|(text, _)| text)
 }
 
-/// [`take_steerable`] against the live composer.
+fn steer_direct_send(
+    tui: Option<&crate::composer::SharedTui>,
+    sid: Option<&str>,
+) -> Option<String> {
+    let home = crate::setup::gray_home().ok()?;
+    let sid = sid?;
+    let msg = crate::session_send::claim_steerable(&home, sid);
+    if let Some(shared) = tui {
+        let pending: Vec<(String, Vec<std::path::PathBuf>)> =
+            crate::session_send::peek_sends(&home, sid)
+                .into_iter()
+                .map(|m| {
+                    (
+                        crate::session_send::prompt_for(&m.from, &m.text),
+                        m.attachments,
+                    )
+                })
+                .collect();
+        let mut t = shared.lock().expect("tui lock");
+        if t.queued_sends != pending {
+            t.queued_sends = pending;
+            let _ = t.draw();
+        }
+        if let Some(msg) = &msg {
+            let text = crate::session_send::prompt_for(&msg.from, &msg.text);
+            t.push_user_prompt(&text, &[], true);
+            let _ = t.draw();
+        }
+    }
+    msg.map(|m| crate::session_send::prompt_for(&m.from, &m.text))
+}
+
 fn steer_queued_input(tui: Option<&crate::composer::SharedTui>) -> Option<String> {
     let mut t = tui?.lock().expect("tui lock");
     let text = take_steerable(&mut t.queued_inputs)?;
-    // Show it: the model is about to act on a line the transcript has not
-    // claimed yet, and an invisible instruction is worse than none.
+
     t.push_user_prompt(&text, &[], true);
     let _ = t.draw();
     Some(text)

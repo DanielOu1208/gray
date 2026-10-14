@@ -1,15 +1,9 @@
-//! A job added from a chat comes back to that chat: the host declares the
-//! origin in the environment, and `gray cron tick --json` hands the frame
-//! back for routing. Core renders; the platform carries.
-
 use std::path::Path;
 use std::process::{Command, Output};
 
 fn run(home: &Path, env_origin: Option<&str>, args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_gray"));
-    // Run from inside a gray session, the bash tool's `GRAY_SESSION_ID`
-    // would make every job a session-origin one; these cases are about the
-    // host declaration alone.
+
     cmd.env("GRAY_HOME", home)
         .env_remove("GRAY_SESSION_ID")
         .current_dir(home)
@@ -122,8 +116,7 @@ fn a_junk_host_origin_is_not_a_declaration() {
 fn tick_json_reports_the_tick_even_with_nothing_due() {
     let tmp = home();
     let h = tmp.path();
-    // Native Windows has no cron execution host by design (WSL instead):
-    // assert the refusal, not the tick.
+
     #[cfg(windows)]
     {
         let out = run(h, None, &["cron", "tick", "--json"]);

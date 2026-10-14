@@ -16,7 +16,7 @@ fn claim_read_and_remove_roundtrip() {
 #[test]
 fn live_record_refuses_a_second_claim() {
     let home = tempfile::tempdir().unwrap();
-    claim(home.path()).unwrap(); // ours, and it is alive
+    claim(home.path()).unwrap();
     let err = claim(home.path()).unwrap_err().to_string();
     assert!(err.contains("already running"), "{err}");
 }
@@ -26,7 +26,7 @@ fn live_record_refuses_a_second_claim() {
 fn recycled_pid_reads_as_stale_and_is_replaced() {
     let home = tempfile::tempdir().unwrap();
     let mut rec = claim(home.path()).unwrap();
-    // Same pid, different start time: the pid was recycled since.
+
     rec.start_time = Some(rec.start_time.unwrap_or(1) + 1_000_000);
     std::fs::write(
         record_path(home.path()),

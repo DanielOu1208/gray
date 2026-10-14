@@ -1,10 +1,8 @@
-"""Opt-in acceptance test: real gray -> pinned public package -> setup CLI."""
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-
 
 @unittest.skipUnless(os.environ.get('GRAY_TEST_BIN') and os.environ.get('GRAY_TEST_PUBLIC_INSTALL') == '1',
                      'Set GRAY_TEST_BIN and GRAY_TEST_PUBLIC_INSTALL=1 (network install)')

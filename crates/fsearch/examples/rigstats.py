@@ -1,9 +1,3 @@
-"""p50/p90/p99 (ms) per category from examples/rig.rs outputs: each query's
-median over its rounds, then percentiles over the queries; typing runs are
-divided by their keystrokes. With --diff A B: the queries whose result
-fingerprints differ.
-
-usage: rigstats.py <rig out.json>... | rigstats.py --diff <a.json> <b.json>"""
 import json, sys
 from collections import defaultdict
 

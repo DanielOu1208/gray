@@ -1,26 +1,10 @@
-//! shell/exit.rs — honest exit reports (brief 1A, Phase 1).
-//!
-//! Pure function `ExitStatus` + command string → `ExitReport`. No I/O.
-//! NOT wired into the crate yet (`mod exit` + `pub mod shell` land with
-//! brief 1D); until then this file is a compile target, not part of the
-//! build. Assumes wiring as `shell::exit` with `super::contract::ExitReport`
-//! (same layout as `shell::guard`).
-//!
-//! Unix signals (`ExitStatusExt::signal`) where available; on Windows the
-//! signal is always `None`, so signal-derived labels/notes don't apply
-//! (plain exit codes still report honestly).
-
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 
 use super::contract::ExitReport;
-// Shared quote-aware `|` splitter (4B dedupes the NOTE(1A) local copy:
-// `||` stays literal, quotes/backslashes/$(…)/heredocs respected).
+
 use super::split::split_pipeline;
 
-/// Build an honest [`ExitReport`] from a wait status and the command that
-/// produced it. Never lies about 128+N; the only note is a masked pipeline
-/// status, which the model cannot see. The signal name says the rest.
 pub fn exit_report(status: std::process::ExitStatus, command: &str) -> ExitReport {
     let code = status.code();
     #[cfg(unix)]
@@ -31,8 +15,7 @@ pub fn exit_report(status: std::process::ExitStatus, command: &str) -> ExitRepor
         (Some(n), _) => (n, format!("exit {n}")),
         (None, Some(s)) => {
             let eff = 128 + s;
-            // `mut` is dead on Windows (no core-dump push below); keep the
-            // single shape and silence the platform-specific warn.
+
             #[allow(unused_mut)]
             let mut label = format!("exit {eff} ({})", signal_name(s));
             #[cfg(unix)]
@@ -55,7 +38,6 @@ pub fn exit_report(status: std::process::ExitStatus, command: &str) -> ExitRepor
     }
 }
 
-/// `exit {128+s} (SIGNAME)` names; unknown signals stay numeric.
 fn signal_name(sig: i32) -> String {
     let name = match sig {
         1 => "HUP",
@@ -79,7 +61,6 @@ fn base_head(cmd: &str) -> &str {
     head.rsplit('/').next().unwrap_or(head)
 }
 
-/// Pipeline note when the tail command's status masks the real one.
 fn masked_note(command: &str) -> Option<String> {
     const TAIL_CMDS: [&str; 8] = ["tail", "head", "grep", "tee", "sort", "wc", "less", "cat"];
     let segs = split_pipeline(command);
@@ -89,13 +70,6 @@ fn masked_note(command: &str) -> Option<String> {
     let last = base_head(&segs[segs.len() - 1]);
     let first = base_head(&segs[0]);
     if UNMASKABLE_TAILS.contains(&last) {
-        // A pure pass-through filter cannot fail on its own, and a `sh -c`
-        // pipeline reports only the last stage's status — so a real
-        // command's failure is swallowed whole:
-        //     pytest -q | head -40        # exit 0 even when tests fail
-        // Name the earlier stage when there is exactly one (a rerun
-        // recovers its status); otherwise stay generic. Never echo the
-        // command — a long pipeline must not ride every header twice.
         let note = if segs.len() == 2 {
             format!("`{last}` masks `{first}`'s exit; rerun `{first}` alone for its status")
         } else {
@@ -106,22 +80,16 @@ fn masked_note(command: &str) -> Option<String> {
     if !TAIL_CMDS.contains(&last) {
         return None;
     }
-    // POSIX-honest: the executor is `sh -c` (dash on some systems), so
-    // `set -o pipefail` is not available. Name the two stages only — never
-    // echo the pipeline (long commands would ride every header twice).
+
     Some(format!(
         "`{last}` masks `{first}`'s exit; rerun `{first}` alone for its status"
     ))
 }
 
-/// Text filters that do not propagate the upstream status: a `0` from one
-/// of them says nothing about the stage feeding it. `head`/`tail`/`cat`/
-/// `less`/`cut`/`column`/`tr` cannot fail on their input at all; `awk` and
-/// `sed` can fail on a bad script but still exit 0 for a failing upstream.
 const UNMASKABLE_TAILS: [&str; 9] = [
     "head", "tail", "cat", "less", "awk", "sed", "tr", "cut", "column",
 ];
 
 #[path = "exit_tests.rs"]
-#[cfg(all(test, unix))] // ExitStatusExt::from_raw is unix-only (T3 windows gate)
+#[cfg(all(test, unix))]
 mod exit_tests;

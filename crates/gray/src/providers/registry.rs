@@ -1,5 +1,3 @@
-//! Bounded cache of installed provider declarations.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -55,7 +53,7 @@ pub struct CachedProviderPlugin {
     pub providers: Vec<ProviderDecl>,
     #[serde(default)]
     pub errors: Vec<String>,
-    /// Spawn argv from the lock; filled on load, never trusted from disk.
+
     #[serde(skip)]
     pub argv: Vec<String>,
 }
@@ -92,14 +90,18 @@ pub struct ProviderRegistry {
 
 impl ProviderRegistry {
     pub fn load_cached(home: &Path) -> Self {
+        Self::load_cached_with_user_home(home, gray_core::paths::gray_user_home().as_deref())
+    }
+
+    fn load_cached_with_user_home(home: &Path, user_home: Option<&Path>) -> Self {
         let mut cache = ProviderCache::load(&cache_path(home));
         let _ = refresh_installed_argv(home, &mut cache);
+        if let Some(user) = user_home.filter(|user| differs(home, user)) {
+            merge_global_entries(user, &mut cache);
+        }
         Self { cache }
     }
 
-    /// Rebuild the provider cache from installed sidecar manifests. A
-    /// plugin without a cached manifest is command-only and contributes no
-    /// providers, so this never needs to spawn a sidecar.
     pub fn refresh(home: &Path) -> anyhow::Result<()> {
         let lock = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(home))?;
         let path = cache_path(home);
@@ -150,11 +152,60 @@ impl ProviderRegistry {
     }
 }
 
+pub fn plugin_home(home: &Path, plugin: &str) -> PathBuf {
+    plugin_home_with_user(home, gray_core::paths::gray_user_home().as_deref(), plugin)
+}
+
+fn plugin_home_with_user(home: &Path, user_home: Option<&Path>, plugin: &str) -> PathBuf {
+    let names_plugin = |dir: &Path| {
+        gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(dir))
+            .is_ok_and(|lock| lock.plugins.contains_key(plugin))
+    };
+    if names_plugin(home) {
+        return home.to_path_buf();
+    }
+    let Some(user) = user_home.filter(|user| differs(home, user)) else {
+        return home.to_path_buf();
+    };
+    let global = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(user))
+        .ok()
+        .and_then(|lock| lock.plugins.get(plugin).map(|e| e.global && e.enabled))
+        .unwrap_or(false);
+    if global {
+        user.to_path_buf()
+    } else {
+        home.to_path_buf()
+    }
+}
+
+fn differs(home: &Path, user: &Path) -> bool {
+    user != home && std::fs::canonicalize(user).ok() != std::fs::canonicalize(home).ok()
+}
+
+fn merge_global_entries(user: &Path, cache: &mut ProviderCache) {
+    let Ok(user_lock) = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(user))
+    else {
+        return;
+    };
+    for (name, entry) in &user_lock.plugins {
+        if !entry.global || !entry.enabled || cache.plugins.contains_key(name) {
+            continue;
+        }
+        let argv = spawn_argv(name, user, entry).unwrap_or_default();
+        cache.plugins.insert(
+            name.clone(),
+            CachedProviderPlugin {
+                argv,
+                ..cached_from_manifest(user, name, entry)
+            },
+        );
+    }
+}
+
 pub fn cache_path(home: &Path) -> PathBuf {
     home.join("plugins/provider-cache.json")
 }
 
-/// Lock identity: package identity plus executable argv, never the raw URL.
 pub fn lock_identity(plugin: &str, entry: &LockEntry) -> String {
     let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
     use sha2::Digest as _;
@@ -223,11 +274,6 @@ fn entry_name(home: &Path, entry: &LockEntry) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("provider plugin entry is not present in the sidecar lock"))
 }
 
-/// A lock entry's cache row derived from its on-disk manifest — the one
-/// place rows come from, shared by `refresh()` and the read-side heal in
-/// `refresh_installed_argv`. An absent or unparseable manifest yields an
-/// empty provider set: the lock entry still exists, it just contributes
-/// no providers until the manifest lands.
 fn cached_from_manifest(home: &Path, name: &str, entry: &LockEntry) -> CachedProviderPlugin {
     let mut cached = CachedProviderPlugin {
         identity: lock_identity(name, entry),
@@ -242,10 +288,7 @@ fn cached_from_manifest(home: &Path, name: &str, entry: &LockEntry) -> CachedPro
     let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
         return cached;
     };
-    // The manifest's own `name` may differ from the lock key: an
-    // index install adopts the CLI manifest of a plugin published
-    // under a different registry key (the `-sub` plugins). The
-    // `<key>-manifest.json` filename is what binds it to the entry.
+
     let raw_providers = manifest
         .get("providers")
         .and_then(serde_json::Value::as_array)
@@ -275,10 +318,6 @@ fn refresh_installed_argv(home: &Path, cache: &mut ProviderCache) -> anyhow::Res
     for (name, entry) in &lock.plugins {
         let argv = spawn_argv(name, home, entry).unwrap_or_default();
         match cache.plugins.get_mut(name) {
-            // Lock identity newer than the cached row means an install
-            // landed between the last provider refresh and now — heal the
-            // row from the manifest on disk rather than resolving against
-            // a stale (or absent) provider set.
             Some(cached) if cached.identity != lock_identity(name, entry) => {
                 *cached = CachedProviderPlugin {
                     argv,
@@ -289,8 +328,7 @@ fn refresh_installed_argv(home: &Path, cache: &mut ProviderCache) -> anyhow::Res
                 cached.enabled = entry.enabled;
                 cached.argv = argv;
             }
-            // Never cached (install's refresh hasn't run or was skipped):
-            // same heal, so a completed install resolves immediately.
+
             None => {
                 cache.plugins.insert(
                     name.clone(),
@@ -330,10 +368,7 @@ pub trait ProviderRpc: Send + Sync {
         &self,
         request: ProviderChatRequest,
     ) -> Result<ProviderChatResult, ProviderRpcError>;
-    /// `provider/usage`: subscription quota windows for `/usage`. Plugins
-    /// that cannot read them answer `Unavailable`/`Protocol` — the caller
-    /// skips them silently. Default impl keeps test doubles and any
-    /// non-subscription provider compiling unchanged.
+
     async fn usage(
         &self,
         _request: ProviderUsageRequest,

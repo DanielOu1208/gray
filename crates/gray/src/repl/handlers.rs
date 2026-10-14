@@ -1,19 +1,5 @@
-//! Slash-command handlers: skills, sys, model, thinking (split from `repl`).
-
 use super::*;
 
-/// Renders the exact text sent to the model for `/skills <name> [args]`:
-/// a binding directive naming the skill, then the skill body (frontmatter
-/// stripped), with the invocation args appended. Pure so both the visible
-/// paste and the model turn share one string — what you see in chat is what
-/// the model gets.
-///
-/// The directive exists because a bare body pasted mid-task reads as
-/// background material: the model resumes whatever plan it was already on
-/// (observed: a `/skills` invocation ignored, the pre-interrupt `ls` re-run
-/// immediately after the paste). Naming the skill and stating the
-/// instructions are binding — with an explicit "even mid-task, drop
-/// conflicting plans" — re-anchors the turn on the skill.
 pub(crate) fn format_skill_paste(body: &str, name: &str, args: Option<&str>) -> String {
     let mut out = format!(
         "The user explicitly invoked the \"{name}\" skill. Its instructions are binding for the current task: follow them now, starting from the first step, even if you were mid-task — abandon any plan that conflicts with them."
@@ -26,10 +12,6 @@ pub(crate) fn format_skill_paste(body: &str, name: &str, args: Option<&str>) -> 
     out
 }
 
-/// Pastes the expanded skill into the chat transcript so the invocation is
-/// visible: a `Skill "name"` box in the TUI, the raw body on headless.
-/// Runs before the model turn, so the transcript shows the skill and then
-/// the model's response to it.
 fn paste_skill_into_chat(
     tui: Option<&crate::composer::SharedTui>,
     cwd: &Path,
@@ -51,16 +33,10 @@ fn paste_skill_into_chat(
     }
 }
 
-/// `/skills enable <name>` / `/skills disable <name>` management verbs.
-/// Returns `(on, name)`. Anything else (invocations, bare, extras) is `None`
-/// — a skill literally named `enable`/`disable` is unreachable by design.
 pub(crate) fn parse_skill_toggle(rest: &str) -> Option<(bool, String)> {
     parse_skill_name_toggle(rest)
 }
 
-/// Global auto-load switch: `/skills on` | `/skills off` (plus `enable` /
-/// `disable` as aliases). `Some(on)` for a bare switch word, `None` for
-/// anything else (per-skill toggles, invocations, bare, extras).
 pub(crate) fn parse_skills_auto_toggle(rest: &str) -> Option<bool> {
     let mut parts = rest.split_whitespace();
     let word = parts.next()?;
@@ -76,10 +52,6 @@ pub(crate) fn parse_skills_auto_toggle(rest: &str) -> Option<bool> {
     }
 }
 
-/// Per-skill toggle core behind [`parse_skill_toggle`]: two words
-/// (`enable|disable <name>`). Bare switch words are global (see
-/// [`parse_skills_auto_toggle`]) — so `enable`/`disable` alone never reach
-/// here, while a skill literally named `on`/`off` stays invokable.
 fn parse_skill_name_toggle(rest: &str) -> Option<(bool, String)> {
     let mut parts = rest.split_whitespace();
     let verb = parts.next()?;
@@ -97,10 +69,6 @@ fn parse_skill_name_toggle(rest: &str) -> Option<(bool, String)> {
     Some((on, name.to_string()))
 }
 
-/// Global-switch core against an explicit config path (test seam): flips the
-/// persisted auto flag and reports. `off` hides the model's prompt list;
-/// manual `/skills <name>` still runs. `on` re-enables auto-loading and
-/// clears the per-skill disabled set so it truly turns all skills on.
 pub(crate) fn apply_skills_auto_toggle(config_path: &Path, on: bool) -> Result<String, String> {
     let _cfg_lock =
         crate::setup::lock_saved_config_at(config_path).map_err(|e| format!("{e:#}"))?;
@@ -117,9 +85,6 @@ pub(crate) fn apply_skills_auto_toggle(config_path: &Path, on: bool) -> Result<S
     })
 }
 
-/// Toggle core against an explicit config path (test seam): validates the
-/// name against discovery, flips the persisted set, and reports. Disabled
-/// hides the skill from the model's prompt list; manual use still runs.
 pub(crate) fn apply_skill_toggle(
     config_path: &Path,
     discovered: &[crate::skills::Skill],
@@ -152,9 +117,6 @@ pub(crate) fn apply_skill_toggle(
     })
 }
 
-/// Subsystems carrying a persisted on/off master switch, mirroring
-/// `skills_auto`. Each gates its autonomous path — cron fires, the gateway
-/// server — while the manual path keeps working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Subsystem {
     Cron,
@@ -163,7 +125,6 @@ pub(crate) enum Subsystem {
 }
 
 impl Subsystem {
-    /// The name users type (`/memory`, `/cron`, `gray gateway`).
     pub(crate) fn label(self) -> &'static str {
         match self {
             Subsystem::Cron => "cron",
@@ -172,7 +133,6 @@ impl Subsystem {
         }
     }
 
-    /// (on report, off effect, manual path that survives off).
     fn copy(self) -> (&'static str, &'static str, &'static str) {
         match self {
             Subsystem::Cron => (
@@ -193,7 +153,6 @@ impl Subsystem {
         }
     }
 
-    /// The persisted field this switch flips.
     fn field(self, saved: &mut crate::setup::SavedConfig) -> &mut Option<bool> {
         match self {
             Subsystem::Cron => &mut saved.cron_auto,
@@ -203,10 +162,6 @@ impl Subsystem {
     }
 }
 
-/// Bare switch-word parse shared by the subsystem toggles: exactly one word
-/// from `on|off|enable|disable` (case-insensitive). Anything else — extras,
-/// names, garbage — is `None`, so each command keeps its own parse shape for
-/// everything that is not a bare switch.
 pub(crate) fn parse_on_off(rest: &str) -> Option<bool> {
     let mut parts = rest.split_whitespace();
     let word = parts.next()?;
@@ -220,10 +175,6 @@ pub(crate) fn parse_on_off(rest: &str) -> Option<bool> {
     }
 }
 
-/// Toggle core against an explicit config path (test seam): flips the
-/// persisted flag and reports. `off` gates the autonomous path only — the
-/// manual path named in the report keeps working. `on` clears the flag so
-/// the subsystem reads as enabled.
 pub(crate) fn apply_subsystem_toggle(
     config_path: &Path,
     subsystem: Subsystem,
@@ -241,9 +192,6 @@ pub(crate) fn apply_subsystem_toggle(
     })
 }
 
-/// Resolves the live config path and applies a subsystem toggle, returning
-/// the report (or the failure) as a string. Shared by the REPL arms and the
-/// `gray gateway on|off` CLI so the path/error dance is written once.
 pub(crate) fn toggle_subsystem(subsystem: Subsystem, on: bool) -> String {
     match crate::setup::saved_config_path() {
         Ok(path) => match apply_subsystem_toggle(&path, subsystem, on) {
@@ -253,23 +201,12 @@ pub(crate) fn toggle_subsystem(subsystem: Subsystem, on: bool) -> String {
     }
 }
 
-/// Expands `/skills <name> [args]` (or the `/skill <name>` alias —
-/// both parse to the identical payload) into a Prompt carrying the skill body
-/// (Grok-style: frontmatter stripped, args appended). The same text is pasted
-/// visibly into the chat transcript first,
-/// so invoking a skill shows the actual skill in chat instead of silently
-/// handing the model a hidden prompt. Bare `/skills` opens the skills manager
-/// (TTY) or prints the text list (headless). Both list *discovered* skills
-/// (global + project), not just `~/.gray/skills` installs.
-/// With `local` set (Esc mid-turn), nothing is pasted or expanded — the turn
-/// was cancelled, nothing talks to the model.
 pub(crate) fn expand_skill_command(
     cmd: ReplCommand,
     cwd: &Path,
     tui: Option<&crate::composer::SharedTui>,
     local: bool,
 ) -> ReplCommand {
-    // local: turn was cancelled — run everything as a no-AI no-op
     let to_prompt = |expanded: String| {
         if local {
             ReplCommand::Empty
@@ -277,9 +214,7 @@ pub(crate) fn expand_skill_command(
             ReplCommand::Prompt(expanded)
         }
     };
-    // Prompt templates (`~/.gray/prompts/<name>.md`, …): an unclaimed
-    // `/name args` whose name matches a template sends its filled body.
-    // Built-ins and provider shortcuts never reach here (parsed earlier).
+
     if let ReplCommand::Unknown(raw) = &cmd {
         let body = raw.trim().trim_start_matches('/');
         let (name, rest) = body.split_once(char::is_whitespace).unwrap_or((body, ""));
@@ -293,7 +228,6 @@ pub(crate) fn expand_skill_command(
     };
     let discovered = crate::skills::discover_skills(cwd);
     let Some(rest) = payload else {
-        // Bare /skills — manager on TTY (like /plugins), text list headless.
         if tui.is_some() {
             let bg = tui.as_ref().map(|s| s.lock().expect("tui lock").snapshot());
             match with_modal_sync(tui, || crate::setup::run_skills_modal(bg.as_ref(), cwd)) {
@@ -309,8 +243,7 @@ pub(crate) fn expand_skill_command(
                     if let Some(shared) = tui {
                         let mut t = shared.lock().expect("tui lock");
                         t.clear_draft();
-                        // Dismissed picker leaves the slash card with no feedback:
-                        // restore the trailing gap so it doesn't jam the input box.
+
                         t.ensure_gap();
                         let _ = t.draw();
                     }
@@ -340,9 +273,6 @@ pub(crate) fn expand_skill_command(
         return ReplCommand::Empty;
     };
     if let Some(on) = parse_skills_auto_toggle(&rest) {
-        // Global switch — but a skill literally named `on`/`off` (or
-        // `enable`/`disable`) stays invokable: an exact discovery hit wins
-        // over the switch interpretation.
         let shadowed = discovered.skills.iter().any(|s| s.name == rest.trim());
         if !shadowed {
             if !local {
@@ -404,16 +334,13 @@ pub(crate) fn expand_skill_command(
             return ReplCommand::Empty;
         }
     };
-    // Esc-cancelled (`local`): no paste, no prompt — the turn is dead and
-    // `to_prompt` already maps to `Empty`. Pasting here would print a skill
-    // body for a turn that never runs.
+
     if !local {
         paste_skill_into_chat(tui, cwd, &skill.name, &expanded);
     }
     to_prompt(expanded)
 }
 
-/// Handles the `/agentsmd` command family (alias `/sys`): edit, show, reset.
 pub(crate) async fn handle_sys(
     config: &Config,
     cwd: &Path,
@@ -459,7 +386,6 @@ pub(crate) async fn handle_sys(
             reload_agent(agent, config, cwd, session_id, tui).await;
         }
         SysAction::Edit => {
-            // Make sure the file exists before opening an editor on it.
             let initial = match load_or_create_system_prompt_at(&path) {
                 Ok(b) => b,
                 Err(e) => {
@@ -467,10 +393,7 @@ pub(crate) async fn handle_sys(
                     return;
                 }
             };
-            // One external-editor path for TUI and headless alike: `$EDITOR`
-            // when set, `vi` otherwise. Snapshot before the editor overwrites
-            // in place; the TUI pauses its draw loop across the handover and
-            // reflows once the editor exits.
+
             let _ = crate::sys_editor::backup_before_overwrite(&path);
             let tui_snap = tui.cloned();
             let editor_paused = if let Some(shared) = &tui_snap {
@@ -510,32 +433,12 @@ pub(crate) async fn handle_sys(
     }
 }
 
-/// Where `/undo` cuts: the index of the last message the *user* sent, so the
-/// exchange it opened (and everything the model said in reply) goes, while
-/// earlier turns stay. `None` when the conversation holds no user turn.
-///
-/// The cut is on a user boundary by construction, which is what keeps the
-/// remaining history valid for the provider: an assistant message with tool
-/// calls whose results were dropped would be a protocol error, and a tool
-/// result whose call was dropped is an orphan.
 pub(crate) fn undo_cut(messages: &[Message]) -> Option<usize> {
     messages
         .iter()
         .rposition(|message| message.role == gray_core::message::Role::User)
 }
 
-/// `/undo` drops the last exchange (the last user turn and everything the
-/// model said after it); `/retry` is the same rewind plus sending that text
-/// again, which the dispatcher does with the returned string.
-///
-/// Conversation only. Files the model wrote are untouched, and the pre-undo
-/// transcript is archived under `~/.gray/sessions/archive/`, so this is
-/// recoverable by hand. Images attached to the dropped turn are not restored
-/// by `/retry`: the resent message is its text.
-///
-/// Returns the text to re-send (`/retry` only), or `None` when nothing was
-/// dropped or the rewind failed — in which case memory and disk are both left
-/// as they were, because a half-undone session is worse than none.
 pub(crate) async fn handle_undo(
     retry: bool,
     agent: &mut Option<Agent>,
@@ -558,8 +461,7 @@ pub(crate) async fn handle_undo(
         String::new()
     };
     let kept: Vec<Message> = messages[..cut].to_vec();
-    // Disk first: a session that survived the rewind on disk but not in
-    // memory would replay the dropped turn on the next resume.
+
     if let Some(state) = session_state
         && let Err(e) = state.store.rewind(&state.session_id, kept.len()).await
     {
@@ -576,10 +478,6 @@ pub(crate) async fn handle_undo(
     (!resent.is_empty()).then_some(resent)
 }
 
-/// Rebuilds the agent after a system-prompt change, preserving conversation history.
-/// `session_id` pins the Responses `prompt_cache_key` shard: rebuilding with
-/// `None` would rotate the shard mid-session and bust prefix-cache hits.
-/// Build failures render via `say()` (never raw `println!` over the live viewport).
 pub(crate) async fn reload_agent(
     agent: &mut Option<Agent>,
     config: &Config,
@@ -604,11 +502,6 @@ pub(crate) async fn reload_agent(
     log::debug!(target: "gray_timing", "reload_agent elapsed_ms={}", started.elapsed().as_millis());
 }
 
-/// Rebuilds the agent for a model or provider switch without restarting
-/// plugins: a fresh model-side agent takes over the running one's tool
-/// surface and transcript. Respawning every sidecar made each switch wait
-/// on the slowest plugin (an MCP server's startup alone held it ~3s). With
-/// no agent yet there is nothing to keep, so it falls back to a full build.
 pub(crate) async fn switch_agent_model(
     agent: &mut Option<Agent>,
     config: &Config,
@@ -634,8 +527,6 @@ pub(crate) async fn switch_agent_model(
     }
 }
 
-/// What `/models` was asked for: the picker (optionally focused on a row —
-/// a plugin `model_picker` outcome like `/fusion`), or a direct id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelArg {
     Picker { focus: Option<String> },
@@ -651,22 +542,12 @@ impl From<Option<String>> for ModelArg {
     }
 }
 
-/// What [`apply_model_selection`] committed: the canonical model id, any
-/// effort clamp it caused, and the effort that preceded the switch (the
-/// caller compares to decide the thinking-footer refresh).
 pub(crate) struct ModelApply {
     pub(crate) model: String,
     pub(crate) clamped: Option<(String, String)>,
     pub(crate) prev_effort: Option<String>,
 }
 
-/// The persisted half of `/models <id>` — shared with `gray cmd`, where it
-/// is also the model picker's apply. Validates against the cached list
-/// (falling back to the live fetch), decomposes a variant id, then writes
-/// model + effort + fast through to saved config. `effort`/`fast` are a
-/// picker's explicit commits; `None` keeps the typed-id semantics (a
-/// `<base>-<tier>` id's own tier wins, else the remembered level).
-/// Returns the applied selection or the user-facing error message.
 pub(crate) fn apply_model_selection(
     config: &mut Config,
     raw: &str,
@@ -677,8 +558,6 @@ pub(crate) fn apply_model_selection(
     apply_model_selection_at(config, raw, effort, fast, path.as_deref())
 }
 
-/// [`apply_model_selection`] with the saved-config path injected, so tests
-/// persist into a tempdir instead of the real home.
 pub(crate) fn apply_model_selection_at(
     config: &mut Config,
     raw: &str,
@@ -686,9 +565,6 @@ pub(crate) fn apply_model_selection_at(
     fast: Option<bool>,
     saved_path: Option<&Path>,
 ) -> Result<ModelApply, String> {
-    // Validate against the cached list first; only an id it doesn't
-    // know waits on the live fetch (a brand-new model). Plugin
-    // connections list via `provider/models`, not the placeholder base.
     let (_, list_key, _) = crate::setup::picker_scope(config);
     let cached = crate::setup::saved_models_for(&list_key, &config.base_url);
     let mut checked = crate::setup::validate_direct_model_id(raw, &cached);
@@ -698,9 +574,7 @@ pub(crate) fn apply_model_selection_at(
         checked = crate::setup::validate_direct_model_id(raw, &known);
         live_rows = known;
     }
-    // Decompose the target once against the merged known list: a
-    // declared `-fast`/`-priority` row and a stale `<base>-<tier>` id
-    // alike split into base + tier + fast.
+
     let mut ids = cached.clone();
     for row in live_rows {
         if !ids.iter().any(|(id, _)| *id == row.0) {
@@ -710,18 +584,12 @@ pub(crate) fn apply_model_selection_at(
     let (m, variant_tier, id_fast) = match checked {
         Ok(canonical) => crate::setup::decompose_model_variant(&canonical, &ids)
             .unwrap_or((canonical, None, false)),
-        Err(msg) => {
-            // A `<base>-<tier>` id names a level on its family row: the
-            // picker collapsed the variants into `base`, so a stale or
-            // hand-typed `swe-2-max` resolves to `swe-2` at `max`.
-            match crate::setup::decompose_model_variant(raw, &ids) {
-                Some(v) => v,
-                None => return Err(msg),
-            }
-        }
+        Err(msg) => match crate::setup::decompose_model_variant(raw, &ids) {
+            Some(v) => v,
+            None => return Err(msg),
+        },
     };
-    // A `-fast` id enables fast on its own; an explicit picker commit
-    // decides otherwise. `GRAY_FAST` stays a user override either way.
+
     let fast = if std::env::var_os("GRAY_FAST").is_some() {
         None
     } else {
@@ -736,11 +604,7 @@ pub(crate) fn apply_model_selection_at(
         }
     }
     config.model = Some(m.clone());
-    // Effort follows the model: adopt this target's remembered level
-    // (or the default) before clamping, so a stale level never lands on
-    // the new model or gets remembered under its key. A tier the id
-    // itself named wins — `swe-2-max` means max — then the picker's
-    // explicit commit, then memory.
+
     let prev_effort = config.thinking_effort.clone();
     match variant_tier.or_else(|| effort.map(str::to_string)) {
         Some(e) if std::env::var_os("GRAY_THINKING_EFFORT").is_none() => {
@@ -757,8 +621,6 @@ pub(crate) fn apply_model_selection_at(
         }
         Some(_) => {}
         None => {
-            // Same load/save discipline as `adopt_connection_effort` —
-            // the lock keeps a concurrent writer from clobbering memory.
             let _cfg_lock = saved_path.and_then(|p| crate::setup::lock_saved_config_at(p).ok());
             let mut saved = saved_path.map(crate::setup::load_saved_config_at);
             crate::setup::apply_connection_effort(
@@ -783,11 +645,6 @@ pub(crate) fn apply_model_selection_at(
     })
 }
 
-/// Handles `/models`: interactive picker (no arg) or direct set (`/models provider/id`).
-/// Switching updates the live agent and persists to ~/.gray/config.json.
-/// After a picker commit: clamp the effort, paint the footer and receipt
-/// for what changed against `prev` (effort, reasoning display, fast mode),
-/// then rebuild the agent on the new model.
 async fn finish_model_pick(
     config: &mut Config,
     cwd: &Path,
@@ -797,9 +654,6 @@ async fn finish_model_pick(
     hide_thinking: &mut bool,
     (prev_effort, prev_show, prev_fast): (Option<String>, Option<bool>, Option<bool>),
 ) {
-    // The picker already committed the row's effort (and any Tab /
-    // ctrl+r toggle); clamp whatever came out so the footer never
-    // shows an unsupported level, and paint the committed state.
     let clamped = super::clamp_thinking_to_model(config);
     let show_changed = config.show_reasoning != prev_show;
     let fast_changed = config.fast_mode != prev_fast;
@@ -812,8 +666,7 @@ async fn finish_model_pick(
             t.set_model(m.clone());
             t.set_model_label(crate::setup::composite_label_for(config));
             t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
-            // Name the effort alongside the model when it has a
-            // level to choose: the picker set both at once.
+
             let label = super::model_receipt_label(config).unwrap_or_else(|| m.clone());
             t.push_action("Model set to", Some(&label));
         }
@@ -851,9 +704,6 @@ async fn finish_model_pick(
     switch_agent_model(agent, config, cwd, session_id, tui).await;
 }
 
-/// Bare `/models`: the two-pane provider×model picker. The modal commits
-/// provider + model itself; what remains is the shared receipt (effort
-/// clamp, footer, action line, live fetch, agent swap).
 pub(crate) async fn handle_model_panes(
     config: &mut Config,
     cwd: &Path,
@@ -931,8 +781,6 @@ pub(crate) async fn handle_model(
         ModelArg::Picker { focus } => (None, focus),
     };
     if let Some(m) = direct {
-        // Validate → decompose → persist shares one path with `gray cmd`;
-        // what stays here are the receipts (footer, action line, agent).
         let applied = match apply_model_selection(config, &m, None, None) {
             Ok(a) => a,
             Err(msg) => {
@@ -988,7 +836,6 @@ pub(crate) async fn handle_model(
     }
 
     if tui.is_none() {
-        // Headless (piped stdout): the picker needs a TTY — print status.
         match config.model.as_deref() {
             Some(m) => println!("model {m} — /models provider/id to switch"),
             None => {
@@ -1022,13 +869,10 @@ pub(crate) async fn handle_model(
             .await;
         }
         Ok(false) => {
-            // Tab / ctrl+r are pending until Enter: a dismissed picker
-            // changed nothing.
             if let Some(shared) = tui {
                 let mut t = shared.lock().expect("tui lock");
                 t.clear_draft();
-                // Dismissed picker leaves the slash card with no feedback:
-                // gap so it doesn't jam the input box.
+
                 t.ensure_gap();
                 let _ = t.draw();
             }

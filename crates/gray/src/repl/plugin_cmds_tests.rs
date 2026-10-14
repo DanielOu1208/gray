@@ -44,7 +44,7 @@ fn parse_covers_every_subcommand() {
         parse_plugin_args("/plugin remove foo"),
         Ok(PluginAction::Remove(_))
     ));
-    // Bare update targets everything, like `gray plugin update` (default `all`).
+
     assert!(matches!(
         parse_plugin_args("/plugin update"),
         Ok(PluginAction::Update(t)) if t == "all"
@@ -70,9 +70,6 @@ fn parse_covers_every_subcommand() {
     assert!(parse_plugin_args("/plugin frobnicate x").is_err());
 }
 
-/// `/plugin list` routes through the Plugin arm (read-only lockfile
-/// read): it returns Continue with no queued follow-up instead of
-/// falling into the unknown-command path.
 #[tokio::test]
 async fn plugin_list_dispatches_without_unknown_command() {
     use clap::Parser;

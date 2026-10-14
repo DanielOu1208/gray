@@ -1,10 +1,8 @@
 use super::*;
 
-/// Point `GRAY_HOME` at a fresh tempdir. Must be called under the
-/// shared `ops::tests::ENV_GUARD` (one process, one process-global env).
 fn use_errors_env() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
-    // SAFETY: serialized by ENV_GUARD.
+
     unsafe {
         std::env::set_var("GRAY_HOME", home.path());
     }

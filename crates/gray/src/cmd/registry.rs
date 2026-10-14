@@ -1,7 +1,3 @@
-//! `gray cmd list` — the merged command table rendered for adapters:
-//! builtins from the REGISTRY, then enabled plugins' manifest commands,
-//! then skills; a name claimed by an earlier tier wins.
-
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -9,9 +5,6 @@ use serde_json::{Value, json};
 
 use crate::repl::REGISTRY;
 
-/// One free-form `args` option per command (contract v1): adapters expose
-/// a single optional string; the hint says what it accepts. `None` = the
-/// command takes no arguments.
 fn args_hint(name: &str) -> Option<&'static str> {
     match name {
         "models" => Some("provider/model-id [slot=option ...] (empty opens the picker)"),
@@ -38,8 +31,6 @@ fn hint_arg(hint: impl Into<String>) -> Vec<Value> {
     vec![json!({"name": "args", "required": false, "hint": hint.into()})]
 }
 
-/// The `cmd list` result body: `{"commands": [...]}` — builtins in
-/// registry order, plugins by lock name, skills in discovery order.
 pub(crate) fn list_json() -> Value {
     let mut commands: Vec<Value> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();

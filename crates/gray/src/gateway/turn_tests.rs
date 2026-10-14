@@ -1,11 +1,7 @@
-//! `ChildRunner` against `#!/bin/sh` fake-grays: the NDJSON contract is the
-//! real one (`print.rs`), and the process bits (pipes, pgroup, kill) run for
-//! real. Shell scripts make every test unix-only.
 #![cfg(unix)]
 
 use super::*;
 
-/// An executable `#!/bin/sh` script in `dir` named `name`.
 fn fake_gray(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
@@ -30,6 +26,7 @@ fn req() -> TurnRequest {
         kind: Kind::User,
         cwd: std::env::temp_dir(),
         timeout: Duration::from_secs(30),
+        running: None,
     }
 }
 
@@ -159,4 +156,34 @@ async fn spawn_failure_is_an_error_not_a_panic() {
         .await;
     let e = out.error.unwrap();
     assert!(e.contains("spawn failed"), "{e}");
+}
+
+#[tokio::test]
+async fn the_child_is_stamped_into_its_admission_record() {
+    use super::super::brain::Running;
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("t1.json");
+    let running = Running {
+        turn: "t1".into(),
+        key: "main".into(),
+        events: Vec::new(),
+        started_at: 1,
+        child: None,
+    };
+    crate::cron::store::atomic_write_json(&record, &running).unwrap();
+    let bin = fake_gray(
+        dir.path(),
+        "gray-pid",
+        r#"printf '%s\n' "{\"type\":\"result\",\"text\":\"$$\",\"session_id\":\"s-7\"}"
+"#,
+    );
+    let mut req = req();
+    req.running = Some(record.clone());
+    let out = runner(bin, dir.path()).run(req).await;
+    assert_eq!(out.error, None);
+    let stamped: Running = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    let child = stamped.child.expect("child stamped");
+    assert_eq!(child.pid.to_string(), out.text);
+    assert_eq!(child.pgid, Some(child.pid));
+    assert_eq!(stamped.turn, "t1");
 }

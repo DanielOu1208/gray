@@ -1,11 +1,9 @@
-"""Verify enforcement inside a real agent tool loop, including unknown usage."""
 import asyncio
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
-
 
 @unittest.skipUnless(os.environ.get('GRAY_TEST_BIN'), 'Set GRAY_TEST_BIN')
 class PrintBudgetTests(unittest.IsolatedAsyncioTestCase):

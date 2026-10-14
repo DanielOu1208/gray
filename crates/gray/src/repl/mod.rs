@@ -1,6 +1,3 @@
-//! Interactive REPL mode for Gray.
-// 2 turn loops (~400 lines) + 3 provider blocks duplicated; extract ensure_provider + run_turn when adding streaming resume.
-
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
@@ -14,22 +11,10 @@ use gray_core::message::Message;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
-/// Static slash-command table driving both `/help` and the autocomplete panel.
-/// True while an agent turn is in flight: `Some(token)` cancels on first
-/// Ctrl-C (token consumed, turn handler reports it, REPL stays alive). With
-/// no token in flight a single press exits — at the prompt the composer's
-/// own Ctrl-C key does the same on an empty draft (a draft press clears it
-/// first); /quit and Ctrl-D exit too. Single mutex = no TOCTOU between
-/// flag and token.
 static TURN_STATE: StdMutex<Option<tokio_util::sync::CancellationToken>> = StdMutex::new(None);
 
-/// True from the moment a turn starts until its last message is persisted.
-/// The exit path waits on it: a second Ctrl-C can land while an interrupted
-/// turn is still inside its cancel cleanup, and `exit(0)` there would throw
-/// the whole turn away — the session would never see the user message.
 static TURN_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Clears [`TURN_IN_FLIGHT`] on every exit path, panic unwind included.
 pub(crate) struct TurnInFlightGuard;
 
 impl Drop for TurnInFlightGuard {
@@ -38,20 +23,13 @@ impl Drop for TurnInFlightGuard {
     }
 }
 
-/// Arms the in-flight flag for the rest of the scope.
 pub(crate) fn mark_turn_in_flight() -> TurnInFlightGuard {
     TURN_IN_FLIGHT.store(true, std::sync::atomic::Ordering::Relaxed);
     TurnInFlightGuard
 }
 
-/// Upper bound on how long the exit path waits for an in-flight turn to
-/// finish persisting before exiting anyway. A turn ends well inside this
-/// (cancel grace + tool report); the cap only exists so a wedged turn can
-/// never make Ctrl-C feel dead.
 const TURN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Waits (bounded) for an in-flight turn to finish persisting. Returns false
-/// on timeout — the caller exits regardless, since the user asked to leave.
 async fn drain_in_flight_turn(limit: std::time::Duration) -> bool {
     let deadline = tokio::time::Instant::now() + limit;
     while TURN_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed) {
@@ -63,8 +41,6 @@ async fn drain_in_flight_turn(limit: std::time::Duration) -> bool {
     true
 }
 
-/// The trailing text a signal exit prints after clearing the band: the same
-/// resume hint `/quit` leaves, or nothing when no session was ever minted.
 fn signal_exit_text(session_id: Option<&str>, styled: bool) -> String {
     match session_id {
         Some(id) => format!("{}\r\n", session::exit_hint_line(id, styled)),
@@ -72,25 +48,15 @@ fn signal_exit_text(session_id: Option<&str>, styled: bool) -> String {
     }
 }
 
-/// Leaves the way `/quit` does, from a signal task that can't reach the
-/// loop: clear the composer band (retrying its lock briefly — a wedged loop
-/// holding it must not block the exit), then print the resume hint. A press
-/// that lands after a normal exit already printed skips all of it — the
-/// hint is never shown twice.
 fn exit_from_signal(code: i32, clear_band: bool) -> ! {
     use std::io::IsTerminal as _;
-    // `process::exit` skips the job workers' kill-on-drop: stop them first,
-    // before the band lock below — a worker that paints on its way out
-    // must not wait on a lock this thread holds until exit.
+
     jobs::stop_all_blocking();
     if session::exit_hint_printed() {
-        // A normal exit already shut the band down and printed the hint:
-        // nothing left but to leave.
         let _ = std::io::stdout().flush();
         std::process::exit(code);
     }
-    // Bound outside the lock loop: the guard borrows it and must live until
-    // process::exit.
+
     let shared = clear_band.then(crate::host::registered_tui).flatten();
     let mut tui_guard = None;
     if let Some(shared) = &shared {
@@ -114,8 +80,7 @@ fn exit_from_signal(code: i32, clear_band: bool) -> ! {
             }
         }
     }
-    // The guard stays alive until process::exit: no painter may redraw the
-    // band after it's cleared.
+
     if let Some(t) = tui_guard.as_mut() {
         t.shutdown();
     } else {
@@ -123,8 +88,6 @@ fn exit_from_signal(code: i32, clear_band: bool) -> ! {
         let _ = write!(std::io::stdout(), "\x1b[?25h\r\n");
     }
     if session::claim_exit_hint() {
-        // write!, never println!: a hung-up tty must not panic here — that
-        // would kill the task and leave the process alive.
         let _ = write!(
             std::io::stdout(),
             "{}",
@@ -138,13 +101,6 @@ fn exit_from_signal(code: i32, clear_band: bool) -> ! {
     std::process::exit(code);
 }
 
-/// Installs the single global Ctrl-C policy:
-/// - during a turn: cancel the turn (first press), the turn handler reports
-///   it and the REPL stays alive; a press after the token was consumed exits.
-/// - otherwise: exit on the first press. Raw mode routes Ctrl-C to the
-///   `read_line` key handler instead, so a SIGINT landing here means the
-///   prompt is in cooked mode — mid-teardown or after the REPL returned —
-///   and leaving right away is what the press asked for.
 async fn spawn_ctrl_c_policy() {
     loop {
         if tokio::signal::ctrl_c().await.is_err() {
@@ -152,22 +108,15 @@ async fn spawn_ctrl_c_policy() {
         }
         let token = TURN_STATE.lock().ok().and_then(|mut g| g.take());
         if let Some(t) = token {
-            t.cancel(); // first press mid-turn: cancel, stay alive
+            t.cancel();
         } else {
-            // An interrupted turn may still be persisting — let it land
-            // first, or the turn is lost instead of saved.
             drain_in_flight_turn(TURN_DRAIN_TIMEOUT).await;
-            // Say something — a bare exit(0) mid-turn looks like a crash:
-            // the resume hint, same as /quit (never printed twice).
+
             exit_from_signal(0, true);
         }
     }
 }
-/// Closing the terminal (SIGHUP) or a `kill` (SIGTERM) used to take the
-/// default action — instant death — and a turn in flight only persists when
-/// it ends, so its user message and every finished tool round vanished from
-/// the session. Now: cancel the turn like Ctrl-C, wait for it to persist,
-/// then exit. Idle, everything is already on disk and this exits at once.
+
 #[cfg(unix)]
 async fn spawn_hangup_policy() {
     use tokio::signal::unix::{SignalKind, signal};
@@ -185,10 +134,10 @@ async fn spawn_hangup_policy() {
         t.cancel();
     }
     drain_in_flight_turn(TURN_DRAIN_TIMEOUT).await;
-    // SIGTERM leaves the terminal alive; a hung-up tty just ignores this.
+
     exit_from_signal(code, code == 143);
 }
-/// No SIGHUP/SIGTERM on Windows; a turn persists when it ends.
+
 #[cfg(not(unix))]
 async fn spawn_hangup_policy() {}
 use crate::config::Config;
@@ -202,7 +151,7 @@ mod customize;
 mod dispatch;
 pub mod format;
 pub(crate) mod gateway_panel;
-pub(crate) mod handlers; // subsystem toggles are crate-wide (gateway CLI, cron)
+pub(crate) mod handlers;
 pub(crate) mod jobs;
 mod key_watcher;
 pub(crate) mod maintenance;
@@ -231,29 +180,19 @@ pub(crate) use status::{
 };
 pub(crate) use user_cmds::handle_feedback;
 
-/// Shared TUI handle: the composer plus its shutdown flag.
 pub(crate) type TuiOpt = Option<(
     crate::composer::SharedTui,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
 )>;
 
 pub(crate) struct SessionState {
-    /// A failed write requires a full replacement before any suffix append.
     pub(crate) full_save_pending: bool,
     pub(crate) store: crate::session_store::JsonlSessionStore,
     pub(crate) session_id: crate::session_store::SessionId,
-    /// `<id>.open` flock held while this session is open here; a second
-    /// gray process gets `SessionError::Locked` naming our PID. Drops with
-    /// the state (exit, `/new`, `/resume`), releasing the claim.
+
     pub(crate) _open_guard: Option<crate::session_store::SessionOpenGuard>,
 }
 
-/// Command feedback: through the composer when it owns the terminal, else stdout.
-/// Raw println! while the composer viewport is live collides with the next draw (ghost input).
-/// Queued `host/say` lines: plain text arrives pre-styled (dim + the
-/// command indent) from [`crate::host::queue_say`]; styled blocks keep
-/// their colors. One call per queued message so a framed block isn't
-/// gapped row-by-row.
 pub(crate) fn say_lines(
     tui: Option<&crate::composer::SharedTui>,
     lines: Vec<ratatui::text::Line<'static>>,
@@ -272,21 +211,17 @@ pub(crate) fn say_lines(
 pub(crate) fn say(tui: Option<&crate::composer::SharedTui>, msg: &str) {
     if let Some(t) = tui {
         let mut t = t.lock().expect("tui lock");
-        // No gap above: command cards skip their trailing gap so this hugs them.
+
         for line in msg.split('\n') {
             t.push_dim(format!("  {line}"));
         }
-        // Breathing room below command output before the next prompt.
+
         t.ensure_gap();
     } else {
         println!("{msg}");
     }
 }
 
-/// Clamp `config.thinking_effort` to the levels `model` accepts
-/// (Prime-Agent `clampThinkingLevel` parity). `None`/empty effort stays
-/// as-is; unknown family keeps the current level. Persists to saved config.
-/// Returns `(old, new)` when a clamp happened.
 pub(crate) fn clamp_thinking_to_model_name(
     config: &mut Config,
     model: &str,
@@ -307,8 +242,7 @@ pub(crate) fn clamp_thinking_to_model_name(
     if let Ok(path) = crate::setup::saved_config_path() {
         let _cfg_lock = crate::setup::lock_saved_config_at(&path).ok();
         let mut saved = crate::setup::load_saved_config_at(&path);
-        // The clamped value is this connection+model's level — remember it
-        // under its own key so a switch away and back restores it.
+
         saved.remember_effort(
             &crate::setup::effort_memory_key(
                 &config.provider_id,
@@ -322,26 +256,16 @@ pub(crate) fn clamp_thinking_to_model_name(
     Some((old, new))
 }
 
-/// Clamp `config.thinking_effort` to what `config.model` accepts.
-/// See [`clamp_thinking_to_model_name`].
 pub(crate) fn clamp_thinking_to_model(config: &mut Config) -> Option<(String, String)> {
     let model = config.model.clone().unwrap_or_default();
     clamp_thinking_to_model_name(config, &model)
 }
 
-/// Boot-time model+effort normalization shared by resume, fresh boot and
-/// `gray -p`: canonicalizes a stored `<base>-<tier>` id, then clamps a
-/// stale effort. Returns the clamp `(old, new)` for the caller to report;
-/// both steps persist through their own seams.
 pub(crate) fn normalize_adopted_model(config: &mut Config) -> Option<(String, String)> {
     crate::setup::canonicalize_adopted_model(config);
     clamp_thinking_to_model(config)
 }
 
-/// Post-`run_connect_modal` feedback shared by `/models` and the
-/// first-turn setup path: sync the chosen model into the composer and echo
-/// the provider name. Clamps a stale effort (e.g. deepseek `max` → Spark
-/// `xhigh`) before painting so the footer never shows an unsupported level.
 pub(crate) fn push_provider_connected(
     config: &mut Config,
     tui: &TuiOpt,
@@ -350,7 +274,6 @@ pub(crate) fn push_provider_connected(
     crate::setup::set_active_model_provider(&config.base_url);
     let clamped = clamp_thinking_to_model(config);
     if let Some(h) = hide_thinking {
-        // The connection's adopted effort (not just a clamp) decides this.
         *h = config.reasoning_hidden();
     }
     let Some((shared, _)) = tui else {
@@ -365,13 +288,12 @@ pub(crate) fn push_provider_connected(
         t.set_model_label(crate::setup::composite_label_for(config));
         t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
     }
-    // Paint the effort unconditionally: a provider/models switch adopts the
-    // target's own remembered level even when no clamp fires.
+
     if let Some(eff) = &config.thinking_effort {
         t.set_thinking_effort(eff.clone());
         t.set_hide_thinking(config.reasoning_hidden());
     }
-    // One receipt row, same shape as `/models`'s `✓ Model set to …`.
+
     let prov_name = connected_provider_name(config);
     let detail = model_receipt_label(config);
     t.push_action(&format!("Connected to {prov_name}"), detail.as_deref());
@@ -387,9 +309,6 @@ pub(crate) fn push_provider_connected(
     let _ = t.draw();
 }
 
-/// The model half of a `✓ Model set to` / `✓ Connected to` receipt: the
-/// composite label when the model has variants (`Fusion · Opus 5.5 High +
-/// SWE-2 High`), else the id plus its effort when it has a level to choose.
 pub(crate) fn model_receipt_label(config: &Config) -> Option<String> {
     let m = config.model.as_ref()?;
     Some(
@@ -409,10 +328,6 @@ pub(crate) fn model_receipt_label(config: &Config) -> Option<String> {
     )
 }
 
-/// Display name of the live connection. Plugin (subscription) connections
-/// carry a placeholder `base_url` no catalog row matches, so they resolve
-/// through the installed provider; API-key ones through the catalog. The
-/// endpoint host is the last resort, never a bare "provider".
 fn connected_provider_name(config: &Config) -> String {
     if let Ok(home) = crate::setup::gray_home()
         && let Some(installed) = crate::providers::resolve_provider_connection(config, &home)
@@ -430,15 +345,12 @@ fn connected_provider_name(config: &Config) -> String {
     endpoint_host(&config.base_url).unwrap_or_else(|| "provider".to_string())
 }
 
-/// `api.example.com` from `https://api.example.com/v1`.
 fn endpoint_host(base_url: &str) -> Option<String> {
     let rest = base_url.split_once("://").map_or(base_url, |(_, r)| r);
     let host = rest.split(['/', '?', '#']).next()?.trim();
     (!host.is_empty()).then(|| host.to_string())
 }
 
-/// Split a `/name argv…` line into (`/name`, argv words) for plugin
-/// slash-command routing. `None` when the line isn't a slash command.
 fn split_plugin_command(line: &str) -> Option<(String, Vec<String>)> {
     let words = shlex::split(line.trim().strip_prefix('/')?)?;
     let (first, rest) = words.split_first()?;
@@ -448,8 +360,6 @@ fn split_plugin_command(line: &str) -> Option<(String, Vec<String>)> {
     Some((format!("/{first}"), rest.to_vec()))
 }
 
-/// Claimed plugin slash commands for `/help`, in hook order. Names drop
-/// the leading slash for display (`echo`, not `/echo`).
 fn plugin_help_entries(hooks: &[Arc<dyn PluginHooks>]) -> Vec<(String, String)> {
     hooks
         .iter()
@@ -463,15 +373,6 @@ fn plugin_help_entries(hooks: &[Arc<dyn PluginHooks>]) -> Vec<(String, String)> 
         .collect()
 }
 
-/// Protocol v1 `command/run`: the first hook claiming `/name` owns it.
-/// `None` when no hook claims the command (the caller keeps the
-/// unknown-command message) or the owner declines to handle it.
-/// The outcome decides the caller's path: `Say` prints via `say()`,
-/// `Prompt` is submitted as a `ReplCommand::Prompt` turn.
-/// Headless agent behind the cron `AsyncRunner` seam for the REPL tick:
-/// fresh agent per fire (no resume/history), events collected without
-/// streaming. Mirrors `HeadlessRunner` in cron_serve.rs; the runner is the
-/// host's business (cron_serve stays agent-agnostic).
 struct ReplRunner {
     config: Config,
 }
@@ -482,16 +383,11 @@ impl crate::cron_serve::AsyncRunner for ReplRunner {
         Ok(self.run_full(prompt, cwd).await?.transcript)
     }
 
-    /// Without this the trait default hands the whole transcript out as the
-    /// final text, and `[tool:bash]` / `[result:…]` markup reaches the card.
     async fn run_full(
         &self,
         prompt: String,
         cwd: std::path::PathBuf,
     ) -> anyhow::Result<crate::cron_serve::FireOutput> {
-        // The ticker thread holds a startup snapshot; a /models switch since
-        // then lives in the saved config — follow it so cron fires ask the
-        // same provider the session uses.
         let mut config = self.config.clone();
         crate::cron_serve::refresh_model_from_saved(&mut config);
         let mut agent = crate::build_agent(&config, &cwd, None).await?;
@@ -522,9 +418,6 @@ async fn run_plugin_command(
     owner.run_command(name, argv).await
 }
 
-/// Stops the session's background jobs on the way out. Every exit path runs
-/// it, so a job never outlives the REPL that started it (`/quit` and Ctrl-D
-/// first ask, see [`jobs::confirm_quit`]).
 async fn shutdown_shell_tasks(
     agent: Option<&gray_core::agent::Agent>,
     session_state: &Option<SessionState>,
@@ -540,9 +433,6 @@ async fn shutdown_shell_tasks(
     }
 }
 
-/// Graceful sidecar teardown (`plugin/shutdown`); best-effort, never fails.
-/// Hooks run concurrently under one cap: a wedged sidecar can't hold the
-/// exit past it.
 async fn shutdown_hooks(agent: Option<&gray_core::agent::Agent>) {
     let hooks: Vec<Arc<dyn PluginHooks>> = agent.map(|a| a.hooks().to_vec()).unwrap_or_default();
     let _ = tokio::time::timeout(
@@ -552,15 +442,6 @@ async fn shutdown_hooks(agent: Option<&gray_core::agent::Agent>) {
     .await;
 }
 
-/// Restores the inline viewport after an alternate-screen modal (model/provider/etc).
-/// EnterAlternateScreen/LeaveAlternateScreen breaks ratatui's Inline(10) viewport anchor;
-/// without this the next Tui::draw renders off-screen and the input box vanishes.
-/// Width unchanged → just re-anchor (LeaveAlternateScreen already restored the
-/// scrollback; clearing/re-emitting here destroyed it). Width changed → full reflow.
-/// A cron tick earns a transcript row only on errors — a clean tick
-/// announces nothing at all (the wake countdown rolling forward already
-/// says it ran). `cron · 2 fired · 1 error`, file-only job names appended
-/// (failed names tint red; chat-bound fires already framed their own boxes).
 fn cron_tick_line(rep: &crate::cron_serve::TickReport) -> ratatui::text::Line<'static> {
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
@@ -655,15 +536,10 @@ pub(crate) fn with_modal_sync<T>(
     r
 }
 
-/// Bare-Enter resume payload (opencode "press Enter instead of typing
-/// \"please continue\""): sent as a normal prompt turn when the last turn
-/// was interrupted or errored.
 pub(crate) const CONTINUE_PROMPT: &str = "continue";
-/// Ghost hint painted in the empty input box while a resume is pending
-/// (display-only — the turn itself sends [`CONTINUE_PROMPT`]).
+
 pub(crate) const CONTINUE_GHOST: &str = "Please continue…";
 
-/// Runs Gray in interactive REPL mode.
 pub async fn run_repl_mode(
     config: &mut Config,
     resume_last: bool,
@@ -673,22 +549,16 @@ pub async fn run_repl_mode(
     crate::tui::clear_screen();
     let cwd = std::env::current_dir()?;
 
-    // Interactive terminals get the ratatui composer; piped input falls back
-    // to plain cooked reads (scripts, tests).
     use std::io::IsTerminal;
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
-    // context window: user override > provider live > disk > litellm/models.dev > guess fallback
+    crate::composer::input::watch_dead_stdin();
+
     crate::setup::set_user_context_window(config.context_window);
     crate::setup::set_user_reserve_tokens(config.context_reserve);
     crate::setup::set_user_keep_recent_tokens(config.context_keep);
     crate::setup::set_active_model_provider(&config.base_url);
-    // Discovery also feeds completion, even with a cached/overridden
-    // context window. Skip the live fetch where it cannot work or is not
-    // wanted: a plugin-credentialed provider's base_url is a relay
-    // placeholder no HTTP fetch can satisfy (the plugin RPC path is
-    // `fetch_plugin_provider_models`), and bare/lean runs stick to the 24h
-    // disk cache the pickers read anyway.
+
     if !config.uses_plugin_credentials() && !config.bare && !config.lean {
         let base = config.base_url.clone();
         let key = config.api_key.clone();
@@ -703,27 +573,18 @@ pub async fn run_repl_mode(
         tokio::spawn(crate::setup::fetch_openrouter_rates());
     }
 
-    // boot: no forced wizard. A dim hint appears when unconfigured,
-    // and the provider picker fires the moment credentials are needed.
     tokio::spawn(spawn_ctrl_c_policy());
     tokio::spawn(spawn_hangup_policy());
-    // Sidecar `host/ask` (questions/permissions plugins): installed once per
-    // process; the TUI handle arrives with the composer below (interactive)
-    // or stays None (piped/headless → stdin/empty surfaces).
+
     crate::ask::install(None, interactive);
-    // Shell logs: 7-day + 10MiB startup sweep (blocking-only bash keeps
-    // per-call logs on disk for the header's grep hint). Off the critical
-    // path: thousands of session dirs made it ~0.4s warm / >1s cold before
-    // the prompt, and it only ever deletes stale files, so racing the
-    // session is harmless. A plain thread so exit never waits on it.
+
     std::thread::spawn(crate::shell_drain::sweep_old_shell_logs);
 
     let mut unconfigured = config.model.is_none();
-    // Piped first-run skips onboarding like `-p` (never blocks on a picker).
+
     if unconfigured && interactive {
         let ready = crate::setup::run_onboarding(config).await?;
-        // A completed connect changes what "unconfigured" means: without
-        // this refresh the first message reopened the picker it just left.
+
         unconfigured = config.model.is_none();
         if !ready {
             print!(
@@ -732,11 +593,11 @@ pub async fn run_repl_mode(
         }
         print!("\r\n");
         crate::setup::set_active_model_provider(&config.base_url);
-        // onboarding may have set model/base_url — re-sync context window override and prime cache
+
         crate::setup::set_user_context_window(config.context_window);
         crate::setup::set_user_reserve_tokens(config.context_reserve);
         crate::setup::set_user_keep_recent_tokens(config.context_keep);
-        // reasoning efforts came in at boot via the live or plugin catalog (see above).
+
         if crate::setup::get_user_context_window().is_none() {
             tokio::spawn(crate::setup::fetch_litellm_context_windows());
             if let Some(m) = config.model.clone()
@@ -751,8 +612,6 @@ pub async fn run_repl_mode(
         }
     }
 
-    // The agent is built lazily so the REPL opens even with no model/key configured;
-    // we surface a friendly hint on first use instead of refusing to start.
     let mut agent: Option<Agent> = None;
     let mut session_state: Option<SessionState> = None;
     let mut session_totals = SessionTotals::default();
@@ -760,8 +619,6 @@ pub async fn run_repl_mode(
     let mut resumed_session_info: Option<(SessionId, Vec<crate::session_store::SessionEntry>)> =
         None;
 
-    // `--session <id>` reopens that exact session; `-c`/`--last` reopens the
-    // most recent. Both resolve into `loaded` and share one apply block.
     type Resumed = (
         SessionId,
         crate::session_store::SessionMeta,
@@ -770,7 +627,6 @@ pub async fn run_repl_mode(
     );
     let mut loaded: Option<Resumed> = None;
 
-    // `--session <id>`: reopen that exact session.
     if let Some(id) = session_id
         && let Some(root) = default_root()
     {
@@ -784,17 +640,13 @@ pub async fn run_repl_mode(
         }
     }
 
-    // `-c`: reopen the most recent session instead of starting blank.
-    // Recall-first: the remembered pointer answers in one file read; the
-    // list scan below is the fallback (cold start, pruned pointer, corrupt
-    // recalled file — any failure degrades, never errors).
     if resume_last
         && loaded.is_none()
         && let Some(root) = default_root()
     {
         let store = JsonlSessionStore::new(root);
         let cwd_now = std::env::current_dir().ok();
-        // (session id, meta, entries) — one load per path, never two.
+
         type Best = (
             SessionId,
             crate::session_store::SessionMeta,
@@ -831,27 +683,18 @@ pub async fn run_repl_mode(
     }
 
     if let Some((sid, meta, entries, store)) = loaded {
-        // One owner per session: `--session`/`-c` asked for THIS session —
-        // a live holder gets the `Locked` refusal (with its PID), never a
-        // silent substitute or a second writer on the same history.
         let open_guard = Some(store.acquire_open(&sid).await?);
         if config.model.is_none() && !meta.model.is_empty() {
             config.model = Some(meta.model.clone());
         }
-        // Startup resume lands on the session's model: canonicalize a
-        // stored variant id and clamp a stale effort (e.g. saved `max`
-        // under a Spark session) before the first build and the TUI paint.
+
         if let Some((old, new)) = normalize_adopted_model(config) {
             println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
         }
         let history: Vec<Message> = entries.iter().map(|e| e.message.clone()).collect();
-        // The agent builds lazily at the first turn (see dispatch's
-        // `agent.is_none()` arm, the same path a fresh session takes): an
-        // eager build here kept the resumed composer off the screen for
-        // seconds while plugins and provider lookups answered.
+
         pending_history = history;
-        // T3.4 lifecycle: resumed sessions start with no ledger state
-        // (fresh builds start empty; clear anyway — see dispatch /new).
+
         if let Some(ledger) = gray_plugin::builder::current_file_ledger() {
             ledger.clear();
         }
@@ -867,26 +710,10 @@ pub async fn run_repl_mode(
         resumed_session_info = Some((sid, entries));
     }
 
-    // Fresh sessions get the same normalization as resumes: a stored
-    // `<base>-<tier>` id canonicalizes to the row + its tier effort
-    // (`swe-2-max` → `swe-2` at `max`), then a stale effort clamps.
     if let Some((old, new)) = normalize_adopted_model(config) {
         println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
     }
 
-    // Interactive terminals get the ratatui composer; piped input falls back
-    // to plain cooked reads (scripts, tests).
-    // The composer owns the bottom pane for the whole session. A tiny ticker
-    // task refreshes the elapsed-seconds status while turns run.
-    // NOTE: `is_terminal()` alone still passes on headless ptys where the
-    // cursor-position query inside `Tui::new` (ratatui Inline viewport)
-    // fails. Probe upfront and map init failure to a clean error — a panic
-    // here exits 101 via the panic hook in main.rs (kept as-is for real
-    // bugs); a clean error exits non-zero with a readable message instead.
-    // Resuming already shows its own line; otherwise nudge toward cut-off work.
-    // The sessions scan is slow (thousands of files), so it runs beside the
-    // boot path — the composer comes up now and the notice lands in the home
-    // rows when the scan answers, like plugin stats.
     let startup_hint = if interactive && resumed_session_info.is_none() {
         let cwd2 = cwd.clone();
         Some(tokio::spawn(async move {
@@ -903,7 +730,7 @@ pub async fn run_repl_mode(
                  (could not query terminal size); pipe input or run under a TTY"
             );
         }
-        let mut t = crate::composer::Tui::new(resumed_session_info.is_some()).map_err(|e| {
+        let mut t = crate::composer::Tui::new().map_err(|e| {
             anyhow::anyhow!(
                 "not a terminal — the interactive composer needs a real terminal \
                  (cursor position could not be read: {e:#}); pipe input or run under a TTY"
@@ -914,25 +741,18 @@ pub async fn run_repl_mode(
             t.set_model_label(crate::setup::composite_label_for(config));
             t.set_model_label_parts(crate::setup::composite_label_parts_for(config));
         }
-        // A level this model no longer offers (a step-family `off` saved
-        // before family truth won) must not ride into the footer.
+
         let _ = clamp_thinking_to_model(config);
         if let Some(eff) = &config.thinking_effort {
             t.set_thinking_effort(eff.clone());
         }
         t.set_hide_thinking(config.reasoning_hidden());
         t.set_cwd(cwd.display().to_string());
+
+        t.set_home_session(session::current_session_line(&session_state));
         if let Some((ref sid, ref entries)) = resumed_session_info {
-            // Paint the band before the replay inserts: the composer is
-            // on screen while the transcript builds above it instead of
-            // appearing only when the first prompt draws.
             let _ = t.draw();
-            // Replayed cards' labels/previews live on the tool defs, but
-            // the agent builds lazily now — source the same defs from
-            // the shared plugin boot (same registry merge `build_agent`
-            // runs). The wait is bounded: a slow sidecar spawn must not
-            // stall the transcript paint, it just falls back to wire
-            // names.
+
             let tool_defs = if config.bare {
                 Vec::new()
             } else {
@@ -982,7 +802,7 @@ pub async fn run_repl_mode(
                 }
             });
         }
-        // Now that the composer exists, point the ask service at it.
+
         crate::ask::install(Some(shared.clone()), interactive);
         if let Ok(mut t) = shared.lock() {
             t.enable_reveal_pacing();
@@ -1004,10 +824,6 @@ pub async fn run_repl_mode(
                     break;
                 }
                 if let Ok(mut t) = ticker_tui.try_lock() {
-                    // Stop may have been set while we were waiting to
-                    // acquire the lock (a keystroke handler holds it
-                    // briefly). Don't repaint the viewport after the main
-                    // thread has already started shutdown.
                     if ticker_stop.load(AtomicOrdering::Relaxed) {
                         break;
                     }
@@ -1046,8 +862,12 @@ pub async fn run_repl_mode(
                 && let Some(line) = outcome.notice()
                 && let Ok(mut t) = shared.lock()
             {
-                t.push_dim(line);
-                t.ensure_gap();
+                if t.is_home() {
+                    t.set_home_update(Some(line));
+                } else {
+                    t.push_dim(line);
+                    t.ensure_gap();
+                }
             }
         });
     }
@@ -1073,26 +893,11 @@ pub async fn run_repl_mode(
         }
     }
 
-    // Cron: background tick in live sessions (workstream C). A dedicated OS
-    // thread + current-thread runtime — the agent future is `!Send`, so it
-    // can never `tokio::spawn`. Fires claim through the store's at-most-once
-    // contract, so a concurrent `tick`/`serve` simply sees nothing due.
-    // Results surface via the host/say queue drained at the top of the loop
-    // (new chat lines in the session's own right, never transcript); a job
-    // whose origin is this session comes back through its inbox instead, as
-    // a card plus a turn (see `cron::idle_wake`).
-    // No join on exit: process return terminates the thread, and an
-    // in-flight fire's claim TTL (300s) lets the next ticker reclaim it.
-    // File-only cron management remains usable on Windows; automatic firing
-    // must not bypass the CLI's explicit unsupported-execution boundary.
     if interactive && !cfg!(windows) {
         let cfg = config.clone();
         if let Ok(home) = crate::setup::gray_home()
             && let Ok(store) = crate::cron::CronStore::open(home.join("cron"))
         {
-            // Session-origin deliveries land in `cron/inbox/<session>` from
-            // whichever ticker fired them (this one, the gateway, `serve`):
-            // poll this session's inbox and wake the idle prompt.
             let inbox_home = home.clone();
             tokio::spawn(async move {
                 loop {
@@ -1120,19 +925,12 @@ pub async fn run_repl_mode(
                         match crate::cron_serve::tick_once(&store, &runner, &deliver, "repl").await
                         {
                             Ok(rep) if rep.fired > 0 || rep.errors > 0 => {
-                                // One hermes-framed box per chat-bound
-                                // delivery (file-only jobs stay on the count
-                                // line); display-only — the model never sees
-                                // it, same as every other `host/say`.
                                 for saved in rep.delivered.iter().filter(|d| d.to_chat) {
                                     crate::host::queue_say(crate::cron_serve::format_fire_chat(
                                         saved,
                                     ));
                                 }
-                                // Clean ticks announce nothing — the
-                                // wake countdown rolling forward already
-                                // says it ran. Errors still earn a row:
-                                // silent failure is worse than noise.
+
                                 if rep.errors > 0 {
                                     crate::host::queue_say_lines(vec![cron_tick_line(&rep)]);
                                 }
@@ -1146,14 +944,8 @@ pub async fn run_repl_mode(
         }
     }
 
-    // pi's hideThinkingBlock — session-only, toggled in the /models picker
-    // (ctrl+r). Reasoning is ON by default — user wants to see thinking
-    // (high effort); the picker sets the level persisted to config.
     let mut hide_thinking = config.reasoning_hidden();
-    // Wire default: if no effort saved yet, enable reasoning so ThinkingDelta
-    // actually streams on openrouter/zen etc. Persist once so future sessions
-    // keep it without relying on this default branch. Skipped when the
-    // provider says the model doesn't reason (opencode parity).
+
     if config.thinking_effort.is_none()
         && crate::setup::model_supports_reasoning(&config.model.clone().unwrap_or_default())
             != Some(false)
@@ -1168,17 +960,14 @@ pub async fn run_repl_mode(
             }
         }
     }
-    // The messaging gateway was deleted from gray core (chat returns as a
-    // plugin): no autostart,
-    // no boot card — the TUI starts clean.
+
     let mut pending_command: Option<ReplCommand> = None;
     let mut pending_images: Vec<std::path::PathBuf> = Vec::new();
-    // True when the last turn was interrupted (Ctrl-C) or errored: bare
-    // Enter resends [`CONTINUE_PROMPT`] instead of being a no-op.
+
     let mut last_turn_resumable = false;
-    // The waiter that wakes the idle prompt when a background job settles.
+
     let mut bg_wake: Option<tokio::task::JoinHandle<()>> = None;
-    // Footer segment for running jobs and scheduled wakes.
+
     if interactive {
         jobs::spawn_footer_poller();
     }
@@ -1188,20 +977,14 @@ pub async fn run_repl_mode(
     }
 
     loop {
-        // Cleared before anything is drained: a wake raised after this point
-        // survives to the next pass instead of being swallowed.
         crate::host::clear_wake();
-        // The signal-task exits can't see `session_state` — keep their copy
-        // of the id the resume hint names current.
+
         session::remember_exit_session(session_state.as_ref().map(|s| s.session_id.as_str()));
-        // Plugin-initiated `host/say` lines queued while a turn ran (cron
-        // reports) surface here, through the composer when it owns the screen.
+
         for lines in crate::host::take_host_say() {
             say_lines(tui.as_ref().map(|(s, _)| s), lines);
         }
-        // Idle point (no queued input): a cron delivery for this session or a
-        // finished background job paints a card and starts a turn on its own,
-        // Claude Code-style. Mid-turn arrivals wait here; nothing interrupts.
+
         if interactive && pending_command.is_none() {
             let sid = session_state
                 .as_ref()
@@ -1215,9 +998,11 @@ pub async fn run_repl_mode(
             if let Some(h) = bg_wake.take() {
                 h.abort();
             }
-            // Armed before draining: a job settling in between still wakes.
+
             bg_wake = cron::arm_background_wake(agent.as_ref(), sid.as_deref(), &cwd);
-            if let Some((cards, prompt)) = cron::idle_wake(agent.as_ref(), sid.as_deref(), &cwd) {
+            if let Some((cards, prompt, sends)) =
+                cron::idle_wake(agent.as_ref(), sid.as_deref(), &cwd)
+            {
                 for card in &cards {
                     match (card, tui.as_ref()) {
                         (cron::WakeCard::Cron(c), Some((shared, _))) => {
@@ -1244,14 +1029,45 @@ pub async fn run_repl_mode(
                         }
                     }
                 }
+
                 if let Some(msg) =
                     crate::turn_caps::check_caps(config, session_totals.turns, session_totals.cost)
                 {
                     say(tui.as_ref().map(|(s, _)| s), &msg);
+                    crate::session_send::hold_back(&sends);
                 } else {
-                    prompt_turn::run_prompt_turn(
+                    let mut images = Vec::new();
+                    for m in &sends {
+                        let line = crate::session_send::prompt_for(&m.from, &m.text);
+                        match tui.as_ref() {
+                            Some((shared, _)) => {
+                                let mut t = shared.lock().expect("tui lock");
+                                t.push_user_prompt(&line, &m.attachments, true);
+                                let _ = t.draw();
+                            }
+                            None => println!("{line}"),
+                        }
+                        images.extend(m.attachments.iter().cloned());
+                    }
+
+                    if let Some((shared, _)) = tui.as_ref() {
+                        let mut t = shared.lock().expect("tui lock");
+                        if let (Ok(home), Some(sid)) = (crate::setup::gray_home(), sid.as_deref()) {
+                            t.queued_sends = crate::session_send::peek_sends(&home, sid)
+                                .into_iter()
+                                .map(|m| {
+                                    (
+                                        crate::session_send::prompt_for(&m.from, &m.text),
+                                        m.attachments,
+                                    )
+                                })
+                                .collect();
+                        }
+                    }
+                    crate::session_send::mark_delivered(&sends);
+                    let turn = prompt_turn::run_prompt_turn(
                         prompt,
-                        &mut Vec::new(),
+                        &mut images,
                         &mut agent,
                         config,
                         &cwd,
@@ -1264,7 +1080,12 @@ pub async fn run_repl_mode(
                         &mut unconfigured,
                         &mut last_turn_resumable,
                     )
-                    .await?;
+                    .await;
+
+                    if turn.is_err() || agent.is_none() {
+                        crate::session_send::hold_back(&sends);
+                    }
+                    turn?;
                 }
                 continue;
             }
@@ -1272,11 +1093,6 @@ pub async fn run_repl_mode(
         let cmd = if let Some(c) = pending_command.take() {
             c
         } else {
-            // The composer swallows empty submits unless a resume is
-            // pending — sync the gate before blocking on input. A blocking
-            // lock: `try_lock` lost to whichever painter held the TUI that
-            // instant, and a skipped arm meant no "Please continue…" ghost and
-            // a bare Enter that did nothing after an interrupt.
             if let Some((shared, _)) = tui.as_ref() {
                 shared
                     .lock()
@@ -1286,8 +1102,6 @@ pub async fn run_repl_mode(
             let (line_text, images) = if interactive {
                 let (shared, stop) = tui.as_ref().expect("interactive implies tui");
                 let (txt, imgs) = {
-                    // The input lock is per-event inside read_line, so background
-                    // painters keep drawing while we wait; re-lock only to shut down.
                     let pair = match crate::composer::input::read_line(shared)? {
                         Some(v) => v,
                         None => {
@@ -1308,14 +1122,11 @@ pub async fn run_repl_mode(
                             break;
                         }
                     };
-                    // An idle wake hands back an empty prompt: go round to the
-                    // loop top, which paints and/or runs the turn. (A bare
-                    // Enter that coincides with a wake yields to it.)
+
                     if pair.0.is_empty() && pair.1.is_empty() && crate::host::wake_requested() {
                         continue;
                     }
-                    // Flag stop for background tickers; with per-event locking a
-                    // final ticker draw may still slip in before shutdown clears.
+
                     if matches!(parse_command(&pair.0), ReplCommand::Quit) {
                         stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -1338,9 +1149,7 @@ pub async fn run_repl_mode(
             };
             pending_images = images;
             let parsed = parse_command(&line_text);
-            // Local commands leave no `› /cmd` card behind: they never reach
-            // the model, so the echo is noise — only the command's own
-            // feedback stays.
+
             if parsed.runs_local()
                 && let Some((shared, _)) = tui.as_ref()
             {
@@ -1351,14 +1160,12 @@ pub async fn run_repl_mode(
             }
             expand_skill_command(parsed, cwd.as_path(), tui.as_ref().map(|(s, _)| s), false)
         };
-        // Clear pending images for non-prompt commands (keep for Prompt/Empty+images)
+
         if !matches!(&cmd, ReplCommand::Prompt(_) | ReplCommand::Empty) {
             pending_images.clear();
         }
         match cmd {
             ReplCommand::Empty => {
-                // An image-only submit runs the normal prompt turn with empty
-                // text. Bare Enter resumes after an interrupt/error, else no-op.
                 if !pending_images.is_empty() {
                     prompt_turn::run_prompt_turn(
                         String::new(),
@@ -1439,7 +1246,6 @@ pub async fn run_repl_mode(
                 .await?;
             }
             other => {
-                // A fresh or replaced transcript has nothing to resume.
                 if matches!(
                     other,
                     ReplCommand::New(_) | ReplCommand::Resume(_) | ReplCommand::Compact(_)

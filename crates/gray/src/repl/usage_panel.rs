@@ -1,36 +1,25 @@
-//! `/usage` panel rows: pure builders shared by the styled TUI render and
-//! the headless plain print ([`usage_plain`] strips the same rows' spans,
-//! so the two never drift). `handle_usage` owns the `✓` action header and
-//! resolves the [`PanelInput`].
-
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::SessionTotals;
 use crate::setup::ModelRate;
 
-/// Cells in the cache-share bar.
 const BAR_CELLS: usize = 24;
 
-/// Cache warmth at render time, read off the composer's `CacheTracker`.
-/// `Unknown` — headless, or a provider that never reported caching —
-/// omits the suffix entirely.
 pub(crate) enum Warmth {
     Warm(std::time::Duration),
     Cold,
     Unknown,
 }
 
-/// Everything one `/usage` render needs, gathered by `handle_usage`.
 pub(crate) struct PanelInput<'a> {
     pub(crate) totals: &'a SessionTotals,
     pub(crate) model: &'a str,
-    /// Active model's rate; `None` = unpriced (fallback line).
+
     pub(crate) rate: Option<ModelRate>,
     pub(crate) warmth: Warmth,
 }
 
-/// `{model} · {n} turn{s}` — the action-line detail in both renders.
 pub(crate) fn usage_header(input: &PanelInput<'_>) -> String {
     let n = input.totals.turns;
     format!(
@@ -40,7 +29,6 @@ pub(crate) fn usage_header(input: &PanelInput<'_>) -> String {
     )
 }
 
-/// Every row below the header, in panel order.
 pub(crate) fn usage_rows(input: &PanelInput<'_>) -> Vec<Line<'static>> {
     let t = input.totals;
     let fl = crate::setup::format_context_length;
@@ -51,8 +39,7 @@ pub(crate) fn usage_rows(input: &PanelInput<'_>) -> Vec<Line<'static>> {
         sep(),
         body(format!("{} out", fl(t.output))),
     ];
-    // An unpriced model's `cost` is 0 by absence, not by being free — the
-    // Rate row's fallback says so; printing `$0` here would lie.
+
     if input.rate.is_some() {
         tokens.push(sep());
         tokens.push(body(crate::setup::format_cost(t.cost)));
@@ -196,8 +183,6 @@ pub(crate) fn usage_rows(input: &PanelInput<'_>) -> Vec<Line<'static>> {
     };
     rows.push(row("Rate", rate));
 
-    // What compression saved, over every result metered on this machine.
-    // An empty counter is noise on a panel opened for tokens and cost.
     let spill = gray_core::spill::totals();
     if spill.events > 0 {
         rows.push(row(
@@ -215,8 +200,6 @@ pub(crate) fn usage_rows(input: &PanelInput<'_>) -> Vec<Line<'static>> {
     rows
 }
 
-/// Headless render: the same rows with styles stripped — one source of
-/// truth, so pipe output can never drift from the TUI panel.
 pub(crate) fn usage_plain(input: &PanelInput<'_>) -> Vec<String> {
     usage_rows(input)
         .iter()
@@ -224,7 +207,6 @@ pub(crate) fn usage_plain(input: &PanelInput<'_>) -> Vec<String> {
         .collect()
 }
 
-/// Headless subscription rows: same strings, styles stripped.
 pub(crate) fn subscription_plain(limits: &gray_plugin::ProviderUsageLimits) -> Vec<String> {
     subscription_rows(limits)
         .iter()
@@ -232,22 +214,16 @@ pub(crate) fn subscription_plain(limits: &gray_plugin::ProviderUsageLimits) -> V
         .collect()
 }
 
-/// `  {label:<9}` gutter + value spans — one `Tokens  `/`Squeeze`-width row.
 fn row(label: &str, value: Vec<Span<'static>>) -> Line<'static> {
     row_w(label, 9, value)
 }
 
-/// Same gutter at a caller-chosen width: subscription windows size their
-/// label column to the longest label in the group.
 fn row_w(label: &str, width: usize, value: Vec<Span<'static>>) -> Line<'static> {
     let mut spans = vec![muted(format!("  {label:<width$} "))];
     spans.extend(value);
     Line::from(spans)
 }
 
-/// Stacked read/written/fresh shares of session input: `█` hits, `▓`
-/// writes, `░` fresh. Segments round to exactly [`BAR_CELLS`]; any nonzero
-/// share keeps at least one cell. Empty when nothing was input.
 fn cache_bar(read: usize, write: usize, fresh: usize) -> Vec<Span<'static>> {
     let total = read + write + fresh;
     if total == 0 {
@@ -262,8 +238,6 @@ fn cache_bar(read: usize, write: usize, fresh: usize) -> Vec<Span<'static>> {
     }
     let mut sum: usize = cells.iter().sum();
     while sum > BAR_CELLS {
-        // Shave the largest segment that can give a cell up (never a
-        // nonzero share's last cell).
         let Some(i) = (0..3).filter(|&i| cells[i] > 1).max_by_key(|&i| cells[i]) else {
             break;
         };
@@ -309,8 +283,6 @@ fn sep() -> Span<'static> {
     styled(" · ", crate::theme::theme().text_dim, false)
 }
 
-/// Short reset label from an RFC-3339 instant: today's shows the clock
-/// time, later shows `Oct 12`.
 fn reset_label(iso: &str) -> Option<String> {
     let at = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
     let now = chrono::Local::now();
@@ -322,10 +294,6 @@ fn reset_label(iso: &str) -> Option<String> {
     })
 }
 
-/// `provider/usage` windows for one connected subscription, one `Label
-/// value` row per window.
-/// Amount without trailing zeros: `$100.10`, `100 ACU`. Drives both the
-/// used/limit pair and limit-only rows.
 fn fmt_amount(v: f64) -> String {
     if (v - v.round()).abs() < 0.005 {
         format!("{:.0}", v)
@@ -334,8 +302,6 @@ fn fmt_amount(v: f64) -> String {
     }
 }
 
-/// Session → weekly → monthly → credits → other, provider order kept
-/// within a kind (plugins emit the windows in display order).
 fn kind_rank(kind: &str) -> u8 {
     match kind {
         "session" => 0,
@@ -349,8 +315,7 @@ fn kind_rank(kind: &str) -> u8 {
 pub(crate) fn subscription_rows(limits: &gray_plugin::ProviderUsageLimits) -> Vec<Line<'static>> {
     let mut windows: Vec<&gray_plugin::ProviderUsageWindow> = limits.windows.iter().collect();
     windows.sort_by_key(|w| kind_rank(&w.kind));
-    // One label column per provider: sized to its longest window label,
-    // never narrower than the session rows above it.
+
     let label_w = windows
         .iter()
         .map(|w| w.label.chars().count())
@@ -361,8 +326,6 @@ pub(crate) fn subscription_rows(limits: &gray_plugin::ProviderUsageLimits) -> Ve
     for w in windows {
         let mut v = Vec::new();
         if let Some(pct) = w.used_percent {
-            // Fill in the threshold color, the empty track in faint — the
-            // eye reads "how much" off the colored part alone.
             let fill = ((pct / 100.0) * 10.0).round() as usize;
             let color = if pct >= 90.0 {
                 crate::theme::theme().error_soft
@@ -384,9 +347,7 @@ pub(crate) fn subscription_rows(limits: &gray_plugin::ProviderUsageLimits) -> Ve
             .as_deref()
             .map(|u| format!(" {u}"))
             .unwrap_or_default();
-        // Scale-only window: the provider publishes a cap, not a counter
-        // (Devin's weekly ACU). Draw the hollow track + a `cap N` amount
-        // so the row reads as a ceiling, never a fake 0%-used range.
+
         if w.used_percent.is_none() && w.used.is_none() && w.limit.is_some() {
             v.push(styled(
                 "\u{2591}".repeat(10),
@@ -394,8 +355,7 @@ pub(crate) fn subscription_rows(limits: &gray_plugin::ProviderUsageLimits) -> Ve
                 false,
             ));
         }
-        // `·` only when a bar precedes — a barless row would lead with
-        // a floating separator.
+
         let amount = match (w.used, w.limit) {
             (Some(used), Some(limit)) => Some(format!(
                 "{}/{}{}",
@@ -429,17 +389,12 @@ pub(crate) fn subscription_rows(limits: &gray_plugin::ProviderUsageLimits) -> Ve
     rows
 }
 
-/// One slide of the `/usage` modal: a tab label, the title the headless
-/// fallback prints, and the body lines.
 pub(crate) struct UsagePage {
     pub(crate) tab: &'static str,
     pub(crate) title: String,
     pub(crate) lines: Vec<Line<'static>>,
 }
 
-/// The `/usage` slide deck — Claude Code's shape: subscription quota on
-/// the first page, this session's tokens on the second. Pages drop out
-/// when they have nothing to show.
 pub(crate) fn usage_pages(
     input: &PanelInput<'_>,
     subs: &[(String, gray_plugin::ProviderUsageLimits)],
@@ -484,9 +439,6 @@ pub(crate) fn usage_pages(
     pages
 }
 
-/// `/usage` as a paged overlay — same chrome as the agents panel:
-/// centered box on a dimmed transcript, `←`/`→` (or tab/h/l) flips
-/// pages, `↑↓`/j/k scrolls a tall page, `r` re-probes via `rebuild`.
 pub(crate) fn run_usage_modal(
     rebuild: &mut dyn FnMut() -> Vec<UsagePage>,
     bg: &crate::setup::BackgroundSnapshot,
@@ -544,7 +496,6 @@ pub(crate) fn run_usage_modal(
                     );
                 };
 
-                // Tab strip + right-aligned esc hint.
                 let mut tabs: Vec<Span> = Vec::new();
                 for (i, p) in pages.iter().enumerate() {
                     if i > 0 {
@@ -599,6 +550,9 @@ pub(crate) fn run_usage_modal(
                 );
             })?;
 
+            if crate::composer::input::stdin_gone() {
+                return Ok(());
+            }
             if !poll(Duration::from_millis(250))? {
                 continue;
             }

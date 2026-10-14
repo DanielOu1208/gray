@@ -12,8 +12,6 @@ fn twelve() -> Vec<Row> {
     (0..12).map(|i| row(&format!("theme{i:02}"))).collect()
 }
 
-/// Draws the picker over `rows` at `w`x`h` with `sel` selected and returns
-/// the screen as one string per row.
 fn screen(w: u16, h: u16, rows: &[Row], sel: usize) -> Vec<String> {
     let refs: Vec<&Row> = rows.iter().collect();
     let list_h = list_rows_for(h, refs.len());

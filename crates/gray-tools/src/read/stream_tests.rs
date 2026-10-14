@@ -15,7 +15,7 @@ async fn bom_stripped_first_line_only_and_cr_stripped_per_line() {
     assert_eq!(l1.text(), "alpha");
     let l2 = s.next_line().await.unwrap().unwrap();
     assert_eq!(l2.text(), "beta");
-    // BOM bytes on line 3 survive (only the first line is stripped).
+
     let l3 = s.next_line().await.unwrap().unwrap();
     assert!(l3.text().starts_with('\u{FEFF}'), "{}", l3.text());
     assert!(s.next_line().await.unwrap().is_none());
@@ -24,7 +24,7 @@ async fn bom_stripped_first_line_only_and_cr_stripped_per_line() {
 #[tokio::test]
 async fn overlong_line_buffers_cap_only_and_counts_overflow() {
     let dir = tempfile::TempDir::new().unwrap();
-    // 20,000 bytes, no trailing newline: buffered prefix + exact discard count.
+
     let path = dir.path().join("big.txt");
     std::fs::write(&path, vec![b'x'; 20_000]).unwrap();
     let mut s = LineStream::open(&path, "big.txt", token()).await.unwrap();
@@ -33,7 +33,7 @@ async fn overlong_line_buffers_cap_only_and_counts_overflow() {
     assert_eq!(line.bytes.len(), LINE_BYTE_CAP + 1);
     assert_eq!(line.overflow_chars, 20_000 - (LINE_BYTE_CAP + 1) as u64);
     assert!(s.next_line().await.unwrap().is_none());
-    // Same with a trailing newline: terminator excluded from the overflow count.
+
     std::fs::write(&path, [vec![b'y'; 20_000], vec![b'\n']].concat()).unwrap();
     let mut s = LineStream::open(&path, "big.txt", token()).await.unwrap();
     let line = s.next_line().await.unwrap().unwrap();
@@ -66,8 +66,7 @@ async fn zoo_parity_with_whole_file_read_on_every_small_fixture() {
         let path = dir.path().join(name);
         let data = std::fs::read(&path).unwrap();
         let mut s = LineStream::open(&path, name, token()).await.unwrap();
-        // Oracle: the whole-file hygiene composition (BOM → sniff → lossy
-        // decode → LF normalize), matching the stream's per-line rules.
+
         let bytes = super::super::hygiene::strip_bom(&data);
         match super::super::hygiene::sniff(bytes, name) {
             Ok(()) => {
@@ -104,7 +103,7 @@ async fn deep_offset_counts_without_storing() {
     let mut s = LineStream::open(&path, "lockfile.txt", token())
         .await
         .unwrap();
-    // Skip 79,989 lines the way the driver will for offset=79990.
+
     for _ in 0..79_989 {
         s.next_line().await.unwrap().unwrap();
     }
@@ -123,9 +122,7 @@ async fn big_lines_stream_with_tiny_buffers() {
     if !super::super::testkit::big_enabled() {
         return;
     }
-    // The zoo sparse.txt is 200 MiB of NULs: post-T1.4 it sniffs as
-    // binary at open (one 8 KiB peek, ~72 KiB resident) — the spec's
-    // "clamp marker" premise predates the sniff. Document that here…
+
     let dir = tempfile::TempDir::new().unwrap();
     let sparse = dir.path().join("sparse.txt");
     super::super::testkit::make_sparse(&sparse).unwrap();
@@ -135,14 +132,14 @@ async fn big_lines_stream_with_tiny_buffers() {
     let note = s.binary_note().unwrap().to_string();
     assert!(note.contains("NUL"), "{note}");
     assert!(s.next_line().await.unwrap().is_none());
-    // …and exercise the overflow path at scale with a 5 MiB text line.
+
     let path = dir.path().join("wide1.txt");
     std::fs::write(&path, vec![b'x'; 5 * 1024 * 1024]).unwrap();
     let mut s = LineStream::open(&path, "wide1.txt", token()).await.unwrap();
     assert_eq!(s.binary_note(), None);
     let line = s.next_line().await.unwrap().unwrap();
     assert_eq!(line.line_no, 1);
-    assert_eq!(line.bytes.len(), LINE_BYTE_CAP + 1); // ~8 KiB, never 5 MiB
+    assert_eq!(line.bytes.len(), LINE_BYTE_CAP + 1);
     assert_eq!(
         line.overflow_chars,
         5 * 1024 * 1024 - (LINE_BYTE_CAP + 1) as u64
@@ -150,7 +147,6 @@ async fn big_lines_stream_with_tiny_buffers() {
     assert!(s.next_line().await.unwrap().is_none());
     #[cfg(target_os = "linux")]
     {
-        // Peak RSS stays < 50 MiB: the long line never materializes.
         let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
         let pages: u64 = statm.split_whitespace().nth(1).unwrap().parse().unwrap();
         let rss = pages * unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
@@ -173,7 +169,7 @@ async fn pre_cancelled_token_yields_none_and_flag() {
         super::super::notices::cancelled_note(s.line_no()),
         "[read: cancelled after 0 lines]"
     );
-    // Mid-stream cancel reports lines already yielded.
+
     let cancel = token();
     let mut s = LineStream::open(&path, "a.txt", cancel.clone())
         .await
@@ -202,13 +198,13 @@ fn count_gate_and_skipped_fragment_are_contract_exact() {
 #[tokio::test]
 async fn overflow_chars_count_codepoints_not_bytes() {
     let dir = tempfile::TempDir::new().unwrap();
-    // ASCII: chars == bytes.
+
     let path = dir.path().join("a.txt");
     std::fs::write(&path, vec![b'x'; 20_000]).unwrap();
     let mut s = LineStream::open(&path, "a.txt", token()).await.unwrap();
     let line = s.next_line().await.unwrap().unwrap();
     assert_eq!(line.overflow_chars, 20_000 - (LINE_BYTE_CAP + 1) as u64);
-    // Emoji (4 bytes each): 5000 chars over 20,000 bytes.
+
     let path = dir.path().join("e.txt");
     std::fs::write(&path, "😀".repeat(5000)).unwrap();
     let mut s = LineStream::open(&path, "e.txt", token()).await.unwrap();
@@ -229,7 +225,7 @@ async fn content_hash_matches_whole_file_read() {
         let path = dir.path().join(name);
         let raw = std::fs::read(&path).unwrap();
         let mut s = LineStream::open(&path, name, token()).await.unwrap();
-        // Drain the way the driver does (some lines + the count pass).
+
         s.next_line().await.unwrap();
         s.count_rest_lines_capped(MAX_COUNT_LINES).await.unwrap();
         assert_eq!(
@@ -238,7 +234,7 @@ async fn content_hash_matches_whole_file_read() {
             "{name}"
         );
     }
-    // Empty file hashes like hash_bytes(b"").
+
     let path = dir.path().join("empty.txt");
     let mut s = LineStream::open(&path, "empty.txt", token()).await.unwrap();
     assert_eq!(s.content_hash(), crate::ledger::FileLedger::hash_bytes(b""));
@@ -255,7 +251,7 @@ async fn count_rest_lines_adds_one_for_unterminated_tail() {
         s.count_rest_lines_capped(MAX_COUNT_LINES).await.unwrap(),
         (2, false)
     );
-    // Terminated tail: lines == newlines.
+
     std::fs::write(&p, b"a\nb\n").unwrap();
     let mut s = LineStream::open(&p, "u.txt", token()).await.unwrap();
     s.next_line().await.unwrap().unwrap();
@@ -263,7 +259,7 @@ async fn count_rest_lines_adds_one_for_unterminated_tail() {
         s.count_rest_lines_capped(MAX_COUNT_LINES).await.unwrap(),
         (1, false)
     );
-    // Nothing left: zero.
+
     let mut s = LineStream::open(&p, "u.txt", token()).await.unwrap();
     s.next_line().await.unwrap().unwrap();
     s.next_line().await.unwrap().unwrap();
@@ -282,7 +278,7 @@ async fn count_capped_stops_early_and_reports() {
     let (count, capped) = s.count_rest_lines_capped(100_000).await.unwrap();
     assert!(capped);
     assert!(count <= 100_001);
-    // Small stream under the cap: exact, uncapped.
+
     let p2 = dir.path().join("small.txt");
     std::fs::write(&p2, "x\n".repeat(10)).unwrap();
     let mut s2 = LineStream::open(&p2, "small.txt", token()).await.unwrap();

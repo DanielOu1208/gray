@@ -9,7 +9,7 @@ fn parse_context_window_accepts_separators() {
     assert_eq!(parse_context_window("1000k"), Some(1_000_000));
     assert_eq!(parse_context_window("128k"), Some(128_000));
     assert_eq!(parse_context_window("1.5m"), Some(1_500_000));
-    assert_eq!(parse_context_window("1.5"), None); // bare decimals rejected
+    assert_eq!(parse_context_window("1.5"), None);
     assert_eq!(parse_context_window(""), None);
     assert_eq!(parse_context_window("abc"), None);
 }
@@ -17,7 +17,7 @@ fn parse_context_window_accepts_separators() {
 #[test]
 fn model_max_ignores_user_override() {
     set_user_context_window(Some(8_000));
-    // gpt-4o fallback is 128k; max must ignore the 8k override
+
     assert_eq!(model_max_context("gpt-4o"), 128_000);
     set_user_context_window(None);
 }
@@ -29,12 +29,11 @@ fn compaction_defaults_match_legacy() {
 
 #[test]
 fn reasoning_capability_from_models_dev_and_live() {
-    // Unknown until a provider speaks.
     assert_eq!(
         model_supports_reasoning("test-reason-capability-never-seen"),
         None
     );
-    // models.dev `reasoning` flag.
+
     let v: serde_json::Value = serde_json::json!({
         "prov": {"models": {
             "test-reason-thinker": {"reasoning": true, "limit": {"context": 200000}},
@@ -47,12 +46,12 @@ fn reasoning_capability_from_models_dev_and_live() {
         model_supports_reasoning("prov/test-reason-plain"),
         Some(false)
     );
-    // Non-reasoning models only get `off`.
+
     assert_eq!(
         supported_thinking_levels("prov/test-reason-plain"),
         vec![("off", "No reasoning")]
     );
-    // Family efforts are provider-driven, not the hardcoded catalog.
+
     let grok: Vec<&str> = supported_thinking_levels("xai/grok-4")
         .iter()
         .map(|(l, _)| *l)
@@ -63,7 +62,7 @@ fn reasoning_capability_from_models_dev_and_live() {
         .map(|(l, _)| *l)
         .collect();
     assert_eq!(claude, vec!["off", "low", "medium", "high", "max"]);
-    // Modern Claude takes xhigh; GPT-5.6 additionally takes max.
+
     let opus47: Vec<&str> = supported_thinking_levels("anthropic/claude-opus-4-7")
         .iter()
         .map(|(l, _)| *l)
@@ -79,7 +78,7 @@ fn reasoning_capability_from_models_dev_and_live() {
         .map(|(l, _)| *l)
         .collect();
     assert_eq!(gemini, vec!["off", "minimal", "low", "medium", "high"]);
-    // Muse Spark contributor has no `max` (models.dev + family table agree).
+
     let spark: Vec<&str> = supported_thinking_levels("testprov/muse-spark-9.9-contributor")
         .iter()
         .map(|(l, _)| *l)
@@ -88,12 +87,7 @@ fn reasoning_capability_from_models_dev_and_live() {
         spark,
         vec!["off", "minimal", "low", "medium", "high", "xhigh"]
     );
-    // Qualified provider entries must not leak efforts into another
-    // provider's bare id: kilo/openrouter list their qualified
-    // `meta/muse-spark-1.3-contributor` WITH `max` while bare-id
-    // providers list the contributor id WITHOUT it — the live
-    // picker showed `max` once the background models.dev
-    // fetch landed. Bare-first order (the observed poisoning):
+
     let v3: serde_json::Value = serde_json::json!({
         "testpoisa": {"models": {
             "spark-poison-7-contributor": {
@@ -122,7 +116,7 @@ fn reasoning_capability_from_models_dev_and_live() {
         bare7,
         vec!["off", "minimal", "low", "medium", "high", "xhigh"]
     );
-    // The qualified id keeps its own provider-specific values (with max).
+
     let qual7: Vec<&str> = supported_thinking_levels("testpoisq/spark-poison-7-contributor")
         .iter()
         .map(|(l, _)| *l)
@@ -131,7 +125,7 @@ fn reasoning_capability_from_models_dev_and_live() {
         qual7,
         vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]
     );
-    // Reverse order (qualified first): the later exact bare entry still wins.
+
     let v5: serde_json::Value = serde_json::json!({
         "testpoisq": {"models": {
             "testpoisq/spark-poison-8-contributor": {
@@ -160,14 +154,13 @@ fn reasoning_capability_from_models_dev_and_live() {
         bare8,
         vec!["off", "minimal", "low", "medium", "high", "xhigh"]
     );
-    // Future GPT family (e.g. gpt-6-astra) gets the generous modern set.
+
     let gpt6: Vec<&str> = supported_thinking_levels("openai/gpt-6-astra")
         .iter()
         .map(|(l, _)| *l)
         .collect();
     assert_eq!(gpt6, vec!["off", "low", "medium", "high", "xhigh"]);
-    // models.dev `reasoning_options` drive levels automatically — no
-    // family table entry needed for unknown families ...
+
     let v2: serde_json::Value = serde_json::json!({
         "testprov": {"models": {
             "test-effort-auto": {
@@ -188,7 +181,7 @@ fn reasoning_capability_from_models_dev_and_live() {
         .map(|(l, _)| *l)
         .collect();
     assert_eq!(auto, vec!["off", "low", "medium", "high", "xhigh", "max"]);
-    // ... and beat the family table where it disagrees (grok has no max).
+
     let grok_future: Vec<&str> = supported_thinking_levels("xai/test-grok-future")
         .iter()
         .map(|(l, _)| *l)
@@ -198,8 +191,6 @@ fn reasoning_capability_from_models_dev_and_live() {
 
 #[test]
 fn commandcode_mimo_pro_keeps_max_after_models_dev_high_only_cache() {
-    // CommandCode has no models.dev entry; a gateway row for the same id once
-    // leaked `high`-only values and clamped a real `xhigh` request to `high`.
     set_active_model_provider("https://api.commandcode.ai/provider/v1");
     let cached_high_only = serde_json::json!({
         "gateway": {"models": {
@@ -230,7 +221,6 @@ fn commandcode_mimo_pro_keeps_max_after_models_dev_high_only_cache() {
         .collect();
     assert_eq!(ultra, vec!["off", "low", "medium", "high", "xhigh", "max"]);
 
-    // Away from CommandCode the same id keeps the gateway's advertised values.
     set_active_model_provider("https://openrouter.ai/api/v1");
     let elsewhere: Vec<&str> = supported_thinking_levels("xiaomi/mimo-v2.6-pro")
         .iter()
@@ -250,13 +240,13 @@ fn litellm_parse_fills_gaps_only() {
         "prov/test-litellm-gamma": {"max_input_tokens": 50000},
     });
     assert_eq!(parse_litellm_context_json(&v), 3);
-    // max_input_tokens wins over output-sized max_tokens
+
     assert_eq!(model_max_context("test-litellm-alpha"), 123_000);
     assert_eq!(model_max_context("test-litellm-beta"), 64_000);
-    // suffix fallback: `some-provider/model` hits the bare key
+
     assert_eq!(model_max_context("someprov/test-litellm-alpha"), 123_000);
     assert_eq!(model_max_context("prov/test-litellm-gamma"), 50_000);
-    // provider values win over litellm gaps regardless of order
+
     cache_model_context("test-litellm-alpha", 999_000);
     assert_eq!(parse_litellm_context_json(&v), 3);
     assert_eq!(model_max_context("test-litellm-alpha"), 999_000);
@@ -283,7 +273,7 @@ fn litellm_rates_and_turn_cost() {
         },
     });
     parse_litellm_context_json(&v);
-    // full entry: cache-aware
+
     let r = get_model_rate("someprov/test-rate-full").expect("rate with suffix fallback");
     assert!(r.has_cache_prices);
     let u = gray_core::event::Usage {
@@ -297,21 +287,21 @@ fn litellm_rates_and_turn_cost() {
     let cost = turn_cost(&u, "test-rate-full").expect("priced");
     let want = 6_000.0 * 0.000003 + 3_000.0 * 0.0000003 + 1_000.0 * 0.00000375 + 2_000.0 * 0.000015;
     assert!((cost - want).abs() < 1e-9, "got {cost}, want {want}");
-    // no cache prices: everything at input rate
+
     let u2 = gray_core::event::Usage::new(10_000, 2_000);
     let cost2 = turn_cost(&u2, "test-rate-nocache").expect("priced");
     assert!((cost2 - (10_000.0 * 0.000002 + 2_000.0 * 0.000008)).abs() < 1e-9);
-    // inclusive-only providers: all input priced fresh
+
     let u3 = gray_core::event::Usage {
         input_tokens: 5_000,
         output_tokens: 0,
         ..Default::default()
     };
     assert!(turn_cost(&u3, "test-rate-full").expect("priced") > 0.0);
-    // half entry dropped, unknown model unpriced
+
     assert!(get_model_rate("test-rate-half").is_none());
     assert!(turn_cost(&u, "no-such-model").is_none());
-    // formatting
+
     assert_eq!(format_cost(0.004), "$0.004");
     assert_eq!(format_cost(0.41), "$0.41");
     assert_eq!(format_cost(1.5), "$1.50");
@@ -330,7 +320,7 @@ fn openrouter_rates_gapfill() {
     assert_eq!(parse_openrouter_models_json(&v), 2);
     let r = get_model_rate("test-or-new-model").expect("openrouter rate cached");
     assert!(!r.has_cache_prices);
-    // gap-fill only: second parse can't overwrite an existing rate
+
     let v2: serde_json::Value = serde_json::json!({
         "data": [{"id": "test-or-new-model", "pricing": {"prompt": "0.99", "completion": "0.99"}}]
     });
@@ -353,23 +343,19 @@ fn breakdown_free_and_grid_sum_to_window() {
     assert_eq!(p.used(), 2_300 + 1_600 + 16_700 + 279 + 42_200);
     assert_eq!(p.free(window, reserve), window - p.used() - reserve);
     assert_eq!(p.grid_cells(window, reserve).iter().sum::<usize>(), 100);
-    // saturates instead of underflowing when over budget
+
     assert_eq!(p.free(10_000, reserve), 0);
 }
 
 #[test]
 fn step_models_are_never_offered_a_dishonest_off() {
-    // The reasoning cache is process-global, so this test primes the
-    // non-reasoning fixture itself rather than trusting test order.
     let v: serde_json::Value = serde_json::json!({
         "prov": {"models": {
             "test-reason-plain": {"reasoning": false, "limit": {"context": 32000}},
         }},
     });
     parse_models_dev_json(&v);
-    // StepFun ignores `thinking: disabled` (measured: 1088 reasoning deltas
-    // still streamed at effort=off), so the picker must not claim "No
-    // reasoning" for it.
+
     assert!(!super::providers::reasoning_off_is_honest("step-5-preview"));
     assert!(!super::providers::reasoning_off_is_honest(
         "stepfun/step-5-preview"
@@ -385,13 +371,11 @@ fn step_models_are_never_offered_a_dishonest_off() {
     assert_eq!(step, vec!["low", "medium", "high", "max"]);
     assert!(!step.contains(&"off"));
 
-    // A non-reasoning model keeps the honest single "off" (that one is true).
     assert_eq!(
         supported_thinking_levels("prov/test-reason-plain"),
         vec![("off", "No reasoning")]
     );
-    // ...and the step family stays truthful even when the provider's own
-    // /models says reasoning:false (StepFun's does — cached at runtime).
+
     super::cache_model_reasoning("step-5-preview", false);
     assert_eq!(model_supports_reasoning("step-5-preview"), Some(false));
     let step: Vec<&str> = supported_thinking_levels("step-5-preview")
@@ -403,9 +387,6 @@ fn step_models_are_never_offered_a_dishonest_off() {
 
 #[test]
 fn effort_in_id_models_offer_no_knob() {
-    // Under a plugin-relay provider (loopback base), ids that bake the
-    // tier into the name — stale saves and hand-typed ones — get no
-    // picker even when no catalog declared them.
     set_active_model_provider("https://127.0.0.1:1/");
     for id in [
         "swe-2-max",
@@ -419,8 +400,7 @@ fn effort_in_id_models_offer_no_knob() {
             "{id} carries its effort in the id — the picker must not open"
         );
     }
-    // The same rule must not blindfold real API providers: `codex-max`
-    // names a model line served over api.openai.com, not a baked tier.
+
     set_active_model_provider("https://api.openai.com/v1");
     let codex: Vec<&str> = supported_thinking_levels("gpt-5.3-codex-max")
         .iter()
@@ -432,7 +412,6 @@ fn effort_in_id_models_offer_no_knob() {
 
 #[test]
 fn litellm_above_200k_tier_prices_long_context() {
-    // Claude-style surcharge rows: same shape opencode's `cost.tiers` carries.
     let v: serde_json::Value = serde_json::json!({
         "test-tiered": {
             "max_input_tokens": 1_000_000,
@@ -450,15 +429,14 @@ fn litellm_above_200k_tier_prices_long_context() {
     let r = get_model_rate("test-tiered").expect("tiered rate");
     assert_eq!(r.tiers.len(), 1);
     assert_eq!(r.tiers[0].size, 200_000);
-    // Under the boundary: base rates. Over: tier rates. At exactly 200k the
-    // base applies (opencode: `context > tier.size`).
+
     let under = gray_core::event::Usage::new(200_000, 1_000);
     let over = gray_core::event::Usage::new(200_001, 1_000);
     let base = turn_cost(&under, "test-tiered").unwrap();
     let tiered = turn_cost(&over, "test-tiered").unwrap();
     assert!((base - (200_000.0 * 0.000003 + 1_000.0 * 0.000015)).abs() < 1e-9);
     assert!((tiered - (200_001.0 * 0.000006 + 1_000.0 * 0.0000225)).abs() < 1e-9);
-    // Cache tokens bill at the tier's cache prices, not the base ones.
+
     let cached = gray_core::event::Usage {
         input_tokens: 300_000,
         output_tokens: 0,
@@ -474,7 +452,6 @@ fn litellm_above_200k_tier_prices_long_context() {
 
 #[test]
 fn models_dev_cost_gap_fills_and_tiers_merge_in_either_order() {
-    // models.dev `cost` is USD per 1M tokens.
     let dev: serde_json::Value = serde_json::json!({
         "prov": {"models": {
             "test-dev-only": {"cost": {"input": 2.0, "output": 12.0,
@@ -489,8 +466,7 @@ fn models_dev_cost_gap_fills_and_tiers_merge_in_either_order() {
         }},
     });
     parse_models_dev_json(&dev);
-    // Full cost object creates a rate where LiteLLM has none; the tier came
-    // from both `tiers` and `context_over_200k` — one slot, not two.
+
     let r = get_model_rate("test-dev-only").expect("dev rate");
     assert!((r.input - 0.000002).abs() < 1e-12);
     assert_eq!(r.tiers.len(), 1);
@@ -498,7 +474,7 @@ fn models_dev_cost_gap_fills_and_tiers_merge_in_either_order() {
     let under = gray_core::event::Usage::new(250_000 - 50_000 - 1, 0);
     assert!((turn_cost(&over, "test-dev-only").unwrap() - 250_000.0 * 0.000004).abs() < 1e-9);
     assert!((turn_cost(&under, "test-dev-only").unwrap() - 199_999.0 * 0.000002).abs() < 1e-9);
-    // No base rate in the entry: tiers still merge for whoever prices it later.
+
     parse_litellm_context_json(&serde_json::json!({
         "test-dev-tier-only": {
             "max_input_tokens": 200000,
@@ -516,9 +492,9 @@ fn models_dev_cost_gap_fills_and_tiers_merge_in_either_order() {
             .abs()
             < 1e-9
     );
-    // Half-priced rows still drop.
+
     assert!(get_model_rate("test-dev-partial").is_none());
-    // LiteLLM applied afterwards keeps its base; models.dev cannot clobber it.
+
     parse_litellm_context_json(&serde_json::json!({
         "test-dev-only": {
             "max_input_tokens": 200000,

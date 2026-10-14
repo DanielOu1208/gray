@@ -1,64 +1,22 @@
-//! Attachment helpers (split from `input`; re-exported there).
-
 use super::*;
 
-// ---------------------------------------------------------------------------
-// Attachment helpers — verbatim from mod.rs 759-885
-// ---------------------------------------------------------------------------
-
-/// Placeholder index across both `[Image #n]` (images) and `[File #n]` (pdf/video/other).
-fn placeholder_index(ph: &str) -> Option<usize> {
-    ph.strip_prefix("[Image #")
-        .or_else(|| ph.strip_prefix("[File #"))
-        .and_then(|s| s.strip_suffix(']'))
-        .and_then(|n| n.parse::<usize>().ok())
-}
-
 pub(crate) fn attach_image(tui: &mut Tui, path: PathBuf) {
-    let mut max_idx = 0;
-    for (ph, _) in &tui.attachments {
-        if let Some(n) = placeholder_index(ph) {
-            max_idx = max_idx.max(n);
-        }
-    }
-    let text = tui.textarea.text().to_string();
-    for prefix in ["[Image #", "[File #"] {
-        for cap in text.match_indices(prefix) {
-            let substr = &text[cap.0..];
-            if let Some(end) = substr.find(']') {
-                let num_str = &substr[prefix.len()..end];
-                if let Ok(n) = num_str.parse::<usize>() {
-                    max_idx = max_idx.max(n);
-                }
-            }
-        }
-    }
-    let idx = max_idx + 1;
-    let placeholder = if crate::repl::attachments::attachment_kind(&path)
-        == crate::repl::attachments::AttachmentKind::Image
-    {
-        format!("[Image #{idx}]")
-    } else {
-        format!("[File #{idx}]")
-    };
-    tui.textarea.insert_element(&placeholder);
-    tui.attachments.push((placeholder.clone(), path));
+    tui.attachments.push(path);
     let _ = tui.draw();
 }
 
-pub(crate) fn sync_attachments(tui: &mut Tui) {
-    let text = tui.textarea.text().to_string();
-    tui.attachments.retain(|(ph, _)| text.contains(ph));
+pub(crate) fn strip_attachment_marker(tui: &mut Tui, path: &std::path::Path) {
+    let label = crate::repl::attachments::attachment_label(path);
+    let hit = crate::repl::attachments::attachment_markers(tui.textarea.text())
+        .into_iter()
+        .find(|(_, name)| *name == label);
+    if let Some((range, _)) = hit {
+        tui.textarea.replace_range(range, "");
+    }
 }
 
-/// Max attachable file size. `repl::attachments` caps only oversized
-/// inputs, so this local sane cap refuses multi-GB drops before
-/// ffmpeg/image decode OOMs.
 pub(crate) const MAX_ATTACH_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
-/// Strip `file://` (+ optional `localhost`) and percent-decode (%20 etc.).
-/// Raw (non-`file://`) paths pass through untouched so literal `%` in real
-/// filenames is never corrupted. Shared by paste + clipboard-text paths.
 fn decoded_paste_path(raw: &str) -> String {
     let s = raw
         .trim()
@@ -85,8 +43,6 @@ fn file_size_exceeds(path: &Path, limit: u64) -> bool {
         .unwrap_or(false)
 }
 
-/// Any file the media pipeline accepts (images, pdf, video, audio) —
-/// opencode parity: MIME-driven, not image-only.
 pub(crate) fn is_attachable_path(path: &str) -> bool {
     use crate::repl::attachments::{AttachmentKind, attachment_kind};
     let decoded = decoded_paste_path(path);
@@ -126,10 +82,6 @@ pub(crate) fn try_attach_image_paste(tui: &mut Tui, pasted: &str) -> bool {
     false
 }
 
-/// Paste an image from the OS clipboard via native helpers
-/// (wl-paste/xclip). Image first, then clipboard text via the caller.
-// arboard removed, native helpers only. If Wayland session
-// quirks ever bite, the text-path fallback below still catches pasted paths.
 pub(crate) fn try_attach_clipboard_image(tui: &mut Tui) -> bool {
     for (cmd, args) in [
         ("wl-paste", vec!["--type", "image/png"]),
@@ -138,8 +90,6 @@ pub(crate) fn try_attach_clipboard_image(tui: &mut Tui) -> bool {
             vec!["-selection", "clipboard", "-t", "image/png", "-o"],
         ),
     ] {
-        // The image probe gets the same bounded spawn the text path uses:
-        // a wedged wl-paste/xclip must not freeze Ctrl+V (audit #16).
         if let Some(out) = super::clipboard::output_with_timeout(
             std::path::Path::new(cmd),
             &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),

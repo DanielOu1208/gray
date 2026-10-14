@@ -53,8 +53,6 @@ fn manifest_result_with_tool_schema_round_trips_def() {
 
 #[test]
 fn tool_preview_parses_and_stays_model_invisible() {
-    // A manifest `preview` names the args dot path for the transcript
-    // preview; same visibility contract as `label`.
     let v = serde_json::json!({
         "name": "x", "version": "0.1.0",
         "tools": [{"name": "send_card", "description": "d",
@@ -62,14 +60,14 @@ fn tool_preview_parses_and_stays_model_invisible() {
     });
     let m = Manifest::from_result(&v);
     assert_eq!(m.tools[0].preview.as_deref(), Some("document.title"));
-    // Blank previews do not stick.
+
     let v2 = serde_json::json!({
         "name": "x", "version": "0.1.0",
         "tools": [{"name": "t", "description": "d",
                    "parameters": {"type": "object"}, "preview": "  "}],
     });
     assert!(Manifest::from_result(&v2).tools[0].preview.is_none());
-    // `None` skips serialization: persisted payloads stay byte-stable.
+
     let def = gray_core::message::ToolDef::new("t", "d", serde_json::json!({}));
     assert!(
         !serde_json::to_value(&def)
@@ -82,7 +80,6 @@ fn tool_preview_parses_and_stays_model_invisible() {
 
 #[test]
 fn legacy_string_tool_entries_still_parse() {
-    // Pre-v1 sidecars send `"tools": ["echo"]` — keep working.
     let v = serde_json::json!({"name": "echo", "version": "0.1.0", "tools": ["echo"]});
     let m = Manifest::from_result(&v);
     assert_eq!(m.tools.len(), 1);
@@ -98,15 +95,13 @@ fn subcommands_parse_lenient() {
     });
     let m = Manifest::from_result(&v);
     assert_eq!(m.subcommands, vec!["/cron".to_string()]);
-    // Absent → empty (pre-v1 sidecars keep working).
+
     let m2 = Manifest::from_result(&serde_json::json!({"name": "x", "tools": []}));
     assert!(m2.subcommands.is_empty());
 }
 
 #[test]
 fn tool_label_parses_and_stays_model_invisible() {
-    // A manifest `label` names the transcript headline; providers project
-    // name/description/parameters only, so it never reaches the model.
     let v = serde_json::json!({
         "name": "x", "version": "0.1.0",
         "tools": [{"name": "notify_owner", "description": "d",
@@ -114,14 +109,14 @@ fn tool_label_parses_and_stays_model_invisible() {
     });
     let m = Manifest::from_result(&v);
     assert_eq!(m.tools[0].label.as_deref(), Some("Notify Owner"));
-    // Blank labels do not stick.
+
     let v2 = serde_json::json!({
         "name": "x", "version": "0.1.0",
         "tools": [{"name": "t", "description": "d",
                    "parameters": {"type": "object"}, "label": "  "}],
     });
     assert!(Manifest::from_result(&v2).tools[0].label.is_none());
-    // `None` skips serialization: persisted payloads stay byte-stable.
+
     let def = gray_core::message::ToolDef::new("t", "d", serde_json::json!({}));
     assert!(
         !serde_json::to_value(&def)

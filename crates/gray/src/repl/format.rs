@@ -1,7 +1,6 @@
 use gray_core::error::{CoreError, ProviderDetail};
 use gray_core::message::Message;
 
-/// Truncates a string slice to at most `max_chars` unicode scalar values / chars.
 pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
         Some((idx, _)) => &s[..idx],
@@ -9,7 +8,6 @@ pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> &str {
     }
 }
 
-/// Formats a token count with comma separators (e.g., 1000 -> 1,000).
 pub fn fmt_usage(total: usize) -> String {
     let s = total.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
@@ -22,10 +20,6 @@ pub fn fmt_usage(total: usize) -> String {
     out.chars().rev().collect()
 }
 
-/// Codex steal (agent-loop.ts): pull Status/Code/Type/Message out of a
-/// `status 503: {"error":{"message":..,"type":..,"code":..}}` blob so the UI
-/// never dumps raw `{"model":..,"param":null}` JSON. Returns a short human
-/// line; falls back to the raw detail when no JSON is found.
 pub fn clean_provider_detail(detail: &str) -> String {
     let start = match detail.find('{') {
         Some(i) => i,
@@ -38,7 +32,7 @@ pub fn clean_provider_detail(detail: &str) -> String {
         _ => return detail.to_string(),
     };
     let end = start + values.byte_offset();
-    // Shape is usually {"model":..,"error":{"message","type","code"}} or just {"error":..}.
+
     let err_obj = parsed.get("error").unwrap_or(&parsed);
     let message = err_obj
         .get("message")
@@ -61,7 +55,7 @@ pub fn clean_provider_detail(detail: &str) -> String {
         .trim_end_matches(':')
         .trim_end()
         .to_string();
-    // Preserve trailing diagnostics Codex keeps (cf-ray / request-id).
+
     let mut suffix = String::new();
     for key in ["cf-ray: ", "request-id: ", "request_id: "] {
         if let Some(pos) = detail[end..].find(key) {
@@ -137,8 +131,6 @@ fn display_provider_detail(detail: &str) -> String {
     }
 }
 
-/// Rewrites a `HH:MM UTC` clock time into the user's local zone (`HH:MM TZ`).
-/// Anything that doesn't match is returned untouched.
 fn localize_utc_time(raw: &str) -> String {
     use chrono::Offset;
     let offset = chrono::Local::now().offset().fix();
@@ -159,9 +151,6 @@ fn localize_utc_time(raw: &str) -> String {
     }
 }
 
-/// Pure core of [`localize_utc_time`]: `HH:MM UTC` or `Mon D HH:MM UTC` ->
-/// the local clock reading using `offset`. Returns `None` if `raw` isn't
-/// either shape.
 fn localize_utc_time_with(
     raw: &str,
     now: chrono::DateTime<chrono::Utc>,
@@ -187,7 +176,6 @@ fn localize_utc_time_with(
     };
 
     match words.as_slice() {
-        // `HH:MM` — today, or tomorrow when that clock time already passed.
         [hm] => {
             let (h, m) = clock(hm)?;
             let mut at = now.with_hour(h)?.with_minute(m)?.with_second(0)?;
@@ -196,8 +184,7 @@ fn localize_utc_time_with(
             }
             Some(at.with_timezone(&offset).format("%H:%M").to_string())
         }
-        // `Oct 11 00:01` — month + day + clock, no year: this year, rolling
-        // forward when the moment already passed (Dec 31 -> Jan 1 resets).
+
         [mon, day, hm] => {
             let (h, m) = clock(hm)?;
             let (month, day) = (month_of(mon)?, day.parse::<u32>().ok()?);
@@ -265,11 +252,6 @@ fn format_model_limit(detail: &str) -> Option<String> {
     ))
 }
 
-/// Formats a [`CoreError`] for REPL display.
-/// Connection/timeout failures get a friendly, actionable message with the
-/// provider's `base_url`; all other errors fall back to the generic prefix.
-/// Render a [`ProviderDetail`]: vendor message + code/status + correlation
-/// ids — exactly the fields format.rs used to scrape out of the message.
 fn provider_detail_text(d: &ProviderDetail) -> String {
     let mut out = d.vendor_message.clone().unwrap_or_default();
     if out.is_empty()
@@ -295,8 +277,6 @@ fn provider_detail_text(d: &ProviderDetail) -> String {
     out
 }
 
-/// A provider failure with its response fields intact: classify on the
-/// variant + structured fields, never on the formatted text.
 fn format_detailed_error(e: &CoreError, d: &ProviderDetail, base_url: &str) -> String {
     let short = provider_detail_text(d);
     if let Some(message) = format_model_limit(&short) {
@@ -334,9 +314,6 @@ fn format_detailed_error(e: &CoreError, d: &ProviderDetail, base_url: &str) -> S
 }
 
 pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
-    // Response fields arrived structured: use them directly. The text arms
-    // below remain the fallback for foreign errors (plugin relays) that
-    // never had the fields.
     if let Some(detail) = e.detail() {
         return format_detailed_error(e, detail, base_url);
     }
@@ -363,10 +340,6 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
             )
         }
         CoreError::Provider(detail) => {
-            // Bounded detail (never raw multi-KB dumps) + explicit
-            // retryability on the first line of each classified arm.
-            // Codex steal: extract Status/Code/Type/Message from JSON blobs
-            // instead of dumping {"model":..,"error":{...}} raw.
             let short = display_provider_detail(detail);
             let lower = short.to_lowercase();
             if lower.contains("not supported")
@@ -409,16 +382,12 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
                     "✗ Provider server error (retryable):\n  {short}\n  Try again later or run /models to switch to another model."
                 )
             } else {
-                // Steal codex's UnexpectedResponseError display: keep status+body but add provider hint
                 format!(
                     "✗ Provider error:\n  {short}\n  Provider: {base_url} — try /models if this persists."
                 )
             }
         }
         CoreError::Auth(detail) => {
-            // Subscription relays surface here with no HTTP status (the 403
-            // came from native inside the sidecar, already classified). Name
-            // the login that failed so the next command is obvious.
             let short = display_provider_detail(detail);
             format!(
                 "✗ Auth failed (not retryable):\n  {short}\n  Run /models to sign in again or update your API key."
@@ -463,47 +432,66 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
     }
 }
 
-/// Builds the user message with MIME-driven attachments (opencode parity):
-/// images passed through at original bytes; video, PDF and audio as native
-/// media carrying a fallback (contact sheet, PDF text, a note) that the
-/// provider sends instead on a model without that input — the same parts a
-/// `cat` of the file produces. Anything else is reported loudly.
 pub(crate) fn build_user_message_with_attachments(
     text: &str,
     paths: &[std::path::PathBuf],
 ) -> Message {
     use gray_core::message::ContentBlock;
-    use gray_tools::view::Attached;
     if paths.is_empty() {
         return Message::user(text);
     }
-    let mut blocks = Vec::new();
-    if !text.is_empty() {
-        blocks.push(ContentBlock::text(text.to_string()));
-    }
-    for path in paths {
-        if !gray_tools::images::is_viewable_extension(path) {
-            blocks.push(ContentBlock::text(format!(
-                "(attached file {} skipped: unsupported type)",
-                path.display()
-            )));
-            continue;
+    let mut used = vec![false; paths.len()];
+    let mut anchors: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+    for (range, name) in super::attachments::attachment_markers(text) {
+        if let Some(i) = paths
+            .iter()
+            .enumerate()
+            .find(|(i, p)| !used[*i] && super::attachments::attachment_label(p) == name)
+            .map(|(i, _)| i)
+        {
+            used[i] = true;
+            anchors.push((range, i));
         }
-        blocks.push(match gray_tools::view::attach(path) {
-            Ok(Attached::Image(img, _)) => ContentBlock::image(img.media_type, img.data),
-            Ok(Attached::Media(m, _)) => ContentBlock::media(m.media_type, m.data, m.fallback),
-            Ok(Attached::Text(t, _)) => ContentBlock::text(t),
-            Err(e) => ContentBlock::text(format!("(attachment skipped: {e})")),
-        });
+    }
+    let mut blocks = Vec::new();
+    let mut last = 0usize;
+    for (range, i) in anchors {
+        if last < range.end {
+            blocks.push(ContentBlock::text(text[last..range.end].to_string()));
+        }
+        blocks.push(attach_block(&paths[i]));
+        last = range.end;
+    }
+    if last < text.len() {
+        blocks.push(ContentBlock::text(text[last..].to_string()));
+    }
+    for (i, path) in paths.iter().enumerate() {
+        if !used[i] {
+            blocks.push(attach_block(path));
+        }
     }
     Message::new(gray_core::message::Role::User, blocks)
 }
 
-/// ANSI dim + italic — pi's styling for rendered thinking blocks
-/// (italic muted color; dim stands in for pi's `thinkingText` theme color).
+fn attach_block(path: &std::path::Path) -> gray_core::message::ContentBlock {
+    use gray_core::message::ContentBlock;
+    use gray_tools::view::Attached;
+    if !gray_tools::images::is_viewable_extension(path) {
+        return ContentBlock::text(format!(
+            "(attached file {} skipped: unsupported type)",
+            path.display()
+        ));
+    }
+    match gray_tools::view::attach(path) {
+        Ok(Attached::Image(img, _)) => ContentBlock::image(img.media_type, img.data),
+        Ok(Attached::Media(m, _)) => ContentBlock::media(m.media_type, m.data, m.fallback),
+        Ok(Attached::Text(t, _)) => ContentBlock::text(t),
+        Err(e) => ContentBlock::text(format!("(attachment skipped: {e})")),
+    }
+}
+
 pub const THINKING_STYLE: &str = "\x1b[2m\x1b[3m";
 
-/// Formats a turn duration like the TUI `Worked for` line: `850ms`, `6s`, `6.5s`, `2m 5s`.
 pub fn fmt_duration_ms(ms: u64) -> String {
     let secs = ms as f64 / 1000.0;
     if secs < 1.0 {

@@ -1,5 +1,3 @@
-//! Installed provider declarations, sidecar RPCs, and model-catalog dispatch.
-
 pub mod catalog;
 pub mod registry;
 pub mod runtime;

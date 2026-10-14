@@ -1,5 +1,3 @@
-//! Minimal file logger: appends timestamped lines to `$GRAY_HOME/logs/gray.log`.
-
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
@@ -11,15 +9,12 @@ struct FileLogger {
     path: std::path::PathBuf,
 }
 
-/// Runtime size check: `rotate_if_needed` at boot covers restarts only, so
-/// the live logger must cap itself past 10MiB too.
 fn should_rotate(len: u64) -> bool {
     len > crate::rotation::LOG_MAX_BYTES
 }
 
 static INIT: OnceLock<()> = OnceLock::new();
 
-/// ISO-ish timestamp: `YYYY-MM-DDTHH:MM:SSZ`.
 fn iso_timestamp() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
@@ -42,12 +37,7 @@ impl Log for FileLogger {
             redact(&record.args().to_string())
         );
         let _ = file.flush();
-        // Runtime cap: boot rotation alone lets a long-lived process grow
-        // gray.log unbounded. Mirrors rotation::rotate_if_needed, but the
-        // handle is open, so rename then swap in a fresh file (best-effort).
-        // Audit #19: another gray process may have rotated the log since
-        // our last line (our handle then writes into a renamed-away
-        // inode). Re-anchor before deciding whether *this* log needs it.
+
         if crate::rotation::handle_drifted(&self.path, &file)
             && let Ok(fresh) = OpenOptions::new()
                 .create(true)
@@ -60,10 +50,8 @@ impl Log for FileLogger {
         if !should_rotate(file.metadata().map(|m| m.len()).unwrap_or(0)) {
             return;
         }
-        // Serialize the shuffle, then swap in a fresh file (best-effort).
+
         let rotated = {
-            // The guard is the acquire, not the open: without the try_lock
-            // inside rotation_guard the file existing buys no exclusion.
             let _guard = crate::rotation::rotation_guard(&self.path);
             let _ = std::fs::remove_file(self.path.with_extension("log.2"));
             let _ = std::fs::rename(
@@ -91,9 +79,6 @@ fn level_from_env() -> LevelFilter {
         .unwrap_or(log::LevelFilter::Info)
 }
 
-/// Replaces secret-looking values with `[REDACTED]`: `sk-…` keys (8+ key
-/// chars), `Bearer <token>`, and `x-api-key[:=]<value>`. Byte-scans ASCII
-/// patterns only, so non-ASCII text passes through untouched.
 pub(crate) fn redact(input: &str) -> String {
     let b = input.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(b.len());
@@ -115,7 +100,7 @@ pub(crate) fn redact(input: &str) -> String {
         {
             let mut k = i + "x-api-key".len();
             if k < b.len() && (b[k] == b'"' || b[k] == b'\'') {
-                k += 1; // quoted key: "x-api-key":
+                k += 1;
             }
             while k < b.len() && (b[k] == b' ' || b[k] == b'\t') {
                 k += 1;
@@ -162,8 +147,6 @@ pub(crate) fn redact(input: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| input.to_string())
 }
 
-/// Installs the file logger once; silently no-ops on second call or when
-/// home cannot be resolved.
 pub fn init() {
     INIT.get_or_init(|| {
         let Ok(home) = crate::setup::gray_home() else {

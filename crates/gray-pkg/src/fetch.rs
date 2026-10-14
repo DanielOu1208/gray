@@ -1,16 +1,10 @@
-//! Download (https-only, size-capped, hash-verified) + tar.gz unpack.
-
 use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256, Sha512};
 use tokio::io::AsyncWriteExt;
 
-/// Max download size: 64 MiB.
 pub const MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// HTTP client for plugin downloads: redirects allowed only when every hop
-/// passes [`check_url`] (no https→http downgrade), with connect/total
-/// deadlines so slow bodies expire.
 pub fn client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -25,8 +19,6 @@ pub fn client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
-/// Strip userinfo, query, and fragment so URLs are safe to log.
-/// Renders `https://u:p@h/x?token=1` as `https://h/x`.
 pub fn redact(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {
         Some((s, r)) => (Some(s), r),
@@ -48,7 +40,6 @@ pub fn redact(url: &str) -> String {
     }
 }
 
-/// https-only, except http loopback (127.0.0.1/::1/localhost) for tests.
 pub(crate) fn check_url(url: &str) -> anyhow::Result<()> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|_| anyhow::anyhow!("invalid plugin URL: {}", redact(url)))?;
@@ -61,9 +52,6 @@ pub(crate) fn check_url(url: &str) -> anyhow::Result<()> {
     anyhow::bail!("refusing non-https plugin URL: {}", redact(url));
 }
 
-/// Decode standard base64 (npm `integrity` payloads) via the workspace
-/// `base64` crate. Empty input is rejected explicitly: the crate decodes
-/// `""` to empty, but an empty digest must never verify.
 fn b64_decode(s: &str) -> anyhow::Result<Vec<u8>> {
     use base64::Engine as _;
     if s.is_empty() {
@@ -74,19 +62,13 @@ fn b64_decode(s: &str) -> anyhow::Result<Vec<u8>> {
         .map_err(|_| anyhow::anyhow!("invalid base64 hash"))
 }
 
-/// Stream `url` to `$GRAY_HOME/plugins/tmp/`, enforcing the 64 MiB cap and
-/// verifying against `expected` (`"sha256:<hex>"` or npm's `"sha512-<base64>"`).
-/// Anything else bails `unsupported hash algorithm`. The temp file is
-/// auto-deleted on failure; on success the kept path is returned.
 pub async fn download(
     client: &reqwest::Client,
     url: &str,
     expected: Option<&crate::index::HashSpec>,
 ) -> anyhow::Result<PathBuf> {
     check_url(url)?;
-    // An index entry that fails to pin a digest must not download: only an
-    // explicit direct-URL install (`expected == None`, warned at the call
-    // site) may skip verification.
+
     if let Some(spec) = expected
         && spec.primary().is_none_or(|s| s.is_empty())
     {
@@ -96,9 +78,7 @@ pub async fn download(
     std::fs::create_dir_all(&tmp_dir)?;
     log::debug!("downloading plugin archive from {}", redact(url));
     let mut resp = client.get(url).send().await?.error_for_status()?;
-    // The redirect policy `stop()`s on a blocked hop and hands the 3xx back:
-    // `error_for_status` does not treat 3xx as an error, so reject it here
-    // instead of saving the redirect body as the archive.
+
     if resp.status().is_redirection() {
         anyhow::bail!("download redirected to a disallowed URL");
     }
@@ -116,7 +96,7 @@ pub async fn download(
         total += bytes.len() as u64;
         if total > MAX_BYTES {
             drop(file);
-            // `temppath` drops here and deletes the partial file.
+
             anyhow::bail!("plugin archive exceeds 64 MiB cap");
         }
         sha256.update(&bytes);
@@ -155,13 +135,6 @@ pub async fn download(
     Ok(path)
 }
 
-/// True when an archive entry name cannot be safely joined onto the
-/// destination. Beyond the obvious absolute and `..` cases this refuses
-/// Windows drive names: `C:\evil` and `C:evil` are neither absolute nor
-/// parent components, but `dest.join()` with a drive-prefixed path
-/// *replaces* the base on Windows, so the entry lands outside the install
-/// directory. A gray-native archive never legitimately contains a drive
-/// name, so the refusal is safe everywhere.
 fn unsafe_entry_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     let drive_name = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
@@ -176,15 +149,10 @@ fn unsafe_entry_name(name: &str) -> bool {
         })
 }
 
-/// Belt-and-braces containment: the joined target must still live inside
-/// the destination after the name check above.
 fn confined(dest: &Path, rel: &Path) -> bool {
     dest.join(rel).starts_with(dest)
 }
 
-/// Unpack a tar.gz, rejecting absolute paths and `..` entries.
-/// Total expanded output is capped at 256 MiB and entry counts/types are
-/// bounded (regular files and directories only).
 pub fn unpack_tar_gz(archive: &Path, dest: &Path) -> anyhow::Result<()> {
     use std::io::Read as _;
     const MAX_OUT: u64 = 256 * 1024 * 1024;
@@ -208,9 +176,7 @@ pub fn unpack_tar_gz(archive: &Path, dest: &Path) -> anyhow::Result<()> {
         }
         entry.unpack_in(dest)?;
     }
-    // Compressed-input ceiling (download caps apply earlier; this is
-    // belt-and-braces). Real output is bounded by the header-size
-    // accounting above: tar only ever emits header.size() bytes per entry.
+
     anyhow::ensure!(
         ar.into_inner().limit() != 0,
         "tar archive exceeds input cap"

@@ -1,43 +1,11 @@
-//! T4.3 input-repair unit for the `read` tool: strict integers.
-//!
-//! Pure functions only (`serde_json` is already a gray-tools dep — no new deps).
-//! Wired by T1.1 as `read::args` (`pub mod args;` in `read/mod.rs`).
-//!
-//! Spec: plan.ts T4.3 ("Input repair: never floor"). Exact contract strings
-//! live here so the reviewer diffs one file.
-//!
-//! FOLLOW-UPS (not done here — files outside T4.3 ownership):
-//! 1. `gray-tools/src/lib.rs` `coerce_args`: delete the `f64 -> i64` fallback;
-//!    route `("integer", String|Number)` through [`coerce_integer`].
-//! 2. `read/mod.rs` (T1.1 did: `pub mod args;`, inline `file_path` chain
-//!    deleted): still open — surface [`LIMIT_ZERO_NOTE`] when `limit == 0`
-//!    and [`coerce_integer`]
-//!    errors (message upgrade may touch gray-core's `get_opt_u64` — separate
-//!    crate, needs its own owner).
-
 use serde_json::Value;
 
-/// Note returned (is_error=false) when `limit` is explicitly 0.
 pub const LIMIT_ZERO_NOTE: &str = "[read: limit=0 shows nothing; omit limit or use limit>=1]";
 
-/// Renders the received value for rejection messages: strings JSON-quoted
-/// (`"2abc"`), numbers plain (`1.5`).
 pub fn render_got(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "<unprintable>".to_string())
 }
 
-/// Strict integer coercion for `offset`/`limit` — the "never floor" rule.
-///
-/// * `"2000"` (trimmed) -> `Ok(2000)`; JSON integers -> `Ok` as-is.
-/// * `"2abc"`, bools, arrays, … -> `Err("invalid argument '{field}': expected
-///   integer, got …")`; the caller leaves the value as-is and the tool rejects.
-/// * `"1.5"` and JSON `1.5` (any fractional spelling, incl. `"2.0"`/exponents)
-///   -> `Err("invalid argument '{field}': expected a whole number, got …")`.
-///   There is deliberately no `f64 -> i64` fallback (that cast floored 1.5 to 1).
-///   Fractional strings render trimmed and unquoted (`got 1.5`) per the contract.
-///
-/// Note: a JSON integer beyond `i64::MAX` falls into the whole-number branch;
-/// unreachable for line windows, and the message wording stays spec-fixed.
 pub fn coerce_integer(field: &str, value: &Value) -> Result<i64, String> {
     match value {
         Value::Number(n) => {

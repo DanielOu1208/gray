@@ -1,10 +1,3 @@
-//! Turn runner: one agent turn for one session key, as a child process.
-//!
-//! Production spawns `gray -p <prompt> --json [--session <sid>]` (the same
-//! headless path the Discord plugin uses), so a crashing or hung turn can
-//! never take the gateway down and can always be killed. Tests use
-//! [`StubRunner`].
-
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -13,40 +6,36 @@ use tokio::io::AsyncBufReadExt;
 use super::event::{Kind, cap};
 use crate::cron::store::Origin as Route;
 
-/// Prompt argv cap: several events' worth of text still stays argv-safe.
 const PROMPT_CAP: usize = 100 * 1024;
-/// One NDJSON line: generous enough for any result, bounded so a broken child
-/// cannot grow the daemon (same 1 MiB as the discord plugin's pipe).
+
 const LINE_CAP: usize = 1024 * 1024;
-/// stderr is only ever an error hint: the last 2 KiB is plenty.
+
 const STDERR_TAIL: usize = 2 * 1024;
-/// A dead child reaps instantly; the bound only covers a failed group kill or
-/// a child that closed stdout and kept running.
+
 const REAP_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct TurnRequest {
-    /// Session key (`main` today), for logs and env.
     pub key: String,
-    /// Gray session to continue; `None` starts a fresh one.
+
     pub session_id: Option<String>,
     pub prompt: String,
-    /// Where a reply would go; exported as `GRAY_CRON_ORIGIN` so a
-    /// `gray cron add` inside the turn binds back to this chat.
+
     pub route: Option<Route>,
-    /// Provenance; exported as `GRAY_TURN_ORIGIN`.
+
     pub kind: Kind,
     pub cwd: PathBuf,
     pub timeout: Duration,
+
+    pub running: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnOutcome {
-    /// The session the child reported (new or continued).
     pub session_id: Option<String>,
-    /// Final assistant text (may be empty).
+
     pub text: String,
-    /// Set when the turn failed (spawn, exit code, timeout, protocol, error row).
+
     pub error: Option<String>,
 }
 
@@ -55,8 +44,6 @@ pub trait TurnRunner: Send + Sync {
     async fn run(&self, req: TurnRequest) -> TurnOutcome;
 }
 
-/// The production runner. `gray_bin` is the gray executable (normally
-/// `std::env::current_exe()`); the child inherits `GRAY_HOME=home`.
 pub struct ChildRunner {
     pub gray_bin: PathBuf,
     pub home: PathBuf,
@@ -81,7 +68,7 @@ impl TurnRunner for ChildRunner {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        // Own process group so a timeout SIGKILL reaches grandchildren too.
+
         #[cfg(unix)]
         unsafe {
             cmd.pre_exec(|| {
@@ -103,8 +90,7 @@ impl TurnRunner for ChildRunner {
                 }
                 Err(e) => log::warn!("gateway turn {}: route not serializable: {e}", req.key),
             },
-            // A turn with no chat behind it must not inherit one: a `cron add`
-            // inside would bind to a stale conversation.
+
             None => {
                 cmd.env_remove("GRAY_CRON_ORIGIN");
             }
@@ -118,13 +104,14 @@ impl TurnRunner for ChildRunner {
             }
         };
         let pid = child.id().unwrap_or(0);
+        if let Some(record) = req.running.as_deref().filter(|_| pid != 0) {
+            super::brain::stamp_child(record, super::brain::ChildProc::leader(pid));
+        }
         let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
             outcome.error = Some("agent spawn failed: no pipes".to_string());
             return outcome;
         };
 
-        // stderr drains beside the reader so a chatty child cannot block on a
-        // full pipe; only the tail survives for error messages.
         let mut stderr_task = tokio::spawn(async move {
             let mut tail: Vec<u8> = Vec::new();
             let mut chunk = [0u8; 8192];
@@ -168,8 +155,6 @@ impl TurnRunner for ChildRunner {
             }
         };
 
-        // stdout ended: the child is done or on its way. The grace bound
-        // catches a child that closed its pipes and kept running.
         let status = match tokio::time::timeout(REAP_GRACE, child.wait()).await {
             Ok(Ok(status)) => Some(status),
             Ok(Err(e)) => {
@@ -218,9 +203,6 @@ impl TurnRunner for ChildRunner {
     }
 }
 
-/// SIGKILL the whole process group so a timeout takes grandchildren down too
-/// (the `pre_exec` setpgid makes the child the leader). Off unix there is no
-/// group: the child alone is killed.
 async fn kill_tree(child: &mut tokio::process::Child, pid: u32) {
     #[cfg(unix)]
     if pid != 0 {
@@ -233,8 +215,7 @@ async fn kill_tree(child: &mut tokio::process::Child, pid: u32) {
         let _ = pid;
         let _ = child.kill().await;
     }
-    // SIGKILL makes this wait immediate; the bound covers a failed group kill
-    // (pid 0 or a sandbox quirk), where the plain kill finishes the job.
+
     if tokio::time::timeout(REAP_GRACE, child.wait())
         .await
         .is_err()
@@ -244,9 +225,6 @@ async fn kill_tree(child: &mut tokio::process::Child, pid: u32) {
     }
 }
 
-/// Next stdout line, `None` at EOF. A line past [`LINE_CAP`] is truncated in
-/// place but still consumed to the newline, so one endless line cannot OOM
-/// the daemon.
 async fn read_line_capped(
     rd: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
 ) -> std::io::Result<Option<Vec<u8>>> {
@@ -268,9 +246,6 @@ async fn read_line_capped(
     }
 }
 
-/// One stdout row: `session_id` is taken from any row, `result`/`error`
-/// become the outcome. Non-JSON lines are noise —
-/// the child owns its stdout, so they mean a broken build — and are dropped.
 fn handle_line(line: &[u8], key: &str, outcome: &mut TurnOutcome, saw_result: &mut bool) {
     let text = String::from_utf8_lossy(line);
     let text = text.trim();
@@ -312,7 +287,6 @@ fn handle_line(line: &[u8], key: &str, outcome: &mut TurnOutcome, saw_result: &m
     }
 }
 
-/// Test runner: answers every prompt with a fixed reply (or a closure).
 pub struct StubRunner {
     pub reply: std::sync::Arc<dyn Fn(&TurnRequest) -> TurnOutcome + Send + Sync>,
 }

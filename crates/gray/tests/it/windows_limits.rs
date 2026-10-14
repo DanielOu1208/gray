@@ -1,4 +1,3 @@
-//! Preview limitations are explicit errors, never a silent WSL install/service.
 #![cfg(windows)]
 use std::time::Duration;
 

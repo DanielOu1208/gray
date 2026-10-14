@@ -1,12 +1,7 @@
-//! Config resolution: the exec prefix (where the model's shell commands run).
-
 use super::*;
 use crate::Cli;
 use clap::Parser;
 
-/// Flags > env > saved file, like every other resolved setting. A saved
-/// `exec_prefix` names the box, so it must survive a restart that has no
-/// `GRAY_EXEC_PREFIX` in the environment.
 #[test]
 fn exec_prefix_prefers_the_environment_over_the_saved_file() {
     let cli = Cli::parse_from(["gray"]);
@@ -17,8 +12,6 @@ fn exec_prefix_prefers_the_environment_over_the_saved_file() {
     assert_eq!(config.exec_prefix.as_deref(), Some("sh -s"));
 }
 
-/// Empty is not a prefix: a blank setting must leave commands running locally
-/// rather than spawning a program named "".
 #[test]
 fn a_blank_exec_prefix_is_no_exec_prefix() {
     let cli = Cli::parse_from(["gray"]);
@@ -29,8 +22,6 @@ fn a_blank_exec_prefix_is_no_exec_prefix() {
     assert_eq!(config.exec_prefix, None);
 }
 
-/// Absent everywhere = local commands, which is the default every existing
-/// install depends on.
 #[test]
 fn no_exec_prefix_means_local_commands() {
     let cli = Cli::parse_from(["gray"]);
@@ -38,7 +29,6 @@ fn no_exec_prefix_means_local_commands() {
     assert_eq!(config.exec_prefix, None);
 }
 
-/// `--bare` and `GRAY_BARE=1` both select a bare run; neither = normal run.
 #[test]
 fn bare_comes_from_the_flag_or_env() {
     let plain = Cli::parse_from(["gray"]);
@@ -58,9 +48,6 @@ fn bare_comes_from_the_flag_or_env() {
     assert!(env.bare);
 }
 
-/// Lean is the default: `--lean` / `GRAY_LEAN=1` force on, `GRAY_LEAN=0`
-/// opts out, the flag wins over an opting-out env, and nothing set means
-/// on (a saved `lean: false` would still opt out — uninjectable here).
 #[test]
 fn lean_defaults_on_with_flag_and_env_overrides() {
     let plain = Cli::parse_from(["gray"]);
@@ -89,16 +76,11 @@ fn lean_defaults_on_with_flag_and_env_overrides() {
     );
 }
 
-// ── api key precedence ──
-// UNRUN (cargo test banned under X — verified via check + clippy only).
-
 fn key_with(env_key: &str, env_val: &str) -> impl FnMut(&str) -> Option<String> {
     let (k, v) = (env_key.to_string(), env_val.to_string());
     move |name| (name == k).then(|| v.clone())
 }
 
-/// (a) Fresh install: `OPENAI_API_KEY` must not ride onto the default
-/// OpenRouter base — there it is just a bad Bearer.
 #[test]
 fn openai_env_key_is_ignored_on_the_default_openrouter_base() {
     let cli = Cli::parse_from(["gray"]);
@@ -109,7 +91,7 @@ fn openai_env_key_is_ignored_on_the_default_openrouter_base() {
         None,
     );
     assert_eq!(key, None);
-    // Slashes/spacing on the resolved base don't dodge the rule.
+
     let key = resolve_api_key(
         &cli,
         " https://openrouter.ai/api/v1/ ",
@@ -119,8 +101,6 @@ fn openai_env_key_is_ignored_on_the_default_openrouter_base() {
     assert_eq!(key, None);
 }
 
-/// (b) A stored key wins over `OPENAI_API_KEY` — the env var stopped being
-/// the override the moment a provider was connected.
 #[test]
 fn the_saved_key_beats_openai_env_key() {
     let cli = Cli::parse_from(["gray"]);
@@ -133,7 +113,6 @@ fn the_saved_key_beats_openai_env_key() {
     assert_eq!(key.as_deref(), Some("sk-stored"));
 }
 
-/// (c) `OPENAI_API_KEY` still fills a non-default base with no stored key.
 #[test]
 fn openai_env_key_applies_to_the_openai_base() {
     let cli = Cli::parse_from(["gray"]);
@@ -146,8 +125,6 @@ fn openai_env_key_applies_to_the_openai_base() {
     assert_eq!(key.as_deref(), Some("sk-oai"));
 }
 
-/// (d) `GRAY_API_KEY` is the explicit override — it beats the stored key on
-/// any base, including the default one.
 #[test]
 fn gray_api_key_beats_the_saved_key() {
     let cli = Cli::parse_from(["gray"]);
@@ -177,13 +154,11 @@ fn desktop_bus_replaces_only_a_dead_bus() {
     assert_eq!(desktop_bus(Some(dead), home.path()), Some(addr.clone()));
     assert_eq!(desktop_bus(None, home.path()), Some(addr.clone()));
     assert_eq!(desktop_bus(Some(&addr), home.path()), None);
-    // The recorded bus is dead too: keep what we have.
+
     std::fs::remove_file(&sock).unwrap();
     assert_eq!(desktop_bus(Some(dead), home.path()), None);
 }
 
-/// The flat `thinking_effort` is whichever session saved last; a target
-/// with its own `effort_memory` entry gets that level, not the stranger's.
 #[test]
 fn remembered_effort_prefers_the_target_memory_over_the_flat_level() {
     let mut saved = crate::setup::SavedConfig {
@@ -204,8 +179,7 @@ fn remembered_effort_prefers_the_target_memory_over_the_flat_level() {
         .as_deref(),
         Some("max")
     );
-    // No entry for this model (or no model at all): nothing to prefer, the
-    // caller falls back to the flat level.
+
     assert_eq!(
         remembered_effort(
             &saved.effort_memory,
@@ -233,7 +207,7 @@ fn remembered_effort_prefers_the_target_memory_over_the_flat_level() {
         ),
         None
     );
-    // A URL-keyed connection (no provider id) resolves through the same key.
+
     saved.effort_memory.insert(
         crate::setup::effort_memory_key("", "https://kenari.id/v1", "claude-sonnet-5-5"),
         "medium".to_string(),

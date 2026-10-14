@@ -1,11 +1,3 @@
-//! Context compaction and summarization for Gray conversations.
-//!
-//! Thin wrappers over `gray_core`'s codex-v2 pipeline ([`Agent::compact_v2`]):
-//! manual `/compact` and the REPL auto paths share the same in-band
-//! trigger → retention walk → summary-first (pi) layout as the in-turn recovery path,
-//! plus the gray-specific lifecycle (file-ledger disarm, continuation
-//! checkpoint).
-
 use gray_core::agent::Agent;
 use gray_core::error::CoreError;
 use gray_core::event::{CompactReason, Usage};
@@ -28,12 +20,6 @@ pub async fn auto_compact_if_needed(agent: &mut Agent) -> Result<bool, CoreError
     Ok(compact_with_keep(agent, None, keep).await?.is_some())
 }
 
-/// Manual `/compact` (`custom_instructions` from `/compact <text>`) and REPL
-/// auto compaction: one codex-v2 call via [`Agent::compact_v2`] with
-/// `keep_tokens` as the retained-history budget (`0` → summary-only). Returns
-/// the summary when history was replaced; `None` when nothing was gained
-/// (history untouched). Keeps the gray-specific lifecycle: file-ledger dedup
-/// entries are disarmed, and the summary is checkpointed for human recovery.
 pub async fn compact_with_keep(
     agent: &mut Agent,
     custom_instructions: Option<&str>,
@@ -49,16 +35,11 @@ pub async fn compact_with_keep(
     else {
         return Ok(None);
     };
-    // T3.4 lifecycle: entries stay for the write guard, but no dedup stub
-    // may reference a compacted-away result.
+
     if let Some(ledger) = gray_plugin::builder::current_file_ledger() {
         ledger.disarm_all_dedup();
     }
-    // Reversible checkpoint: summary on disk, so nothing is truly lost.
-    // Best-effort; compaction succeeds even if it fails. Logged, never
-    // `eprintln!`: raw stderr writes land on the live composer viewport and
-    // collide with the next draw (ghost input) while `Compacting context`
-    // owns the status dock.
+
     let path = write_continuation_checkpoint(&summary, replaced);
     if let Some(p) = path {
         log::info!(target: "gray_compact", "continuation checkpoint: {}", p.display());
@@ -66,12 +47,6 @@ pub async fn compact_with_keep(
     Ok(Some(summary))
 }
 
-/// Best-effort snapshot of the compact summary for human recovery. Carries
-/// only the summary: the full pre-compact transcript stays durable in the
-/// session JSONL (pre-boundary entries) and nothing ever reads this file back
-/// into the model, so copying the transcript here only widened secret
-/// exposure. Lives under the gray home dir (never /tmp or the workspace) with
-/// an unpredictable uuid name, owner-only (0600) on unix; newest 5 kept.
 pub fn write_continuation_checkpoint(
     summary: &str,
     replaced_messages: usize,
@@ -106,7 +81,6 @@ pub fn write_continuation_checkpoint(
     Some(path)
 }
 
-/// Keeps the newest `KEEP` checkpoints; best-effort, failures ignored.
 fn rotate_continuation_checkpoints(dir: &std::path::Path) {
     const KEEP: usize = 5;
     let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(dir)

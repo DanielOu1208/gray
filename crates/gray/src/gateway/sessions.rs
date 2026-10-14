@@ -1,5 +1,3 @@
-//! `sessions.json`: session key → gray session id + where it last spoke.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -9,8 +7,7 @@ use crate::cron::store::Origin as Route;
 pub struct Entry {
     #[serde(default)]
     pub session_id: Option<String>,
-    /// The surface the last user message for this key came from: where
-    /// autonomous output for the key goes.
+
     #[serde(default)]
     pub last_route: Option<Route>,
     #[serde(default)]

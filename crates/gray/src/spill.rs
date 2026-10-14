@@ -1,27 +1,13 @@
-//! `gray spill …` — read back a tool result that did not fit in context.
-//!
-//! A `[spilled …]` footer names a handle; this is what a handle is for. It is
-//! a subcommand rather than a tool on purpose: gray is bash-only, the model
-//! already has a shell, and a new tool schema entry is schema the provider
-//! re-reads and prompt caches miss on every single turn.
-//!
-//! Every read is bounded. A recovery path that can dump 8 MiB back into the
-//! context is a second truncation problem, not a fix for the first.
-
 use anyhow::Result;
 use gray_core::spill;
 use regex::Regex;
 
 use crate::SpillCmd;
 
-/// Lines one read may print before it says so.
 const MAX_OUT_LINES: usize = 200;
 
-/// Bytes one read may print before it says so.
 const MAX_OUT_BYTES: usize = 12 * 1024;
 
-/// Runs before `Config::resolve`, like `view`/`find`/`grep`: reading a local
-/// file is nobody's provider concern.
 pub fn run_cli(cmd: &SpillCmd) -> Result<()> {
     let out = match cmd {
         SpillCmd::Head { handle, lines } => {
@@ -62,8 +48,6 @@ fn build(pattern: &str, ignore_case: bool, literal: bool) -> Result<Regex> {
     .map_err(|e| anyhow::anyhow!("bad pattern: {e}"))
 }
 
-/// Lines `start..start+count` (0-based `start`), numbered 1-based, with the
-/// ceiling stated rather than silently applied.
 fn slice(handle: &str, text: &str, start: usize, count: usize) -> String {
     let total = text.lines().count();
     if total == 0 {
@@ -98,10 +82,6 @@ fn slice(handle: &str, text: &str, start: usize, count: usize) -> String {
     out
 }
 
-/// Matching lines with context, numbered against the original so the model can
-/// ask for the exact window next. The match count is a full scan of the stored
-/// original — cheap, and it means "212 match(es), showing 200" is a true
-/// statement rather than a count of what fit.
 fn grep_lines(
     handle: &str,
     text: &str,
@@ -119,9 +99,7 @@ fn grep_lines(
             lines.len()
         );
     }
-    // One pass over the hits: a line is shown when it matches, or when it is
-    // within `context` lines of a match — leading context included, which is
-    // what makes the line above an error readable.
+
     let mut shown = vec![false; lines.len()];
     for hit in &hits {
         let from = hit.saturating_sub(context);
@@ -161,8 +139,6 @@ fn grep_lines(
     out
 }
 
-/// What compression has saved so far, by rule — the counterfactual `/usage`
-/// has never had.
 fn stats() -> String {
     let totals = spill::totals();
     if totals.events == 0 {
@@ -176,14 +152,14 @@ fn stats() -> String {
         spill::fmt_bytes(totals.saved() as usize),
         totals.saved_pct()
     );
-    // The same bytes-per-token estimate the context gauge uses.
+
     out.push_str(&format!(
         "\n≈ {} tokens of tool output never entered a context window\n",
         totals.saved() / 4
     ));
     out.push_str("\nby rule:\n");
     let mut rows: Vec<_> = totals.by_rule.iter().collect();
-    // Biggest saving first; the empty rule is a plain spill, no compressor.
+
     rows.sort_by_key(|(_, (_, raw, sent))| std::cmp::Reverse(raw.saturating_sub(*sent)));
     for (rule, (events, raw, sent)) in rows {
         let name = if rule.is_empty() {

@@ -1,9 +1,3 @@
-//! The terminal's bytes replayed on a screen model, so every test checks
-//! what a real terminal would show, scroll regions and scrollback included.
-//!
-//! Off Windows only: there crossterm may run a command through the console
-//! API instead of writing its escape sequence, and the tape would miss it.
-
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -12,7 +6,6 @@ use ratatui::style::Style;
 
 use super::*;
 
-/// Every byte the backend writes, shared with the test that replays them.
 #[derive(Clone, Default)]
 struct Tape(Rc<RefCell<Vec<u8>>>);
 
@@ -37,13 +30,10 @@ impl Tape {
     }
 }
 
-/// Just enough of xterm to replay the terminal: cursor moves, erases,
-/// DECSTBM scroll regions, line feed and reverse index at the margins, and
-/// scrollback for rows leaving a region anchored at the screen top.
 struct Screen {
     w: usize,
     h: usize,
-    /// `'\0'` marks the column a wide glyph covers.
+
     rows: Vec<Vec<char>>,
     scrollback: Vec<String>,
     x: usize,
@@ -83,7 +73,7 @@ impl Screen {
                         }
                         s.csi(&params, fin);
                     }
-                    // OSC (hyperlinks): up to BEL or ST, no columns.
+
                     Some(']') => {
                         while let Some(c) = chars.next() {
                             if c == '\x07' {
@@ -108,7 +98,6 @@ impl Screen {
     }
 
     fn csi(&mut self, params: &str, fin: char) {
-        // Private modes (cursor, synchronized update, paste) move nothing.
         if params.starts_with('?') {
             return;
         }
@@ -126,7 +115,7 @@ impl Screen {
                 } else {
                     (at_least_1(0), nums.get(1).copied().unwrap_or(self.h))
                 };
-                // DECSTBM needs two rows; xterm ignores anything less.
+
                 if top < bottom && bottom <= self.h {
                     self.top = top - 1;
                     self.bottom = bottom - 1;
@@ -157,7 +146,7 @@ impl Screen {
             'G' => self.x = (at_least_1(0) - 1).min(self.w - 1),
             'S' => self.scroll_up(at_least_1(0)),
             'T' => self.scroll_down(at_least_1(0)),
-            // SGR and the rest leave the glyphs alone.
+
             _ => {}
         }
     }
@@ -215,7 +204,6 @@ impl Screen {
         self.rows.iter().map(|r| text(r)).collect()
     }
 
-    /// Scrollback, then the screen rows above `band_top`: the transcript.
     fn transcript(&self, band_top: u16) -> Vec<String> {
         let mut all = self.scrollback.clone();
         all.extend(self.lines().into_iter().take(usize::from(band_top)));
@@ -255,17 +243,9 @@ fn insert(term: &mut Term, rows: &[&str]) {
     .unwrap();
 }
 
-/// One frame of a `height`-row band: row `i` reads `band{i}`, and the
-/// prompt row (the second to last, as in the real input box) reads `❯`.
 fn band(term: &mut Term, height: u16) {
-    band_with_chips(term, height, 0);
-}
-
-/// `band` on a frame whose input box shows `chips` attachment rows.
-fn band_with_chips(term: &mut Term, height: u16, chips: u16) {
     let screen = term.last_known_screen_size;
-    term.set_viewport_height(height, screen, true, chips)
-        .unwrap();
+    term.set_viewport_height(height, screen).unwrap();
     term.draw(|frame| {
         let area = frame.area();
         for i in 0..area.height {
@@ -280,13 +260,6 @@ fn band_with_chips(term: &mut Term, height: u16, chips: u16) {
         }
     })
     .unwrap();
-}
-
-/// The settle path: the band gives its rows up without a paint, as a
-/// history insert does before it writes (`settle_band`).
-fn settle(term: &mut Term, height: u16) {
-    let screen = term.last_known_screen_size;
-    term.set_viewport_height(height, screen, false, 0).unwrap();
 }
 
 fn band_rows(height: u16) -> Vec<String> {
@@ -305,9 +278,6 @@ fn rows(range: std::ops::Range<usize>) -> Vec<String> {
     range.map(|i| format!("r{i}")).collect()
 }
 
-/// The reported gap: on a short session the band was pinned to the screen
-/// bottom, so a screenful of dead rows sat between `/resume` and the input
-/// box. The band now sits right under the last transcript row.
 #[test]
 fn the_band_sits_under_a_short_transcript() {
     let (mut term, tape) = term(16, 0, Scrollback::Regions);
@@ -322,8 +292,6 @@ fn the_band_sits_under_a_short_transcript() {
     assert_eq!(term.viewport_area, Rect::new(0, 3, W, 4));
 }
 
-/// Startup: the band starts empty on the shell's cursor row, and the banner
-/// pushes it down instead of being drawn over it.
 #[test]
 fn the_banner_lands_on_the_cursor_row_and_the_band_follows_it() {
     let (mut term, tape) = term(16, 5, Scrollback::Regions);
@@ -335,8 +303,6 @@ fn the_banner_lands_on_the_cursor_row_and_the_band_follows_it() {
     assert_eq!(lines[7..11], band_rows(4)[..]);
 }
 
-/// While there is room below, an insert shifts the band down: the terminal
-/// moves its cells, so neither the insert nor the next frame repaints it.
 #[test]
 fn an_insert_shifts_the_band_down_without_repainting_it() {
     let (mut term, tape) = term(16, 0, Scrollback::Regions);
@@ -361,8 +327,6 @@ fn an_insert_shifts_the_band_down_without_repainting_it() {
     assert_eq!(lines[3..7], band_rows(4)[..]);
 }
 
-/// Once the band reaches the bottom, rows scroll the transcript into
-/// scrollback, oldest first, and the band stays where it is.
 #[test]
 fn on_the_bottom_rows_scroll_into_history_in_order() {
     let (mut term, tape) = term(8, 0, Scrollback::Regions);
@@ -377,8 +341,6 @@ fn on_the_bottom_rows_scroll_into_history_in_order() {
     assert_eq!(term.viewport_area, Rect::new(0, 5, W, 3));
 }
 
-/// A batch taller than the screen (a reflow re-emitting the history) lands
-/// in order whichever way the terminal scrolls.
 #[test]
 fn a_batch_taller_than_the_screen_keeps_its_order() {
     for scrollback in [Scrollback::Regions, Scrollback::FullScreen] {
@@ -395,9 +357,6 @@ fn a_batch_taller_than_the_screen_keeps_its_order() {
     }
 }
 
-/// Opening the slash popup on a short transcript grows the band down into
-/// free rows and closing it shrinks it back: its top and the banner above
-/// it never move, and nothing reaches scrollback.
 #[test]
 fn growth_and_shrink_keep_the_band_top() {
     let (mut term, tape) = term(16, 0, Scrollback::Regions);
@@ -421,7 +380,6 @@ fn growth_and_shrink_keep_the_band_top() {
     assert!(screen.scrollback.is_empty());
 }
 
-/// Growth past the bottom scrolls only the overflow into scrollback.
 #[test]
 fn growth_past_the_bottom_scrolls_only_the_overflow() {
     let (mut term, tape) = term(10, 0, Scrollback::Regions);
@@ -439,10 +397,6 @@ fn growth_past_the_bottom_scrolls_only_the_overflow() {
     assert_eq!(screen.lines()[4..], band_rows(6)[..]);
 }
 
-/// A shrink on the bottom (a queued prompt collapsing the input box under a
-/// paused Thinking dock) keeps the band flush under the transcript: the
-/// rows it gave up sit under its footer, and the next inserts spend them
-/// before scrolling anything.
 #[test]
 fn a_shrink_leaves_its_rows_under_the_footer_for_the_next_insert() {
     let (mut term, tape) = term(10, 0, Scrollback::Regions);
@@ -468,11 +422,6 @@ fn a_shrink_leaves_its_rows_under_the_footer_for_the_next_insert() {
     assert_eq!(screen.transcript(6), rows(0..7));
 }
 
-/// The reported doubled prompt: back from the `/resume` picker, the
-/// terminal was rebuilt from a cursor probe that landed on the old prompt
-/// row; the band overflowed, scrolled the screen and left the old input box
-/// painted above the new one. Now the band is cleared and repainted where
-/// it already is, which also wipes anything stale inside it.
 #[test]
 fn a_modal_round_trip_repaints_the_band_in_place() {
     let (mut term, mut tape) = term(16, 0, Scrollback::Regions);
@@ -480,8 +429,6 @@ fn a_modal_round_trip_repaints_the_band_in_place() {
     band(&mut term, 4);
     let before = Screen::replay(&tape, W, 16).lines();
 
-    // Leftovers inside the band: a stale prompt row the frame's blank cells
-    // would never overwrite on their own.
     write!(tape, "\x1b[3;1H❯ stale\x1b[4;1H❯").unwrap();
     term.clear().unwrap();
     band(&mut term, 4);
@@ -491,9 +438,6 @@ fn a_modal_round_trip_repaints_the_band_in_place() {
     assert_eq!(after.iter().filter(|l| l.contains('❯')).count(), 1);
 }
 
-/// Windows Terminal: rows go in with whole-screen scrolling; the band is
-/// cleared first (no stale composer row reaches scrollback) and repainted
-/// under the new rows.
 #[test]
 fn full_screen_inserts_keep_the_band_out_of_scrollback() {
     let (mut term, tape) = term(8, 0, Scrollback::FullScreen);
@@ -508,8 +452,6 @@ fn full_screen_inserts_keep_the_band_out_of_scrollback() {
     assert_eq!(term.viewport_area, Rect::new(0, 5, W, 3));
 }
 
-/// One row above the band cannot hold a DECSTBM region (it needs two):
-/// the whole-screen fallback still lands the rows in order.
 #[test]
 fn a_one_row_history_region_falls_back_to_whole_screen_scrolling() {
     let (mut term, tape) = term(5, 0, Scrollback::Regions);
@@ -523,8 +465,6 @@ fn a_one_row_history_region_falls_back_to_whole_screen_scrolling() {
     assert_eq!(screen.lines()[1..], band_rows(4)[..]);
 }
 
-/// A hyperlinked cell's OSC 8 wrapper takes no columns, and a wide glyph
-/// covers the cell after it: neither pushes the rest of the row right.
 #[test]
 fn hyperlinks_and_wide_glyphs_keep_the_rest_of_the_row_in_place() {
     let (mut term, tape) = term(8, 0, Scrollback::Regions);
@@ -539,9 +479,6 @@ fn hyperlinks_and_wide_glyphs_keep_the_rest_of_the_row_in_place() {
     assert_eq!(lines[1], "中文x");
 }
 
-/// A shorter screen is reflowed from the top right after: a frame in
-/// between must not scroll rows into scrollback that the reflow writes
-/// again.
 #[test]
 fn a_frame_on_a_shrunken_screen_does_not_scroll_history() {
     let (mut term, tape) = term(10, 0, Scrollback::Regions);
@@ -550,76 +487,11 @@ fn a_frame_on_a_shrunken_screen_does_not_scroll_history() {
     insert(&mut term, &refs);
     band(&mut term, 4);
     let mark = tape.len();
-    term.set_viewport_height(4, Size::new(W, 8), true, 0)
-        .unwrap();
+    term.set_viewport_height(4, Size::new(W, 8)).unwrap();
     assert_eq!(term.viewport_area, Rect::new(0, 4, W, 4));
     assert!(!tape.since(mark).contains("\r\n"), "history was scrolled");
 }
 
-/// The reported bug: the band sat on the screen bottom, a paste grew it past
-/// the bottom (two transcript rows scrolled into scrollback), and removing
-/// the paste shrank it back. The shrink gives those rows back, so the footer
-/// lands on the last row at once and nothing blank sits under it. The rows
-/// the growth scrolled away stay in scrollback, so the blank rows the lift
-/// opens sit above the transcript.
-#[test]
-fn grow_then_shrink_puts_the_footer_back_on_the_last_row() {
-    for mode in [Scrollback::Regions, Scrollback::FullScreen] {
-        let (mut term, tape) = term(10, 0, mode);
-        let transcript = rows(0..6);
-        let refs: Vec<&str> = transcript.iter().map(String::as_str).collect();
-        insert(&mut term, &refs);
-        band(&mut term, 4);
-        band_with_chips(&mut term, 6, 2);
-        assert_eq!(term.viewport_area, Rect::new(0, 4, W, 6), "{mode:?}");
-
-        band(&mut term, 4);
-        assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4), "{mode:?}");
-        let screen = Screen::replay(&tape, W, 10);
-        assert_eq!(screen.scrollback, rows(0..2), "{mode:?}");
-        assert!(screen.lines()[..2].iter().all(String::is_empty), "{mode:?}");
-        assert_eq!(screen.lines()[2..6], rows(2..6)[..], "{mode:?}");
-        assert_eq!(screen.lines()[6..], band_rows(4)[..], "{mode:?}");
-    }
-}
-
-/// A settle (a committed card right before its insert) gives its rows up
-/// without a lift. The insert writes into them and the band moves down under
-/// the new rows, so the footer is back on the last row with nothing blank
-/// left above it, and the next attachment growth and removal still lift
-/// exactly what their own growth scrolled.
-#[test]
-fn a_settle_shrink_is_spent_by_the_insert_and_never_lifted() {
-    for mode in [Scrollback::Regions, Scrollback::FullScreen] {
-        let (mut term, tape) = term(10, 0, mode);
-        let transcript = rows(0..6);
-        let refs: Vec<&str> = transcript.iter().map(String::as_str).collect();
-        insert(&mut term, &refs);
-        band(&mut term, 4);
-        band_with_chips(&mut term, 6, 2);
-        settle(&mut term, 4);
-        assert_eq!(term.viewport_area, Rect::new(0, 4, W, 4), "{mode:?}");
-
-        insert(&mut term, &["r6", "r7"]);
-        band(&mut term, 4);
-        assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4), "{mode:?}");
-        let screen = Screen::replay(&tape, W, 10);
-        assert_eq!(screen.scrollback, rows(0..2), "{mode:?}");
-        assert_eq!(screen.transcript(6), rows(0..8), "{mode:?}");
-        assert_eq!(screen.lines()[6..], band_rows(4)[..], "{mode:?}");
-
-        band_with_chips(&mut term, 6, 2);
-        band(&mut term, 4);
-        assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4), "{mode:?}");
-        let screen = Screen::replay(&tape, W, 10);
-        assert_eq!(screen.lines()[6..], band_rows(4)[..], "{mode:?}");
-        assert_eq!(screen.scrollback, rows(0..4), "{mode:?}");
-    }
-}
-
-/// A popup or the status dock grows and shrinks the band the same way, but
-/// keeps its top on the way back: the blank rows stay under the footer until
-/// the next insert spends them, and no blank line reaches scrollback.
 #[test]
 fn a_popup_on_a_full_screen_keeps_the_band_top() {
     let (mut term, tape) = term(10, 0, Scrollback::Regions);

@@ -6,23 +6,17 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use std::sync::{Arc, Mutex};
 
-/// `$GRAY_HOME` is process-global: media stubbing materializes real files,
-/// so the stub tests pin it to a tempdir under the shared lock (same one
-/// `spill_tests` and `paths` use — one env, one lock).
 fn with_home<T>(body: impl FnOnce() -> T) -> T {
     let _guard = crate::paths::HOME_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::TempDir::new().expect("tempdir");
-    // SAFETY: the lock makes this the only thread touching the var while it
-    // is set, and every test reads back only its own directory.
+
     unsafe { std::env::set_var("GRAY_HOME", dir.path()) };
     let out = body();
     unsafe { std::env::remove_var("GRAY_HOME") };
     out
 }
-
-// --- Task 2 (RED): retention grouping + budget walk --------------------
 
 fn assistant_tool_use(id: &str) -> Message {
     Message {
@@ -40,9 +34,6 @@ fn user_tool_result(id: &str) -> Message {
     }
 }
 
-/// Assistant message carrying a whole parallel-call batch: gray's loop
-/// pushes one `ToolResult` user message per call, so an N-call batch is
-/// 1 assistant + N user messages.
 fn assistant_tool_uses(ids: &[&str]) -> Message {
     Message {
         role: Role::Assistant,
@@ -54,8 +45,6 @@ fn assistant_tool_uses(ids: &[&str]) -> Message {
     }
 }
 
-/// Sorted (calls, results) id sets in `msgs`: equal iff no orphaned call
-/// or result survives the retain/drop decision.
 fn call_result_ids(msgs: &[Message]) -> (Vec<String>, Vec<String>) {
     let mut uses: Vec<String> = msgs
         .iter()
@@ -125,8 +114,6 @@ fn retention_drops_tool_chatter_atomically() {
 
 #[test]
 fn atomic_batch_2_calls_drop_without_orphans() {
-    // Results span 2 user messages; the tool-use-only batch must drop
-    // whole — never a retained `c2` result orphaned from its call.
     let msgs = vec![
         assistant_tool_uses(&["c1", "c2"]),
         user_tool_result("c1"),
@@ -142,7 +129,6 @@ fn atomic_batch_2_calls_drop_without_orphans() {
 
 #[test]
 fn atomic_batch_3_calls_retain_without_orphans() {
-    // Text-carrying assistant: the batch is retained, still atomically.
     let mut batch = vec![Message {
         role: Role::Assistant,
         injected: false,
@@ -184,11 +170,6 @@ fn boundary_group_middle_truncated_not_dropped() {
 
 #[test]
 fn boundary_truncation_charges_thinking_and_tool_blocks() {
-    // Thinking (500 tokens) + text (1000) in the boundary group, newest
-    // kept (1000) at a 2000 budget: fixed costs bill first, text takes
-    // the remaining 500 with a marker, total stays within budget. The
-    // old text/image-only accounting kept the text whole (1000) with the
-    // 500 thinking tokens free → 2500 over a 2000 budget.
     let old = Message {
         role: Role::Assistant,
         injected: false,
@@ -210,8 +191,6 @@ fn boundary_truncation_charges_thinking_and_tool_blocks() {
         "truncated output fits budget"
     );
 
-    // Tool-arg-heavy mixed batch: ToolUse args (~500) + small result are
-    // fixed costs; the batch's text truncates to the remainder.
     let batch_old = vec![
         Message {
             role: Role::Assistant,
@@ -238,11 +217,6 @@ fn boundary_truncation_charges_thinking_and_tool_blocks() {
     );
 }
 
-// --- Task 3 (RED): in-band trigger call -------------------------------
-
-/// Test fake mirroring `agent::agent_tests::FakeProvider`'s `Provider`
-/// impl shape: records the `ChatRequest` it receives, replays one
-/// scripted event list.
 struct CapturingProvider {
     script: Mutex<Vec<StreamEvent>>,
     seen: Arc<Mutex<Vec<ChatRequest>>>,
@@ -266,8 +240,6 @@ impl Provider for CapturingProvider {
     }
 }
 
-/// Executor that records calls instead of running them (the trigger-call
-/// drain must never reach it).
 struct RecordingExecutor {
     calls: Arc<Mutex<Vec<String>>>,
 }
@@ -398,9 +370,6 @@ async fn compaction_call_drops_tool_use_blocks_from_reply() {
 
 #[test]
 fn budget_walk_newest_first() {
-    // Exact-fit sizing: 3 × 32k tokens at a 64k budget leaves
-    // `remaining == 0` after the two newest, so the oldest is dropped (a
-    // 30k sizing would boundary-truncate it instead — covered above).
     let mk = |tag: &str| Message::user(format!("{tag}:{}", "z".repeat(32_000 * 4 - tag.len() - 1)));
     let msgs = vec![mk("m1"), mk("m2"), mk("m3")];
     let out = build_retained(&msgs, RETAINED_MESSAGE_TOKEN_BUDGET);
@@ -409,11 +378,8 @@ fn budget_walk_newest_first() {
     assert!(out[1].text_content().starts_with("m3:"));
 }
 
-// --- Task 4 (RED): atomic image budget ------------------------------
-
 #[test]
 fn images_priced_and_dropped_oldest_first() {
-    // Adaptation #3 pricing: decoded bytes/4, floored at 1_000.
     assert_eq!(image_block_tokens("image/png", 5_000), 1_000);
     assert_eq!(image_block_tokens("image/png", 16_000), 3_000);
     assert_eq!(image_block_tokens("image/png", 64), 1_000);
@@ -423,13 +389,13 @@ fn images_priced_and_dropped_oldest_first() {
         injected: false,
         content: vec![ContentBlock::image("image/png", "a".repeat(5_000))],
     };
-    let new = Message::user("b".repeat(400)); // 100 tokens
-    // Tight budget: newest text kept, oldest image group dropped whole.
+    let new = Message::user("b".repeat(400));
+
     assert_eq!(
         build_retained(&[img.clone(), new.clone()], 500),
         vec![new.clone()]
     );
-    // Roomy budget (100 text + 1_000 priced image): both kept, image whole.
+
     let out = build_retained(&[img, new.clone()], 1_100);
     assert_eq!(out.len(), 2);
     assert_eq!(out[1], new);
@@ -454,15 +420,14 @@ fn trigger_is_task_neutral() {
 
 #[test]
 fn image_never_split_by_boundary_truncation() {
-    let old = Message::user("o".repeat(40)); // 10 tokens
+    let old = Message::user("o".repeat(40));
     let img = Message {
         role: Role::User,
         injected: false,
-        content: vec![ContentBlock::image("image/png", "a".repeat(5_000))], // 1_000 tokens
+        content: vec![ContentBlock::image("image/png", "a".repeat(5_000))],
     };
-    let new = Message::user("n".repeat(4_000)); // 1_000 tokens
-    // Newest kept (1_000); the image group doesn't fit in the remaining 10
-    // → whole-group drop with budget preserved, oldest text still kept.
+    let new = Message::user("n".repeat(4_000));
+
     let out = build_retained(&[old.clone(), img, new.clone()], 1_010);
     assert_eq!(out, vec![old, new]);
     assert!(
@@ -515,9 +480,7 @@ async fn compaction_preserves_last_live_hook_context() {
         assert_eq!(live.system, Some("S".to_string()));
         assert_eq!(compact.system, live.system);
         assert_eq!(compact.tools, live.tools);
-        // Per-turn hook text rides a transcript note, never the system
-        // prefix — a drifting `system` would force relay sessions to
-        // respawn (full re-bill) on every turn.
+
         assert!(
             live.messages
                 .iter()
@@ -528,10 +491,6 @@ async fn compaction_preserves_last_live_hook_context() {
     assert_eq!(hook.0.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
-// --- ARC citation stubs (arXiv:2607.25066) ---------------------------------
-
-/// Tool-only round (assistant `ToolUse` + user `ToolResult`) whose result
-/// body is `bytes` long.
 fn big_tool_group(id: &str, bytes: usize) -> Vec<Message> {
     vec![
         assistant_tool_use(id),
@@ -557,7 +516,7 @@ fn tool_only_round_with_large_output_survives_as_citation() {
     let mut msgs = big_tool_group("call_abc", ARC_STUB_MIN_BYTES + 100);
     msgs.push(Message::user("done?"));
     let out = build_retained_with_session(&msgs, RETAINED_MESSAGE_TOKEN_BUDGET, Some("sess1"));
-    // Pairing intact: the call and its (stubbed) result both survive.
+
     assert_eq!(
         call_result_ids(&out),
         (vec!["call_abc".to_string()], vec!["call_abc".to_string()]),
@@ -638,10 +597,7 @@ fn media_older_than_two_kept_groups_becomes_a_stub() {
             media_type: "image/png".to_string(),
             data: big(),
         });
-        // Four retained groups, oldest first: old_pic | big round | big round |
-        // recent_pic. The middle rounds must be large enough to survive the
-        // retention filter (small tool results are droppable and would leave
-        // only two groups, defeating the point of the test).
+
         let mut msgs = vec![old_pic];
         msgs.extend(big_tool_group("c1", ARC_STUB_MIN_BYTES + 100));
         msgs.extend(big_tool_group("c2", ARC_STUB_MIN_BYTES + 100));
@@ -658,7 +614,7 @@ fn media_older_than_two_kept_groups_becomes_a_stub() {
                 _ => false,
             })
         };
-        // Oldest picture: stubbed. Newest picture group: pixels kept.
+
         assert!(stubbed(&out[0]), "old media must be stubbed: {:?}", out[0]);
         assert!(!has_raw_image(&out[0]));
         let last = out.last().unwrap();
@@ -692,9 +648,6 @@ fn citation_stub_falls_back_to_generic_path_without_session() {
 
 #[test]
 fn stubbing_rescues_over_budget_text_group() {
-    // Assistant text worth keeping, fused with a tool call whose huge result
-    // prices the whole group out of budget: without the stub fallback the
-    // text drops with it.
     let msgs = vec![
         Message {
             role: Role::Assistant,
@@ -741,9 +694,6 @@ fn stubbing_rescues_over_budget_text_group() {
 
 #[test]
 fn fitting_groups_keep_large_output_verbatim() {
-    // Budget pressure is the trigger: a group that fits whole keeps its big
-    // result byte-identical (TRACE, arXiv:2608.06503 — eliding recent,
-    // still-referenced output destabilizes execution).
     let big = "z".repeat(ARC_STUB_MIN_BYTES + 10);
     let msgs = vec![
         Message {
@@ -768,8 +718,6 @@ fn fitting_groups_keep_large_output_verbatim() {
     assert_eq!(content, big, "no stub when the group fits");
 }
 
-// --- Soft-threshold elision (arXiv:2609.20804 T4 stage M1) -------------
-
 fn big_tool_result(id: &str) -> Message {
     Message {
         role: Role::User,
@@ -791,7 +739,6 @@ fn result_body(m: &Message) -> &str {
 
 #[test]
 fn soft_elision_stubs_old_large_results_and_keeps_the_recent_window_verbatim() {
-    // user, then four rounds each (assistant call, 8 KiB result).
     let mut msgs = vec![Message::user("fix it")];
     for id in ["a", "b", "c", "d"] {
         msgs.push(assistant_tool_use(id));
@@ -799,8 +746,7 @@ fn soft_elision_stubs_old_large_results_and_keeps_the_recent_window_verbatim() {
     }
     let (calls_before, results_before) = call_result_ids(&msgs);
     let len_before = msgs.len();
-    // Budget fits exactly one round (~2k tokens each); the two-group floor
-    // still keeps rounds c and d verbatim.
+
     let elided = elide_stale_tool_results(&mut msgs, 2_100, Some("sess"));
     assert_eq!(elided, 2, "rounds a and b are elided, c and d kept");
     assert_eq!(msgs.len(), len_before, "nothing dropped or reordered");
@@ -822,7 +768,7 @@ fn soft_elision_stubs_old_large_results_and_keeps_the_recent_window_verbatim() {
         "recent round d verbatim"
     );
     assert_eq!(msgs[0], Message::user("fix it"), "intent untouched");
-    // Idempotent: stubs are under the threshold, a second pass is a no-op.
+
     assert_eq!(elide_stale_tool_results(&mut msgs, 2_100, Some("sess")), 0);
 }
 
@@ -836,11 +782,10 @@ fn soft_elision_leaves_small_results_and_a_generous_window_alone() {
     msgs.insert(1, assistant_tool_use("big"));
     msgs.insert(2, big_tool_result("big"));
     let snapshot = msgs.clone();
-    // Keep budget covers the whole transcript: nothing is in the middle.
+
     assert_eq!(elide_stale_tool_results(&mut msgs, 1_000_000, None), 0);
     assert_eq!(msgs, snapshot);
-    // Tiny budget: only the one at-threshold body changes; small results
-    // older than the window are never stubbed.
+
     assert_eq!(elide_stale_tool_results(&mut msgs, 1, None), 1);
     assert_eq!(result_body(&msgs[4]), "ok");
 }

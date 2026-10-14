@@ -1,4 +1,3 @@
-// UNRUN (cargo test banned under X): run in TTY/CI.
 use super::*;
 
 struct StubRunner {
@@ -19,7 +18,6 @@ impl AsyncRunner for StubRunner {
     }
 }
 
-/// A runner that produced the same text for the transcript and the answer.
 fn out(text: &str) -> FireOutput {
     FireOutput {
         transcript: text.to_string(),
@@ -74,9 +72,6 @@ fn test_config() -> crate::config::Config {
 
 #[test]
 fn fire_follows_saved_model_switches() {
-    // A /model switch persists base_url+model; a later fire must use the
-    // switch, not the runner's startup snapshot. Pure temp path, no env, so
-    // parallel tests cannot interfere.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");
     std::fs::write(
@@ -285,8 +280,7 @@ async fn origin_delivery_appends_to_session_and_keeps_file_on_failure() {
     let deliver = SaveLocalDeliver {
         home: home.path().to_path_buf(),
     };
-    // Happy path: session append + file save. The mirror is the clean
-    // excerpt (no wrapper, no file path) as a USER turn.
+
     let saved = deliver
         .deliver_full(
             &mk_job("j-origin", chat),
@@ -328,10 +322,7 @@ async fn origin_delivery_appends_to_session_and_keeps_file_on_failure() {
         session_text.contains("\"role\":\"user\""),
         "mirror must be a USER turn, never assistant"
     );
-    // No session for the chat id: the mirror is skipped, NOT a delivery
-    // failure. A host whose chat id has no session yet (a job added in a
-    // conversation's first turn) must still receive the message; only the
-    // in-context mirror is lost.
+
     let saved = deliver
         .deliver_full(
             &mk_job("j-bad", "no-such-session"),
@@ -383,9 +374,6 @@ async fn cron_runner_receives_job_workdir() {
 
 #[tokio::test]
 async fn local_and_target_jobs_are_save_only() {
-    // Local, unknown target, and session-less origin all save only. One
-    // temp home per job: each `due_store` writes a fresh `jobs.json`, so a
-    // shared home would leave only the last record behind.
     for (id, d) in [
         ("l1", serde_json::json!("local")),
         ("t1", serde_json::json!({"target": "somewhere"})),
@@ -439,17 +427,16 @@ async fn tick_fires_nothing_while_the_switch_is_off_but_keeps_ticking() {
     assert_eq!(rep.fired, 0);
     assert_eq!(rep.errors, 0);
     assert!(rep.delivered.is_empty());
-    // The job was never claimed, so it stays due for the flip back on.
+
     let job = store.get("j1").unwrap().unwrap();
     assert!(job.fire_claim.is_none());
     assert_eq!(job.last_status, None);
     assert!(runner.seen.lock().unwrap().is_empty());
-    // The heartbeat stamped anyway — liveness stays truthful, the ticker is
-    // alive, it just fired nothing.
+
     let now = crate::cron::now_secs();
     let health = store.health(now).unwrap();
     assert!(health.ticker_live(now));
-    // And with the switch on, the very same store fires normally.
+
     let rep = tick_once_with(
         &store,
         &runner,
@@ -463,8 +450,6 @@ async fn tick_fires_nothing_while_the_switch_is_off_but_keeps_ticking() {
     .unwrap();
     assert_eq!(rep.fired, 1);
 }
-
-// ── chat delivery: the line a platform host routes ──
 
 fn delivered() -> DeliveredFire {
     DeliveredFire {
@@ -497,8 +482,7 @@ fn delivery_json_carries_the_route_and_the_hermes_frame() {
     assert_eq!(v["platform"], "discord");
     assert_eq!(v["chat"], "chat:one");
     assert_eq!(v["route"], "1234567890");
-    // Structured fields for a native renderer; `text` is only the plain
-    // fallback and carries no job id, dashes, footer or path.
+
     assert_eq!(v["kind"], "task");
     assert_eq!(v["status"], "ok");
     assert_eq!(v["final_text"], "all clear");
@@ -516,9 +500,6 @@ fn delivery_json_without_an_origin_still_renders() {
 
 #[tokio::test]
 async fn a_platform_chat_id_gets_its_own_transcript() {
-    // A host passes the real session id when it knows one (so a reply
-    // continues in context); otherwise the chat id names the transcript.
-    // Either way the delivery is a chat delivery, never local-only.
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().to_path_buf();
     let store_dir = home.join("sessions");
@@ -550,9 +531,7 @@ async fn a_platform_chat_id_gets_its_own_transcript() {
         deliver: crate::cron::Deliver::Origin,
         origin: Some(crate::cron::store::Origin {
             platform: "discord".into(),
-            // A host passes a session-safe id: the live session uuid when it
-            // knows one, else its conversation key. Anything the session
-            // store would reject cannot be mirrored.
+
             chat: "4f3c2b1a9d8e7f6a5b4c3d2e1f0a9b8c".into(),
             thread: None,
             route: Some("42".into()),
@@ -580,9 +559,6 @@ async fn a_platform_chat_id_gets_its_own_transcript() {
 
 #[tokio::test]
 async fn a_missing_origin_session_still_delivers_to_the_route() {
-    // A job added in a conversation's first turn: the host has a chat id
-    // but no session for it yet. The mirror is best-effort context; losing
-    // it must not swallow the delivery the platform is waiting for.
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().to_path_buf();
     let job = crate::cron::CronJob {
@@ -619,7 +595,7 @@ async fn a_missing_origin_session_still_delivers_to_the_route() {
         .expect("a missing session is not a delivery failure");
     assert!(saved.to_chat);
     assert!(saved.excerpt.contains("the deploy is green"));
-    // The local transcript of the run still exists either way.
+
     let out = home.join("cron").join("output").join("job1").join("1.md");
     assert!(
         std::fs::read_to_string(&out)
@@ -660,7 +636,7 @@ async fn a_reminder_fires_without_a_model_turn_and_delivers_verbatim() {
     let d = &rep.delivered[0];
     assert!(d.reminder && d.to_chat && !d.failed);
     assert_eq!(d.excerpt, "clean my roo");
-    // No framing at all: the user's own words, byte for byte.
+
     assert_eq!(format_fire_chat(d), "clean my roo");
 }
 
@@ -742,9 +718,6 @@ async fn chat_gets_only_the_final_text_while_the_transcript_stays_on_disk() {
 
 #[tokio::test]
 async fn a_session_origin_fire_goes_to_that_sessions_inbox_once() {
-    // A job added from inside a gray session comes back as one inbox entry
-    // (card + user-role note) for the REPL to turn into a turn: never a chat
-    // route, never a transcript mirror (the REPL's turn persists the note).
     let home = tempfile::tempdir().unwrap();
     let mut record = one_due("s3", serde_json::json!("origin"));
     record[0]["origin"] = serde_json::json!({"platform": SESSION_PLATFORM, "chat": "sess-1"});
@@ -782,15 +755,12 @@ async fn a_session_origin_fire_goes_to_that_sessions_inbox_once() {
         "delivered once"
     );
     assert!(!session_inbox_pending(home.path(), "sess-1"));
-    // A session id that could leave the inbox directory is never a path.
+
     assert!(!session_inbox_pending(home.path(), "../sess-1"));
 }
 
 #[tokio::test]
 async fn hosted_delivery_survives_a_non_host_driver() {
-    // The Discord incident: an in-turn `cron serve`/`tick` (or the gateway)
-    // fired a channel-bound job and its delivery died on that process's
-    // stdout. Now it waits in the outbox for the host's `tick --json`.
     let home = tempfile::tempdir().unwrap();
     let origin = serde_json::json!({"platform": "discord", "chat": "c1", "route": "chan-9"});
     let mut hosted = one_due("d1", serde_json::json!("origin"));
