@@ -4,7 +4,6 @@ use anstyle::{Color, Effects};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum ColorLevel {
-
     None,
 
     Basic,
@@ -16,7 +15,6 @@ pub enum ColorLevel {
 }
 
 impl ColorLevel {
-
     pub fn has_256(self) -> bool {
         self >= Self::Ansi256
     }
@@ -26,13 +24,11 @@ static COLOR_LEVEL: OnceLock<ColorLevel> = OnceLock::new();
 
 pub fn detect_color_level() -> ColorLevel {
     *COLOR_LEVEL.get_or_init(|| {
-
         if std::env::var_os("NO_COLOR").is_some() {
             return ColorLevel::None;
         }
 
         let level = match supports_color::on(supports_color::Stream::Stdout) {
-
             None => ColorLevel::TrueColor,
             Some(level) => {
                 if level.has_16m {

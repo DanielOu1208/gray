@@ -19,7 +19,6 @@ pub struct WindowLine {
 }
 
 pub struct Window {
-
     pub shown: Vec<String>,
 
     pub cut: Option<Cut>,
@@ -52,7 +51,6 @@ pub fn window(
     for (i, l) in lines.iter().enumerate() {
         let n = first_n + i;
         if shown.len() >= max_lines {
-
             return Window {
                 shown,
                 cut: Some(Cut::Lines),
@@ -64,7 +62,6 @@ pub fn window(
         let p = prefix_line(n, &c);
         let need = p.len() + if shown.is_empty() { 0 } else { 1 };
         if bytes_used + need > max_bytes {
-
             return Window {
                 shown,
                 cut: Some(Cut::Bytes),

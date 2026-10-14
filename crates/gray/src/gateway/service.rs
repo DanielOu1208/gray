@@ -32,7 +32,6 @@ pub fn supervisor_kind() -> String {
 fn parent_comm() -> Option<String> {
     #[cfg(unix)]
     {
-
         let ppid = unsafe { libc::getppid() };
         proc_comm(ppid as u32)
     }
@@ -416,7 +415,6 @@ fn stop_by_pid(home: &Path) -> anyhow::Result<String> {
     };
     #[cfg(unix)]
     {
-
         unsafe { libc::kill(rec.pid as libc::pid_t, libc::SIGTERM) };
     }
     #[cfg(not(unix))]
@@ -588,7 +586,6 @@ fn runit_run_script(home: &Path, exe: &Path) -> String {
 }
 
 fn runit_log_script(home: &Path) -> String {
-
     let logs = shell_quote(
         &home
             .join("logs/gateway")

@@ -145,7 +145,6 @@ fn idle_ctx(cwd: &Path, sid: &str) -> gray_core::agent::ToolContext {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum WakeCard {
-
     Cron(crate::cron_serve::CronCard),
 
     Job(JobCard),

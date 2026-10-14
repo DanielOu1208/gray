@@ -98,7 +98,6 @@ impl Screen {
     }
 
     fn csi(&mut self, params: &str, fin: char) {
-
         if params.starts_with('?') {
             return;
         }

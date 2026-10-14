@@ -158,7 +158,6 @@ pub fn parse_schedule(input: &str) -> anyhow::Result<Schedule> {
 pub fn next_run(after: i64, s: &Schedule) -> Option<i64> {
     match s {
         Schedule::Interval { secs } => {
-
             if *secs < MIN_INTERVAL_SECS {
                 return None;
             }

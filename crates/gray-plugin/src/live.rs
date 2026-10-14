@@ -76,7 +76,6 @@ impl ToolExecutor for LiveRegistry {
     }
 
     fn execute(&self, ctx: &ToolContext, name: &str, args: Value) -> BoxFut<ToolOutput> {
-
         if self.static_.tool_names().iter().any(|n| n == name) {
             return self.static_.execute(ctx, name, args);
         }

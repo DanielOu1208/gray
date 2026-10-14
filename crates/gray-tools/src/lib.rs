@@ -50,7 +50,6 @@ pub struct Registry {
 }
 
 impl Registry {
-
     pub fn new(tools: Vec<Arc<dyn Tool>>) -> Self {
         let mut out: Vec<Arc<dyn Tool>> = Vec::new();
         for t in tools {
@@ -167,7 +166,6 @@ fn coerce_args(def: &ToolDef, args: Value) -> Value {
             .is_some_and(|o| o.contains_key(name))
     };
     for (old, new) in ALIASES {
-
         if map.contains_key(*old)
             && !map.contains_key(*new)
             && has_prop(new)
@@ -213,7 +211,6 @@ fn coerce_args(def: &ToolDef, args: Value) -> Value {
                 .map(Value::from)
                 .or_else(|| {
                     s.trim().parse::<f64>().ok().and_then(|n| {
-
                         (n.fract() == 0.0 && n.abs() < 9.223372036854776e18)
                             .then_some(Value::from(n as i64))
                     })
@@ -261,7 +258,6 @@ fn coerce_args(def: &ToolDef, args: Value) -> Value {
     let drop: Vec<String> = map
         .iter()
         .filter_map(|(k, v)| {
-
             if v.is_null() && !required.iter().any(|r| r == k) {
                 Some(k.clone())
             } else {
@@ -299,7 +295,6 @@ impl ToolExecutor for Registry {
         timeout: std::time::Duration,
     ) -> BoxFuture<'static, Option<()>> {
         for tool in &self.tools {
-
             if tool.as_any().downcast_ref::<BashTool>().is_some() {
                 let ctx = ctx.clone();
                 let fut = tool

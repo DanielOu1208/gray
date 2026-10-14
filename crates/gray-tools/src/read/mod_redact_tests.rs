@@ -3,7 +3,6 @@ use gray_core::agent::ToolContext;
 
 #[tokio::test]
 async fn read_redacts_secret_shaped_assignment() {
-
     let name: String = [109u8, 121, 95, 116, 111, 107, 101, 110]
         .iter()
         .map(|b| *b as char)

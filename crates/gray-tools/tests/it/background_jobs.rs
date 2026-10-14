@@ -147,7 +147,6 @@ async fn timed_out_commands_keep_running_and_other_work_proceeds() {
 
 #[tokio::test]
 async fn the_turn_end_wake_fires_when_a_job_finishes() {
-
     let dir = tempfile::tempdir().unwrap();
     let ctx = ctx(dir.path());
     let reg = Registry::new(vec![Arc::new(BashTool::default())]);

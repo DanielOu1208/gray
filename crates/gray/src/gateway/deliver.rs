@@ -25,7 +25,6 @@ fn is_token_line(line: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
-
     Deliver(Intent),
 
     Suppressed(&'static str),

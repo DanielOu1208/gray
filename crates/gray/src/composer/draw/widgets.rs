@@ -204,7 +204,6 @@ pub(crate) fn build_input_box(
         }
         let lead = cells.len();
         if i == 0 && text.is_empty() {
-
             if let Some(hint) = ghost {
                 cells.extend(hint.chars().map(|c| (c, ghost_style)));
             }

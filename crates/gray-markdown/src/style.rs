@@ -171,7 +171,6 @@ pub struct MarkdownStyle {
 }
 
 impl MarkdownStyle {
-
     pub fn adapt(self) -> Self {
         Self {
             heading_inner: [

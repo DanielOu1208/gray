@@ -10,7 +10,6 @@ const MAX_METER_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug)]
 pub enum SpillError {
-
     NoHome,
 
     BadHandle(String),
@@ -126,7 +125,6 @@ fn prune(dir: &Path) {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct MeterEvent {
-
     pub ts: u64,
 
     pub rule: String,
@@ -146,7 +144,6 @@ pub struct MeterTotals {
 }
 
 impl MeterTotals {
-
     pub fn saved(&self) -> u64 {
         self.raw_bytes.saturating_sub(self.sent_bytes)
     }

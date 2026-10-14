@@ -226,7 +226,6 @@ async fn fast_path_parity() {
             &["a.txt"],
             false,
         ),
-
         (json!({"pattern": "needle", "limit": 5}), dir_rels, true),
     ];
     for (args, rels, hits_limit) in shapes.iter() {
@@ -243,7 +242,6 @@ async fn fast_path_parity() {
         let (fm, frest) = split(&fast.content, rels);
         let (sm, srest) = split(&slow.content, rels);
         if *hits_limit {
-
             assert!(
                 !fm.is_empty(),
                 "no matches at all for {args} — is rg installed?"

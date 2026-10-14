@@ -17,7 +17,6 @@ fn bash_args(cmd: &str) -> serde_json::Value {
 
 #[test]
 fn bash_heredoc_write_renders_code_then_output() {
-
     let cmd = "cat <<'EOF' > pid.rs\nfn main() {}\nEOF";
     let out = "exit 0 · patched pid.rs";
     let lines =
@@ -70,7 +69,6 @@ fn bash_shell_fence_is_stripped_for_display() {
 
 #[test]
 fn bash_half_fence_from_truncation_still_strips() {
-
     let open_only = "<untrusted-output task=\"t3\">\npartial body";
     let text: String = format_tool_result_lines_with_context("bash", None, open_only, false, None)
         .iter()
@@ -91,7 +89,6 @@ fn bash_half_fence_from_truncation_still_strips() {
 
 #[test]
 fn bash_header_plus_fence_is_stripped_for_display() {
-
     let out = "exit 0 \u{00b7} 0.0s \u{00b7} 1 lines \u{00b7} log ~/.gray/shell/nosession/t1.log\n<untrusted-output task=\"t1\">\nhi\n</untrusted-output>";
     let lines = format_tool_result_lines_with_context("bash", None, out, false, None);
     let rendered: String = lines.iter().map(row_text).collect::<Vec<_>>().join("\n");
@@ -105,7 +102,6 @@ fn bash_header_plus_fence_is_stripped_for_display() {
 
 #[test]
 fn bash_promotion_trailer_keeps_body_but_drops_fence() {
-
     let out = "still running after 1s \u{2192} promoted to background as t6 \u{00b7} pid 4242 \u{00b7} log ~/.gray/shell/nosession/t6.log\n<untrusted-output task=\"t6\">\ntick 1\n</untrusted-output>\nshell_output(task_id=\"t6\", from_offset=12) for the rest \u{00b7} next_offset=12";
     let lines = format_tool_result_lines_with_context("bash", None, out, false, None);
     let rendered: String = lines.iter().map(row_text).collect::<Vec<_>>().join("\n");
@@ -126,7 +122,6 @@ fn bash_promotion_trailer_keeps_body_but_drops_fence() {
 
 #[test]
 fn bash_escaped_closer_in_body_is_restored() {
-
     let out = "exit 0 \u{00b7} 0.0s \u{00b7} 2 lines \u{00b7} log ~/.gray/shell/nosession/t1.log\n<untrusted-output task=\"t1\">\nfirst\n<\\/untrusted-output> tail\n</untrusted-output>";
     let lines = format_tool_result_lines_with_context("bash", None, out, false, None);
     let rendered: String = lines.iter().map(row_text).collect::<Vec<_>>().join("\n");
@@ -160,7 +155,6 @@ fn bash_caps_long_output_like_code_blocks() {
 
 #[test]
 fn ls_caps_home_dir_flooding() {
-
     let out: String = (1..=180)
         .map(|i| format!("entry-{i}"))
         .collect::<Vec<_>>()
@@ -196,7 +190,6 @@ fn bash_html_is_split_one_tag_per_line() {
 
 #[test]
 fn render_code_block_608_line_file_has_unique_gutters() {
-
     let mut src: Vec<String> = vec![
         "<!DOCTYPE html>".to_string(),
         "<html lang=\"en\">".to_string(),
@@ -285,7 +278,6 @@ fn live_header_garbage_never_panics_and_names_tool() {
 
 #[test]
 fn live_header_huge_raw_still_streams_prefix() {
-
     let big = format!(r#"{{"command":"{}"#, "x".repeat(9000));
     let full = format!(r#"{{"command":"{}"}}"#, "x".repeat(9000));
     let v: serde_json::Value = serde_json::from_str(&full).unwrap();
@@ -297,7 +289,6 @@ fn live_header_huge_raw_still_streams_prefix() {
 
 #[test]
 fn truncate_cmd_never_splits_a_multibyte_char() {
-
     let head = "114.3k/300k · 0.0% cache ";
     assert_eq!(head.len(), 26);
     let pad = "x".repeat(53);
@@ -410,7 +401,6 @@ fn web_fetch_renders_a_verb_with_the_url() {
 
 #[test]
 fn web_search_body_renders_like_bash() {
-
     let out = r#"{"provider":"bing","results":[{"title":"t","url":"https://example.com","snippet":"hi"}]}"#;
     let lines = format_tool_result_lines_with_context("web_search", None, out, false, None);
     assert!(
@@ -428,7 +418,6 @@ fn web_search_body_renders_like_bash() {
 
 #[test]
 fn web_fetch_body_renders_like_bash() {
-
     let out = "line one\nline two";
     let lines = format_tool_result_lines_with_context("web_fetch", None, out, false, None);
     assert!(
@@ -445,7 +434,6 @@ fn web_fetch_body_renders_like_bash() {
 
 #[test]
 fn web_search_caps_long_output_like_bash() {
-
     let out: String = (1..=60)
         .map(|i| format!("result {i}"))
         .collect::<Vec<_>>()
@@ -506,7 +494,6 @@ fn web_fetch_decodes_entities_and_keeps_unknown_literal() {
 
 #[test]
 fn web_fetch_giant_line_is_char_truncated_not_row_flooded() {
-
     let out = "word ".repeat(1000);
     let lines = format_tool_result_lines_with_context("web_fetch", None, &out, false, None);
     let text: String = lines.iter().map(row_text).collect::<Vec<_>>().join("\n");
@@ -521,7 +508,6 @@ fn web_fetch_giant_line_is_char_truncated_not_row_flooded() {
 
 #[test]
 fn web_search_many_results_hit_the_omission_marker() {
-
     let results: Vec<String> = (1..=20)
         .map(|i| {
             format!(r#"{{"title":"title {i}","url":"https://r{i}.example","snippet":"s{i}"}}"#)
@@ -552,7 +538,6 @@ fn an_unknown_tool_humanizes_its_name_and_shows_args() {
 
 #[test]
 fn plugin_preview_path_renders_first_string_at_that_path() {
-
     let args = serde_json::json!({"document": {"title": "  ## Hello  "}});
     let text = row_text(&format_tool_call_header(
         "some_surface_tool",
@@ -592,7 +577,6 @@ fn plugin_preview_path_missing_falls_back_to_generic_dump() {
 
 #[test]
 fn unknown_tool_surfaces_first_string_arg_and_flags_the_rest() {
-
     let args = serde_json::json!({"all": true, "limit": 10});
     let text = row_text(&format_tool_call_header("recall", &args, None, None));
     assert!(text.contains("recall"), "headline missing: {text:?}");
@@ -853,7 +837,6 @@ fn an_error_lines_up_with_numbered_output() {
 
 #[test]
 fn an_unknown_tool_renders_its_args_verbatim() {
-
     let args = serde_json::json!({"content": "**updated**"});
     let text = row_text(&format_tool_call_header(
         "my_channel_send",
@@ -1139,7 +1122,6 @@ fn template_preview_flattens_for_json_and_dot_paths_stay_put() {
 
 #[test]
 fn dot_path_preview_header_is_unchanged() {
-
     let args = serde_json::json!({"document": {"title": "## Hello"}});
     let lines = format_tool_call_lines("some_surface_tool", &args, None, Some("document.title"));
     assert_eq!(lines.len(), 1, "a dot path adds no second line");
@@ -1184,7 +1166,6 @@ fn row_texts(lines: &[Line<'_>]) -> Vec<String> {
 
 #[test]
 fn manifest_label_beats_a_wire_label_arg() {
-
     let args = serde_json::json!({"label": "wire-value", "name": "x"});
     let lines = format_tool_card_lines("my_tool", &args, None, Some("Manifest Label"), None);
     let head = row_text(&lines[0]);
@@ -1195,7 +1176,6 @@ fn manifest_label_beats_a_wire_label_arg() {
 
 #[test]
 fn live_header_with_label_and_template_matches_the_final_card() {
-
     let raw = r#"{"name":"e2e-theme","model":"claude-haiku-5-5","effort":"max","prompt":"verify the theme fixes\nmore"}"#;
     let v: serde_json::Value = serde_json::from_str(raw).unwrap();
     let spec = "{name} · {model|model} · {effort}\n{prompt|firstline}";

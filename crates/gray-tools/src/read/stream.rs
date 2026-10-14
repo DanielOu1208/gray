@@ -52,7 +52,6 @@ impl<R: AsyncRead + Unpin> AsyncRead for HashRead<R> {
 }
 
 pub struct RawLine {
-
     pub line_no: usize,
 
     pub bytes: Vec<u8>,
@@ -61,7 +60,6 @@ pub struct RawLine {
 }
 
 impl RawLine {
-
     pub fn text(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(&self.bytes)
     }
@@ -79,13 +77,11 @@ pub struct LineStream {
 }
 
 impl LineStream {
-
     pub async fn open(
         path: &Path,
         display: &str,
         cancel: CancellationToken,
     ) -> std::io::Result<Self> {
-
         #[cfg(unix)]
         let file = {
             use std::os::unix::fs::OpenOptionsExt;
@@ -149,7 +145,6 @@ impl LineStream {
             }
             let room = (LINE_BYTE_CAP + 1).saturating_sub(self.scratch.len());
             if room == 0 {
-
                 match chunk.iter().position(|&b| b == b'\n') {
                     Some(p) => {
                         overflow_bytes += p as u64;
@@ -182,7 +177,6 @@ impl LineStream {
             }
         }
         if self.scratch.is_empty() && overflow_bytes == 0 && !had_newline {
-
             self.done = true;
             return Ok(None);
         }
@@ -196,7 +190,6 @@ impl LineStream {
             self.scratch.truncate(len - 1);
         }
         if self.line_no == 0 {
-
             let bom = self.scratch.len() - hygiene::strip_bom(&self.scratch).len();
             if bom > 0 {
                 self.scratch.drain(..bom);
@@ -233,7 +226,6 @@ impl LineStream {
             if let Some(max) = cap
                 && newlines + chunk_newlines >= max
             {
-
                 let mut need = max - newlines;
                 let mut pos = chunk.len();
                 if need == 0 {

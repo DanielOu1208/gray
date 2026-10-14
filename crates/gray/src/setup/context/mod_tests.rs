@@ -29,7 +29,6 @@ fn compaction_defaults_match_legacy() {
 
 #[test]
 fn reasoning_capability_from_models_dev_and_live() {
-
     assert_eq!(
         model_supports_reasoning("test-reason-capability-never-seen"),
         None
@@ -192,7 +191,6 @@ fn reasoning_capability_from_models_dev_and_live() {
 
 #[test]
 fn commandcode_mimo_pro_keeps_max_after_models_dev_high_only_cache() {
-
     set_active_model_provider("https://api.commandcode.ai/provider/v1");
     let cached_high_only = serde_json::json!({
         "gateway": {"models": {
@@ -351,7 +349,6 @@ fn breakdown_free_and_grid_sum_to_window() {
 
 #[test]
 fn step_models_are_never_offered_a_dishonest_off() {
-
     let v: serde_json::Value = serde_json::json!({
         "prov": {"models": {
             "test-reason-plain": {"reasoning": false, "limit": {"context": 32000}},
@@ -390,7 +387,6 @@ fn step_models_are_never_offered_a_dishonest_off() {
 
 #[test]
 fn effort_in_id_models_offer_no_knob() {
-
     set_active_model_provider("https://127.0.0.1:1/");
     for id in [
         "swe-2-max",
@@ -416,7 +412,6 @@ fn effort_in_id_models_offer_no_knob() {
 
 #[test]
 fn litellm_above_200k_tier_prices_long_context() {
-
     let v: serde_json::Value = serde_json::json!({
         "test-tiered": {
             "max_input_tokens": 1_000_000,
@@ -457,7 +452,6 @@ fn litellm_above_200k_tier_prices_long_context() {
 
 #[test]
 fn models_dev_cost_gap_fills_and_tiers_merge_in_either_order() {
-
     let dev: serde_json::Value = serde_json::json!({
         "prov": {"models": {
             "test-dev-only": {"cost": {"input": 2.0, "output": 12.0,

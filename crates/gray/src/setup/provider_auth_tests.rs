@@ -159,7 +159,6 @@ fn a_dismissed_connect_leaves_the_session_as_it_was() {
         Ok(crate::setup::ConnectOutcome::Dismissed),
         Err(anyhow!("modal failed")),
     ] {
-
         let mut config = key_config("https://openrouter.ai/api/v1", Some("sk-picked"));
         settle_connect_config(&mut config, before.clone(), &outcome);
         assert!(config == before);

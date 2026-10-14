@@ -327,13 +327,11 @@ async fn happy_path_single_tool_round_trip() {
             },
             AgentEvent::tool_call_end("call_1", serde_json::json!({"q": "x"})),
             AgentEvent::tool_result("call_1", "result payload", false),
-
             AgentEvent::MessageBoundary,
             AgentEvent::text_delta("all done"),
             AgentEvent::StepUsage {
                 usage: Usage::new(20, 10)
             },
-
             AgentEvent::turn_end(
                 StopReason::EndTurn,
                 Usage {
@@ -399,7 +397,6 @@ async fn tool_error_is_fed_back_and_model_recovers() {
             AgentEvent::StepUsage {
                 usage: Usage::new(10, 5)
             },
-
             AgentEvent::turn_end(StopReason::EndTurn, Usage::new(10, 5)),
         ]
     );
@@ -414,7 +411,6 @@ async fn tool_error_is_fed_back_and_model_recovers() {
 
 #[tokio::test]
 async fn loop_guard_nudges_once_at_four_then_aborts_at_six() {
-
     let scripts: Vec<Vec<StreamEvent>> = (0..6).map(|i| tool_script(&format!("c{i}"))).collect();
     let provider = FakeProvider::new(scripts);
     let executor = FakeExecutor::new(ToolOutput::ok("ok"));
@@ -440,7 +436,6 @@ async fn loop_guard_nudges_once_at_four_then_aborts_at_six() {
 
 #[tokio::test]
 async fn loop_guard_lets_the_model_recover() {
-
     let mut scripts: Vec<Vec<StreamEvent>> =
         (0..3).map(|i| tool_script(&format!("c{i}"))).collect();
     scripts.push(read_script("r1", "/tmp/other.rs"));
@@ -463,7 +458,6 @@ async fn loop_guard_lets_the_model_recover() {
 
 #[tokio::test]
 async fn loop_guard_exempts_job_polls() {
-
     let mut scripts: Vec<Vec<StreamEvent>> =
         (0..10).map(|i| tool_script(&format!("c{i}"))).collect();
     scripts.push(end_script());
@@ -487,7 +481,6 @@ async fn loop_guard_exempts_job_polls() {
 
 #[tokio::test]
 async fn running_jobs_are_relisted_at_turn_start() {
-
     let provider = FakeProvider::new(vec![end_script()]);
     let seen = provider.seen_requests();
     let executor = FakeExecutor::new(ToolOutput::ok("unused")).with_jobs_note(
@@ -520,7 +513,6 @@ async fn running_jobs_are_relisted_at_turn_start() {
 
 #[tokio::test]
 async fn retryable_failure_with_no_output_retries_whole_turn_and_recovers() {
-
     let provider = FakeProvider::new(vec![end_script()]).with_failures(vec![
         ProviderError::ServerError("provider-side status 503".into()),
         ProviderError::ServerError("provider-side status 503".into()),
@@ -548,7 +540,6 @@ async fn retryable_failure_with_no_output_retries_whole_turn_and_recovers() {
 
 #[tokio::test]
 async fn retryable_failure_budget_exhausts_and_surfaces() {
-
     let provider = FakeProvider::new(vec![]).with_failures(vec![
         ProviderError::ServerError("503".into()),
         ProviderError::ServerError("503".into()),
@@ -571,7 +562,6 @@ async fn retryable_failure_budget_exhausts_and_surfaces() {
 
 #[tokio::test]
 async fn non_retryable_failure_never_retries_whole_turn() {
-
     let provider = FakeProvider::new(vec![end_script()])
         .with_failures(vec![ProviderError::Auth("401".into())]);
     let seen = provider.seen_requests();
@@ -590,7 +580,6 @@ async fn non_retryable_failure_never_retries_whole_turn() {
 
 #[tokio::test]
 async fn mid_stream_failure_after_visible_delta_does_not_replay() {
-
     let provider = FakeProvider::new(vec![end_script()]).with_partial_failures(vec![(
         vec![StreamEvent::text_delta("visible half")],
         ProviderError::ServerError("503".into()),
@@ -614,7 +603,6 @@ async fn mid_stream_failure_after_visible_delta_does_not_replay() {
 
 #[tokio::test]
 async fn stream_error_notices_forward_live_without_ending_turn() {
-
     let provider = FakeProvider::new(vec![vec![
         StreamEvent::stream_error("Reconnecting... 1/3", "status 503: boom"),
         StreamEvent::text_delta("still here"),
@@ -948,7 +936,6 @@ async fn context_overflow_compacts_once_then_continues() {
         Box::new(provider),
         Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
     )
-
     .with_messages(
         (0..80)
             .map(|i| Message::user(format!("bulk{i}:{}", "x".repeat(3990))))
@@ -1159,7 +1146,6 @@ fn tool_script_with_args(id: &str, args: &str) -> Vec<StreamEvent> {
 
 #[tokio::test]
 async fn alternating_tool_empty_stays_bounded_and_nudges_once() {
-
     let provider = FakeProvider::new(vec![
         tool_script_with_args("c1", r#"{"q":"a"}"#),
         empty_script(),
@@ -1204,7 +1190,6 @@ fn text_end_script(text: &str) -> Vec<StreamEvent> {
 
 #[tokio::test]
 async fn leaked_call_markup_ending_nudges() {
-
     let leaked = concat!(
         "Before writing code, let me grab the middle of `mod`.\n\n```gray_calls\n",
         "[{\"name\": \"bash\", \"arguments\": {\"command\": \"sed -n '167,355p' mod\"}}]",
@@ -1234,7 +1219,6 @@ async fn leaked_call_markup_ending_nudges() {
 
 #[tokio::test]
 async fn nudge_continue_marks_a_message_boundary() {
-
     let provider = FakeProvider::new(vec![text_end_script("```gray_calls\n[]"), end_script()]);
     let mut agent = Agent::new(
         Box::new(provider),
@@ -1393,7 +1377,6 @@ fn summary_message_envelope_is_byte_stable() {
 
 #[test]
 fn context_estimate_anchors_on_provider_usage() {
-
     let mut agent = Agent::new(
         Box::new(FakeProvider::new(vec![])),
         Arc::new(FakeExecutor::new(ToolOutput::ok(""))),
@@ -1419,7 +1402,6 @@ fn context_estimate_anchors_on_provider_usage() {
 
 #[tokio::test]
 async fn soft_elision_stubs_stale_results_without_a_summary_call() {
-
     let provider = FakeProvider::new(vec![end_script()]);
     let mut history = vec![Message::user("fix the bug")];
     for i in 0..30 {
@@ -1518,7 +1500,6 @@ async fn soft_elision_stubs_stale_results_without_a_summary_call() {
 
 #[tokio::test]
 async fn provider_usage_triggers_pre_turn_compaction() {
-
     let provider = FakeProvider::new(vec![
         vec![
             StreamEvent::tool_call_delta(
@@ -1641,7 +1622,6 @@ impl PluginHooks for CountingCtxHook {
 
 #[tokio::test]
 async fn prompt_context_fetched_once_per_turn() {
-
     let provider = FakeProvider::new(vec![tool_script("c1"), end_script()]);
     let seen = provider.seen_requests();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1820,7 +1800,6 @@ impl PluginHooks for LifecycleHook {
 
 #[tokio::test]
 async fn turn_end_hook_called_once_on_end_and_on_error() {
-
     let ends = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
     let mut agent = Agent::new(
@@ -1890,7 +1869,6 @@ async fn pre_post_hooks_emit_around_tool_execution() {
         vec![format!("pre:{TOOL_NAME}"), format!("post:{TOOL_NAME}")],
         "order pre→post, got {logged:?}"
     );
-
 }
 
 #[tokio::test]
@@ -2058,7 +2036,6 @@ async fn parallel_prepass_cancel_backfills_whole_run_exactly_once() {
 
 #[tokio::test]
 async fn name_before_id_emits_no_start_until_id_arrives() {
-
     let provider = FakeProvider::new(vec![
         vec![
             StreamEvent::tool_call_delta(0, None, Some(TOOL_NAME.into()), r#"{"q":"#),
@@ -2194,7 +2171,6 @@ async fn no_id_call_gets_single_fallback_used_everywhere() {
 
 #[tokio::test]
 async fn eof_with_tool_pending_executes_nothing() {
-
     let provider = FakeProvider::new(vec![vec![StreamEvent::tool_call_delta(
         0,
         Some("c-eof".into()),
@@ -2297,7 +2273,6 @@ fn old_session_video_block_still_parses() {
 
 #[tokio::test]
 async fn eof_with_text_and_tool_pending_salvages_visible_text() {
-
     let provider = FakeProvider::new(vec![vec![
         StreamEvent::text_delta("hello"),
         StreamEvent::tool_call_delta(
@@ -2343,7 +2318,6 @@ async fn eof_with_text_and_tool_pending_salvages_visible_text() {
 
 #[tokio::test]
 async fn reasoning_only_maxtokens_is_not_retried_as_empty() {
-
     let provider = FakeProvider::new(vec![vec![
         StreamEvent::thinking_delta("deep reasoning..."),
         StreamEvent::message_complete(Some(StopReason::MaxTokens), None),

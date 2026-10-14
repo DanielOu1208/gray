@@ -5,7 +5,6 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct FrozenState {
-
     pub(crate) lines_len: usize,
 
     pub(crate) source_bytes: usize,
@@ -14,7 +13,6 @@ pub(crate) struct FrozenState {
 }
 
 pub struct StreamingMarkdownRenderer {
-
     source: String,
 
     output: MarkdownRenderOutput,
@@ -46,7 +44,6 @@ impl std::fmt::Debug for StreamingMarkdownRenderer {
 
 impl Clone for StreamingMarkdownRenderer {
     fn clone(&self) -> Self {
-
         let mut new = Self::new(self.style, self.pretty);
         new.set_max_table_width(self.max_table_width);
         new.source.push_str(&self.source);
@@ -61,7 +58,6 @@ impl Clone for StreamingMarkdownRenderer {
 }
 
 impl StreamingMarkdownRenderer {
-
     pub fn new(style: MarkdownStyle, pretty: bool) -> Self {
         Self {
             source: String::new(),
@@ -98,7 +94,6 @@ impl StreamingMarkdownRenderer {
     }
 
     fn rerender_tail(&mut self, syntect: Option<&Syntect>) {
-
         self.highlighted = syntect.is_some();
 
         self.output.lines.truncate(self.frozen.lines_len);
@@ -186,7 +181,6 @@ impl StreamingMarkdownRenderer {
     }
 
     pub fn finish(&mut self, syntect: Option<&Syntect>) -> &MarkdownRenderOutput {
-
         self.highlighted = syntect.is_some();
 
         let mut buffers = MarkdownBuffers::new();
@@ -197,7 +191,6 @@ impl StreamingMarkdownRenderer {
             &mut buffers,
             syntect,
             self.max_table_width,
-
             0,
         );
 

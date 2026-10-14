@@ -20,11 +20,7 @@ pub(crate) fn recommended_ids(
         }
     }
 
-    let mut winners: Vec<(
-        String,
-        String,
-        String,
-    )> = Vec::new();
+    let mut winners: Vec<(String, String, String)> = Vec::new();
     for (id, name) in models {
         let lower_id = id.to_lowercase();
         let lower_name = name.to_lowercase();
@@ -43,7 +39,6 @@ pub(crate) fn recommended_ids(
         let family = m.family.clone().unwrap_or_else(|| id.clone());
         let date = m.release_date.clone().unwrap_or_default();
         match winners.iter_mut().find(|(f, ..)| *f == family) {
-
             Some((_, cur_id, cur_date)) => {
                 if date > *cur_date || (date == *cur_date && *id < *cur_id) {
                     *cur_id = id.clone();

@@ -42,7 +42,6 @@ fn entry(ecosystem: &str, enabled: bool) -> LockEntry {
 
 #[test]
 fn manager_specs_differ_only_where_expected() {
-
     let skills = &super::SKILLS_SPEC;
     assert_eq!(skills.title, "Skills");
     assert_eq!(skills.empty_hint, "no skills discovered");
@@ -91,7 +90,6 @@ fn row_caps_long_descriptions() {
 
 #[test]
 fn error_row_holds_for_varied_entries() {
-
     for (source, item, message) in [
         ("skills", "demo", "boom"),
         ("index", "some-plugin", "fetch failed: 404"),

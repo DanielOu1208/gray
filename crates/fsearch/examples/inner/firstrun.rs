@@ -108,7 +108,6 @@ pub fn main() {
             println!("{}", json!({"seq": out, "peak_mb": mb(peak.load(Ordering::Relaxed))}));
         }
         "same" => {
-
             let first: Vec<(f64, Value)> = a[3..]
                 .iter()
                 .map(|s| {
@@ -147,7 +146,6 @@ pub fn main() {
             println!("{}", json!({"specs": first.len(), "differ": bad, "ready_s": ready, "built_s": done}));
         }
         "probe" => {
-
             let p: Value = serde_json::from_slice(&std::fs::read(&a[3]).unwrap()).unwrap();
             let root = &a[4];
             let s = |k: &str| p[k].as_str().unwrap().to_string();
@@ -198,7 +196,6 @@ pub fn main() {
             println!("{}", json!({"name_s": name_s, "grep_s": grep_s, "peak_mb": mb(peak.load(Ordering::Relaxed))}));
         }
         "diff" => {
-
             let truth: Value = serde_json::from_slice(&std::fs::read(&a[3]).unwrap()).unwrap();
             for spec in &a[4..] {
                 let got = loop {

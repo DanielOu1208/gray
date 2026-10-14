@@ -367,7 +367,6 @@ pub fn read_branch(cwd: &Path) -> Option<String> {
         let git_dir = if dotgit.is_dir() {
             Some(dotgit)
         } else if dotgit.is_file() {
-
             let body = std::fs::read_to_string(&dotgit).ok()?;
             let p = body.trim().strip_prefix("gitdir:")?.trim().to_string();
             let p = PathBuf::from(p);

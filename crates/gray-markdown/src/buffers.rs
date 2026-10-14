@@ -12,7 +12,6 @@ pub struct Highlight {
 
 #[derive(Debug, Clone)]
 pub struct Replace {
-
     pub highlighted: Vec<Vec<(SyntectStyle, String)>>,
 
     pub range: Range<usize>,
@@ -20,7 +19,6 @@ pub struct Replace {
 
 #[derive(Debug, Clone)]
 pub struct LinkTarget {
-
     pub source_range: Range<usize>,
 
     pub url: String,
@@ -30,7 +28,6 @@ pub struct LinkTarget {
 
 #[derive(Debug, Clone)]
 pub struct Transform {
-
     pub(crate) range: Range<usize>,
 
     pub(crate) to: String,
@@ -87,7 +84,6 @@ impl StyledCell {
 
 #[derive(Debug, Clone)]
 pub struct TableState {
-
     pub alignments: Vec<pulldown_cmark::Alignment>,
 
     pub header: Vec<StyledCell>,
@@ -139,7 +135,6 @@ impl TableState {
 
 #[derive(Debug, Clone)]
 pub struct TableHyperlink {
-
     pub line_offset: usize,
 
     pub column_range: Range<usize>,
@@ -151,7 +146,6 @@ pub struct TableHyperlink {
 
 #[derive(Debug, Clone)]
 pub struct TableReplace {
-
     pub lines: Vec<String>,
 
     pub styled_lines: Vec<Line<'static>>,
@@ -186,7 +180,6 @@ pub struct RenderEvent {
 }
 
 pub struct MarkdownBuffers {
-
     pub highlights: Vec<Highlight>,
     pub replaces: Vec<Replace>,
     pub transforms: Vec<Transform>,

@@ -261,7 +261,6 @@ impl fmt::Debug for ProviderUsageRequest {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProviderUsageWindow {
-
     pub id: String,
 
     pub label: String,
@@ -289,7 +288,6 @@ pub struct ProviderUsageWindow {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProviderUsageLimits {
-
     #[serde(default)]
     pub available: bool,
 
@@ -334,7 +332,6 @@ pub struct ProviderChatResult {
 
 impl fmt::Debug for ProviderChatResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-
         f.debug_struct("ProviderChatResult")
             .field("relay_url", &"<redacted>")
             .finish_non_exhaustive()
@@ -367,7 +364,6 @@ pub struct ProviderModel {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelVariant {
-
     pub id: String,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -381,7 +377,6 @@ pub struct ModelVariant {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSlot {
-
     pub key: String,
 
     pub label: String,

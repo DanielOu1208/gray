@@ -41,7 +41,6 @@ fn normalize_custom_base_url_trims_suffixes() {
 
 #[test]
 fn saving_key_preserves_oauth_objects() {
-
     let dir = tempfile::tempdir().expect("tmp");
     let path = dir.path().join("auth.json");
     let oauth = StoredAuth {
@@ -240,7 +239,6 @@ fn failed_save_reports_error() {
 
 #[test]
 fn removing_entry_keeps_every_other_credential() {
-
     let dir = tempfile::tempdir().expect("tmp");
     let path = dir.path().join("auth.json");
     let oauth = StoredAuth {
@@ -377,7 +375,6 @@ fn the_config_lock_serializes_writers_then_releases() {
 
 #[test]
 fn effort_memory_scopes_by_connection_and_model() {
-
     let mut saved = SavedConfig::default();
     let devin = "devin-sub:devin-subscription";
     let loopback = "https://127.0.0.1:1/";

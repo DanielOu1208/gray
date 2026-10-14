@@ -106,7 +106,6 @@ const MIN_INTERRUPTED_SPAN_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionState {
-
     Done,
 
     Interrupted,
@@ -312,7 +311,6 @@ pub async fn resolve_prefix(
             return Some(cwd_matches[0].id.clone());
         }
         if cwd_matches.len() > 1 {
-
             let latest = cwd_matches.into_iter().max_by_key(|s| s.last_message_at);
             if let Some(s) = latest {
                 return Some(s.id.clone());
@@ -328,7 +326,6 @@ pub async fn resolve_prefix(
         return Some(all_matches[0].id.clone());
     }
     if all_matches.len() > 1 {
-
         let latest = all_matches.into_iter().max_by_key(|s| s.last_message_at);
         if let Some(s) = latest {
             return Some(s.id.clone());
@@ -564,7 +561,6 @@ fn run_picker_sync(
 
     let result: anyhow::Result<Option<SessionId>> = (|| {
         loop {
-
             while let Ok(event) = scan.try_recv() {
                 match event {
                     SessionScanEvent::Running(set) => running = set,
@@ -1104,7 +1100,6 @@ fn try_take_over(
     id: &SessionId,
     pid: Option<u32>,
 ) -> Result<(), String> {
-
     if !store.open_lock_held_sync(id) {
         return Ok(());
     }
@@ -1135,7 +1130,6 @@ fn try_take_over(
 fn terminate_holder(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-
         let mut exe = String::new();
         for _ in 0..5 {
             if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
@@ -1156,7 +1150,6 @@ fn terminate_holder(pid: u32) -> Result<(), String> {
                 }
             }
             true => {
-
                 let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
                 if !alive {
                     return Err(format!("pid {pid} is already gone — pick it again"));

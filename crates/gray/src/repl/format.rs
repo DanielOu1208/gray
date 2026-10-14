@@ -176,7 +176,6 @@ fn localize_utc_time_with(
     };
 
     match words.as_slice() {
-
         [hm] => {
             let (h, m) = clock(hm)?;
             let mut at = now.with_hour(h)?.with_minute(m)?.with_second(0)?;
@@ -315,7 +314,6 @@ fn format_detailed_error(e: &CoreError, d: &ProviderDetail, base_url: &str) -> S
 }
 
 pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
-
     if let Some(detail) = e.detail() {
         return format_detailed_error(e, detail, base_url);
     }
@@ -342,7 +340,6 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
             )
         }
         CoreError::Provider(detail) => {
-
             let short = display_provider_detail(detail);
             let lower = short.to_lowercase();
             if lower.contains("not supported")
@@ -385,14 +382,12 @@ pub fn format_core_error(e: &CoreError, base_url: &str) -> String {
                     "✗ Provider server error (retryable):\n  {short}\n  Try again later or run /models to switch to another model."
                 )
             } else {
-
                 format!(
                     "✗ Provider error:\n  {short}\n  Provider: {base_url} — try /models if this persists."
                 )
             }
         }
         CoreError::Auth(detail) => {
-
             let short = display_provider_detail(detail);
             format!(
                 "✗ Auth failed (not retryable):\n  {short}\n  Run /models to sign in again or update your API key."

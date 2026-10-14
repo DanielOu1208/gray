@@ -2,7 +2,6 @@ use super::*;
 
 #[test]
 fn replayed_thinking_keeps_every_line_dim_italic() {
-
     let rows = thinking_replay_lines("first\nsecond");
     assert_eq!(rows.len(), 2, "{rows:?}");
     for r in &rows {
@@ -14,7 +13,6 @@ fn replayed_thinking_keeps_every_line_dim_italic() {
 
 #[test]
 fn adjacent_file_links_do_not_steal_previous_url() {
-
     let hyperlinks = vec![
         HyperlinkTarget {
             line_index: 0,
@@ -42,7 +40,6 @@ fn adjacent_file_links_do_not_steal_previous_url() {
 
 #[test]
 fn compaction_summary_renders_markdown_not_literal() {
-
     let (lines, _) = render_markdown_lines("**Active request:** foo", Some(80));
     let text: String = lines
         .iter()
@@ -67,7 +64,6 @@ fn compaction_summary_renders_markdown_not_literal() {
 
 #[test]
 fn a_turn_error_reads_as_an_error_not_as_prose() {
-
     let theme = crate::theme::theme();
     let msg = "✗ Rate limited (retryable): status 429: slow down\n  Try again later or switch model via /model.\n";
     let rows = error_lines(msg);
@@ -135,7 +131,6 @@ fn other_header_details_stay_inline_when_they_fit() {
 
 #[test]
 fn home_receipt_rows_indent_to_the_box_edge() {
-
     assert_eq!(home_receipt_indent(false, 160), 0);
 
     let (x, _) = crate::composer::home_column(160);

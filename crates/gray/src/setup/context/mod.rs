@@ -94,7 +94,6 @@ pub fn user_keep_for(window: usize) -> usize {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactAt {
-
     Auto,
 
     Tokens(usize),
@@ -159,13 +158,11 @@ pub fn parse_context_window(s: &str) -> Option<usize> {
     }
     let dots = num.bytes().filter(|&b| b == b'.').count();
     let plain = if dots > 1 {
-
         num.replace('.', "")
     } else {
         num.to_string()
     };
     if mult == 1.0 {
-
         if dots == 1 && !is_grouped_thousands(num) {
             return None;
         }
@@ -263,7 +260,6 @@ pub fn format_context_length(tokens: usize) -> String {
 }
 
 pub fn resolve_model_context_length(model_name: &str) -> usize {
-
     if let Some(user) = get_user_context_window() {
         return user;
     }

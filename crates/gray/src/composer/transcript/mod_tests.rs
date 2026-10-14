@@ -168,7 +168,6 @@ fn streaming_punctuation_guard_only_matches_a_standalone_continuation() {
 
 #[test]
 fn unboundaryed_punctuation_only_chunks_are_held_not_rendered() {
-
     assert!(should_hold_stream_chunk(0, "."));
     assert!(should_hold_stream_chunk(0, "…"));
 
@@ -265,7 +264,6 @@ fn full_width_numbered_row_is_not_rewrapped() {
 
 #[test]
 fn wrap_ranges_round_trip_and_identity() {
-
     let short = Line::from(vec![Span::raw("hello world")]);
     let out = wrap_styled_line_with_ranges(short, 20);
     assert_eq!(out.len(), 1);
@@ -362,7 +360,6 @@ fn thinking_survives_resize_round_trip() {
 
 #[test]
 fn thinking_run_rows_collapse_stacked_blanks() {
-
     let rows = thinking_run_rows("\nfoo\n\n\nbar\n", 40, true);
     let texts: Vec<String> = rows
         .iter()
@@ -414,7 +411,6 @@ fn history_entries_cap_keeps_at_most_1000_unrun() {
 
 #[test]
 fn thinking_blank_never_stacks_on_blank() {
-
     let tail_blank = Line::from("");
     let tail_text = Line::from(vec![Span::styled("hello".to_string(), thinking_style())]);
     let drained = "\n\nhello\n\n";
@@ -446,7 +442,6 @@ fn thinking_blank_never_stacks_on_blank() {
 
 #[test]
 fn transcript_row_is_blank_matches_gap_predicates() {
-
     assert!(transcript_row_is_blank(&Line::from("")));
     assert!(transcript_row_is_blank(&Line::from(" ")));
     assert!(transcript_row_is_blank(&Line::from(vec![Span::raw(" ")])));
@@ -462,7 +457,6 @@ fn transcript_row_is_blank_matches_gap_predicates() {
 
 #[test]
 fn tool_box_has_exactly_one_painted_margin_row_top_and_bottom() {
-
     let bg = crate::theme::theme().surface_bg;
     let row_w = |l: &Line<'static>| l.spans.iter().map(|s| s.width()).sum::<usize>();
     let painted = |l: &Line<'static>| {
@@ -491,7 +485,6 @@ fn tool_box_has_exactly_one_painted_margin_row_top_and_bottom() {
 
 #[test]
 fn prose_and_card_glyphs_share_the_gutter_column() {
-
     let first_glyph = |l: &Line<'static>| {
         let flat: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
         flat.chars().take_while(|c| *c == ' ').count()

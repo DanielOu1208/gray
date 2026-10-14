@@ -41,7 +41,6 @@ pub fn from_plugins(plugins: &[Arc<dyn Plugin>]) -> (Registry, Vec<Manifest>) {
             .iter()
             .any(|c| c == crate::capabilities::TOOL_OVERRIDE);
         for t in p.tools() {
-
             if t.def().name == "bash" && !may_override {
                 push_builder_warning(format!(
                     "plugin `{}` claims built-in tool `bash`; grant `{}` to let it (gray plugin capabilities {})",
@@ -197,7 +196,6 @@ pub async fn active_plugins(
     handler: Option<HostHandler>,
     abort_on_spawn_failure: bool,
 ) -> anyhow::Result<(Vec<Arc<dyn Plugin>>, bool)> {
-
     let entries: Vec<PluginEntry> = match load_entries(profile_path) {
         Ok(entries) => entries,
         Err(e) => {
@@ -274,7 +272,6 @@ pub async fn active_plugins(
                 }
             }
             PluginEntry::Sidecar(spec) => {
-
                 if spec.0.iter().any(|a| a == "-y" || a == "--yes")
                     || spec
                         .0

@@ -40,7 +40,6 @@ pub async fn run_plugin_login(
     cancel: CancellationToken,
     progress: tokio::sync::mpsc::UnboundedSender<PluginLoginProgress>,
 ) -> anyhow::Result<()> {
-
     if installed
         .auth_method
         .operations
@@ -371,7 +370,6 @@ pub fn settle_connect_config(
     match outcome {
         Ok(crate::setup::ConnectOutcome::Dismissed) | Err(_) => *config = before,
         Ok(crate::setup::ConnectOutcome::Connected) => {
-
             let old_key = crate::setup::catalog::effort_memory_key(
                 &before.provider_id,
                 &before.base_url,

@@ -88,7 +88,6 @@ impl Frecency {
                 let mut map = me.map.lock().unwrap();
                 map.retain(|_, e| decayed(*e, now) >= FLOOR);
                 for (p, &(s, t)) in map.iter() {
-
                     let quoted = (p.contains(&b'\n') || p.first() == Some(&b'"'))
                         .then(|| std::str::from_utf8(p).ok().map(|p| serde_json::json!(p).to_string()));
                     let p = match &quoted {

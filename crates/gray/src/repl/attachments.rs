@@ -12,7 +12,6 @@ pub enum AttachmentKind {
 }
 
 impl AttachmentKind {
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Image => "Image",

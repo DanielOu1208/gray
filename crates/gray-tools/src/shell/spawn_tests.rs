@@ -5,7 +5,6 @@ use std::path::PathBuf;
 #[cfg(unix)]
 #[test]
 fn setsid_failure_is_an_error() {
-
     assert!(check_setsid(-1).is_err());
     assert!(check_setsid(1234).is_ok());
 }
@@ -38,7 +37,6 @@ fn prefix_honours_quotes_so_a_box_name_may_contain_a_space() {
 
 #[test]
 fn an_unterminated_quote_is_an_error_not_a_truncated_prefix() {
-
     assert!(split_prefix("ssh 'my box").is_err());
     assert!(split_prefix("ssh box\\").is_err());
 }
@@ -71,7 +69,6 @@ async fn exec_prefix_runs_the_command_on_the_far_shell() {
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_prefix_carries_gray_env_across_the_boundary() {
-
     let report = std::env::temp_dir().join("gray-exec-env-test.txt");
     let spawned = spawn_with_prefix(
         r#"case "$GRAY_CWD_REPORT" in /*) echo report-ok;; *) echo report-missing;; esac"#,
@@ -89,7 +86,6 @@ async fn exec_prefix_carries_gray_env_across_the_boundary() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_heredoc_survives_the_prefix_boundary_intact() {
-
     let dir = std::env::temp_dir().join(format!("gray-exec-heredoc-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let file = dir.join("body.txt");

@@ -27,7 +27,6 @@ fn repro_soft_break_space_across_chunks() {
 
 #[test]
 fn torn_hyperlink_brackets_across_chunks_preserve_hyperlink_offset() {
-
     let full = "See [click](https://example.com) here.\n\n";
     let split = full.find("](").unwrap() + 1;
     let (a, b) = full.split_at(split);

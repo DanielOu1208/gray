@@ -18,7 +18,6 @@ fn entry(done: bool, notified: bool) -> (Job, watch::Sender<Option<ToolOutput>>)
 
 #[tokio::test]
 async fn any_job_waiter_wakes_on_a_send_after_the_snapshot() {
-
     let tool = std::sync::Arc::new(BashTool::default());
     let ctx = ToolContext::default();
     assert!(
@@ -84,7 +83,6 @@ fn register_evicts_only_delivered_history_and_never_refuses_a_live_child() {
     let jobs = Jobs::default();
     let ctx = ToolContext::default();
     for n in 0..MAX_RETAINED {
-
         jobs.0
             .lock()
             .unwrap()

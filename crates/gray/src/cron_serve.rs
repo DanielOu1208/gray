@@ -103,7 +103,6 @@ pub struct SaveLocalDeliver {
 }
 
 impl SaveLocalDeliver {
-
     pub async fn deliver_full(
         &self,
         job: &crate::cron::CronJob,
@@ -202,7 +201,6 @@ pub async fn fire_one(
         RunStatus::Error
     };
     if job.reminder {
-
         let out = FireOutput {
             transcript: job.prompt.clone(),
             final_text: job.prompt.clone(),
@@ -555,7 +553,6 @@ pub(crate) async fn tick_once_with(
     kind: &str,
     auto: bool,
 ) -> anyhow::Result<TickReport> {
-
     if let Err(e) = store.record_tick(kind) {
         log::warn!("cron: cannot record tick heartbeat: {e:#}");
     }

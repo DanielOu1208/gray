@@ -470,7 +470,6 @@ pub(crate) fn initial_effort_in(
 
 #[derive(Default)]
 struct RowEfforts {
-
     stepped: std::collections::HashMap<String, &'static str>,
 
     fast: bool,
@@ -479,7 +478,6 @@ struct RowEfforts {
 }
 
 impl RowEfforts {
-
     fn parts_of(
         &self,
         config: &Config,
@@ -715,7 +713,6 @@ fn list_window(total: usize, sel: usize, top: usize, cap: usize) -> (usize, usiz
     }
     let sel = sel.min(total - 1);
     if cap < 3 {
-
         let top = top.min(sel).max((sel + 1).saturating_sub(cap));
         return (top.min(total - cap), cap);
     }
@@ -739,7 +736,6 @@ fn per_million(rate: f64) -> String {
 pub(crate) const PRICE_DOTS: usize = 5;
 
 pub(crate) fn price_level(blended_per_million: f64) -> usize {
-
     const BANDS: [f64; PRICE_DOTS - 1] = [0.5, 2.0, 8.0, 20.0];
     1 + BANDS.iter().filter(|&&b| blended_per_million > b).count()
 }
@@ -1012,7 +1008,6 @@ struct PickerView<'a> {
 }
 
 impl PickerView<'_> {
-
     fn highlighted(&self, sel: usize) -> Option<&str> {
         match self.rows.get(sel) {
             Some(Row::Model(mi)) => self.filtered.get(*mi).map(|(id, _)| id.as_str()),
@@ -1107,7 +1102,6 @@ fn picker_row_line(
     let suffix = sel(fg(if selected { on_dim } else { t.text_dim }));
     let shape = super::variants::row_shape(id).filter(|s| s.is_composite());
     if let Some(shape) = shape {
-
         let summary: Vec<&str> = shape
             .slots
             .iter()
@@ -1183,7 +1177,6 @@ pub(crate) fn meter_spans(
         ),
         Span::styled(right, arrow(pos.is_some_and(|p| p + 1 < levels.len()))),
         Span::styled(" ", sel(Style::default())),
-
         Span::styled(
             format!("{:<7}", effort_label(level)),
             sel(fg(if selected { on } else { t.text_muted })),
@@ -1336,7 +1329,6 @@ fn picker_detail_lines(
         }
         lines.push(Line::from(spans));
     } else if lists_fast_variants(v.models) {
-
         lines.push(Line::default());
     }
 
@@ -1364,7 +1356,6 @@ fn picker_detail_lines(
         match &rate {
             None => spans.push(Span::styled("—", fg(t.text_faint))),
             Some(r) => {
-
                 let level = (w >= 2 + 10 + PRICE_DOTS + 2 + 12)
                     .then(|| price_level((r.input + r.output) * 1_000_000.0));
                 if let Some(level) = level {
@@ -1649,7 +1640,6 @@ fn draw_picker(
         }
         for slot in top..end {
             let line = match row_at(slot, v.gap) {
-
                 None => Line::default(),
                 Some(ri) => match v.rows[ri] {
                     Row::Divider if v.all_head => Line::from(Span::styled(
@@ -1757,7 +1747,6 @@ pub(crate) fn model_picker_loop(
     let result = (|| -> anyhow::Result<bool> {
         let mut refreshing = true;
         loop {
-
             if refreshing && let Ok(live) = refresh_rx.try_recv() {
                 refreshing = false;
                 if !live.is_empty() {
@@ -1788,7 +1777,6 @@ pub(crate) fn model_picker_loop(
             let mut all_head = false;
             let mut div_at = sep;
             if sep == 0 && f.is_empty() {
-
                 let head: Vec<String> = super::recommend::recommended_ids(
                     &models,
                     curated.as_deref(),
@@ -2024,7 +2012,6 @@ pub(crate) fn model_picker_loop(
                     sel = 0;
                 }
                 PickerKey::Confirm => {
-
                     if let Some(id) = highlighted.as_deref()
                         && let Some(shape) =
                             super::variants::row_shape(id).filter(|s| s.is_composite())
@@ -2056,11 +2043,9 @@ pub(crate) fn model_picker_loop(
                     let chosen_model = if let Some(id) = highlighted {
                         id
                     } else if !filter.is_empty() {
-
                         validate_direct_model_id(filter.trim(), &models)
                             .unwrap_or_else(|_| filter.trim().to_string())
                     } else {
-
                         "default".to_string()
                     };
                     commit_selection(

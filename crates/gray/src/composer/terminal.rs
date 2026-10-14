@@ -27,7 +27,6 @@ impl Frame<'_> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scrollback {
-
     Regions,
 
     FullScreen,
@@ -72,7 +71,6 @@ impl<B> CustomTerminal<B>
 where
     B: Backend + Write,
 {
-
     pub fn with_options(mut backend: B) -> io::Result<Self> {
         let screen_size = backend.size()?;
         let cursor_pos = backend
@@ -109,7 +107,6 @@ where
     }
 
     pub fn set_viewport_height(&mut self, height: u16, screen_size: Size) -> io::Result<()> {
-
         let screen_shrank = screen_size.height < self.last_known_screen_size.height;
         self.last_known_screen_size = screen_size;
         let old = self.viewport_area;
@@ -151,7 +148,6 @@ where
     }
 
     pub(crate) fn clear_scrollback_and_screen(&mut self, screen_size: Size) -> io::Result<()> {
-
         write!(self.backend, "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H")?;
         Backend::flush(&mut self.backend)?;
         self.last_known_screen_size = screen_size;
@@ -241,7 +237,6 @@ where
             if area.bottom() < screen_h {
                 let shift = rows.len().min(usize::from(screen_h - area.bottom()));
                 if !area.is_empty() {
-
                     write!(self.backend, "\x1b[{};{}r", area.top() + 1, screen_h)?;
                     self.backend
                         .set_cursor_position(Position::new(0, area.top()))?;

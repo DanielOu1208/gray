@@ -221,7 +221,6 @@ const FRESH_ID_ATTEMPTS: usize = 16;
 pub struct SessionId(String);
 
 impl SessionId {
-
     pub fn generate() -> Self {
         let bits = uuid::Uuid::new_v4().as_u128();
         let q = QUALIFIER_WORDS[(bits as usize) % QUALIFIER_WORDS.len()];
@@ -249,7 +248,6 @@ pub type SessionEntryId = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
-
     pub id: SessionId,
 
     pub timestamp: u64,
@@ -263,7 +261,6 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
-
     pub fn new(
         id: SessionId,
         timestamp: u64,
@@ -314,7 +311,6 @@ fn is_false(b: &bool) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionEntry {
-
     #[serde(default, skip_serializing_if = "is_false")]
     pub compaction_boundary: bool,
 
@@ -336,7 +332,6 @@ pub struct SessionEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionEnd {
-
     #[default]
     Done,
 
@@ -349,7 +344,6 @@ pub enum SessionEnd {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {
-
     #[serde(default)]
     pub last_end: SessionEnd,
 
@@ -379,7 +373,6 @@ pub struct SessionSummary {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -396,16 +389,10 @@ pub enum SessionError {
         "session '{id}' is already open in another process{}. Close the other instance before opening it here.",
         .pid.map(|p| format!(" (PID {p})")).unwrap_or_default()
     )]
-    Locked {
-
-        id: SessionId,
-
-        pid: Option<u32>,
-    },
+    Locked { id: SessionId, pid: Option<u32> },
 
     #[error("corrupt entry at {}:{}: {source}", path.display(), line)]
     Corrupt {
-
         path: PathBuf,
 
         line: usize,
@@ -418,7 +405,6 @@ pub enum SessionError {
 pub type Result<T> = std::result::Result<T, SessionError>;
 
 impl SessionError {
-
     pub fn locked_notice(id: &SessionId, pid: Option<u32>) -> String {
         let head = match pid {
             Some(p) => format!("session '{id}' is already open in another process (pid {p})"),
@@ -445,7 +431,6 @@ pub struct JsonlSessionStore {
 }
 
 impl Default for JsonlSessionStore {
-
     fn default() -> Self {
         Self::new(default_root().unwrap_or_else(|| PathBuf::from(".gray/sessions")))
     }
@@ -475,7 +460,6 @@ pub(crate) fn valid_session_id(s: &str) -> bool {
 }
 
 impl JsonlSessionStore {
-
     pub fn new(root_dir: impl Into<PathBuf>) -> Self {
         Self {
             root_dir: root_dir.into(),
@@ -798,7 +782,6 @@ impl JsonlSessionStore {
 }
 
 pub(crate) enum SessionScanEvent {
-
     Running(std::collections::HashSet<String>),
 
     Summary(SessionSummary),
@@ -872,7 +855,6 @@ fn summarize_session_file(root: &Path, path: &Path, cwd: Option<&Path>) -> Optio
             };
             last_message_at = last_message_at.max(entry.timestamp);
             if entry.compaction_boundary {
-
                 first_user_text = None;
                 last_user_text = None;
                 continue;
@@ -1114,7 +1096,6 @@ fn read_session_whole(path: &Path) -> Option<SessionSlices> {
 }
 
 impl JsonlSessionStore {
-
     pub async fn create(&self, meta: SessionMeta) -> Result<SessionId> {
         let _guard = self.lock.lock().await;
         let id = meta.id.clone();
@@ -1200,7 +1181,6 @@ impl JsonlSessionStore {
         usage: Option<gray_core::event::Usage>,
         duration_ms: Option<u64>,
     ) -> Result<SessionEntryId> {
-
         let _lock_file = self.lock_session_file(id).await?;
         let _guard = self.lock.lock().await;
         let path = self.session_path(id)?;
@@ -1708,7 +1688,6 @@ impl JsonlSessionStore {
     }
 
     pub async fn delete(&self, id: &SessionId) -> Result<()> {
-
         let _lock = self.lock_session_file(id).await?;
         let _guard = self.lock.lock().await;
 
@@ -1916,7 +1895,6 @@ fn open_lock_held_at(open_path: &Path) -> bool {
         return false;
     };
     match file.try_lock() {
-
         Ok(()) => false,
         Err(std::fs::TryLockError::WouldBlock) => true,
         Err(std::fs::TryLockError::Error(_)) => false,

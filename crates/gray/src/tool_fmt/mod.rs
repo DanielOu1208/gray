@@ -3,7 +3,6 @@ use ratatui::text::{Line, Span};
 use std::path::Path;
 
 fn arg_path(args: &serde_json::Value) -> &str {
-
     args.get("path")
         .or_else(|| args.get("file_path"))
         .and_then(|v| v.as_str())
@@ -11,7 +10,6 @@ fn arg_path(args: &serde_json::Value) -> &str {
 }
 
 fn arg_content(args: &serde_json::Value) -> &str {
-
     args.get("content")
         .or_else(|| args.get("contents"))
         .or_else(|| args.get("text"))
@@ -199,7 +197,6 @@ fn scalar_key(name: &str, raw: &str) -> &'static str {
         "web_search" => "query",
         "web_fetch" => "url",
         _ => {
-
             let path_pos = raw.find("\"path\"").map(|i| (i, "path"));
             let pattern_pos = raw.find("\"pattern\"").map(|i| (i, "pattern"));
             let command_pos = raw.find("\"command\"").map(|i| (i, "command"));
@@ -564,7 +561,6 @@ pub struct ToolDisplay<'a> {
 }
 
 impl<'a> ToolDisplay<'a> {
-
     pub fn label(self, name: &str) -> Option<&'a str> {
         self.labels.and_then(|m| m.get(name)).map(String::as_str)
     }
@@ -763,7 +759,6 @@ pub fn format_tool_call_lines(
             Span::styled("Read Discord UI schema", action_style),
         ]),
         other => {
-
             let headline = args
                 .get("label")
                 .and_then(|v| v.as_str())
@@ -808,7 +803,6 @@ pub fn format_tool_call_lines(
                     Span::styled(path, path_style),
                 ])
             } else {
-
                 let obj_args: Vec<(&String, &serde_json::Value)> = args
                     .as_object()
                     .map(|obj| obj.iter().filter(|(k, _)| *k != "label").collect())
@@ -1086,7 +1080,6 @@ fn humanize_bash_notices(text: &str) -> String {
                 rest.split(';').next().unwrap_or(rest)
             ));
         } else if let Some(cut) = line.find("; rerun without the pipe to check") {
-
             let tail = &line[cut + "; rerun without the pipe to check".len()..];
             out.push(format!("{}{tail}", &line[..cut]));
         } else if t == "Partial output (snapshot):" {
@@ -1094,7 +1087,6 @@ fn humanize_bash_notices(text: &str) -> String {
         } else if let Some(rest) = t.strip_prefix("job ")
             && rest.contains(" \u{00b7} ")
         {
-
             out.push(drop_log_field(&rest.replace("elapsed ", "")));
         } else {
             out.push(line.to_string());
@@ -1173,7 +1165,6 @@ fn prettify_output(trimmed: &str) -> (String, Option<&'static str>) {
         .unwrap_or(trimmed.trim_start())
         .to_ascii_lowercase();
     if head.starts_with("<!doctype") || head.starts_with("<html") {
-
         return (trimmed.replace("><", ">\n<"), Some("html"));
     }
     if head.starts_with("<?xml") {
@@ -1401,7 +1392,6 @@ pub fn format_tool_result_lines_with_context(
     }
 
     if tool_name == "write" {
-
         let content = args.map(arg_content).unwrap_or("");
         if !content.is_empty() {
             return render_code_block(content, file_path);
@@ -1422,10 +1412,8 @@ pub fn format_tool_result_lines_with_context(
     let mut rows = if trimmed.is_empty() {
         Vec::new()
     } else if let Some(text) = web::web_body_text(tool_name, &trimmed) {
-
         render_numbered_lines(&text.lines().collect::<Vec<_>>(), &mut None)
     } else {
-
         let (pretty, token) = prettify_output(&trimmed);
         let syntect = gray_markdown::get_syntect();
         let mut highlighter = token.and_then(|t| syntect.highlight_lines_for_token(t));

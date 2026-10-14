@@ -22,7 +22,6 @@ pub const WARN_MISS_COST: f64 = 0.10;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CacheMiss {
-
     pub missed_tokens: usize,
 
     pub missed_cost: f64,
@@ -33,7 +32,6 @@ pub struct CacheMiss {
 }
 
 impl CacheMiss {
-
     pub fn notice(&self) -> Option<String> {
         if self.missed_tokens < WARN_MISS_TOKENS && self.missed_cost < WARN_MISS_COST {
             return None;
@@ -59,7 +57,6 @@ impl CacheMiss {
 
 #[derive(Debug, Clone)]
 struct LastRequest {
-
     at: Instant,
 
     prompt_tokens: usize,
@@ -78,7 +75,6 @@ pub struct CacheTracker {
 }
 
 impl CacheTracker {
-
     pub fn note(
         &mut self,
         usage: &Usage,
@@ -86,7 +82,6 @@ impl CacheTracker {
         rate: Option<ModelRate>,
         now: Instant,
     ) -> Option<CacheMiss> {
-
         let prompt_tokens = usage.input_tokens;
         let read = usage.cache_read_input_tokens.max(usage.cached_tokens);
         let write = usage.cache_write_input_tokens;
@@ -95,7 +90,6 @@ impl CacheTracker {
         let miss_at = self.paused_at.unwrap_or(now);
 
         let miss = match &self.last {
-
             Some(prev) if prev.usage == *usage => None,
             Some(prev) => detect_miss(
                 prev,

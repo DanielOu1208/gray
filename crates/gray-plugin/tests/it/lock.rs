@@ -99,7 +99,6 @@ fn disabled_argvs_come_from_user_lock() {
 
 #[test]
 fn project_overlay_wins_on_the_flag_only() {
-
     let project = LockFile {
         schema: 1,
         plugins: BTreeMap::from([named("on-sidecar", vec!["other-bin"], false)]),

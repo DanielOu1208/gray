@@ -3,7 +3,6 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderDetail {
-
     pub status: Option<u16>,
 
     pub vendor_code: Option<String>,
@@ -61,7 +60,6 @@ pub enum CoreError {
 }
 
 impl CoreError {
-
     pub fn class(&self) -> &CoreError {
         let mut cur = self;
         while let Self::Detailed { class, .. } = cur {

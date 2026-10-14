@@ -80,7 +80,6 @@ pub(crate) fn run_gateway_modal(
         None,
         &GATEWAY_SPEC,
         || Some(items()),
-
         |_| anyhow::bail!("remove apps with /plugin remove <name>"),
         crate::plugin_cli::set_managed_enabled,
     )

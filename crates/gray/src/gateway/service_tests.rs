@@ -56,7 +56,6 @@ fn linger_warning_fires_only_without_linger_yes() {
 
 #[test]
 fn the_unit_quotes_gray_home() {
-
     let home = std::path::Path::new("/home/it s home");
     let exe = std::path::Path::new("/usr/local/bin/gray");
     let body = super::systemd_unit_body(home, exe);

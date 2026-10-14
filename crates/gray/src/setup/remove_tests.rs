@@ -304,7 +304,6 @@ fn list_footer_hides_removal_for_a_provider_with_nothing_stored() {
 
 #[test]
 fn saved_custom_rows_are_always_removable() {
-
     let config = config_for("https://openrouter.ai/api/v1");
     let auth = BTreeMap::new();
     let item = crate::setup::ConnectItem {

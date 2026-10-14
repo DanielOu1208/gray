@@ -5,7 +5,6 @@ use crate::cron::store::Origin as Route;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
-
     pub owners: Vec<Route>,
 
     pub max_turns: usize,
@@ -27,7 +26,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-
     pub fn load(dir: &Path) -> Self {
         let path = dir.join("config.json");
         match std::fs::read(&path) {

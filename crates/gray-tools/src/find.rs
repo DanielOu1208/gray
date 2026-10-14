@@ -61,7 +61,6 @@ impl Tool for FindTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: Value) -> ToolOutput {
-
         if ctx.cancel.is_cancelled() {
             return finish("cancelled by user".to_string());
         }
@@ -101,7 +100,6 @@ async fn try_fd(
     effective_limit: usize,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Option<ToolOutput> {
-
     let mut args: Vec<String> = vec![
         "--glob".to_string(),
         "--color=never".to_string(),
@@ -257,7 +255,6 @@ async fn try_fd(
 }
 
 async fn fallback_walk(pattern: &str, search_path: &Path, effective_limit: usize) -> ToolOutput {
-
     let full_pattern = if pattern.contains('/')
         && !pattern.starts_with('/')
         && !pattern.starts_with("**/")
@@ -281,7 +278,6 @@ async fn fallback_walk(pattern: &str, search_path: &Path, effective_limit: usize
         .hidden(false)
         .require_git(false)
         .filter_entry(|e| {
-
             !(e.file_type().is_some_and(|t| t.is_dir())
                 && (e.file_name() == ".git" || e.file_name() == "node_modules"))
         })
@@ -305,7 +301,6 @@ async fn fallback_walk(pattern: &str, search_path: &Path, effective_limit: usize
             matcher.is_match(&rel_str)
         };
         if hit {
-
             if is_dir && !rel_str.ends_with('/') {
                 results.push(format!("{rel_str}/"));
             } else {

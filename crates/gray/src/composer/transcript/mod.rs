@@ -102,7 +102,6 @@ pub(crate) fn layout_history(
     };
     for entry in entries {
         match entry {
-
             TranscriptEntry::Welcome => out.extend(super::build_welcome_lines(w)),
             TranscriptEntry::UserPrompt(text, attached) => {
                 place(
@@ -230,7 +229,6 @@ pub(crate) fn should_hold_stream_chunk(hold_len: usize, text: &str) -> bool {
 }
 
 impl Tui {
-
     pub(crate) fn ensure_gap(&mut self) {
         if !self.gap_owed {
             self.history_entries.push(super::TranscriptEntry::Gap(1));
@@ -313,7 +311,6 @@ impl Tui {
     }
 
     pub(crate) fn live_width(&mut self) -> usize {
-
         if let Ok((cols, _)) = crossterm::terminal::size()
             && cols.max(20) != self.last_width
         {
@@ -373,7 +370,6 @@ impl Tui {
         }
         let clean = strip_ansi(chunk);
         if should_drop_stream_punctuation(self.stream_round_boundary, &clean) {
-
             self.stream_round_target = attach_stream_punctuation(
                 &mut self.history_entries,
                 self.stream_round_target,
@@ -386,13 +382,11 @@ impl Tui {
             return;
         }
         if self.stream_round_boundary && clean.trim().is_empty() {
-
             self.streamed_bytes = self.streamed_bytes.saturating_add(clean.len() as u64);
             let _ = self.draw();
             return;
         }
         if should_hold_stream_chunk(self.stream_punct_hold.len(), &clean) {
-
             self.streamed_bytes = self.streamed_bytes.saturating_add(clean.len() as u64);
             self.stream_punct_hold.push_str(&clean);
             let _ = self.draw();
@@ -529,7 +523,6 @@ impl Tui {
         trailing_gap: bool,
     ) {
         self.atomic(|t| {
-
             t.ensure_gap();
             let lines = format_user_prompt_lines(text, attached, t.width().max(10));
             t.history_entries.push(super::TranscriptEntry::UserPrompt(

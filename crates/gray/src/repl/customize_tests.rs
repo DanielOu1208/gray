@@ -81,7 +81,6 @@ fn switch_card_names_the_theme_on_its_own_palette() {
     for row in &rows {
         assert_eq!(row.width(), 60, "{}", card_text(row));
         for span in &row.spans {
-
             if span.content == "▀▀" {
                 continue;
             }

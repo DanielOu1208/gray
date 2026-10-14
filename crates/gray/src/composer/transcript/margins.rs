@@ -60,7 +60,6 @@ pub(crate) fn admit(owed: &mut bool, transcript: &[Line<'static>], shaped: &Shap
 }
 
 pub(crate) fn junction_blank_run(tail: &[Line<'static>], rows: &[Line<'static>]) -> usize {
-
     if tail.is_empty() {
         return 0;
     }

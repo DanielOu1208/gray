@@ -1213,7 +1213,6 @@ async fn torn_final_line_at_every_offset_costs_only_that_entry() {
     let mut boundary_cuts = 0;
     let mut mid_utf8_cuts = 0;
     for cut in 1..record.len() {
-
         let damaged = &bytes[..record_start + cut];
         tokio::fs::write(&path, damaged).await.unwrap();
         let mid_utf8 = std::str::from_utf8(damaged).is_err();

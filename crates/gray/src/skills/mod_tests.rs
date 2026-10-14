@@ -87,7 +87,6 @@ fn rank_skips_user_disabled_skills() {
 
 #[test]
 fn prompt_block_gives_proactive_skill_guidance() {
-
     let s = test_skill("anything", &[]);
     let out = format_skills_for_prompt(&[s], true, &BTreeSet::new());
     assert!(
@@ -99,7 +98,6 @@ fn prompt_block_gives_proactive_skill_guidance() {
 
 #[test]
 fn prompt_block_caps_skill_list_and_says_so() {
-
     let skills: Vec<Skill> = (0..60)
         .map(|i| test_skill(&format!("skill-{i:02}"), &[]))
         .collect();
@@ -130,7 +128,6 @@ fn prompt_block_under_cap_lists_all_without_notice() {
 
 #[test]
 fn prompt_cap_counts_only_eligible_unique_skills() {
-
     let mut skills = vec![test_skill("duplicate", &[]); 50];
     let mut disabled = test_skill("disabled", &[]);
     disabled.disable_model_invocation = true;

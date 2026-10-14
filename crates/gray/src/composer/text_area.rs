@@ -46,7 +46,6 @@ impl TextArea {
         p
     }
     pub(crate) fn next_boundary(&self, pos: usize) -> usize {
-
         for el in &self.elements {
             if pos >= el.range.start && pos < el.range.end {
                 return el.range.end;
@@ -290,18 +289,14 @@ impl TextArea {
         }
 
         if width < target_col {
-
             byte_pos = line_end;
 
-            if byte_pos > line_start {
-
-            }
+            if byte_pos > line_start {}
         }
         let mut new_pos = self.clamp_to_boundary(byte_pos);
 
         for el in &self.elements {
             if new_pos > el.range.start && new_pos < el.range.end {
-
                 new_pos = el.range.end;
                 break;
             }
@@ -334,10 +329,8 @@ impl TextArea {
             .unwrap_or(0);
         let prev_line_end = prev_eol;
         self.move_to_display_col_on_line(prev_bol, prev_line_end, target_col);
-
     }
     pub(crate) fn move_down(&mut self) {
-
         let eol = self.text[self.cursor..]
             .find('\n')
             .map(|i| i + self.cursor)

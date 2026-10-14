@@ -93,7 +93,6 @@ pub(crate) async fn handle_resume(
         return;
     }
     if args.target.is_none() {
-
         let at_home = tui.is_some_and(|s| s.lock().expect("tui lock").is_home());
         if !at_home && let Some(line) = current_session_line(session_state) {
             say(tui, &line);
@@ -175,7 +174,6 @@ pub(crate) async fn handle_resume(
             }
         }
     } else if tui.is_none() {
-
         let Some(root) = default_root() else {
             return;
         };
@@ -194,7 +192,6 @@ pub(crate) async fn handle_resume(
         match result {
             Ok(Some(id)) => Some(id),
             Ok(None) => {
-
                 if let Some(shared) = &tui {
                     shared.lock().expect("tui lock").ensure_gap();
                 }
@@ -389,7 +386,6 @@ pub(crate) async fn persist_turn_messages(
                 .append_with_usage_and_duration(&state.session_id, msg, usage, duration)
                 .await
             {
-
                 use crate::session_store::SessionError;
                 let retryable = matches!(
                     &e,
@@ -461,14 +457,12 @@ pub(crate) async fn ensure_session_state(
 
 #[derive(Debug, Default)]
 pub(crate) struct TurnStreamClock {
-
     anchor: Option<std::time::Instant>,
 
     streamed: std::time::Duration,
 }
 
 impl TurnStreamClock {
-
     pub(crate) fn tick(&mut self) {
         self.tick_at(std::time::Instant::now());
     }
@@ -550,7 +544,6 @@ pub(crate) fn dispatch_agent_event(
     tool_labels: Option<&HashMap<String, String>>,
     tool_previews: Option<&HashMap<String, String>>,
 ) {
-
     let elapsed_ms = || turn_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
     match ev {
@@ -600,7 +593,6 @@ pub(crate) fn dispatch_agent_event(
                 name,
                 args_so_far,
             } => {
-
                 pending_tools.insert(id.clone(), (name.clone(), None));
                 let header = crate::tool_fmt::format_live_tool_header(
                     name,
@@ -649,7 +641,6 @@ pub(crate) fn dispatch_agent_event(
                 is_error,
                 ..
             } => {
-
                 let (name, args) = pending_tools
                     .remove(id)
                     .map(|(n, a)| (if n.is_empty() { "tool".to_string() } else { n }, a))
@@ -683,10 +674,8 @@ pub(crate) fn dispatch_agent_event(
                 t.set_usage(*usage);
 
                 if let Some(miss) = t.note_cache_request(usage, model, wire_model) {
-
                     totals.note_miss(&miss);
                     if let Some(notice) = miss.notice() {
-
                         t.flush_markdown();
                         t.end_thinking();
                         t.mark_stream_round_boundary();
@@ -745,7 +734,6 @@ pub(crate) fn dispatch_agent_event(
                 if usage.total() > 0 {
                     totals.add(usage, model, Some(ms));
                     t.set_turn_billed(usage.output_tokens);
-
                 }
             }
             _ => {}
@@ -909,14 +897,12 @@ async fn save_full_history(state: &mut SessionState, messages: &[Message]) -> Re
             Ok(())
         }
         Err(error) => {
-
             use crate::session_store::SessionError;
             let retryable = matches!(
                 &error,
                 SessionError::Io(_) | SessionError::Corrupt { .. } | SessionError::NotFound(_)
             );
             if retryable {
-
                 let repaired = state.store.load(&state.session_id).await.is_ok()
                     || remint_missing_session(state).await;
                 if repaired {
@@ -1008,7 +994,6 @@ pub(crate) async fn maybe_threshold_compact(
     }
     match crate::compact::auto_compact_if_needed(agent).await {
         Ok(true) => {
-
             let elapsed = tui
                 .and_then(|shared| {
                     shared
@@ -1035,7 +1020,6 @@ pub(crate) async fn maybe_threshold_compact(
             *initial_count = agent.messages().len();
         }
         Ok(false) => {
-
             if let Some(shared) = tui {
                 shared
                     .lock()

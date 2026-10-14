@@ -108,7 +108,5 @@ impl ProviderRuntime {
 }
 
 impl Drop for ProviderRuntime {
-    fn drop(&mut self) {
-
-    }
+    fn drop(&mut self) {}
 }

@@ -20,7 +20,6 @@ pub(crate) struct ManagerItem {
 pub(crate) type SetupAction<'a> = &'a dyn Fn(&ManagerItem) -> anyhow::Result<()>;
 
 pub(crate) enum EnterAction {
-
     Setup,
 
     Toggle,
@@ -154,27 +153,23 @@ pub fn run_skills_modal(
                     .collect(),
             )
         },
-        |name| {
-            match gray_pkg::skills_ops::remove(name) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-
-                    if let Some(hit) = crate::skills::discover_skills(cwd)
-                        .skills
-                        .iter()
-                        .find(|s| s.name == name)
-                    {
-                        anyhow::bail!(
-                            "'{}' lives outside ~/.gray/skills ({}) — delete it manually",
-                            name,
-                            hit.file_path.display()
-                        );
-                    }
-                    Err(e)
+        |name| match gray_pkg::skills_ops::remove(name) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if let Some(hit) = crate::skills::discover_skills(cwd)
+                    .skills
+                    .iter()
+                    .find(|s| s.name == name)
+                {
+                    anyhow::bail!(
+                        "'{}' lives outside ~/.gray/skills ({}) — delete it manually",
+                        name,
+                        hit.file_path.display()
+                    );
                 }
+                Err(e)
             }
         },
-
         |_, _| Ok(()),
     )
 }
@@ -185,7 +180,6 @@ pub fn run_plugins_modal(bg: Option<&BackgroundSnapshot>) -> anyhow::Result<bool
         None,
         &PLUGINS_SPEC,
         || {
-
             crate::plugin_cli::list_rows().ok().map(|rows| {
                 rows.into_iter()
                     .map(|r| ManagerItem {

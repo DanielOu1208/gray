@@ -163,7 +163,6 @@ pub fn shutdown() {
 }
 
 pub async fn handle_ask(params: serde_json::Value) -> serde_json::Value {
-
     let svc = SERVICE.lock().expect("ask service").clone();
     let Some(svc) = svc else {
         return serde_json::json!({"error": "host/ask: ask service not installed"});
@@ -176,7 +175,6 @@ pub async fn handle_ask(params: serde_json::Value) -> serde_json::Value {
         return serde_json::json!({ "answers": {} });
     }
     if !blocking {
-
         return serde_json::json!({ "answers": {} });
     }
     if svc.cancel.is_cancelled() {
@@ -203,7 +201,6 @@ pub async fn handle_ask(params: serde_json::Value) -> serde_json::Value {
         if drive_svc.demux.load(std::sync::atomic::Ordering::Relaxed)
             && drive_svc.json_turn.is_some()
         {
-
             let turn = drive_svc.json_turn.clone().expect("json_turn checked");
             let questions = {
                 let pending = drive_svc.pending.lock().expect("ask pending");
@@ -740,7 +737,6 @@ fn run_ask_modal(
                     if state.notes_open[i] && !state.notes[i].is_empty() {
                         state.notes[i].pop();
                     } else {
-
                         state.committed[i] = false;
                         state.notes[i].clear();
                         state.checked[i].iter_mut().for_each(|c| *c = false);
@@ -762,7 +758,6 @@ fn run_ask_modal(
                     if !key.modifiers.contains(KeyModifiers::CONTROL)
                         && !key.modifiers.contains(KeyModifiers::ALT) =>
                 {
-
                     if let Some(d) = c.to_digit(10)
                         && !state.notes_open[i]
                         && (1..=9).contains(&d)

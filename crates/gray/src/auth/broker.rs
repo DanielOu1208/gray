@@ -202,7 +202,6 @@ impl gray_core::credential::CredentialSource for PluginCredentialSource {
 }
 
 impl PluginCredentialSource {
-
     pub async fn mark_relay_verified(&self) -> Result<(), CredentialError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -237,7 +236,6 @@ impl PluginCredentialSource {
             model: self.model.clone().unwrap_or_default(),
         };
         let result = self.rpc.chat(request).await.map_err(|e| match e {
-
             gray_plugin::ProviderRpcError::Unavailable(message) => {
                 CredentialError::ReauthRequired(message)
             }

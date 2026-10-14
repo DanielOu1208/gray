@@ -152,7 +152,6 @@ fn prefix_ignore_pattern(line: &str, prefix: &str) -> Option<String> {
 }
 
 fn pathdiff_relative(path: &Path, base: &Path) -> PathBuf {
-
     if let Ok(rel) = path.strip_prefix(base) {
         return rel.to_path_buf();
     }
@@ -262,7 +261,6 @@ pub fn format_skills_for_prompt(
     auto_enabled: bool,
     disabled: &BTreeSet<String>,
 ) -> String {
-
     const MAX_PROMPT_SKILLS: usize = 12;
     let visible: Vec<&Skill> = rank_skills_for_prompt(skills, auto_enabled, disabled);
     if visible.is_empty() {
@@ -367,7 +365,6 @@ fn skill_search_roots(cwd: &Path, agent_dir: &Path) -> Vec<(PathBuf, &'static st
         return roots;
     }
     if let Some(home) = resolve_home() {
-
         let config_base = std::env::var("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| home.join(".config"));
@@ -375,7 +372,6 @@ fn skill_search_roots(cwd: &Path, agent_dir: &Path) -> Vec<(PathBuf, &'static st
         let opencode_skills = opencode_dir.join("skills");
         push_root(&mut roots, opencode_skills.clone(), "user", &global_skills);
         if let Ok(entries) = fs::read_dir(&opencode_dir) {
-
             for entry in entries.flatten() {
                 let sub_skills = entry.path().join("skills");
                 if sub_skills.is_dir()
@@ -460,7 +456,6 @@ pub fn discovery_fingerprint(cwd: &Path) -> u64 {
                         stack.push(e.path());
                     }
                     _ => {
-
                         1u8.hash(&mut h);
                         match fs::symlink_metadata(e.path()) {
                             Ok(m) => {

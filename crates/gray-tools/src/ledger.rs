@@ -9,7 +9,6 @@ pub const MAX_HASH_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct LedgerEntry {
-
     pub mtime: SystemTime,
 
     pub size: u64,
@@ -35,7 +34,6 @@ pub struct FileLedger {
 }
 
 impl FileLedger {
-
     pub fn new() -> Self {
         Self::default()
     }

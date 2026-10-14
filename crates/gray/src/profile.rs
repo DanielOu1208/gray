@@ -7,10 +7,7 @@ pub use gray_plugin::builder::from_plugins;
 use crate::skills_tool::SkillsPlugin;
 
 pub(crate) fn gray_defaults() -> Vec<Arc<dyn Plugin>> {
-    vec![
-
-        Arc::new(SkillsPlugin::default()) as Arc<dyn Plugin>,
-    ]
+    vec![Arc::new(SkillsPlugin::default()) as Arc<dyn Plugin>]
 }
 
 static PROFILE_WARNINGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -44,7 +41,6 @@ pub(crate) async fn active_plugins(
 ) -> anyhow::Result<(Vec<Arc<dyn Plugin>>, bool)> {
     let (mut plugins, fallback) = gray_plugin::builder::active_plugins(
         gray_defaults(),
-
         &["skills"],
         "gray.yml",
         handler,

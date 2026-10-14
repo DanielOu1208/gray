@@ -2,7 +2,6 @@ use super::*;
 
 #[test]
 fn strip_escape_sequences_removes_paste_markers_and_keeps_text() {
-
     assert_eq!(
         strip_escape_sequences("\u{1b}[200~hello world\u{1b}[201~"),
         "hello world"

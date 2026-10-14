@@ -27,7 +27,6 @@ fn blocklisted_names_hit() {
         "/dev/tty",
         "/dev/tty1",
         "/dev/ttyS0",
-
         "dev/fd/3",
     ] {
         assert!(is_blocklisted(Path::new(p)), "{p}");
@@ -53,7 +52,6 @@ fn innocent_names_pass() {
 
 #[test]
 fn name_hit_needs_no_io() {
-
     let missing = Path::new("/dev/fd/999998");
     assert!(!missing.exists());
     assert!(check_name(missing, None, "/dev/fd/999998").is_err());
@@ -84,7 +82,6 @@ fn metadata_regular_file_and_dir() {
 #[cfg(unix)]
 #[test]
 fn metadata_char_device_fifo_socket_refused() {
-
     if Path::new("/dev/null").exists() {
         let err =
             check_metadata(&std::fs::metadata("/dev/null").unwrap(), "/dev/null").unwrap_err();

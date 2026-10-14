@@ -318,7 +318,6 @@ fn refresh_installed_argv(home: &Path, cache: &mut ProviderCache) -> anyhow::Res
     for (name, entry) in &lock.plugins {
         let argv = spawn_argv(name, home, entry).unwrap_or_default();
         match cache.plugins.get_mut(name) {
-
             Some(cached) if cached.identity != lock_identity(name, entry) => {
                 *cached = CachedProviderPlugin {
                     argv,

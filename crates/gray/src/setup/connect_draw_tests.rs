@@ -139,7 +139,6 @@ fn provider_selection_stays_visible_through_separator_scroll_and_filter() {
                     continue;
                 }
                 if let Some(item) = filtered.get(sel) {
-
                     let expected: String = item.name.chars().take(5).collect();
                     assert!(
                         highlighted.contains(&expected),

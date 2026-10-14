@@ -70,7 +70,6 @@ fn masked_note(command: &str) -> Option<String> {
     let last = base_head(&segs[segs.len() - 1]);
     let first = base_head(&segs[0]);
     if UNMASKABLE_TAILS.contains(&last) {
-
         let note = if segs.len() == 2 {
             format!("`{last}` masks `{first}`'s exit; rerun `{first}` alone for its status")
         } else {

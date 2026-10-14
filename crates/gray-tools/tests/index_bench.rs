@@ -49,7 +49,6 @@ fn write_tree(root: &std::path::Path) {
 
 #[tokio::test]
 async fn index_vs_spawn_tax() {
-
     let indexed_dir = TempDir::new().unwrap();
     let legacy_dir = TempDir::new().unwrap();
     write_tree(indexed_dir.path());
@@ -116,7 +115,6 @@ async fn index_vs_spawn_tax() {
     let mut old_grep = Vec::with_capacity(SAMPLES);
 
     for i in 0..SAMPLES {
-
         let pat = format!("*file{:03}.rs", i % 10);
         let t = Instant::now();
         let out = bounded(

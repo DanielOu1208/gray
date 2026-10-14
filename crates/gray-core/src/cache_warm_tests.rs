@@ -24,7 +24,6 @@ fn policy(prices: Option<Prices>) -> CacheWarmPolicy {
 
 #[test]
 fn savings_follow_pi_and_clear_the_floor_only_for_big_prompts() {
-
     let big = expected_savings(&sonnet(), 100_000, 1);
     assert!((big - (0.375 - 0.03 - 0.03 - 15e-6)).abs() < 1e-9, "{big}");
     assert!(big >= MIN_EXPECTED_SAVINGS);
@@ -147,7 +146,6 @@ async fn run_turn_reading(
 
 #[tokio::test(start_paused = true)]
 async fn a_long_tool_run_is_refreshed_and_billed() {
-
     let (seen, billed) = run_turn(Duration::from_secs(600), Some(sonnet())).await;
     let warms: Vec<_> = seen.iter().filter(|(m, _)| *m == Some(1)).collect();
     assert_eq!(warms.len(), 2, "{seen:?}");
@@ -176,7 +174,6 @@ async fn unknown_prices_never_warm_a_provider_without_cache_reports() {
 
 #[tokio::test(start_paused = true)]
 async fn unknown_prices_warm_a_big_prompt_the_provider_caches() {
-
     let (seen, _) = run_turn_reading(Duration::from_secs(600), None, 90_000, 1).await;
     assert_eq!(
         seen.iter().filter(|(m, _)| *m == Some(1)).count(),
@@ -187,7 +184,6 @@ async fn unknown_prices_warm_a_big_prompt_the_provider_caches() {
 
 #[test]
 fn the_token_floor_backs_up_the_dollar_floor() {
-
     assert!(worth_refreshing(None, 25_000, 1, true));
     assert!(!worth_refreshing(None, 25_000, 1, false));
     assert!(!worth_refreshing(None, 5_000, 1, true));
@@ -220,7 +216,6 @@ fn the_token_floor_backs_up_the_dollar_floor() {
 
 #[tokio::test(start_paused = true)]
 async fn a_thinking_replay_warms_at_the_providers_cap() {
-
     let (seen, billed) = run_turn_reading(Duration::from_secs(600), Some(sonnet()), 0, 2048).await;
     let warms: Vec<_> = seen.iter().filter(|(m, _)| *m == Some(2048)).collect();
     assert_eq!(warms.len(), 2, "{seen:?}");
@@ -235,7 +230,6 @@ async fn a_thinking_replay_warms_at_the_providers_cap() {
 
 #[tokio::test(start_paused = true)]
 async fn a_late_timer_skips_the_refresh() {
-
     let seen = Arc::new(Mutex::new(Vec::new()));
     let provider: Arc<dyn Provider> = Arc::new(Fake {
         scripts: Mutex::new(VecDeque::new()),

@@ -38,7 +38,6 @@ unsafe extern "C" {
 }
 
 pub fn main() {
-
     #[cfg(target_os = "macos")]
     unsafe {
         setiopolicy_np(3, 0, 1)
@@ -203,7 +202,6 @@ fn domain() -> String {
 
 #[cfg(target_os = "macos")]
 fn install(login: bool) {
-
     let login = login || plist_path().exists();
     let bin = PathBuf::from(home()).join(".local/bin/fsearch");
     let agents =

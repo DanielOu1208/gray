@@ -11,13 +11,11 @@ pub enum Syntax {
 
 #[derive(Default)]
 pub struct Walk {
-
     rules: Vec<(bool, GlobMatcher)>,
     exclude_dirs: Vec<GlobMatcher>,
 }
 
 impl Walk {
-
     pub fn keeps_file(&self, name: &[u8]) -> bool {
         let Ok(name) = std::str::from_utf8(name) else {
             return false;
@@ -40,7 +38,6 @@ impl Walk {
 }
 
 pub struct GrepPlan {
-
     pub argv: Vec<String>,
 
     pub operand: String,

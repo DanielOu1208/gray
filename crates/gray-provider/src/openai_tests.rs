@@ -59,7 +59,6 @@ fn unsupported_model_500_maps_to_bad_request_and_preserves_cf_ray() {
 
 #[test]
 fn unsupported_model_401_body_outranks_auth_status() {
-
     let err = classify_http_error(
         reqwest::StatusCode::UNAUTHORIZED,
         r#"{"type":"error","error":{"type":"ModelError","message":"Model deepseek/deepseek-chat is not supported"}}"#,
@@ -87,7 +86,6 @@ fn auth_401_insufficient_balance_is_not_retryable() {
 
 #[test]
 fn cloudflare_edge_403_is_retryable_not_auth() {
-
     let err = classify_http_error(
         reqwest::StatusCode::FORBIDDEN,
         "error code: 1010",
@@ -100,7 +98,6 @@ fn cloudflare_edge_403_is_retryable_not_auth() {
 
 #[test]
 fn real_api_403_stays_auth() {
-
     let err = classify_http_error(
         reqwest::StatusCode::FORBIDDEN,
         r#"{"error":{"message":"invalid api key"}}"#,
@@ -125,7 +122,6 @@ fn plain_500_without_model_hint_is_server_error_retryable() {
 
 #[test]
 fn retry_notice_uses_codex_reconnecting_format() {
-
     let err = ProviderError::ServerError("status 503: backend overloaded".to_string());
     let ev = retry_notice_event(1, 3, &err);
     match ev {
@@ -139,7 +135,6 @@ fn retry_notice_uses_codex_reconnecting_format() {
 
 #[tokio::test]
 async fn retry_burst_emits_a_single_reconnect_notice() {
-
     use futures::StreamExt;
     use gray_core::message::ChatRequest;
     let server = wiremock::MockServer::start().await;
@@ -169,7 +164,6 @@ async fn retry_burst_emits_a_single_reconnect_notice() {
 
 #[tokio::test]
 async fn session_header_sent_on_chat_post() {
-
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
         .respond_with(wiremock::ResponseTemplate::new(500).set_body_string("boom"))
@@ -320,7 +314,6 @@ fn previous_response_id_serializes_only_when_set() {
 
 #[test]
 fn resume_carries_tool_prefix_on_id_drops_on_none() {
-
     let prefix = || {
         let mut tools: BTreeMap<String, (usize, String, String)> = BTreeMap::new();
         tools.insert(
@@ -365,7 +358,6 @@ fn resume_carries_tool_prefix_on_id_drops_on_none() {
 
 #[test]
 fn responses_usage_maps_input_tokens_details_cached() {
-
     let v = serde_json::json!({
         "input_tokens": 1000,
         "output_tokens": 200,
@@ -383,7 +375,6 @@ fn responses_usage_maps_input_tokens_details_cached() {
 
 #[test]
 fn chat_usage_prefers_explicit_cache_miss_tokens() {
-
     let v = serde_json::json!({
         "prompt_tokens": 1000,
         "completion_tokens": 50,
@@ -512,7 +503,6 @@ fn empty_chat_req() -> gray_core::message::ChatRequest {
 
 #[tokio::test]
 async fn sampling_params_are_sent_when_configured() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -541,7 +531,6 @@ async fn sampling_params_are_sent_when_configured() {
 
 #[tokio::test]
 async fn sampling_params_are_omitted_by_default() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -579,7 +568,6 @@ fn chat_mapping_off_sends_thinking_disabled_only() {
 
 #[test]
 fn a_capped_chat_request_leaves_out_a_budget_it_cannot_fit() {
-
     let req = gray_core::message::ChatRequest {
         max_tokens: Some(1),
         ..empty_chat_req()
@@ -670,7 +658,6 @@ fn reasoning_400_with_extra_inputs_retries_without_reasoning() {
 
 #[test]
 fn thinking_only_400_retries_without_reasoning_when_params_were_sent() {
-
     assert!(
         should_retry_without_reasoning(400, "thinking-only model", true),
         "off-path 400 must retry stripped"
@@ -733,7 +720,6 @@ fn reasoning_conflict_error_names_model_and_conflict() {
 
 #[test]
 fn chat_mapping_user_and_system_roles_map_without_panic() {
-
     let req = gray_core::message::ChatRequest {
         system: None,
         messages: vec![
@@ -750,7 +736,6 @@ fn chat_mapping_user_and_system_roles_map_without_panic() {
 
 #[test]
 fn serialize_body_maps_failure_to_bad_request() {
-
     let bad: std::collections::BTreeMap<(), u8> = [((), 1)].into_iter().collect();
     let err = serialize_body(&bad, "test body").expect_err("unit keys must fail");
     assert!(
@@ -790,7 +775,6 @@ fn plain_429_without_quota_hints_stays_retryable() {
     for body in [
         "Rate limit reached for model",
         "rate_limit_exceeded: slow down",
-
         "Rate limit exceeded. Upgrade your billing plan for higher limits.",
     ] {
         let err = classify_http_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body, None, None);
@@ -874,7 +858,6 @@ fn retry_after_accepts_ms_and_http_date_and_caps_at_60s() {
 
 #[test]
 fn long_body_quota_signal_survives_snippet_cap() {
-
     let snippet = |body: &str| -> String { body.chars().take(4000).collect() };
     let pad = "x".repeat(600);
     let body = format!("{pad} insufficient_quota: billing exhausted");
@@ -903,7 +886,6 @@ fn long_body_quota_signal_survives_snippet_cap() {
 
 #[tokio::test]
 async fn quota_429_body_past_500_chars_terminal_end_to_end() {
-
     use futures::StreamExt;
     use gray_core::message::ChatRequest;
     let server = wiremock::MockServer::start().await;
@@ -935,7 +917,6 @@ async fn quota_429_body_past_500_chars_terminal_end_to_end() {
 
 #[tokio::test]
 async fn dropped_stream_fires_no_retry_post_after_backoff() {
-
     use futures::StreamExt;
     use gray_core::message::ChatRequest;
     let server = wiremock::MockServer::start().await;
@@ -979,7 +960,6 @@ async fn dropped_stream_fires_no_retry_post_after_backoff() {
 
 #[tokio::test]
 async fn chat_post_carries_prompt_cache_key_body() {
-
     use futures::StreamExt;
     use gray_core::message::ChatRequest;
     let server = wiremock::MockServer::start().await;
@@ -1018,7 +998,6 @@ async fn chat_post_carries_prompt_cache_key_body() {
 
 #[test]
 fn chat_affinity_omitted_when_unset() {
-
     let body = map_chat_request(empty_chat_req(), "test-model", None).expect("maps");
     let v = serde_json::to_value(&body).expect("serializes");
     assert!(
@@ -1029,7 +1008,6 @@ fn chat_affinity_omitted_when_unset() {
 
 #[test]
 fn unknown_resume_id_retries_stripped_once() {
-
     assert!(
         should_retry_without_previous_response(
             400,
@@ -1068,7 +1046,6 @@ fn unknown_resume_id_retries_stripped_once() {
 
 #[test]
 fn deepseek_assistant_messages_always_carry_reasoning_content() {
-
     use gray_core::message::Message;
     let plain_assistant = || ChatRequest {
         system: None,
@@ -1129,7 +1106,6 @@ fn deepseek_assistant_messages_always_carry_reasoning_content() {
 
 #[test]
 fn tool_error_flag_survives_chat_wire_encoding() {
-
     use gray_core::message::Message;
     let req = ChatRequest {
         system: None,
@@ -1255,7 +1231,6 @@ fn tool_error_flag_survives_responses_wire_encoding() {
 
 #[tokio::test]
 async fn oversize_tool_index_is_forwarded_not_silently_dropped() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let chunk = serde_json::json!({
@@ -1293,7 +1268,6 @@ async fn oversize_tool_index_is_forwarded_not_silently_dropped() {
 
 #[tokio::test]
 async fn responses_twin_ids_require_confirmed_completion() {
-
     use futures::StreamExt;
     for confirmed in [false, true] {
         let server = wiremock::MockServer::start().await;
@@ -1368,7 +1342,6 @@ async fn responses_twin_ids_require_confirmed_completion() {
 
 #[tokio::test]
 async fn responses_text_only_eof_without_completed_completes() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let delta = serde_json::json!({
@@ -1429,7 +1402,6 @@ async fn responses_text_only_eof_without_completed_completes() {
 
 #[tokio::test]
 async fn responses_text_parts_get_a_blank_line_between_them() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let ev = |output_index, content_index, delta| {
@@ -1480,7 +1452,6 @@ async fn responses_text_parts_get_a_blank_line_between_them() {
 
 #[tokio::test]
 async fn responses_failure_event_is_an_error_not_endturn() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let failed = serde_json::json!({
@@ -1630,7 +1601,6 @@ async fn responses_incomplete_and_top_level_error_are_not_success() {
 
 #[tokio::test]
 async fn empty_tool_call_padding_deltas_are_dropped() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let real = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]}}]});
@@ -1665,7 +1635,6 @@ async fn empty_tool_call_padding_deltas_are_dropped() {
 
 #[tokio::test]
 async fn chat_eof_keeps_complete_tool_calls() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let chunk = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{\"command\":\"ls -la\"}"}}]}}]});
@@ -1718,7 +1687,6 @@ async fn chat_eof_never_executes_unconfirmed_tools() {
 
 #[tokio::test]
 async fn zen_500_retry_hardening_recovers_on_fifth_attempt() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -1760,7 +1728,6 @@ async fn zen_500_retry_hardening_recovers_on_fifth_attempt() {
 
 #[test]
 fn zen_500_retry_budget_constants() {
-
     assert_eq!(MAX_ATTEMPTS, 5, "retry budget is 5 attempts");
     assert_eq!(
         INITIAL_BACKOFF,
@@ -1828,7 +1795,6 @@ fn cached_turn_req() -> gray_core::message::ChatRequest {
 
 #[test]
 fn anthropic_cache_control_rides_content_parts() {
-
     let model = "anthropic/claude-sonnet-4.5";
     let body = map_chat_request(cached_turn_req(), model, None).expect("maps");
     let v = serde_json::to_value(&body).expect("serializes");
@@ -1865,7 +1831,6 @@ fn non_anthropic_models_carry_no_cache_control() {
 
 #[test]
 fn session_affinity_header_is_host_independent() {
-
     let openrouter = Url::parse("https://openrouter.ai/api/v1").expect("url");
     let commandcode = Url::parse("https://api.commandcode.ai/provider/v1").expect("url");
     let other = Url::parse("https://api.deepseek.com/v1").expect("url");
@@ -1900,7 +1865,6 @@ async fn serve_truncated_then_good() -> (String, tokio::task::JoinHandle<()>) {
             .await;
             served += 1;
             if served == 1 {
-
                 let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
                 if sock.write_all(head.as_bytes()).await.is_err() {
                     return;
@@ -1935,7 +1899,6 @@ async fn serve_truncated_then_good() -> (String, tokio::task::JoinHandle<()>) {
 
 #[tokio::test]
 async fn a_truncated_body_retries_when_nothing_was_emitted() {
-
     use futures::StreamExt;
     use gray_core::message::ChatRequest;
     let (base, server) = serve_truncated_then_good().await;
@@ -2296,7 +2259,6 @@ async fn relay_url_override_posts_to_lease_url() {
             .await
             .is_ok()
         {
-
             declared_hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     });
@@ -2382,7 +2344,6 @@ async fn relay_url_override_posts_to_lease_url() {
 
 #[test]
 fn admission_consumed_400_is_terminal_bad_request() {
-
     let err = classify_http_error(
         reqwest::StatusCode::BAD_REQUEST,
         r#"{"type":"error","error":{"type":"invalid_request_error","message":"ANTIGRAVITY_MODEL_ADMISSION_CONSUMED"}}"#,
@@ -2485,7 +2446,6 @@ fn media_goes_native_where_the_wire_takes_it_else_its_fallback() {
 
 #[test]
 fn chat_tool_result_fallback_text_follows_all_tool_results() {
-
     let req = ChatRequest {
         system: None,
         messages: vec![
@@ -2554,7 +2514,6 @@ fn http_errors_show_the_providers_sentence_not_its_json() {
 
 #[test]
 fn should_retry_request_allows_one_bare_403_retry() {
-
     let auth = || ProviderError::Auth("status 403: Authentication failed".to_string());
     assert!(should_retry_request(&auth(), 403, 1));
     assert!(!should_retry_request(&auth(), 403, 2));
@@ -2569,7 +2528,6 @@ fn should_retry_request_allows_one_bare_403_retry() {
 
 #[tokio::test]
 async fn transient_403_retries_once_then_surfaces_auth() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -2601,7 +2559,6 @@ async fn transient_403_retries_once_then_surfaces_auth() {
 
 #[tokio::test]
 async fn auth_401_is_single_attempt() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -2629,7 +2586,6 @@ async fn auth_401_is_single_attempt() {
 
 #[tokio::test]
 async fn quota_403_is_single_attempt() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any())
@@ -2677,7 +2633,6 @@ fn plan_usage_provider(base_url: String) -> OpenAiProvider {
 
 #[tokio::test]
 async fn plan_usage_limit_429_is_single_attempt() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let body = r#"{"error": {"message": "You have reached your usage limit for this app.", "type": "usage_limit", "code": "subscription_sharing_usage_limit_exceeded"}}"#;
@@ -2697,7 +2652,6 @@ async fn plan_usage_limit_429_is_single_attempt() {
 
 #[tokio::test]
 async fn plan_usage_limit_mid_stream_is_single_attempt() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let failed = serde_json::json!({
@@ -2727,7 +2681,6 @@ async fn plan_usage_limit_mid_stream_is_single_attempt() {
 
 #[tokio::test]
 async fn relay_quota_429_in_server_error_code_is_terminal() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let failed = serde_json::json!({
@@ -2757,7 +2710,6 @@ async fn relay_quota_429_in_server_error_code_is_terminal() {
 
 #[tokio::test]
 async fn responses_transient_403_then_success_delivers_text() {
-
     use futures::StreamExt;
     let server = wiremock::MockServer::start().await;
     let delta = serde_json::json!({

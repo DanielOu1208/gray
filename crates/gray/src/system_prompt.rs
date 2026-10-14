@@ -15,7 +15,6 @@ pub fn strip_comments(s: &str) -> String {
 }
 
 pub fn build_system_prompt(custom_prompt: Option<String>) -> String {
-
     strip_comments(custom_prompt.as_deref().unwrap_or_default())
         .trim_start()
         .to_string()

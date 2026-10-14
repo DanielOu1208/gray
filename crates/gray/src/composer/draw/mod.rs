@@ -35,7 +35,6 @@ pub(crate) fn latched_viewport_floor(
     attach_h: u16,
     max_h: u16,
 ) -> u16 {
-
     let with_dock = status_h + queued_h + live_h + box_rows + attach_h + 1;
     let no_status = queued_h + live_h + box_rows + attach_h + 1;
 
@@ -169,7 +168,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let queued_est: u16 = if n == 0 {
         0
     } else {
-
         1 + n.min(3) as u16 + u16::from(n > 3) + 1
     };
     let panel_est: u16 = if home.is_some() {
@@ -202,7 +200,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let chips = attachment_cells(&tui.attachments, &text);
     let mut ibox = build_input_box(&text, cursor, w, ghost, home, &chips);
     if home.is_some() {
-
         let above: usize = {
             let transcript_h: usize = tui
                 .transcript
@@ -505,7 +502,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         if show_live_overflow {
             let y = live_y + live_rows.len() as u16;
             if y >= area.y && y < area.y + area.height {
-
                 frame.render_widget(
                     chrome_row(Line::from(vec![Span::styled(
                         format!("    … +{live_overflow} more"),
@@ -675,7 +671,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 u.cache_hit_rate() * 100.0,
             )
         } else if tui.streamed_bytes > 0 {
-
             (super::live_context_total(None, tui.streamed_bytes), 0.0)
         } else {
             (0, 0.0)
@@ -787,7 +782,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 "model" => {
                     let mut seg = Seg::new(model_text.clone(), t.text_bright);
                     if let Some(parts) = &tui.model_label_parts {
-
                         let sk_lit = tui
                             .live_tools
                             .iter()
@@ -884,7 +878,6 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let left_segs =
             crate::statusline::clip(left_segs, w.saturating_sub(seg_width(&right_segs) + 5));
         if line_cfg.command.is_some() {
-
             static LAST_FACTS_KEY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
             let branch = crate::statusline::git_branch(std::path::Path::new(&tui.cwd));
             let key = format!(
@@ -993,7 +986,6 @@ fn chrome_row(line: Line<'static>) -> Paragraph<'static> {
 }
 
 fn theme_row_swatch(name: &str) -> Option<Vec<Span<'static>>> {
-
     let theme_name = name
         .strip_prefix("theme ")
         .or_else(|| name.strip_prefix("themes "))?;

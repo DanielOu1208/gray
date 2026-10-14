@@ -29,7 +29,6 @@ fn refuses_plain_http_remote() {
 
 #[test]
 fn rejects_dotdot_entries() {
-
     fn evil_tar_gz(name: &str) -> Vec<u8> {
         use std::io::Write;
         let mut hdr = [0u8; 512];

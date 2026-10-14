@@ -2,7 +2,6 @@ use super::*;
 
 #[test]
 fn codex_style_server_error_extracts_message_not_raw_json() {
-
     let detail = r#"server error: status 503 Service Unavailable: {"model":"muse-spark-1.3-contributor","error":{"param":null,"type":"server_error","message":"Error from provider (Console Go): Upstream request failed: [service_overloaded] The backend is temporarily overloaded. Please retry."}}, cf-ray: a35cf09b5c1b7537-SEA"#;
     let out = format_core_error(
         &CoreError::Provider(detail.to_string()),
@@ -129,7 +128,6 @@ fn formats_minutes() {
 
 #[test]
 fn typed_image_link_becomes_vision_block() {
-
     let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]));
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("typed.png");
@@ -150,7 +148,6 @@ fn typed_image_link_becomes_vision_block() {
 
 #[test]
 fn typed_auth_error_names_connect_not_agent_error() {
-
     let out = format_core_error(
         &CoreError::Auth(
             "status 403 Forbidden: Authentication failed. Please check your credentials.".into(),
@@ -223,7 +220,6 @@ fn localize_utc_time_converts_to_offset() {
 
 #[test]
 fn detailed_provider_error_classifies_by_variant_and_fields_not_text() {
-
     let err = CoreError::Detailed {
         class: Box::new(CoreError::RateLimited("status 429: slow down".into())),
         detail: ProviderDetail {

@@ -6,7 +6,6 @@ use serde_json::json;
 
 #[tokio::test]
 async fn shell_preserves_command_cwd_and_nonzero_exit() {
-
     let dir = tempfile::Builder::new()
         .prefix("gray shell café ")
         .tempdir()
@@ -74,7 +73,6 @@ async fn stopped_tree_cannot_write_later(cancel: bool) {
         out.content
     );
     if !cancel {
-
         let stop = out
             .content
             .split("Stop: `")

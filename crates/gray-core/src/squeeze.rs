@@ -4,7 +4,6 @@ pub const MIN_SQUEEZE_BYTES: usize = 2048;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Squeezed {
-
     pub text: String,
 
     pub rule: &'static str,
@@ -78,7 +77,6 @@ impl Rule {
 fn segment_family(segment: &str) -> Option<Rule> {
     let mut words = segment.split_whitespace();
     let exe = loop {
-
         let word = words.next()?;
         let key = word.split_once('=').map_or("", |(k, _)| k);
         if !key.is_empty() && !key.starts_with('-') && !key.contains('/') && word.contains('=') {
@@ -102,7 +100,6 @@ fn classify(command: &str) -> Option<Rule> {
     let mut family: Option<Rule> = None;
     let mut segments = 0usize;
     for segment in command.split(['|', ';', '\n', '&']) {
-
         let segment = segment
             .split_once('>')
             .map_or(segment, |(head, _)| head)
@@ -199,7 +196,6 @@ fn pytest_progress(line: &str) -> bool {
 }
 
 fn collapse(input: Vec<&str>, rule: Option<Rule>) -> String {
-
     let keep = |line: &str| {
         if rule == Some(Rule::Pip) {
             pip_summary(line)
@@ -210,7 +206,6 @@ fn collapse(input: Vec<&str>, rule: Option<Rule>) -> String {
     let mut out: Vec<String> = Vec::with_capacity(input.len());
     let mut i = 0usize;
     while i < input.len() {
-
         if input[i].trim().is_empty() {
             let start = i;
             while i < input.len() && input[i].trim().is_empty() {
@@ -258,7 +253,6 @@ fn collapse(input: Vec<&str>, rule: Option<Rule>) -> String {
 }
 
 fn run_line(key: &str, run: &[&str], rule: Option<Rule>) -> String {
-
     format!(
         "[{}] {key} ×{} elided (last: {})",
         rule.map_or("runs", Rule::id),

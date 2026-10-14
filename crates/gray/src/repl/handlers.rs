@@ -125,7 +125,6 @@ pub(crate) enum Subsystem {
 }
 
 impl Subsystem {
-
     pub(crate) fn label(self) -> &'static str {
         match self {
             Subsystem::Cron => "cron",
@@ -208,7 +207,6 @@ pub(crate) fn expand_skill_command(
     tui: Option<&crate::composer::SharedTui>,
     local: bool,
 ) -> ReplCommand {
-
     let to_prompt = |expanded: String| {
         if local {
             ReplCommand::Empty
@@ -230,7 +228,6 @@ pub(crate) fn expand_skill_command(
     };
     let discovered = crate::skills::discover_skills(cwd);
     let Some(rest) = payload else {
-
         if tui.is_some() {
             let bg = tui.as_ref().map(|s| s.lock().expect("tui lock").snapshot());
             match with_modal_sync(tui, || crate::setup::run_skills_modal(bg.as_ref(), cwd)) {
@@ -276,7 +273,6 @@ pub(crate) fn expand_skill_command(
         return ReplCommand::Empty;
     };
     if let Some(on) = parse_skills_auto_toggle(&rest) {
-
         let shadowed = discovered.skills.iter().any(|s| s.name == rest.trim());
         if !shadowed {
             if !local {
@@ -390,7 +386,6 @@ pub(crate) async fn handle_sys(
             reload_agent(agent, config, cwd, session_id, tui).await;
         }
         SysAction::Edit => {
-
             let initial = match load_or_create_system_prompt_at(&path) {
                 Ok(b) => b,
                 Err(e) => {
@@ -570,7 +565,6 @@ pub(crate) fn apply_model_selection_at(
     fast: Option<bool>,
     saved_path: Option<&Path>,
 ) -> Result<ModelApply, String> {
-
     let (_, list_key, _) = crate::setup::picker_scope(config);
     let cached = crate::setup::saved_models_for(&list_key, &config.base_url);
     let mut checked = crate::setup::validate_direct_model_id(raw, &cached);
@@ -590,13 +584,10 @@ pub(crate) fn apply_model_selection_at(
     let (m, variant_tier, id_fast) = match checked {
         Ok(canonical) => crate::setup::decompose_model_variant(&canonical, &ids)
             .unwrap_or((canonical, None, false)),
-        Err(msg) => {
-
-            match crate::setup::decompose_model_variant(raw, &ids) {
-                Some(v) => v,
-                None => return Err(msg),
-            }
-        }
+        Err(msg) => match crate::setup::decompose_model_variant(raw, &ids) {
+            Some(v) => v,
+            None => return Err(msg),
+        },
     };
 
     let fast = if std::env::var_os("GRAY_FAST").is_some() {
@@ -630,7 +621,6 @@ pub(crate) fn apply_model_selection_at(
         }
         Some(_) => {}
         None => {
-
             let _cfg_lock = saved_path.and_then(|p| crate::setup::lock_saved_config_at(p).ok());
             let mut saved = saved_path.map(crate::setup::load_saved_config_at);
             crate::setup::apply_connection_effort(
@@ -664,7 +654,6 @@ async fn finish_model_pick(
     hide_thinking: &mut bool,
     (prev_effort, prev_show, prev_fast): (Option<String>, Option<bool>, Option<bool>),
 ) {
-
     let clamped = super::clamp_thinking_to_model(config);
     let show_changed = config.show_reasoning != prev_show;
     let fast_changed = config.fast_mode != prev_fast;
@@ -792,7 +781,6 @@ pub(crate) async fn handle_model(
         ModelArg::Picker { focus } => (None, focus),
     };
     if let Some(m) = direct {
-
         let applied = match apply_model_selection(config, &m, None, None) {
             Ok(a) => a,
             Err(msg) => {
@@ -848,7 +836,6 @@ pub(crate) async fn handle_model(
     }
 
     if tui.is_none() {
-
         match config.model.as_deref() {
             Some(m) => println!("model {m} — /models provider/id to switch"),
             None => {
@@ -882,7 +869,6 @@ pub(crate) async fn handle_model(
             .await;
         }
         Ok(false) => {
-
             if let Some(shared) = tui {
                 let mut t = shared.lock().expect("tui lock");
                 t.clear_draft();

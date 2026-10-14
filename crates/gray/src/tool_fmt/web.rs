@@ -33,7 +33,6 @@ fn search_body_text(trimmed: &str) -> Option<String> {
 }
 
 fn fetch_body_text(trimmed: &str) -> String {
-
     const MAX_CHARS: usize = 2000;
     let decoded = decode_html_entities_text(trimmed);
     if decoded.chars().count() <= MAX_CHARS {

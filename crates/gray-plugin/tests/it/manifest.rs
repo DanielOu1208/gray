@@ -53,7 +53,6 @@ fn manifest_result_with_tool_schema_round_trips_def() {
 
 #[test]
 fn tool_preview_parses_and_stays_model_invisible() {
-
     let v = serde_json::json!({
         "name": "x", "version": "0.1.0",
         "tools": [{"name": "send_card", "description": "d",
@@ -81,7 +80,6 @@ fn tool_preview_parses_and_stays_model_invisible() {
 
 #[test]
 fn legacy_string_tool_entries_still_parse() {
-
     let v = serde_json::json!({"name": "echo", "version": "0.1.0", "tools": ["echo"]});
     let m = Manifest::from_result(&v);
     assert_eq!(m.tools.len(), 1);
@@ -104,7 +102,6 @@ fn subcommands_parse_lenient() {
 
 #[test]
 fn tool_label_parses_and_stays_model_invisible() {
-
     let v = serde_json::json!({
         "name": "x", "version": "0.1.0",
         "tools": [{"name": "notify_owner", "description": "d",

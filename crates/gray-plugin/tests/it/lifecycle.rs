@@ -42,7 +42,6 @@ fn bubble_argv(dir: &Path) -> Vec<String> {
 }
 
 fn endpoint_files(dir: &PathBuf) -> Vec<(PathBuf, String, String)> {
-
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else {
         return out;
@@ -66,7 +65,6 @@ fn endpoint_files(dir: &PathBuf) -> Vec<(PathBuf, String, String)> {
 }
 
 fn child_alive(pid: &str) -> bool {
-
     std::process::Command::new("kill")
         .arg("-0")
         .arg(pid)
@@ -152,7 +150,6 @@ async fn shutdown_one_leaves_other_alive() {
 
 #[tokio::test]
 async fn pre_v1_fixture_survives_shutdown_without_hanging() {
-
     let p = SidecarPlugin::spawn(vec!["testdata/hooks_plugin.sh".into()])
         .await
         .unwrap();

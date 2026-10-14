@@ -57,7 +57,6 @@ pub fn truncate_output(text: &str) -> String {
         }
         b
     } else {
-
         text.to_string()
     };
 
@@ -76,7 +75,6 @@ pub fn truncate_output(text: &str) -> String {
     } else if notes.is_empty() {
         body
     } else {
-
         let mid = body.lines().count() / 2;
         let split = body
             .match_indices('\n')

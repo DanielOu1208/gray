@@ -70,7 +70,6 @@ enum RequestSensitivity {
 
 #[cfg(windows)]
 async fn try_write_frame(stdin: &std::sync::Arc<Mutex<ChildStdin>>, frame: &str) -> FrameWrite {
-
     let stdin = Arc::clone(stdin);
     let frame = frame.to_owned();
     let mut guard = stdin.lock_owned().await;
@@ -283,7 +282,6 @@ fn spawn_reader(
                         .map(|cap| cap.to_string())
                 };
                 if let Some(cap) = ungranted {
-
                     let reply = json!({"id": id, "result": {
                         "error": format!("capability_not_granted: {cap}"),
                         "hint": format!("gray plugin capabilities {plugin_name}"),
@@ -332,7 +330,6 @@ fn spawn_reader(
                             log::warn!("sidecar reply write failed ({e}); dropping the permit");
                         }
                         FrameWrite::TimedOut => {
-
                             log::warn!("sidecar stopped reading stdin; dropping a host permit");
                         }
                     }
@@ -367,7 +364,6 @@ fn spawn_reader(
 }
 
 impl Transport {
-
     fn name_of(argv: &[String]) -> String {
         argv.first()
             .and_then(|p| Path::new(p).file_stem())
@@ -637,7 +633,6 @@ impl SidecarPlugin {
             global: std::sync::atomic::AtomicBool::new(false),
         };
         if dynamic {
-
             plugin.install_tools_changed_handler();
 
             let transport = Arc::downgrade(&plugin.transport);
@@ -951,7 +946,6 @@ fn parse_credential_material(value: Value) -> Result<CredentialMaterial, Provide
 
 #[async_trait]
 impl Plugin for SidecarPlugin {
-
     fn capabilities(&self) -> Vec<String> {
         SidecarPlugin::capabilities(self)
     }
@@ -1106,7 +1100,6 @@ impl Plugin for SidecarPlugin {
         Some(out)
     }
     async fn run_command(&self, name: &str, argv: Vec<String>) -> Option<CommandOutcome> {
-
         if !self.manifest.commands.iter().any(|c| c == name)
             && !self.manifest.subcommands.iter().any(|c| c == name)
         {
@@ -1121,7 +1114,6 @@ impl Plugin for SidecarPlugin {
         command_outcome(&v)
     }
     async fn on_event(&self, e: CoreEvent) {
-
         let session = session_json(&self.pinned_sid(), &self.cwd);
         let params = match &e {
             CoreEvent::PreTool { name, args } => {
@@ -1314,7 +1306,6 @@ impl Tool for SidecarTool {
         };
         match self.transport.request("tool/call", Some(params), ttl).await {
             Ok(v) => {
-
                 let is_error = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
                 let content = v.get("content").and_then(|c| c.as_str());
                 match (is_error, content) {

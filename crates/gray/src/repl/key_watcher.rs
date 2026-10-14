@@ -219,7 +219,6 @@ fn run_turn_local_command(ctx: &TurnLocalCommands, text: &str) {
                     Err(e) => super::say(tui, &format!("agents panel error: {e}")),
                 }
             } else {
-
                 let shared = ctx.tui.clone();
                 std::thread::spawn(move || {
                     let tui = Some(&shared);
@@ -352,7 +351,6 @@ pub(crate) fn spawn_key_watcher_with_typing(
                             return;
                         }
                         KeyOutcome::Interrupt => {
-
                             let mut text = t.textarea.text().to_string();
                             for (ph, full) in &t.pending_pastes {
                                 text = text.replace(ph, full);
@@ -368,7 +366,6 @@ pub(crate) fn spawn_key_watcher_with_typing(
                             return;
                         }
                         KeyOutcome::Command(cmd) => {
-
                             if t.attachments.is_empty()
                                 && let Some(locals) = turn_locals.as_ref()
                                 && is_turn_local_command(&cmd)
@@ -403,7 +400,6 @@ pub(crate) fn spawn_key_watcher_with_typing(
                                 && is_turn_local_command(&text)
                                 && turn_locals.is_some();
                             if local {
-
                                 t.flush_markdown();
                                 t.end_thinking();
                                 t.textarea.set_text("");

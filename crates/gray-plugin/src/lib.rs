@@ -121,7 +121,6 @@ pub fn manifest_tools(v: &Value) -> Vec<ToolDef> {
 }
 
 impl Manifest {
-
     pub fn from_result(v: &Value) -> Self {
         let str_list = |key: &str| {
             v.get(key)
@@ -285,7 +284,6 @@ impl PluginHooks for PluginHookAdapter {
         self.plugin.tool_before(name, args).await
     }
     fn commands(&self) -> Vec<PluginCommand> {
-
         let m = self.plugin.manifest();
         m.commands
             .into_iter()

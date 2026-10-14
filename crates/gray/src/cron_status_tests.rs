@@ -82,7 +82,6 @@ fn add_warning_only_when_nothing_is_ticking() {
 
 #[test]
 fn add_warning_never_sends_a_chat_bound_job_to_start_a_driver() {
-
     let hint = add_warning(None, 10_000, true).expect("chat-bound hint");
     assert!(hint.contains("host's next tick"), "{hint}");
     assert!(!hint.contains("cron serve"), "{hint}");

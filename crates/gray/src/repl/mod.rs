@@ -53,7 +53,6 @@ fn exit_from_signal(code: i32, clear_band: bool) -> ! {
 
     jobs::stop_all_blocking();
     if session::exit_hint_printed() {
-
         let _ = std::io::stdout().flush();
         std::process::exit(code);
     }
@@ -89,7 +88,6 @@ fn exit_from_signal(code: i32, clear_band: bool) -> ! {
         let _ = write!(std::io::stdout(), "\x1b[?25h\r\n");
     }
     if session::claim_exit_hint() {
-
         let _ = write!(
             std::io::stdout(),
             "{}",
@@ -112,7 +110,6 @@ async fn spawn_ctrl_c_policy() {
         if let Some(t) = token {
             t.cancel();
         } else {
-
             drain_in_flight_turn(TURN_DRAIN_TIMEOUT).await;
 
             exit_from_signal(0, true);
@@ -189,7 +186,6 @@ pub(crate) type TuiOpt = Option<(
 )>;
 
 pub(crate) struct SessionState {
-
     pub(crate) full_save_pending: bool,
     pub(crate) store: crate::session_store::JsonlSessionStore,
     pub(crate) session_id: crate::session_store::SessionId,
@@ -278,7 +274,6 @@ pub(crate) fn push_provider_connected(
     crate::setup::set_active_model_provider(&config.base_url);
     let clamped = clamp_thinking_to_model(config);
     if let Some(h) = hide_thinking {
-
         *h = config.reasoning_hidden();
     }
     let Some((shared, _)) = tui else {
@@ -393,7 +388,6 @@ impl crate::cron_serve::AsyncRunner for ReplRunner {
         prompt: String,
         cwd: std::path::PathBuf,
     ) -> anyhow::Result<crate::cron_serve::FireOutput> {
-
         let mut config = self.config.clone();
         crate::cron_serve::refresh_model_from_saved(&mut config);
         let mut agent = crate::build_agent(&config, &cwd, None).await?;
@@ -689,7 +683,6 @@ pub async fn run_repl_mode(
     }
 
     if let Some((sid, meta, entries, store)) = loaded {
-
         let open_guard = Some(store.acquire_open(&sid).await?);
         if config.model.is_none() && !meta.model.is_empty() {
             config.model = Some(meta.model.clone());
@@ -758,7 +751,6 @@ pub async fn run_repl_mode(
 
         t.set_home_session(session::current_session_line(&session_state));
         if let Some((ref sid, ref entries)) = resumed_session_info {
-
             let _ = t.draw();
 
             let tool_defs = if config.bare {
@@ -832,7 +824,6 @@ pub async fn run_repl_mode(
                     break;
                 }
                 if let Ok(mut t) = ticker_tui.try_lock() {
-
                     if ticker_stop.load(AtomicOrdering::Relaxed) {
                         break;
                     }
@@ -907,7 +898,6 @@ pub async fn run_repl_mode(
         if let Ok(home) = crate::setup::gray_home()
             && let Ok(store) = crate::cron::CronStore::open(home.join("cron"))
         {
-
             let inbox_home = home.clone();
             tokio::spawn(async move {
                 loop {
@@ -935,7 +925,6 @@ pub async fn run_repl_mode(
                         match crate::cron_serve::tick_once(&store, &runner, &deliver, "repl").await
                         {
                             Ok(rep) if rep.fired > 0 || rep.errors > 0 => {
-
                                 for saved in rep.delivered.iter().filter(|d| d.to_chat) {
                                     crate::host::queue_say(crate::cron_serve::format_fire_chat(
                                         saved,
@@ -988,7 +977,6 @@ pub async fn run_repl_mode(
     }
 
     loop {
-
         crate::host::clear_wake();
 
         session::remember_exit_session(session_state.as_ref().map(|s| s.session_id.as_str()));
@@ -1048,7 +1036,6 @@ pub async fn run_repl_mode(
                     say(tui.as_ref().map(|(s, _)| s), &msg);
                     crate::session_send::hold_back(&sends);
                 } else {
-
                     let mut images = Vec::new();
                     for m in &sends {
                         let line = crate::session_send::prompt_for(&m.from, &m.text);
@@ -1106,7 +1093,6 @@ pub async fn run_repl_mode(
         let cmd = if let Some(c) = pending_command.take() {
             c
         } else {
-
             if let Some((shared, _)) = tui.as_ref() {
                 shared
                     .lock()
@@ -1116,7 +1102,6 @@ pub async fn run_repl_mode(
             let (line_text, images) = if interactive {
                 let (shared, stop) = tui.as_ref().expect("interactive implies tui");
                 let (txt, imgs) = {
-
                     let pair = match crate::composer::input::read_line(shared)? {
                         Some(v) => v,
                         None => {
@@ -1181,7 +1166,6 @@ pub async fn run_repl_mode(
         }
         match cmd {
             ReplCommand::Empty => {
-
                 if !pending_images.is_empty() {
                     prompt_turn::run_prompt_turn(
                         String::new(),
@@ -1262,7 +1246,6 @@ pub async fn run_repl_mode(
                 .await?;
             }
             other => {
-
                 if matches!(
                     other,
                     ReplCommand::New(_) | ReplCommand::Resume(_) | ReplCommand::Compact(_)

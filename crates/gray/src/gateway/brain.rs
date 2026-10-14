@@ -37,7 +37,6 @@ pub struct ChildProc {
 }
 
 impl ChildProc {
-
     pub fn leader(pid: u32) -> Self {
         Self {
             pid,

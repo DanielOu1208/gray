@@ -29,7 +29,6 @@ fn edge_blanks_become_boundary_marks() {
 
 #[test]
 fn inner_blanks_are_content_and_stay() {
-
     let rows = vec![text("let a = 1;"), text(""), text(""), text("let b = 2;")];
     let shaped = shape_block(rows.clone(), vec![]);
     assert!(!shaped.lead && !shaped.trail);
@@ -45,7 +44,6 @@ fn an_all_blank_block_is_only_a_boundary() {
 
 #[test]
 fn painted_rows_are_edges_not_gaps() {
-
     let bg = Style::default().bg(Color::Rgb(22, 22, 22));
     let rows = vec![text("").style(bg), text("card"), text("").style(bg)];
     let shaped = shape_block(rows.clone(), vec![]);
@@ -78,7 +76,6 @@ fn junction_counts_blanks_across_the_seam() {
 
 #[test]
 fn junction_ignores_a_documents_leading_margin() {
-
     assert_eq!(junction_blank_run(&[], &[text(""), text(""), text("x")]), 0);
 }
 

@@ -40,7 +40,6 @@ pub fn render_event_with_context<W: Write>(
             w.flush()
         }
         AgentEvent::ThinkingDelta { delta } => {
-
             write!(w, "\x1b[2m\x1b[3m{delta}\x1b[0m")?;
             w.flush()
         }
@@ -160,7 +159,6 @@ pub fn render_event_with_context<W: Write>(
         }
 
         AgentEvent::StreamError { message, details } => {
-
             let message = scrub_error_text(message);
             let details = scrub_error_text(details);
             if details.is_empty() {
@@ -358,9 +356,7 @@ pub struct PrintFailure {
 }
 
 impl PrintFailure {
-
     pub fn of(error: &anyhow::Error) -> Self {
-
         if matches!(
             error.downcast_ref::<crate::session_store::SessionError>(),
             Some(crate::session_store::SessionError::Locked { .. })
@@ -474,7 +470,6 @@ struct JsonOutput {
 
 #[derive(Default)]
 struct TextSegment {
-
     index: u64,
 
     raw: String,
@@ -513,7 +508,6 @@ fn steer_enabled() -> bool {
 }
 
 impl JsonOutput {
-
     fn display_name(&self, name: &str) -> String {
         self.labels
             .get(name)
@@ -538,7 +532,6 @@ impl JsonOutput {
     }
 
     fn rows(&mut self, event: &AgentEvent) -> Vec<serde_json::Value> {
-
         if let AgentEvent::ThinkingDelta { delta } = event {
             if self.show_reasoning {
                 self.thinking.push_str(delta);
@@ -721,7 +714,6 @@ fn disclose(text: &str, cap: usize) -> String {
 }
 
 fn disclose_output(text: &str, cap: usize) -> String {
-
     let look_ahead = cap.saturating_add(256);
     let mut chars = text.chars();
     let prefix = chars.by_ref().take(look_ahead).collect::<String>();
@@ -886,7 +878,6 @@ async fn run_print_inner(
     continue_last: bool,
     mut json: Option<&mut JsonOutput>,
 ) -> anyhow::Result<()> {
-
     let mut config_owned = config.clone();
     let _ = crate::repl::normalize_adopted_model(&mut config_owned);
     let config = &config_owned;
@@ -1174,7 +1165,6 @@ async fn run_print_inner(
     if run_result.is_ok()
         && let Some(output) = json.as_deref_mut()
     {
-
         if let Some(message) = agent
             .messages()
             .last()
@@ -1224,7 +1214,6 @@ async fn run_print_inner(
     }
 
     if render_broken {
-
         match (&run_result, &persist_result) {
             (_, Err(p)) => return Err(anyhow::anyhow!("{p:#}")),
             (Ok(_), Ok(_)) => return Ok(()),
@@ -1235,7 +1224,6 @@ async fn run_print_inner(
         }
     }
     if let Some(e) = render_err {
-
         return match (run_result, persist_result) {
             (Err(r), Err(p)) => Err(anyhow::anyhow!(
                 "{r:#}; stdout write failed: {e}; also failed to persist session: {p:#}"
@@ -1301,7 +1289,6 @@ pub async fn append_new_messages(
     duration_ms: Option<u64>,
 ) -> anyhow::Result<()> {
     if history_rewritten || messages.len() < prior_count {
-
         let redacted: Vec<Message> = messages.iter().map(redact_message).collect();
         return store
             .append_compaction_replacement(sid, &redacted)
@@ -1345,7 +1332,6 @@ pub async fn save_session(
     store.create(meta).await?;
 
     for msg in messages {
-
         let redacted = redact_message(msg);
         store
             .append(&session_id, &redacted)

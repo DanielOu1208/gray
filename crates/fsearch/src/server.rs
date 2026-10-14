@@ -16,7 +16,6 @@ pub fn socket_path(dir: &Path) -> PathBuf {
 }
 
 pub fn serve(dir: PathBuf, home: String) {
-
     std::fs::create_dir_all(&dir).ok();
 
     let Ok(mut lock) = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(dir.join("socket.lock")) else {
@@ -88,7 +87,6 @@ pub fn stop(dir: &Path) -> Result<(), String> {
 const WARM: Duration = Duration::from_millis(250);
 
 fn handle(mut conn: UnixStream, cx: &Ctx) {
-
     #[cfg(target_os = "macos")]
     unsafe {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
@@ -194,7 +192,6 @@ fn run(v: &Value, cx: &Ctx) -> Result<Reply, String> {
         }
         _ if is_grep => grep(v, cx).map(Reply::Value),
         "open" => {
-
             let paths: Vec<&str> = match (v.get("path"), v.get("paths")) {
                 (Some(Value::String(p)), _) => vec![p],
                 (_, Some(Value::Array(a))) => a.iter().filter_map(Value::as_str).collect(),
@@ -205,14 +202,12 @@ fn run(v: &Value, cx: &Ctx) -> Result<Reply, String> {
             Ok(Reply::Value(json!({"ok": true, "scores": scores})))
         }
         "recent" => {
-
             let (q, _) = parse_request(v, engine.home())?;
             let top = frecent(cx, q.scope.as_deref(), fsearch::query::now_secs());
             let hits = top.into_iter().filter_map(|(p, s)| Some(Found { score: (s * 100.0) as i32, ..found(&q, &p)? }));
             Ok(Reply::Hits(hits.take(q.limit).collect(), 0, None, v.get("git") == Some(&Value::Bool(true))))
         }
         "git" => {
-
             let p = v.get("path").and_then(Value::as_str).ok_or("git needs a path")?;
             let r = cx.git.load(&[&real(p)[..], b"/."].concat());
             let snap = r.as_ref().and_then(|r| r.snap(Duration::ZERO));
@@ -313,7 +308,6 @@ impl Extras {
             near: v.get("near").and_then(Value::as_str).map(real),
         };
         if let Some(o) = at {
-
             x.offset = (o.as_u64().or_else(|| o.as_str()?.parse().ok()).ok_or("offset must be a number")?).min(MAX_FETCH as u64) as usize;
         }
         let mut globs: Vec<&str> = match v.get("glob") {
@@ -501,7 +495,6 @@ fn fetch_kept<T>(
     keep: impl Fn(&T) -> bool,
     mut search: impl FnMut(usize) -> Result<(Vec<T>, bool), String>,
 ) -> Result<(Vec<T>, bool), String> {
-
     let mut fetch = if x.globs.is_empty() && x.sels.is_empty() { want.saturating_add(1) } else { want.saturating_mul(2).saturating_add(16) };
     loop {
         let n = fetch.min(cap);
@@ -705,7 +698,6 @@ fn grep(v: &Value, cx: &Ctx) -> Result<Value, String> {
         let next = r.next;
         (r, source(indexed), next)
     } else if x.listed() {
-
         x.ready(cx, &q)?;
         let mut paths = from_git(cx, &q.clone_for_scan(), &x, MAX_GREP);
         paths.retain(|f| f.kind & 3 == KIND_FILE && f.size <= fsearch::content::MAX_FILE && x.keep(&cx.git, f.path.as_os_str().as_bytes()));

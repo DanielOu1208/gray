@@ -224,7 +224,6 @@ fn local_sidekick() -> Option<String> {
 }
 
 pub(crate) struct FusionPlugin {
-
     gate: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -276,7 +275,6 @@ pub(crate) fn lead_framing() -> Option<&'static str> {
 }
 
 struct HandoffTool {
-
     name: &'static str,
 
     qualified: String,
@@ -425,7 +423,6 @@ fn resolve_sidekick(home: &Path, qualified: &str) -> Option<SidekickSpec> {
         ));
         spec.env_remove.push("GRAY_API_KEY".into());
     } else {
-
         for k in [
             "GRAY_PROVIDER_ID",
             "GRAY_CREDENTIAL_SOURCE",
@@ -461,7 +458,6 @@ struct SidekickOutcome {
 }
 
 impl HandoffTool {
-
     async fn run(
         &self,
         spec: &SidekickSpec,

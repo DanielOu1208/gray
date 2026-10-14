@@ -420,7 +420,6 @@ fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
         if ft.is_dir() {
             copy_dir_all(&entry.path(), &target)?;
         } else {
-
             std::fs::copy(entry.path(), &target)?;
         }
     }

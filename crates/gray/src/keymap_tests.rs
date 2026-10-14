@@ -46,7 +46,6 @@ fn parse_rejects_garbage() {
 
 #[test]
 fn shifted_symbols_and_capitals_normalize() {
-
     let a = Chord::from_event(&ev(KeyCode::Char('A'), KeyModifiers::NONE)).unwrap();
     assert_eq!(a, chord("shift+a"));
     let a2 = Chord::from_event(&ev(KeyCode::Char('A'), KeyModifiers::SHIFT)).unwrap();

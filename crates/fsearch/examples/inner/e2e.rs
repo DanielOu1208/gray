@@ -11,7 +11,6 @@ enum Conn {
 impl Conn {
     fn open(t: &str) -> Conn {
         if let Some(spec) = t.strip_prefix("stdio:") {
-
             let mut parts = spec.split('#');
             let bin = parts.next().unwrap();
             let (bin, home) = bin.split_once('@').map_or((bin, None), |(b, h)| (b, Some(h)));
@@ -150,7 +149,6 @@ fn dual(a: &[String]) {
             "grep" => ("grep", greps.clone()),
             "ping" => ("ping", vec![("ping".into(), String::new())]),
             "typing" => {
-
                 for _ in 0..n {
                     for run in corpus["typing"].as_array().unwrap() {
                         let keys: Vec<&str> = run.as_array().unwrap().iter().map(|k| k.as_str().unwrap()).collect();
@@ -341,7 +339,6 @@ pub fn main() {
                 let gap = Duration::from_millis(num(2, 0));
                 for _ in 0..num(1, 3) {
                     for run in &typing {
-
                         conn.ask(&req("zzzz qqqq"), &mut line);
                         let mut total = Duration::ZERO;
                         let mut first = Duration::ZERO;

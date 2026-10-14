@@ -22,7 +22,6 @@ fn kind_map_covers_media() {
 
 #[test]
 fn normalize_keeps_long_side() {
-
     let img = image::RgbaImage::from_pixel(3000, 100, image::Rgba([9, 9, 9, 255]));
     let mut buf = Vec::new();
     image::DynamicImage::ImageRgba8(img)
@@ -109,7 +108,6 @@ fn inline_relative_resolves_against_cwd() {
 
 #[test]
 fn a_typed_video_path_is_media_too() {
-
     let dir = tempfile::tempdir().unwrap();
     let clip = dir.path().join("clip.mp4");
     std::fs::write(&clip, b"fake mp4").unwrap();

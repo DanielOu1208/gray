@@ -152,7 +152,6 @@ fn unknown_verbs_still_list_every_verb() {
 
 #[test]
 fn logs_tail_reports_the_real_total_after_the_byte_cap() {
-
     let dir = tempfile::tempdir().unwrap();
     let logs = dir.path().join("logs");
     std::fs::create_dir_all(&logs).unwrap();
@@ -199,7 +198,6 @@ fn pull_then_ack_drains_a_platform() {
 
 #[test]
 fn identify_and_status_never_carry_the_process_argv() {
-
     let home = tempfile::tempdir().unwrap();
     for req in [
         br#"{"id":1,"verb":"identify","protocol":1}"#.as_slice(),

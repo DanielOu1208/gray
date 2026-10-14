@@ -203,7 +203,6 @@ fn test_thinking_block_roundtrips_losslessly() {
 
 #[test]
 fn test_legacy_thinking_without_replay_fields_still_parses() {
-
     let legacy = r#"{"role":"assistant","content":[{"type":"thinking","text":"private"},{"type":"text","text":"visible"}]}"#;
     let msg: Message = serde_json::from_str(legacy).unwrap();
     assert_eq!(msg.content.len(), 2);

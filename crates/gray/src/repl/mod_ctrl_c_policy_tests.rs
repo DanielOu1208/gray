@@ -1,6 +1,5 @@
 #[tokio::test]
 async fn drain_waits_for_a_turn_but_never_blocks_the_exit_forever() {
-
     {
         let _guard = super::mark_turn_in_flight();
         tokio::spawn(async {

@@ -9,7 +9,6 @@ fn buffer_rows(backend: &ratatui::backend::TestBackend, w: u16, h: u16) -> Vec<S
 
 #[test]
 fn backdrop_mirrors_live_layout_with_multiline_prompt() {
-
     let backend = ratatui::backend::TestBackend::new(40, 10);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
     let bg = BackgroundSnapshot {
@@ -35,7 +34,6 @@ fn backdrop_mirrors_live_layout_with_multiline_prompt() {
     let box_bg = terminal.backend().buffer()[(0, 1)].bg;
     assert_eq!(
         box_bg,
-
         ratatui::style::Color::Rgb(8, 8, 8),
         "backdrop input box is dimmed composer gray"
     );

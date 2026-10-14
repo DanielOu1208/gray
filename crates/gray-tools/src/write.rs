@@ -15,7 +15,6 @@ pub struct WriteTool {
 }
 
 impl WriteTool {
-
     pub fn new(ledger: Arc<FileLedger>) -> Self {
         Self { ledger }
     }
@@ -164,7 +163,6 @@ impl Tool for WriteTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: Value) -> ToolOutput {
-
         let path = match get_str(&args, "path") {
             Ok(p) => p,
             Err(e) => return e,
@@ -236,7 +234,6 @@ impl Tool for WriteTool {
         }
         match atomic_write(&full, content.as_bytes()).await {
             Ok(()) => {
-
                 self.ledger.mark_written(&full, content.as_bytes());
                 if existed && !old.is_empty() {
                     let patch = crate::edit_diff::generate_unified_patch(&path, &old, &content, 3);

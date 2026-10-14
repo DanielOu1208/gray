@@ -53,7 +53,6 @@ fn dir_prefix_overlap_stays_sequential() {
 
 #[test]
 fn normalization_spellings_still_conflict() {
-
     let u = vec![w("a", "./a.txt"), w("b", "a.txt")];
     assert_eq!(
         plan_segments(&u, &known_rw()),
@@ -68,7 +67,6 @@ fn normalization_spellings_still_conflict() {
 
 #[test]
 fn non_interfering_reads_and_writes_share_one_segment() {
-
     let u = vec![
         ("a".into(), "read".into(), json!({"path": "a.txt"})),
         w("b", "b.txt"),
@@ -93,7 +91,6 @@ fn non_interfering_reads_and_writes_share_one_segment() {
 
 #[test]
 fn reading_a_written_path_stays_sequential() {
-
     let u = vec![
         ("a".into(), "read".into(), json!({"path": "a.txt"})),
         w("b", "a.txt"),
@@ -115,7 +112,6 @@ fn reading_a_written_path_stays_sequential() {
 
 #[test]
 fn missing_or_non_string_path_is_barrier() {
-
     let u = vec![
         w("a", "a.txt"),
         ("b".into(), "write".into(), json!({"content": "x"})),

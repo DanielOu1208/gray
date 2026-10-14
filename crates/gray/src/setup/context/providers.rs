@@ -78,7 +78,6 @@ fn model_efforts_cell() -> &'static std::sync::RwLock<std::collections::HashMap<
 
 pub(crate) fn cache_model_efforts(model_id: &str, efforts: Vec<String>) {
     if let Ok(mut g) = model_efforts_cell().write() {
-
         g.insert(model_id.to_string(), efforts.clone());
         let lower = model_id.to_lowercase();
         if lower != model_id {
@@ -195,7 +194,6 @@ pub fn model_supports_reasoning(model_id: &str) -> Option<bool> {
 }
 
 pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
-
     let active = active_provider_base_url();
     if active.contains("commandcode.ai") && is_mimo_v26_pro(model_id) {
         return Some(vec!["off", "low", "medium", "high", "xhigh", "max"]);
@@ -237,7 +235,6 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
         || id.starts_with("o4")
         || id.contains("deep-research")
     {
-
         if id.contains("-chat") {
             return Some(vec!["medium"]);
         }
@@ -303,7 +300,6 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
     }
 
     if id.contains("gemini") || id.contains("gemma") {
-
         if id.contains("pro-image") || id.contains("pro_image") {
             return Some(vec!["high"]);
         }
@@ -365,7 +361,6 @@ pub const STEP_LEVELS: &[(&str, &str)] = &[
 ];
 
 pub fn supported_thinking_levels(model_id: &str) -> Vec<(&'static str, &'static str)> {
-
     if step_family(model_id) {
         return STEP_LEVELS.to_vec();
     }
@@ -1023,12 +1018,10 @@ pub(crate) fn save_provider_model_rows_at(
 ) {
     use crate::setup::variants::CachedRow;
     if rows.is_empty() {
-
         return;
     }
     let base = crate::setup::catalog::normalize_custom_base_url(base_url);
     if base.is_empty() || is_loopback_base(&base) {
-
         return;
     }
     let path = home.join("provider_models.json");
@@ -2054,7 +2047,6 @@ pub(crate) fn ensure_disk_loaded() {
 }
 
 pub(crate) fn warm_rates_from_disk_cache() {
-
     if cfg!(test) {
         return;
     }

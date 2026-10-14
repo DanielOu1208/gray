@@ -231,7 +231,6 @@ fn lock_roundtrips_exact_shape() {
 
 #[test]
 fn lock_enabled_defaults_true_and_roundtrips_false() {
-
     let old: LockFile = serde_json::from_str(
             r#"{"schema":1,"plugins":{"demo":{"ecosystem":"gray-native","version":"1.0.0","hash":"sha256:abc","source":"https://h/demo.tar.gz","argv":[],"adapter_version":"0.1.0","installed_at":"1","scope":"user"}}}"#,
         )
@@ -267,7 +266,6 @@ fn lock_cli_argv_roundtrips() {
 
 #[test]
 fn set_enabled_flips_flag_and_bails_on_miss() {
-
     let _guard = env_guard();
     let _home = use_home_env();
     let mut lock = LockFile::default();
@@ -291,7 +289,6 @@ fn set_enabled_flips_flag_and_bails_on_miss() {
 
 #[test]
 fn set_enabled_preserves_plugin_owned_lock_fields() {
-
     let _guard = env_guard();
     let _home = use_home_env();
     let mut extra = serde_json::Map::new();
@@ -444,7 +441,6 @@ fn archive_rollback_preserves_backup_when_cleanup_fails() {
     let archive = home.path().join("archive.tgz");
     std::fs::write(&archive, tiny_tgz()).unwrap();
     let error = replace_archive(&archive, "demo", || {
-
         std::fs::remove_dir_all(&dest)?;
         std::fs::write(&dest, b"concurrent file")?;
         anyhow::bail!("record failed")

@@ -196,7 +196,6 @@ fn decoder_maps_the_event_stream() {
 
 #[test]
 fn separate_text_blocks_in_one_message_get_a_blank_line() {
-
     let events = vec![
         json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
         json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "one"}}),

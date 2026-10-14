@@ -35,7 +35,6 @@ fn tiny_terminals_decline_the_mascot() {
 
 #[test]
 fn lines_tile_the_grid_with_merged_runs() {
-
     unsafe { std::env::remove_var("NO_COLOR") };
     let grid = decode_grid(120, 40).expect("asset decodes");
     let lines = super::mascot_lines_unchecked(120, 40, Some(120)).expect("truecolor path");
@@ -55,7 +54,6 @@ fn plain(lines: &[Line<'static>]) -> Vec<String> {
 
 #[test]
 fn welcome_is_the_ascii_logo_by_default() {
-
     let welcome = plain(&build_welcome_lines(120));
     assert!(
         !welcome.iter().any(|l| l.contains('\u{2580}')),
@@ -144,7 +142,6 @@ fn hehe_toggle_drops_the_mascot_entry() {
 
 #[test]
 fn welcome_layout_is_devin_home() {
-
     let w = 100usize;
     let text = plain(&build_welcome_lines(w));
     let col_w = (w - 8).min(78);

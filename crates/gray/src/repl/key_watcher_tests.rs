@@ -34,7 +34,6 @@ fn consumed_key_is_not_lost_while_renderer_holds_tui() {
     std::thread::scope(|scope| {
         let state = state.clone();
         let reader = scope.spawn(move || {
-
             ready_tx.send(()).unwrap();
             let mut draft = lock_tui(&state);
             draft.push('x');
@@ -88,7 +87,6 @@ fn turn_local_commands_are_read_only() {
         "/subagents entries",
         "/subagents manifest",
         "/subagents e2e",
-
         "/theme",
         "/theme banish",
         "/plugins",

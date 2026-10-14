@@ -3,7 +3,6 @@ use crate::output::HyperlinkTarget;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ChunkLinkRange {
-
     pub(crate) xform_start: usize,
 
     pub(crate) xform_end: usize,
@@ -30,7 +29,6 @@ pub(crate) fn source_to_chunk_offset(
             let dst_len = t.to.len() as isize;
             delta += dst_len - src_len;
         } else {
-
             debug_assert!(
                 false,
                 "source_to_chunk_offset: transform [{}..{}) straddles src_pos {}; \

@@ -14,7 +14,6 @@ pub(crate) fn is_removable(
     config: &Config,
     auth: &std::collections::BTreeMap<String, catalog::AuthEntry>,
 ) -> bool {
-
     if item.id.starts_with("custom:") {
         return true;
     }
@@ -27,7 +26,6 @@ fn forget_provider_at(
     auth_path: &std::path::Path,
     saved_path: &std::path::Path,
 ) -> anyhow::Result<String> {
-
     if let ConnectAuth::Plugin { auth_ref, .. } = &item.auth {
         let store = crate::auth::CredentialStore::new(auth_path.to_path_buf());
         let removed = store
@@ -84,13 +82,11 @@ pub(crate) fn forget_provider(item: &ConnectItem, config: &mut Config) -> anyhow
 }
 
 pub(crate) fn insert_paste(buf: &mut String, pasted: &str) {
-
     buf.push_str(&crate::composer::input::strip_escape_sequences(pasted).replace(['\r', '\n'], ""));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectOutcome {
-
     Connected,
 
     Removed(String),
@@ -126,7 +122,6 @@ fn spawn_plugin_login(
     let cancel = tokio_util::sync::CancellationToken::new();
     let login_cancel = cancel.clone();
     tokio::spawn(async move {
-
         if let Err(err) = run_plugin_login(installed, login_cancel, progress_sender.clone()).await {
             let _ = progress_sender.send(PluginLoginProgress::Failed(err.to_string()));
         }
@@ -308,7 +303,6 @@ fn connect_modal(
                         progress,
                     };
                 } else if matches!(item.auth, ConnectAuth::ApiKey) {
-
                     let existing_key = load_auth_keys().get(&item.id).cloned();
                     state = ModalState::EnteringKey {
                         item: item.clone(),
@@ -344,7 +338,6 @@ fn connect_modal(
                         Some(installed)
                     }
                     _ => {
-
                         config.provider_id.clear();
                         config.credential_source.clear();
                         config.auth_ref.clear();
@@ -630,7 +623,6 @@ fn connect_modal(
                     sel,
                     probe_failed,
                 } => {
-
                     let filtered = filter_local_suggestions(suggestions, url_buf);
                     if filtered.is_empty() {
                         *sel = 0;
@@ -673,7 +665,6 @@ fn connect_modal(
                                 *probe_failed = false;
                             }
                             KeyCode::Tab => {
-
                                 if let Some(s) = filtered.get(*sel) {
                                     *url_buf = s.url.to_string();
                                     *status_msg = None;
@@ -803,7 +794,6 @@ fn connect_modal(
 
                             if final_key.is_empty() {
                                 if catalog::is_custom_id(&item.id) && existing_key.is_none() {
-
                                     config.base_url = item.base_url.clone();
                                     config.api_key = None;
                                     state = ModalState::SelectingModel { item: item.clone() };
@@ -878,7 +868,6 @@ fn connect_modal(
                     cancel,
                     progress,
                 } => {
-
                     let mut next_state: Option<ModalState> = None;
                     while let Ok(progress) = progress.try_recv() {
                         match progress {
@@ -895,7 +884,6 @@ fn connect_modal(
                                 *status_msg = Some("Credential saved".into())
                             }
                             PluginLoginProgress::Models(models) => {
-
                                 super::context::save_provider_model_list(
                                     &super::catalog::plugin_models_key(&item.id),
                                     &models,

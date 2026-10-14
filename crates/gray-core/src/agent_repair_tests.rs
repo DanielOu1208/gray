@@ -157,7 +157,6 @@ fn streamed_text_is_salvaged_once() {
 
 #[test]
 fn synthetic_results_do_not_hide_earlier_turns() {
-
     let mut agent = agent_with(vec![
         Message::user("first"),
         Message::assistant("first answer"),

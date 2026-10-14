@@ -143,7 +143,6 @@ fn lens(ndocs: usize, ntri: usize, plen: usize, paths_len: usize, nwords: usize,
 }
 
 impl Segment {
-
     sec!(dict_idx, S::DictIdx, [u32; 3], nblk);
     sec!(dict, S::Dict, u8, dict_len);
     sec!(post, S::Post, u8, plen);
@@ -269,7 +268,6 @@ impl Segment {
                     i += 1;
                 }
                 Some(k) => {
-
                     let mut hi = p[..prefix.len() + k + 1].to_vec();
                     *hi.last_mut().unwrap() = b'/' + 1;
                     i += bp[i..].partition_point(|&d| self.path(d) < hi);
@@ -417,7 +415,6 @@ struct PathReader<'a> {
 }
 
 impl<'a> PathReader<'a> {
-
     fn read(&mut self) -> &'a [u8] {
         let (shared, k) = varint(self.b);
         let (len, m) = varint(&self.b[k..]);
@@ -657,7 +654,6 @@ impl Held {
 }
 
 impl Dedup {
-
     fn find(&self, h: u64) -> Option<u32> {
         self.held.iter().find_map(|s| s.find(h)).or_else(|| self.built.lock().unwrap().get(&h).copied())
     }
@@ -670,7 +666,6 @@ struct Gids {
 }
 
 impl Gids {
-
     fn take(&mut self, n: usize) -> Vec<u32> {
         let mut out = Vec::with_capacity(n);
         while out.len() < n {
@@ -704,7 +699,6 @@ impl Default for Paths {
 }
 
 impl Paths {
-
     fn exactly(n: usize) -> Paths {
         let map = (n >= 1 << 20).then(|| memmap2::MmapMut::map_anon(n).ok()).flatten();
         map.map_or_else(|| Paths::Heap(Vec::with_capacity(n)), |m| Paths::Mapped(m, 0))
@@ -794,7 +788,6 @@ struct ContentMeta<'a> {
 
 #[derive(Clone, Copy)]
 enum Holds {
-
     Nothing,
 
     Gid(u32),
@@ -1029,7 +1022,6 @@ struct Postings {
 }
 
 impl Postings {
-
     fn push(&mut self, n: usize, key: u32, list: &[u32]) {
         self.keys.push(key);
         let at = self.post.len();
@@ -1305,7 +1297,6 @@ struct Place {
 }
 
 struct Rules {
-
     dir: Vec<u8>,
     gitignore: Option<Arc<Globs>>,
     ignore: Option<Arc<Globs>>,
@@ -1381,7 +1372,6 @@ impl<'a> Scope<'a> {
     }
 
     fn enter(&self, dir: &[u8], up: Place) -> Place {
-
         let git = (dir != self.home).then(|| (self.look)(&join(dir, b".git"))).flatten();
         let (gitignore, ignore) = (self.globs(&join(dir, b".gitignore")), self.globs(&join(dir, b".ignore")));
         if git.is_none() && gitignore.is_none() && ignore.is_none() {
@@ -1599,7 +1589,6 @@ fn glob_regex(g: &[u8]) -> Option<String> {
             b'?' => top.push(T::Any),
             b'*' if g.get(i + 1) != Some(&b'*') => top.push(T::Star),
             b'*' => {
-
                 let (prev, next) = (i.checked_sub(1).map(|p| g[p]), g.get(i + 2).copied());
                 i += 1;
                 let end = next.is_none() || (depth > 1 && matches!(next, Some(b',' | b'}')));
@@ -1618,7 +1607,6 @@ fn glob_regex(g: &[u8]) -> Option<String> {
                 }
             }
             b'[' => {
-
                 let neg = matches!(g.get(i + 1), Some(b'!' | b'^'));
                 let start = i + 1 + neg as usize;
                 match (start + 1..g.len()).find(|&j| g[j] == b']') {
@@ -1825,7 +1813,6 @@ fn content_of(gids: &[(u32, u32, u32, u32)], g: u32) -> Option<(usize, u32)> {
 }
 
 impl Content {
-
     pub fn open_shared(dir: PathBuf) -> Content {
         let manifest: Vec<u64> =
             std::fs::read_to_string(dir.join("manifest")).unwrap_or_default().split_whitespace().filter_map(|s| s.parse().ok()).collect();
@@ -1998,7 +1985,6 @@ impl Content {
                 for d in ids {
                     let (i, g) = (d as usize, s.doc_gid()[d as usize]);
                     match want.find(&s.path(d)) {
-
                         Some(k)
                             if want.items[k].2 == s.size()[i] as u64
                                 && want.items[k].3 == s.mtime()[i]
@@ -2137,7 +2123,6 @@ impl Content {
     }
 
     fn candidates<'c>(&'c self, plan: &TQ, filt: &Query) -> Found {
-
         let prefix = filt.scope.as_ref().map(|s| [s.as_slice(), b"/"].concat());
         let (only_scope, ext_only) = (only_scope(filt), only_exts(filt));
         let runs: Vec<std::ops::Range<usize>> = self.segs.iter().map(|s| prefix.as_ref().map_or(0..s.ndocs, |p| s.prefix_run(p))).collect();
@@ -2243,7 +2228,6 @@ impl Content {
         let expand = |a: usize, sel: &[u32], top: &mut Top| {
             let at = top.len();
             if global {
-
                 let mut seg = (usize::MAX, &[][..], &[][..]);
                 self.holders(a, sel, |b, d| {
                     if b != seg.0 {
@@ -2451,7 +2435,6 @@ impl Content {
             let (more, done) = verify_from(g, from(best.len()), best.len(), limit - r.files.len(), Reading::Index, t, |i| path(&best[i]));
             add(&mut r, more, fresh.len());
             if r.files.len() < limit && done == best.len() && best.len() < total {
-
                 let mut rest: Vec<Ranked> = par_claim(&per, per.len().min(8), |c| c.rest(&self.segs, &dense)).concat();
                 let next = rest.len().min(8 * FIRST);
                 if next < rest.len() {
@@ -2521,7 +2504,6 @@ type Changed = HashMap<(Vec<u8>, bool), Vec<(Vec<u8>, u64, u32)>>;
 const DIRTY_MAX: usize = 4096;
 
 impl Dirty {
-
     pub fn mark(&self, content: &Content, wants: Vec<(Vec<u8>, bool, Docs)>) {
         let mut m = self.0.lock().unwrap();
         for (dir, recursive, want) in wants {
@@ -2675,7 +2657,6 @@ impl Top {
 }
 
 enum Cands {
-
     List(Vec<Ranked>),
 
     Two(Vec<Ranked>, Vec<Ranked>),
@@ -2686,7 +2667,6 @@ enum Cands {
 }
 
 impl Cands {
-
     fn list(mut v: Vec<Ranked>) -> Cands {
         if v.len() > FIRST {
             v.select_nth_unstable(FIRST);
@@ -2776,7 +2756,6 @@ fn helpers() -> &'static Helpers {
         let n = std::thread::available_parallelism().map_or(1, |n| n.get()).max(SCAN_READERS);
         for i in 1..n {
             let spawned = std::thread::Builder::new().name(format!("fsearch-help-{i}")).spawn(move || {
-
                 #[cfg(target_os = "macos")]
                 unsafe {
                     libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0)
@@ -2877,10 +2856,8 @@ pub fn wants(live: &Live, home: &[u8], dirs: &[Vec<u8>], trees: &[Vec<u8>]) -> V
     drop(skips);
     for (d, r) in dirs.iter().map(|d| (d, false)).chain(trees.iter().map(|d| (d, true))) {
         if in_scope(d, home) {
-
             out.push((d.clone(), r || scope.rules_changed(d)));
         } else if r && home.starts_with(d) {
-
             out.push((home.to_vec(), true));
         }
     }
@@ -2918,7 +2895,6 @@ struct Probes {
 
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub enum Case {
-
     #[default]
     Smart,
     Sensitive,
@@ -2991,7 +2967,6 @@ pub struct Grep {
 }
 
 impl Grep {
-
     pub fn new(pattern: &str, mode: GrepMode) -> Result<Grep, String> {
         Grep::with_case(pattern, mode, Case::Smart)
     }
@@ -3052,7 +3027,6 @@ impl Grep {
     }
 
     fn re(&self) -> &Regex {
-
         self.re.get_or_init(|| self.build().expect("literal regex"))
     }
 
@@ -3072,7 +3046,6 @@ impl Grep {
 
     fn plan(&self) -> TQ {
         match self.mode {
-
             GrepMode::Symbol if plain_identifier(self.pattern.as_bytes()) => TQ::Tri(symbol_key(self.pattern.as_bytes())),
             GrepMode::Literal | GrepMode::Symbol => literal_plan(self.pattern.as_bytes()),
             GrepMode::Regex => regex_syntax::Parser::new().parse(&self.pattern).map_or(TQ::All, |h| regex_plan(&h)),
@@ -3158,7 +3131,6 @@ pub struct FileMatches {
 
 #[derive(Clone, Default)]
 pub struct Hit {
-
     pub col: usize,
 
     pub ranges: Vec<(usize, usize)>,
@@ -3185,7 +3157,6 @@ fn verify_as(g: &Grep, paths: &[impl AsRef<[u8]> + Sync], limit: usize, how: Rea
 
 #[derive(Clone, Copy)]
 enum Reading {
-
     Index,
 
     Fresh,
@@ -3219,7 +3190,6 @@ fn verify_from<'a>(
     let (next, found, read, opening) = (AtomicUsize::new(from), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
     let hits = std::sync::Mutex::new(Vec::new());
     let work = || {
-
         let (mut taken, mut mine, mut run) = (std::collections::VecDeque::new(), 0, 0..0);
         loop {
             let deep = scan && mine >= AHEAD_AFTER;
@@ -3431,11 +3401,7 @@ enum Literal {
     Exact(memchr::memmem::Finder<'static>),
 
     Definition(memchr::memmem::Finder<'static>),
-    Folded {
-        needle: Vec<u8>,
-        pair: (usize, usize),
-        odd: Vec<memchr::memmem::Finder<'static>>,
-    },
+    Folded { needle: Vec<u8>, pair: (usize, usize), odd: Vec<memchr::memmem::Finder<'static>> },
 }
 
 impl Literal {
@@ -3511,7 +3477,6 @@ fn find_folded(hay: &[u8], from: usize, needle: &[u8], pair: (usize, usize)) -> 
     #[allow(unused_mut)]
     let mut i = from;
     #[cfg(target_arch = "aarch64")]
-
     unsafe {
         use std::arch::aarch64::*;
         let (c1, c2) = (needle[pair.0], needle[pair.1]);
@@ -3555,7 +3520,6 @@ fn literal_plan(s: &[u8]) -> TQ {
 
 #[derive(Clone, Copy)]
 enum List<'a> {
-
     Bits(&'a [u8]),
 
     Ic(Ic<'a>),
@@ -3576,7 +3540,6 @@ struct Bits {
 }
 
 impl Bits {
-
     fn put(&mut self, v: u32, w: u32) {
         self.acc |= (v as u64) << self.n;
         self.n += w;
@@ -3756,7 +3719,6 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-
     fn new(ic: Ic<'a>) -> Cursor<'a> {
         Cursor { ic, j: 0, buf: [0; BLOCK], len: 0, i: 0 }
     }
@@ -3786,7 +3748,6 @@ impl<'a> Cursor<'a> {
 }
 
 impl List<'_> {
-
     fn all_into(self, out: &mut Vec<u32>) {
         match self {
             List::Bits(bytes) => {

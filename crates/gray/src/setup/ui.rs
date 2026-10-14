@@ -99,7 +99,6 @@ pub fn dim_style(style: ratatui::style::Style) -> ratatui::style::Style {
         s = s.fg(crate::theme::theme().text_faint);
     }
     if let Some(bg) = style.bg {
-
         s = s.bg(dim_color(bg));
     }
     s

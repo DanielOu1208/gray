@@ -2,7 +2,6 @@ use super::*;
 
 #[test]
 fn every_role_name_maps_to_a_distinct_field() {
-
     let fields = std::mem::size_of::<UiTheme>() / std::mem::size_of::<Color>();
     assert_eq!(ROLE_NAMES.len(), fields);
     for (i, name) in ROLE_NAMES.iter().enumerate() {
@@ -47,7 +46,6 @@ fn window_bg_tracks_surface_unless_overridden() {
 
 #[test]
 fn derived_window_steps_away_from_the_surface() {
-
     let (dark, _) = parse_theme(r##"{"colors":{"surface_bg":"#202020"}}"##).unwrap();
     assert_ne!(dark.window_bg, dark.surface_bg);
     assert_eq!(dark.window_bg, Color::Rgb(18, 18, 18));
@@ -133,7 +131,6 @@ fn builtin_names() {
 
 #[test]
 fn derived_window_keeps_its_side_of_near_extreme_surfaces() {
-
     let (blackgold, _) = parse_theme(r##"{"colors":{"surface_bg":"#0d0d0d"}}"##).unwrap();
     assert_eq!(blackgold.window_bg, Color::Rgb(1, 1, 1));
     assert_eq!(derive_window(Color::Rgb(4, 4, 4)), Color::Rgb(0, 0, 0));

@@ -74,7 +74,6 @@ pub(crate) fn format_tool_box_lines_multi(
                 }
             }
             if line_bg != bg_color {
-
                 let current_w: usize = l.spans.iter().map(|s| s.width()).sum();
                 if current_w < width {
                     l.spans.push(Span::styled(

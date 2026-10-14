@@ -79,7 +79,6 @@ const PACKED: u8 = 0xFF;
 const HEX_RUN: usize = 16;
 
 pub enum Name<'a> {
-
     Raw(&'a [u8], &'a [u8]),
 
     Unpacked(Vec<u8>, usize),
@@ -97,7 +96,6 @@ impl std::ops::Deref for Name<'_> {
 }
 
 impl Name<'_> {
-
     #[inline]
     pub fn wide(&self) -> Option<&[u8; 64]> {
         match self {
@@ -230,7 +228,6 @@ fn unpack(p: &[u8]) -> Name<'static> {
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct NameInfo {
-
     pub key: i8,
 
     pub len: u8,
@@ -253,7 +250,6 @@ pub struct ByKey {
 pub const SHORT: usize = 3;
 
 pub struct MemoPlan {
-
     pub upper: Vec<u32>,
 
     pub chunks: Vec<(u32, std::ops::Range<u32>)>,
@@ -278,7 +274,6 @@ macro_rules! runs {
 }
 
 impl Index {
-
     sec!(name_bits, Sec::NameBits, u64, bits_len);
     sec!(name_base, Sec::NameBase, u32, groups);
     sec!(name_off, Sec::NameOff, u16, u1);
@@ -498,7 +493,6 @@ impl Index {
             let mut p = MemoPlan { upper: Vec::new(), chunks: Vec::new() };
             let mut big = vec![0u32];
             while let Some(k) = big.pop() {
-
                 let (s, l) = (self.dir_start(k as usize), self.dir_len(k as usize));
                 let kids = self.dirs_before(s) as u32..self.dirs_before(s + l) as u32;
                 let mut from = kids.end;
@@ -548,12 +542,7 @@ impl Index {
                 let mid = (lo + hi) / 2;
                 if *self.name(mid) < *comp { lo = mid + 1 } else { hi = mid }
             }
-            e = if lo < r.end && *self.name(lo) == *comp {
-                lo as u32
-            } else {
-
-                r.clone().find(|&c| self.name(c).eq_ignore_ascii_case(comp))? as u32
-            };
+            e = if lo < r.end && *self.name(lo) == *comp { lo as u32 } else { r.clone().find(|&c| self.name(c).eq_ignore_ascii_case(comp))? as u32 };
         }
         Some(e)
     }
@@ -586,7 +575,6 @@ impl Index {
         let mut stack: Vec<(u32, u32)> = vec![(0, by_id[0])];
         let mut kids: Vec<(u32, u32)> = Vec::new();
         while let Some((e, li)) = stack.pop() {
-
             let l = std::mem::take(&mut ls[li as usize]);
             let start = pos;
             kids.clear();
@@ -934,7 +922,6 @@ pub(crate) fn ext_slots(names: &[u8], off: &[u32]) -> (Vec<[u8; 16]>, Vec<u8>) {
 }
 
 impl NameInfo {
-
     pub fn of(name: &[u8], prior: i8) -> NameInfo {
         let off = (name.len() > 1 && name[0] == b'.') as usize;
         let stem = name.iter().rposition(|&b| b == b'.').filter(|&p| p > off).unwrap_or(name.len());
@@ -1051,7 +1038,6 @@ pub const ZONE: usize = 1024;
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct Zone {
-
     pub max_size: u32,
     pub min_mtime: u32,
     pub max_mtime: u32,

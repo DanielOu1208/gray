@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
-
     Note,
 
     Caution,
@@ -22,7 +21,6 @@ impl Severity {
 
 #[derive(Debug, Clone)]
 pub struct Finding {
-
     pub rule: &'static str,
     pub severity: Severity,
 
@@ -60,7 +58,6 @@ pub struct Report {
 }
 
 impl Report {
-
     pub fn verdict(&self) -> Verdict {
         if self
             .findings
@@ -136,7 +133,6 @@ impl Report {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
-
     Prose,
 
     Test,
@@ -169,7 +165,6 @@ fn is_test(path: &Path) -> bool {
         "spec",
         "specs",
         "fixtures",
-
         "testdata",
         "benches",
         "examples",
@@ -271,7 +266,6 @@ fn rm_invocation(line: &str) -> Option<(String, String)> {
         }
         let mut flags = String::new();
         for raw in &tokens[i + 1..] {
-
             let t =
                 raw.trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | ',' | ';' | '`'));
             if t == "--" {
@@ -449,7 +443,6 @@ struct Rule {
 }
 
 const RULES: &[Rule] = &[
-
     Rule {
         id: "reverse_shell",
         severity: Severity::Critical,
@@ -492,21 +485,18 @@ const RULES: &[Rule] = &[
         survives_prose: true,
         test: hardcoded_secret,
     },
-
     Rule {
         id: "destructive_root_rm",
         severity: Severity::Critical,
         survives_prose: false,
         test: destructive_root_rm,
     },
-
     Rule {
         id: "credential_store_read",
         severity: Severity::Caution,
         survives_prose: false,
         test: credential_store_read,
     },
-
     Rule {
         id: "self_uninstall",
         severity: Severity::Note,
@@ -542,14 +532,11 @@ fn adjust(rule: &Rule, class: Class, rel: &str, line: &str) -> Severity {
             }
         }
         Class::Test => match rule.severity {
-
             Severity::Critical if rule.id == "hardcoded_secret" => Severity::Note,
             Severity::Critical => {
                 if is_script(Path::new(rel)) || line_executes(line) {
-
                     Severity::Caution
                 } else {
-
                     Severity::Note
                 }
             }

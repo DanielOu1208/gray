@@ -23,7 +23,6 @@ fn wlines(n: usize) -> Vec<WindowLine> {
 
 #[test]
 fn exactly_filled_window_is_complete_without_peek_hit() {
-
     let lines = wlines(2000);
     let w = window(1, &lines, MAX_LINES, MAX_BYTES, MAX_LINE_CHARS, false);
     assert_eq!(w.cut, None);
@@ -40,7 +39,6 @@ fn exactly_filled_window_is_complete_without_peek_hit() {
 
 #[test]
 fn over_supplied_window_cuts_without_peek() {
-
     let lines = wlines(2005);
     let w = window(1, &lines, MAX_LINES, MAX_BYTES, MAX_LINE_CHARS, false);
     assert_eq!(w.cut, Some(Cut::Lines));
@@ -50,7 +48,6 @@ fn over_supplied_window_cuts_without_peek() {
 
 #[test]
 fn byte_cut_stops_before_the_unshown_line() {
-
     let lines: Vec<WindowLine> = (1..=500)
         .map(|i| WindowLine {
             text: format!("{:<300}", format!("log line {i:04} ")),
@@ -68,7 +65,6 @@ fn byte_cut_stops_before_the_unshown_line() {
 
 #[test]
 fn byte_budget_exact_fit_is_complete() {
-
     let mk = |s: &str| WindowLine {
         text: s.to_string(),
         overflow_chars: 0,
@@ -101,7 +97,6 @@ fn byte_budget_exact_fit_is_complete() {
 
 #[test]
 fn clamp_counts_shown_lines_only() {
-
     let long = "y".repeat(3900);
     let lines = vec![
         WindowLine {
@@ -128,7 +123,6 @@ fn clamp_counts_shown_lines_only() {
 
 #[test]
 fn overflow_chars_keep_the_clamp_marker_exact() {
-
     let kept_text = "😀".repeat(2000);
     let w = window(
         1,

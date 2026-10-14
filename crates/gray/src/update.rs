@@ -178,7 +178,6 @@ pub(crate) struct UpdateLock(std::fs::File);
 
 impl Drop for UpdateLock {
     fn drop(&mut self) {
-
         let _ = self.0.unlock();
     }
 }
@@ -239,7 +238,6 @@ fn installer_dest() -> Option<PathBuf> {
 
 #[cfg(unix)]
 fn unix_installer_dest() -> Option<PathBuf> {
-
     if unsafe { libc::geteuid() } == 0 {
         return Some(PathBuf::from("/usr/local/bin"));
     }
@@ -386,7 +384,6 @@ pub(crate) fn install_unlocked() -> anyhow::Result<()> {
 }
 
 pub(crate) fn install() -> anyhow::Result<()> {
-
     anyhow::ensure!(
         !cfg!(windows),
         "self-update is not supported on native Windows: close Gray and rerun install-native.ps1 with the verified preview ZIP and checksum"

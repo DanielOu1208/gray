@@ -34,7 +34,6 @@ pub fn word(s: u8) -> Option<&'static str> {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Sel {
-
     Modified,
     Untracked,
     Staged,
@@ -123,7 +122,6 @@ pub struct Repo {
 }
 
 impl Repo {
-
     pub fn snap(&self, wait: Duration) -> Option<Arc<Snap>> {
         self.used.store(ms(), Ordering::Relaxed);
         if wait > Duration::ZERO {
@@ -275,7 +273,6 @@ impl Git {
     }
 
     pub fn changed(&self, dirs: &[(&[u8], bool)]) {
-
         {
             let mut memo = self.dirs.lock().unwrap();
             let stale = dirs.iter().any(|(d, _)| {
@@ -291,7 +288,6 @@ impl Git {
         let repos = self.repos.lock().unwrap().clone();
         let mut hit: Vec<&Arc<Repo>> = Vec::new();
         for &(d, below) in dirs {
-
             let above = |r: &&Arc<Repo>| below && r.root.starts_with(d) && (d.ends_with(b"/") || r.root.get(d.len()) == Some(&b'/'));
             let mut todo: Vec<(&Arc<Repo>, &[u8])> = repos.iter().filter(above).map(|r| (r, &b""[..])).collect();
 
@@ -413,7 +409,6 @@ impl Git {
 
     fn update(&self, r: &Repo, old: &Snap, dirs: HashMap<Vec<u8>, bool>, head: bool) -> Option<Snap> {
         if old.untrusted {
-
             return if head { self.read_all(r) } else { None };
         }
         let mut s = old.clone();
@@ -434,7 +429,6 @@ impl Git {
             if *rec {
                 specs.push([b":(literal)", &d[..]].concat());
             } else if d.is_empty() {
-
                 for e in std::fs::read_dir(OsStr::from_bytes(&r.root)).into_iter().flatten().flatten() {
                     let name = e.file_name();
                     if name.as_bytes() == b".git" {

@@ -137,10 +137,8 @@ fn cache_warm_policy(
     plugin_warm_replay: bool,
     cache_ttl_secs: u64,
 ) -> Option<gray_core::cache_warm::CacheWarmPolicy> {
-
     let cacheable = !config.uses_plugin_credentials() || plugin_warm_replay;
     if !cacheable {
-
         log::info!(target: "gray_agent",
             "cache warm disabled: provider is plugin-credentialed without request.warm_replay");
     }
@@ -365,7 +363,6 @@ pub(crate) fn extra_surface_plugins(
     group(ArgGroup::new("one_shot_input").args(["print", "input_json"]))
 )]
 pub struct Cli {
-
     #[arg(long)]
     pub model: Option<String>,
 
@@ -459,9 +456,7 @@ fn parse_compact_at_cli(s: &str) -> Result<crate::setup::CompactAt, String> {
 
 #[derive(Parser, Debug, Clone)]
 pub enum Commands {
-
     Find {
-
         #[arg(value_name = "PATTERN")]
         pattern: String,
 
@@ -473,7 +468,6 @@ pub enum Commands {
     },
 
     Grep {
-
         #[arg(value_name = "PATTERN")]
         pattern: String,
 
@@ -497,7 +491,6 @@ pub enum Commands {
     },
 
     Resume {
-
         #[arg(value_name = "SESSION_ID")]
         session_id: Option<String>,
 
@@ -509,7 +502,6 @@ pub enum Commands {
     },
 
     Send {
-
         #[arg(value_name = "SESSION_ID")]
         session: String,
 
@@ -538,7 +530,6 @@ pub enum Commands {
     },
 
     Trust {
-
         dir: Option<std::path::PathBuf>,
 
         #[arg(long)]
@@ -576,7 +567,6 @@ pub enum Commands {
 
     #[command(hide = true)]
     SearchServe {
-
         #[arg(long, value_name = "DIR")]
         root: std::path::PathBuf,
 
@@ -590,9 +580,7 @@ pub enum Commands {
 
 #[derive(Parser, Debug, Clone)]
 pub enum SpillCmd {
-
     Head {
-
         #[arg(value_name = "HANDLE")]
         handle: String,
 
@@ -601,7 +589,6 @@ pub enum SpillCmd {
     },
 
     Tail {
-
         #[arg(value_name = "HANDLE")]
         handle: String,
 
@@ -610,7 +597,6 @@ pub enum SpillCmd {
     },
 
     Grep {
-
         #[arg(value_name = "HANDLE")]
         handle: String,
 
@@ -635,9 +621,7 @@ pub enum SpillCmd {
 
 #[derive(Parser, Debug, Clone)]
 pub enum SessionsCmd {
-
     Prune {
-
         #[arg(long, default_value_t = 90)]
         older_than_days: u64,
     },
@@ -645,14 +629,12 @@ pub enum SessionsCmd {
 
 #[derive(Parser, Debug, Clone)]
 pub enum CronCmd {
-
     List,
 
     #[command(
         after_help = "Reminder (one command, no model turn):\n  gray cron add \"in 2m\" \"clean my roo\" --reminder\nThe text is stored and delivered verbatim: never reword it, never fix typos, never pass --name."
     )]
     Add {
-
         schedule: String,
 
         prompt: String,
@@ -680,7 +662,6 @@ pub enum CronCmd {
     },
 
     Tick {
-
         #[arg(long)]
         json: bool,
     },
@@ -688,36 +669,29 @@ pub enum CronCmd {
     Serve,
 
     Pause {
-
         id: String,
     },
 
     Resume {
-
         id: String,
     },
 
     Run {
-
         id: String,
     },
 
     Show {
-
         id: String,
     },
 
     Remove {
-
         id: String,
     },
 }
 
 #[derive(Parser, Debug, Clone)]
 pub enum GatewayCmd {
-
     Setup {
-
         platform: Option<String>,
     },
 
@@ -732,7 +706,6 @@ pub enum GatewayCmd {
     Restart,
 
     Install {
-
         #[arg(long)]
         no_start: bool,
 
@@ -755,9 +728,7 @@ pub enum GatewayCmd {
 
 #[derive(Parser, Debug, Clone)]
 pub enum LifecycleCmd {
-
     Boot {
-
         #[arg(long)]
         dir: std::path::PathBuf,
 
@@ -766,19 +737,16 @@ pub enum LifecycleCmd {
     },
 
     Stop {
-
         #[arg(long)]
         dir: std::path::PathBuf,
     },
 
     Restart {
-
         #[arg(long)]
         dir: std::path::PathBuf,
     },
 
     ClearRestart {
-
         #[arg(long)]
         dir: std::path::PathBuf,
     },
@@ -786,11 +754,9 @@ pub enum LifecycleCmd {
 
 #[derive(Parser, Debug, Clone)]
 pub enum CmdVerb {
-
     List,
 
     Run {
-
         name: String,
 
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -798,7 +764,6 @@ pub enum CmdVerb {
     },
 
     Interact {
-
         token: String,
 
         action: Option<String>,
@@ -807,11 +772,9 @@ pub enum CmdVerb {
 
 #[derive(Parser, Debug, Clone)]
 pub enum PluginCmd {
-
     List,
 
     Install {
-
         spec: String,
 
         #[arg(short, long)]
@@ -822,12 +785,10 @@ pub enum PluginCmd {
     },
 
     Remove {
-
         name: String,
     },
 
     Update {
-
         #[arg(default_value = "all")]
         target: String,
         #[arg(long)]
@@ -835,7 +796,6 @@ pub enum PluginCmd {
     },
 
     Enable {
-
         name: String,
 
         #[arg(long)]
@@ -843,17 +803,14 @@ pub enum PluginCmd {
     },
 
     Disable {
-
         name: String,
     },
 
     Check {
-
         dir: String,
     },
 
     Capabilities {
-
         name: Option<String>,
 
         #[arg(long)]

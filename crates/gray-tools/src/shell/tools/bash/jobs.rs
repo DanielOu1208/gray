@@ -30,7 +30,6 @@ impl Drop for Jobs {
 }
 
 impl Jobs {
-
     pub(super) fn register(
         &self,
         parent: &ToolContext,
@@ -152,7 +151,6 @@ impl Jobs {
             return false;
         }
         let wait_all = futures::future::select_all(rxs.into_iter().map(|mut rx| {
-
             Box::pin(async move {
                 while rx.borrow().is_none() {
                     if rx.changed().await.is_err() {
@@ -175,7 +173,6 @@ fn readable_id(jobs: &BTreeMap<String, Job>, command: &str) -> String {
 }
 
 impl Jobs {
-
     pub(super) async fn intercept_stop(
         &self,
         ctx: &ToolContext,
@@ -236,7 +233,6 @@ fn outcome(out: &ToolOutput) -> String {
 }
 
 impl Jobs {
-
     pub(super) fn footer(&self, ctx: &ToolContext, ids: &[String]) -> Option<String> {
         if ids.is_empty() {
             return None;

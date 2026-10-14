@@ -19,10 +19,7 @@ pub enum Change {
 
     HistoryAt(usize),
 
-    HistoryTruncated {
-        from: usize,
-        to: usize,
-    },
+    HistoryTruncated { from: usize, to: usize },
 }
 
 impl fmt::Display for Change {
@@ -85,7 +82,6 @@ pub struct PrefixGuard {
 }
 
 impl PrefixGuard {
-
     pub fn expect_change(&mut self, reason: &'static str) {
         self.expected = Some(reason);
     }

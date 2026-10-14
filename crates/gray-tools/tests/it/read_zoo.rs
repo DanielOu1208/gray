@@ -167,7 +167,6 @@ fn resume_offset(content: &str) -> Option<u64> {
 
 #[tokio::test]
 async fn t22_exactly_filled_window_claims_no_more_remains() {
-
     let dir = TempDir::new().unwrap();
     let lines: Vec<String> = (1..=2000).map(|i| format!("e{i:04}")).collect();
     std::fs::write(dir.path().join("exact.txt"), lines.join("\n") + "\n").unwrap();
@@ -180,7 +179,6 @@ async fn t22_exactly_filled_window_claims_no_more_remains() {
 
 #[tokio::test]
 async fn t22_one_more_byte_names_offset_2001() {
-
     let dir = TempDir::new().unwrap();
     let lines: Vec<String> = (1..=2000).map(|i| format!("e{i:04}")).collect();
     std::fs::write(dir.path().join("plus1.txt"), lines.join("\n") + "\n").unwrap();
@@ -237,7 +235,6 @@ async fn t22_byte_resume_points_at_the_unshown_line() {
 
 #[tokio::test]
 async fn t22_cut_iff_reread_returns_a_line() {
-
     struct Rng(u64);
     impl Rng {
         fn below(&mut self, n: u64) -> u64 {
@@ -272,7 +269,6 @@ async fn t22_cut_iff_reread_returns_a_line() {
             text.push('\n');
         }
         if case % 7 == 3 {
-
             text.push_str(&"Q".repeat(2500));
             text.push('\n');
         }
@@ -298,7 +294,6 @@ async fn t22_cut_iff_reread_returns_a_line() {
             out.content
         );
         if out.content.contains("beyond the end") {
-
             let retry = resume_offset(&out.content).expect("EOF note suggests a retry");
             let r2 = read_signed(dir.path(), "p.txt", Some(retry as i64), None).await;
             assert!(
@@ -307,7 +302,6 @@ async fn t22_cut_iff_reread_returns_a_line() {
                 r2.content
             );
         } else if let Some(n) = resume_offset(&out.content) {
-
             let r2 = read_signed(dir.path(), "p.txt", Some(n as i64), None).await;
             let first = r2.content.lines().next().unwrap_or("");
             assert!(
@@ -316,7 +310,6 @@ async fn t22_cut_iff_reread_returns_a_line() {
                 r2.content
             );
         } else {
-
             let shown = numbered_lines(&out.content);
             assert!(
                 !shown.is_empty(),
@@ -341,7 +334,6 @@ async fn t22_cut_iff_reread_returns_a_line() {
 
 #[tokio::test]
 async fn t22_huge_file_skips_count_but_resumes_and_guards_write() {
-
     const BIG_LINE: usize = 70 * 1024 * 1024;
     let dir = TempDir::new().unwrap();
     let mut data = "x\n".repeat(2000).into_bytes();

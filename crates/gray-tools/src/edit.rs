@@ -18,7 +18,6 @@ pub struct EditTool {
 }
 
 impl EditTool {
-
     pub fn new(ledger: Arc<FileLedger>) -> Self {
         Self { ledger }
     }
@@ -225,7 +224,6 @@ impl Tool for EditTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: Value) -> ToolOutput {
-
         let path = match get_str(&args, "path") {
             Ok(p) => p,
             Err(e) => return e,

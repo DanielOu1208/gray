@@ -238,7 +238,6 @@ fn cache_bar(read: usize, write: usize, fresh: usize) -> Vec<Span<'static>> {
     }
     let mut sum: usize = cells.iter().sum();
     while sum > BAR_CELLS {
-
         let Some(i) = (0..3).filter(|&i| cells[i] > 1).max_by_key(|&i| cells[i]) else {
             break;
         };
@@ -327,7 +326,6 @@ pub(crate) fn subscription_rows(limits: &gray_plugin::ProviderUsageLimits) -> Ve
     for w in windows {
         let mut v = Vec::new();
         if let Some(pct) = w.used_percent {
-
             let fill = ((pct / 100.0) * 10.0).round() as usize;
             let color = if pct >= 90.0 {
                 crate::theme::theme().error_soft

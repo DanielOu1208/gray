@@ -64,7 +64,6 @@ pub const ALL: &[Action] = &[
 ];
 
 impl Action {
-
     pub fn id(self) -> &'static str {
         match self {
             Action::SelectUp => "tui.select.up",
@@ -192,7 +191,6 @@ pub enum ChordKey {
 }
 
 impl Chord {
-
     pub fn from_event(ev: &KeyEvent) -> Option<Chord> {
         let m = ev.modifiers;
         let mut shift = m.contains(KeyModifiers::SHIFT);
@@ -202,7 +200,6 @@ impl Chord {
                     shift = true;
                     ChordKey::Char(c.to_ascii_lowercase())
                 } else {
-
                     if !c.is_ascii_alphabetic() {
                         shift = false;
                     }
@@ -304,7 +301,6 @@ impl Chord {
                             c.shift = true;
                         }
                         if !ch.is_ascii_alphabetic() {
-
                             c.shift = false;
                         }
                         ChordKey::Char(ch.to_ascii_lowercase())

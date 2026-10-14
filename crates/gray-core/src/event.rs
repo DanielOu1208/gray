@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Usage {
-
     #[serde(default)]
     pub input_tokens: usize,
 
@@ -29,7 +28,6 @@ pub struct Usage {
 }
 
 impl Usage {
-
     pub fn new(input_tokens: usize, output_tokens: usize) -> Self {
         Self {
             input_tokens,
@@ -112,7 +110,6 @@ impl Usage {
     }
 
     pub fn normalize(&mut self) {
-
         if self.cached_tokens == 0 && self.cache_read_input_tokens != 0 {
             self.cached_tokens = self.cache_read_input_tokens;
         } else if self.cache_read_input_tokens == 0 && self.cached_tokens != 0 {
@@ -175,7 +172,6 @@ pub enum StopReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-
     Start,
 
     TextDelta {
@@ -188,7 +184,10 @@ pub enum AgentEvent {
         delta: String,
     },
 
-    ToolCallStart { id: String, name: String },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
 
     ToolCallProgress {
         id: String,
@@ -196,7 +195,10 @@ pub enum AgentEvent {
         args_so_far: String,
     },
 
-    ToolCallEnd { id: String, args: serde_json::Value },
+    ToolCallEnd {
+        id: String,
+        args: serde_json::Value,
+    },
 
     ToolResult {
         id: String,
@@ -206,7 +208,9 @@ pub enum AgentEvent {
         is_error: bool,
     },
 
-    StepUsage { usage: Usage },
+    StepUsage {
+        usage: Usage,
+    },
 
     StreamError {
         message: String,
@@ -216,7 +220,9 @@ pub enum AgentEvent {
 
     MessageBoundary,
 
-    Steered { text: String },
+    Steered {
+        text: String,
+    },
 
     Retract,
 
@@ -239,7 +245,6 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactReason {
-
     #[default]
     Window,
 
@@ -247,11 +252,12 @@ pub enum CompactReason {
 
     UserCeiling,
 
-    PriceCliff { cliff: usize },
+    PriceCliff {
+        cliff: usize,
+    },
 }
 
 impl AgentEvent {
-
     pub fn text_delta(delta: impl Into<String>) -> Self {
         Self::TextDelta {
             delta: delta.into(),
@@ -329,7 +335,6 @@ impl AgentEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
-
     TextDelta {
         #[serde(alias = "text")]
         delta: String,
@@ -370,7 +375,6 @@ pub enum StreamEvent {
 }
 
 impl StreamEvent {
-
     pub fn text_delta(delta: impl Into<String>) -> Self {
         Self::TextDelta {
             delta: delta.into(),

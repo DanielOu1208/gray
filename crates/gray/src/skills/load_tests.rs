@@ -33,7 +33,6 @@ fn frontmatter_without_args_means_no_args() {
 
 #[test]
 fn folded_description_joins_continuation_lines() {
-
     let mut f = tempfile::NamedTempFile::new().unwrap();
     writeln!(
             f,
@@ -82,7 +81,6 @@ fn frontmatter_preserves_crlf_unicode_and_body() {
 
 #[test]
 fn a_symlink_cycle_terminates() {
-
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let inner = root.join("a");

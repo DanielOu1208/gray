@@ -54,7 +54,6 @@ pub fn home_relative(p: &Path) -> String {
         && !gray.trim().is_empty()
         && under(gray.trim())
     {
-
         return format!(
             "~/{}",
             s[gray.trim().len()..].trim_start_matches(['/', '\\'])
@@ -117,11 +116,8 @@ fn take_tail(s: &str, byte_budget: usize, line_budget: usize) -> String {
             if after < s.len() {
                 start = after;
             }
-
         }
-
     } else if start == 0 {
-
     }
     let mut tail = s[start..].trim_start_matches('\n').to_string();
 
@@ -189,7 +185,6 @@ pub fn strip_ansi(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] != 0x1b {
-
             let start = i;
             i += 1;
             while i < bytes.len() && !s.is_char_boundary(i) {

@@ -94,26 +94,20 @@ fn ordinary_words_and_identifiers_are_not_mistaken_for_secrets() {
 #[test]
 fn adversarial_prose_survives_the_credential_state_machine() {
     for text in [
-
         "bearer shares responsibility for the rollout",
         "the bearer of bad news is rarely thanked",
         "bearer",
         "each bearer token header is rewritten downstream",
-
         "Token holders vote on the proposal",
         "Basic auth is enabled for the staging endpoint",
         "Digest the results before the review",
-
         "authorization: needed before merge",
         "authorization: bearer shares responsibility",
-
         "variables like aws_region and pk_display stay readable",
         "aws_ prefixed variables are documented in the runbook",
-
         "pk_ and pub_ are conventions, not values",
         "asia and akia are four letter strings",
         "the variables were renamed in the same commit",
-
         "internationalization is spelled with eighteen letters",
     ] {
         let redaction = redact_for_disclosure(text);
@@ -132,15 +126,12 @@ fn adversarial_prose_survives_the_credential_state_machine() {
 #[test]
 fn adversarial_credentials_lose_the_whole_value() {
     for (text, leaked) in [
-
         ("Bearer qqq", "qqq"),
         ("Authorization: Bearer qqq", "qqq"),
         ("authorization: Bearer qqq", "qqq"),
-
         ("Authorization: Bearer qqq.", "qqq"),
         ("-H \"Authorization: Bearer qqq\"", "qqq"),
         ("Authorization:Bearer qqq", "qqq"),
-
         ("send Bearer hunter2 now", "hunter2"),
         (
             "curl -H Authorization: Bearer sk-live-0000 -X POST",
@@ -247,23 +238,19 @@ fn repo_relative_paths_are_redacted_in_every_spelling_and_disclosed() {
 #[test]
 fn prose_labels_and_bare_punctuation_are_not_paths() {
     for token in [
-
         "deepseek/deepseek-v4-flash",
         "zai/glm-5.2",
         "anthropic/claude-opus-5",
         "workspace/glm-pair",
-
         "a/b",
         "and/or",
         "read/write/execute",
         "TODO/FIXME",
         "provider/model/reasoning",
-
         "/",
         "~",
         "5:30",
         "v0.9.2",
-
         "https://example.test/a/b.rs",
     ] {
         let redaction = redact_for_disclosure(token);
@@ -392,7 +379,6 @@ fn multi_line_text_is_redacted_line_by_line() {
 
 #[test]
 fn backtick_and_asterisk_wrapped_secrets_are_replaced() {
-
     for input in [
         "key=`sk-live-abc123def456`",
         "token=*sk-live-abc123def456*",

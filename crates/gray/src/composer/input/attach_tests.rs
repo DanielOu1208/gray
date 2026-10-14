@@ -19,7 +19,6 @@ fn file_url_percent_decoding() {
 
 #[test]
 fn raw_paths_pass_through() {
-
     assert_eq!(decoded_paste_path("/tmp/100%.png"), "/tmp/100%.png");
     assert_eq!(decoded_paste_path("/tmp/plain.png"), "/tmp/plain.png");
 }

@@ -41,7 +41,6 @@ struct CredItem {
 }
 
 enum CredExtract {
-
     PoolAgentKey { provider: String },
 
     DotEnv { name: String },

@@ -102,7 +102,6 @@ impl Provider for Metered {
                     state.usage_complete =
                         previous_complete && (usage.input_tokens > 0 || usage.output_tokens > 0);
                     if let Some((input, output)) = meter.rates {
-
                         let cost = (usage.input_tokens as f64 * input
                             + usage.output_tokens as f64 * output)
                             .ceil() as u64;

@@ -19,7 +19,6 @@ fn line_format_matches_spec() {
 
 #[test]
 fn classify_splits_retrieval_from_action() {
-
     assert_eq!(classify("read"), CLASS_RETRIEVAL);
     assert_eq!(classify("grep"), CLASS_RETRIEVAL);
     assert_eq!(classify("find"), CLASS_RETRIEVAL);

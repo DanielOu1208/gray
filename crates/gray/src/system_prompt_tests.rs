@@ -6,7 +6,6 @@ fn opts(prompt: &str) -> Option<String> {
 
 #[test]
 fn rebuild_is_byte_stable() {
-
     let a = build_system_prompt(opts("You are gray."));
     let b = build_system_prompt(opts("You are gray."));
     assert_eq!(a, b, "system prompt rebuild diverged");
@@ -14,7 +13,6 @@ fn rebuild_is_byte_stable() {
 
 #[test]
 fn shipped_default_prompt_strips_to_the_agent_line() {
-
     let p = build_system_prompt(opts(crate::DEFAULT_SYS_PROMPT));
 
     assert!(
@@ -89,7 +87,6 @@ fn directory_is_quoted_without_losing_path_characters() {
 
 #[test]
 fn runtime_prompt_states_that_batched_tool_calls_share_one_round() {
-
     let p = build_runtime_prompt(opts("Rules."), std::path::Path::new("/project"));
     assert!(p.contains("results"), "{p}");
     assert!(
@@ -118,7 +115,6 @@ fn runtime_prompt_states_that_batched_tool_calls_share_one_round() {
 
 #[test]
 fn identity_block_names_the_picked_row_and_provider() {
-
     assert_eq!(
         identity_block("Step Fun 5", "step-5-preview", "Devin Subscription"),
         "Model: Step Fun 5 (step-5-preview)\nProvider: Devin Subscription"
@@ -157,7 +153,6 @@ fn identity_block_does_not_repeat_a_label_that_is_the_id() {
 
 #[test]
 fn tool_batching_guidance_is_not_user_editable_text() {
-
     for custom in [None, opts(""), opts("<!-- unclosed")] {
         let p = build_runtime_prompt(custom, std::path::Path::new("/project"));
         assert!(p.contains("Tool batching"), "{p}");

@@ -41,7 +41,6 @@ fn diff_success_is_plain() {
 
 #[test]
 fn masked_pipeline_note_is_posix_honest() {
-
     let r = exit_report(code(0), "false | tail -1");
     let note = r.note.as_deref().unwrap_or("");
     assert!(!note.contains("pipefail"), "{note}");
@@ -56,20 +55,17 @@ fn masked_pipeline_note_is_posix_honest() {
 
 #[test]
 fn pipefail_mention_does_not_suppress_masked_note() {
-
     let r = exit_report(code(0), "echo pipefail | tail -1");
     assert!(r.note.is_some());
 }
 
 #[test]
 fn failing_stage_behind_a_text_filter_is_flagged() {
-
     for cmd in [
         "pytest -q | head -40",
         "cargo test | tail -5",
         "python3 -c 'raise SystemExit(3)' | head -5",
         "make check | cat",
-
         "pytest -q | awk '{print $1}'",
         "cargo test 2>&1 | sed -n '1,20p'",
         "make test | cut -d: -f1",
@@ -97,7 +93,6 @@ fn multi_stage_filter_names_stages_generically() {
 
 #[test]
 fn text_filter_last_with_no_masking_risk_stays_silent() {
-
     let r = exit_report(code(0), "cargo test | grep PASS");
     assert!(
         r.note.as_deref().unwrap_or("").contains("cargo"),

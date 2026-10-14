@@ -67,7 +67,6 @@ fn live_rows_mark_running_cards() {
 
 #[test]
 fn live_rows_update_in_place_without_reorder() {
-
     let mut tools = vec![live("a", "old", false), live("b", "bee", false)];
 
     if let Some(slot) = tools.iter_mut().find(|t| t.id == "a") {
@@ -123,7 +122,6 @@ fn other_tools_keep_their_identity_and_empty_headers_are_safe() {
 
 #[test]
 fn template_second_line_stays_plain_under_a_running_headline() {
-
     let tool = LiveTool {
         id: "subagent".into(),
         name: "subagent_spawn".into(),

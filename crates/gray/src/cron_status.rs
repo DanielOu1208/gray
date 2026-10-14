@@ -35,7 +35,6 @@ pub fn ticker_line(health: &CronHealth, now: i64) -> String {
         .map(|j| now.saturating_sub(j.next_run_at))
         .max()
     {
-
         out.push_str(&format!(
             "\n⚠ {} job(s) overdue (worst {} behind) — not firing",
             health.overdue.len(),

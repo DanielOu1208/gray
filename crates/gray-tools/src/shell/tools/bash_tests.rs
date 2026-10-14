@@ -23,7 +23,6 @@ fn ctx_for(session: &str) -> ToolContext {
 
 #[test]
 fn shell_dir_respects_gray_home() {
-
     let dir = tempfile::tempdir().expect("tempdir");
     let gray = dir.path().to_string_lossy().into_owned();
     let prev = std::env::var("GRAY_HOME").ok();
@@ -141,7 +140,6 @@ fn truncated_log_has_executable_bounded_recovery() {
                 vec![b'z'; (raw.len() - INLINE_BUDGET_BYTES).min(READ_CHUNK as usize)]
             );
         } else {
-
             assert!(
                 out.stdout.starts_with(b"a\r\n") || out.stdout.starts_with(b"a\n"),
                 "expected 610d0a (or EOL-folded 610a) recovery, got {:02x?} (command: {command})",
@@ -204,7 +202,6 @@ fn not_found_subject_reads_every_shell_wording() {
 
 #[test]
 fn known_missing_binaries_get_their_real_substitute() {
-
     let rg = missing_command_hint("bash: line 1: rg: command not found").unwrap();
     assert!(rg.contains("`grep -r`"), "{rg}");
     let xxd = missing_command_hint("sh: 1: xxd: not found").unwrap();
@@ -296,7 +293,6 @@ async fn cat_shows_every_image_it_names() {
 
 #[tokio::test]
 async fn cat_keeps_native_resolution() {
-
     use base64::Engine as _;
     use image::ImageDecoder;
     use std::io::Cursor;
@@ -369,7 +365,6 @@ async fn cat_of_a_video_attaches_the_clip_with_its_sheet_as_fallback() {
 
 #[tokio::test]
 async fn cat_of_a_pdf_and_audio_attaches_them_with_text_fallbacks() {
-
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("doc.pdf"), b"%PDF-1.4 not really").unwrap();
     std::fs::write(dir.path().join("talk.mp3"), b"ID3 fake").unwrap();
@@ -392,7 +387,6 @@ async fn cat_of_a_pdf_and_audio_attaches_them_with_text_fallbacks() {
 
 #[tokio::test]
 async fn cat_skips_a_missing_path_and_keeps_the_rest() {
-
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("good.png"), png_bytes()).unwrap();
     let out = image_command("cat good.png typo.png", dir.path())
@@ -471,7 +465,6 @@ async fn cat_through_execute_shows_vision() {
 
 #[test]
 fn unattached_media_note_covers_every_shape_the_claim_refuses() {
-
     for cmd in [
         "cd /tmp && cat a.png",
         "cat a.png | wc -c",
@@ -597,7 +590,6 @@ async fn real_commands_disguised_as_noops_still_run() {
 
 #[tokio::test]
 async fn cat_expands_a_tilde_the_shell_would_have() {
-
     let home = std::env::var("HOME").unwrap_or_default();
     if home.is_empty() {
         return;
@@ -624,7 +616,6 @@ async fn cat_expands_a_tilde_the_shell_would_have() {
 
 #[tokio::test]
 async fn cat_resolves_a_tilde_path_only_when_the_file_is_there() {
-
     let home = std::env::var("HOME").unwrap_or_default();
     if home.is_empty() || !std::path::Path::new(&home).is_dir() {
         return;
@@ -655,7 +646,6 @@ async fn cat_resolves_a_tilde_path_only_when_the_file_is_there() {
 
 #[tokio::test]
 async fn a_cd_carries_carries_into_the_next_command_in_the_same_session() {
-
     let dir = tempfile::tempdir().expect("tempdir");
     let mut ctx = ctx_for(&sess("cd"));
     ctx.cwd = dir.path().to_path_buf();
@@ -680,7 +670,6 @@ async fn a_cd_carries_carries_into_the_next_command_in_the_same_session() {
 
 #[tokio::test]
 async fn the_cwd_report_never_leaks_into_the_output() {
-
     let tool = BashTool::default();
     let ctx = ctx_for(&sess("leak"));
     let r = tool
@@ -761,7 +750,6 @@ fn the_cwd_report_suffix_is_appended_not_substituted() {
 
 #[test]
 fn the_cwd_report_keeps_a_trailing_heredoc_terminator_alone() {
-
     let wrapped = with_cwd_report("cat > f <<'EOF'\nbody\nEOF");
     assert!(
         wrapped.starts_with("cat > f <<'EOF'\nbody\nEOF\n"),
@@ -772,7 +760,6 @@ fn the_cwd_report_keeps_a_trailing_heredoc_terminator_alone() {
 
 #[test]
 fn the_cwd_report_asks_for_a_path_rust_can_resolve() {
-
     let wrapped = with_cwd_report("echo hi");
     #[cfg(windows)]
     assert!(
@@ -785,7 +772,6 @@ fn the_cwd_report_asks_for_a_path_rust_can_resolve() {
 
 #[tokio::test]
 async fn the_cwd_report_does_not_mask_the_commands_exit_code() {
-
     let tool = BashTool::default();
     let ctx = ctx_for(&sess("exit"));
     let r = tool
@@ -921,7 +907,6 @@ async fn search_command_reads_flag_values_once() {
 
 #[tokio::test]
 async fn bare_find_and_grep_are_not_claimed() {
-
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "needle one\n").unwrap();
     for cmd in [
@@ -942,7 +927,6 @@ async fn bare_find_and_grep_are_not_claimed() {
 async fn bare_find_and_grep_leave_the_shell_richer_forms() {
     let dir = tempfile::tempdir().unwrap();
     for cmd in [
-
         "grep -r needle .",
         "grep -v needle",
         "grep -E 'a|b'",
@@ -955,7 +939,6 @@ async fn bare_find_and_grep_leave_the_shell_richer_forms() {
         "grep needle -",
         "grep",
         "egrep needle",
-
         "find .",
         "find . -type f",
         "find . -type d -name '*.rs'",
@@ -980,7 +963,6 @@ async fn bare_find_and_grep_leave_the_shell_richer_forms() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_repeated_cat_is_stubbed_once_through_the_tool() {
-
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("a.txt");
     std::fs::write(&file, "alpha\nbeta\ngamma\n").expect("write");
@@ -1062,7 +1044,6 @@ fn fake_cargo(bin: &std::path::Path) {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn a_noisy_command_is_squeezed_and_its_log_keeps_everything() {
-
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().expect("tempdir");
     let home = dir.path().join("home");
@@ -1214,7 +1195,6 @@ async fn wait_group_gone(pgid: i32) -> bool {
 #[cfg(unix)]
 #[tokio::test]
 async fn bare_timeout_kills_and_says_how_to_rerun() {
-
     let tool = BashTool::default();
     let ctx = ctx_for(&sess("bare-timeout"));
     let t0 = Instant::now();
@@ -1238,7 +1218,6 @@ async fn bare_timeout_kills_and_says_how_to_rerun() {
 #[cfg(unix)]
 #[tokio::test]
 async fn timeout_hands_off_to_a_job_never_kills() {
-
     let tool = BashTool::default();
     let ctx = ctx_for(&sess("handoff"));
     let t0 = Instant::now();
@@ -1306,7 +1285,6 @@ async fn wait_notices(tool: &BashTool, ctx: &ToolContext) -> Vec<String> {
 #[cfg(unix)]
 #[tokio::test]
 async fn the_advertised_stop_command_kills_the_whole_tree_in_band() {
-
     let dir = tempfile::tempdir().unwrap();
     let ctx = ToolContext {
         cwd: dir.path().into(),
@@ -1406,7 +1384,6 @@ async fn a_finished_command_inside_the_timeout_is_an_ordinary_result() {
 #[cfg(unix)]
 #[tokio::test]
 async fn running_jobs_ride_along_on_later_results() {
-
     let tool = BashTool::default();
     let ctx = ctx_for(&sess("footer"));
     let (out, pgid, log, _report) = run_lane(&tool, &ctx, "sleep 60", Some(1), true).await;
@@ -1470,10 +1447,8 @@ async fn bare_noop_commands_are_steered_not_spawned() {
         "true",
         ":",
         " true ",
-
         "echo hi",
         "echo \"switching to harness tools\"",
-
         "true && echo ran",
         "echo a; echo b",
         "env echo ran",
@@ -1528,7 +1503,6 @@ async fn removed_arguments_fail_loudly_and_never_spawn() {
         json!({"command": "touch BAD", "from_offset": 3}),
         json!({"command": "touch BAD", "notify_on": "exit"}),
         json!({"command": "touch BAD", "run_in_background": true}),
-
         json!({"wait_ms": 5000}),
         json!({"yield_ms": 1000}),
     ] {
@@ -1555,11 +1529,9 @@ async fn removed_arguments_fail_loudly_and_never_spawn() {
         json!({"command": "echo fine | cat", "action": "run"}),
         json!({"command": "echo fine | cat", "yield_ms": null}),
         json!({"command": "echo fine | cat", "job_id": "bash-bogus"}),
-
         json!({"command": "echo fine | cat", "wait_ms": 5000}),
         json!({"command": "echo fine | cat", "yield_ms": 1000}),
         json!({"command": "echo fine | cat", "yield_time_ms": 10000}),
-
         json!({"action":"run","background":false,"command":"echo fine | cat","job_id":"","timeout":10,"wait_ms":1000,"yield_ms":1000}),
     ] {
         let out = tool.execute(&ctx, args.clone()).await;
@@ -1621,7 +1593,6 @@ fn the_schema_is_command_and_timeout_only() {
 
 #[test]
 fn a_leading_sleep_stretches_the_default_bound() {
-
     let d = DEFAULT_TIMEOUT_SECS;
     let slack = SLEEP_SLACK_SECS;
     for (cmd, want) in [
@@ -1636,13 +1607,11 @@ fn a_leading_sleep_stretches_the_default_bound() {
         ("sleep 1.5m", 90 + slack),
         ("sleep 2h", MAX_TIMEOUT_SECS),
         ("sleep 99999", MAX_TIMEOUT_SECS),
-
         ("sleep 300 & cargo build", d),
         ("sleep 300 | cat", d),
         ("sleepy 300", d),
         ("sleep $N", d),
         ("echo x; sleep 300", d),
-
         ("cd /repo && sleep 300 && tail log", 300 + slack),
         ("cd /repo; sleep 300; tail log", 300 + slack),
         ("cd ~/gray && cd crates\nsleep 200", 200 + slack),

@@ -39,7 +39,6 @@ pub struct LazySidecarPlugin {
 }
 
 impl LazySidecarPlugin {
-
     pub fn new(argv: Vec<String>, manifest: Manifest) -> Self {
         Self {
             argv,
@@ -210,7 +209,6 @@ impl Plugin for LazySidecarPlugin {
     }
 
     async fn run_command(&self, name: &str, argv: Vec<String>) -> Option<CommandOutcome> {
-
         if !self.manifest.commands.iter().any(|c| c == name)
             && !self.manifest.subcommands.iter().any(|c| c == name)
         {
@@ -226,7 +224,6 @@ impl Plugin for LazySidecarPlugin {
     }
 
     async fn on_event(&self, e: CoreEvent) {
-
         if self.live.get().is_none() && self.manifest.hooks.is_empty() {
             return;
         }
@@ -321,7 +318,6 @@ mod tests {
 
     #[tokio::test]
     async fn dormant_calls_never_spawn() {
-
         let p = LazySidecarPlugin::new(
             vec!["/nonexistent/binary".into()],
             manifest(0, &[], &["/demo"]),
@@ -341,7 +337,6 @@ mod tests {
 
     #[tokio::test]
     async fn unclaimed_command_and_events_skip_spawn() {
-
         let p = LazySidecarPlugin::new(
             vec!["/nonexistent/binary".into()],
             manifest(2, &["prompt/context"], &[]),

@@ -29,7 +29,6 @@ async fn empty_manifest_name_bails() {
 
 #[tokio::test]
 async fn notify_sends_no_id_and_needs_no_reply() {
-
     let p = SidecarPlugin::spawn(vec!["testdata/hang_plugin.sh".into()])
         .await
         .unwrap();
@@ -43,7 +42,6 @@ async fn notify_sends_no_id_and_needs_no_reply() {
 
 #[tokio::test]
 async fn a_child_that_stopped_reading_fails_the_request_not_the_protocol() {
-
     let p = SidecarPlugin::spawn(vec!["testdata/wedged_stdin_plugin.sh".into()])
         .await
         .unwrap();
@@ -269,7 +267,6 @@ async fn dynamic_plugin_refreshes_tools_on_tools_changed() {
 
 #[tokio::test]
 async fn tools_changed_during_initial_refresh_is_not_lost() {
-
     let p = SidecarPlugin::spawn(vec!["testdata/early_tools_changed_plugin.sh".into()])
         .await
         .unwrap();
@@ -334,7 +331,6 @@ async fn tool_call_reply_images_and_media_are_attached() {
 
 #[test]
 fn context_build_text_scrub_fits_frame_and_restores() {
-
     let big_a = "a".repeat(300 * 1024);
     let big_b = "b".repeat(300 * 1024);
     let mut wire = vec![

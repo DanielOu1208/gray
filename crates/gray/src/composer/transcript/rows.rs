@@ -79,7 +79,6 @@ pub(crate) fn wrap_styled_line_with_ranges(
     line: Line<'static>,
     max_w: usize,
 ) -> Vec<(Line<'static>, Range<usize>)> {
-
     if line.spans.iter().any(|s| s.content.contains("\x1b]8;;")) {
         return vec![(line, 0..usize::MAX)];
     }
@@ -165,7 +164,6 @@ pub(crate) fn wrap_styled_line_with_ranges(
         words.push(start..i);
     }
     if words.is_empty() {
-
         return char_chunk_fallback(line, max_w)
             .into_iter()
             .map(|l| (l, 0..usize::MAX))
@@ -403,7 +401,6 @@ pub(crate) fn format_user_prompt_lines(
             let mut start = 0usize;
             let mut first_row = true;
             while start < chars.len() {
-
                 let end = word_window_end(&chars, start, max_w);
                 let row_prefix = if first_row {
                     prefix.clone()

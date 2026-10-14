@@ -2,7 +2,6 @@ use super::*;
 
 #[test]
 fn schema_has_single_scalar_types_paths_exclude_and_empty_required() {
-
     let def = ReadTool::default().def();
     let props = def
         .parameters

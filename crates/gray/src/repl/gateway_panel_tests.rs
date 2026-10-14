@@ -73,7 +73,6 @@ fn an_app_without_setup_gets_no_hint_and_no_invented_commands() {
 
 #[test]
 fn the_panel_is_apps_only() {
-
     let home = tempfile::tempdir().unwrap();
     let rows = [row("myapp", true)];
     let items = app_rows_with(&rows, Some(home.path()));

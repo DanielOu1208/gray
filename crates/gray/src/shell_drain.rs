@@ -20,7 +20,6 @@ pub fn sweep_old_shell_logs() {
         return;
     };
     for sess in sessions.flatten() {
-
         let dir_age = sess
             .metadata()
             .ok()

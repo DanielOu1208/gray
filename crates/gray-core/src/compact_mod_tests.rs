@@ -114,7 +114,6 @@ fn retention_drops_tool_chatter_atomically() {
 
 #[test]
 fn atomic_batch_2_calls_drop_without_orphans() {
-
     let msgs = vec![
         assistant_tool_uses(&["c1", "c2"]),
         user_tool_result("c1"),
@@ -130,7 +129,6 @@ fn atomic_batch_2_calls_drop_without_orphans() {
 
 #[test]
 fn atomic_batch_3_calls_retain_without_orphans() {
-
     let mut batch = vec![Message {
         role: Role::Assistant,
         injected: false,
@@ -172,7 +170,6 @@ fn boundary_group_middle_truncated_not_dropped() {
 
 #[test]
 fn boundary_truncation_charges_thinking_and_tool_blocks() {
-
     let old = Message {
         role: Role::Assistant,
         injected: false,
@@ -373,7 +370,6 @@ async fn compaction_call_drops_tool_use_blocks_from_reply() {
 
 #[test]
 fn budget_walk_newest_first() {
-
     let mk = |tag: &str| Message::user(format!("{tag}:{}", "z".repeat(32_000 * 4 - tag.len() - 1)));
     let msgs = vec![mk("m1"), mk("m2"), mk("m3")];
     let out = build_retained(&msgs, RETAINED_MESSAGE_TOKEN_BUDGET);
@@ -384,7 +380,6 @@ fn budget_walk_newest_first() {
 
 #[test]
 fn images_priced_and_dropped_oldest_first() {
-
     assert_eq!(image_block_tokens("image/png", 5_000), 1_000);
     assert_eq!(image_block_tokens("image/png", 16_000), 3_000);
     assert_eq!(image_block_tokens("image/png", 64), 1_000);
@@ -653,7 +648,6 @@ fn citation_stub_falls_back_to_generic_path_without_session() {
 
 #[test]
 fn stubbing_rescues_over_budget_text_group() {
-
     let msgs = vec![
         Message {
             role: Role::Assistant,
@@ -700,7 +694,6 @@ fn stubbing_rescues_over_budget_text_group() {
 
 #[test]
 fn fitting_groups_keep_large_output_verbatim() {
-
     let big = "z".repeat(ARC_STUB_MIN_BYTES + 10);
     let msgs = vec![
         Message {
@@ -746,7 +739,6 @@ fn result_body(m: &Message) -> &str {
 
 #[test]
 fn soft_elision_stubs_old_large_results_and_keeps_the_recent_window_verbatim() {
-
     let mut msgs = vec![Message::user("fix it")];
     for id in ["a", "b", "c", "d"] {
         msgs.push(assistant_tool_use(id));

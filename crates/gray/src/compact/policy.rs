@@ -104,7 +104,6 @@ pub fn compaction_settings_for(
 }
 
 pub fn estimate_tokens(msg: &Message) -> usize {
-
     if msg.content.iter().any(|block| {
         matches!(
             block,

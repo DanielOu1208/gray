@@ -29,7 +29,6 @@ fn read_structured_input(path: &Path) -> Result<Vec<u8>, InputError> {
 }
 
 fn main() -> anyhow::Result<()> {
-
     #[cfg(unix)]
     if let Some(tool) = gray_tools::search_shim::invoked_as() {
         gray_tools::search_shim::run(&tool);
@@ -308,7 +307,6 @@ async fn run_resume_subcommand(
     };
     let store = JsonlSessionStore::new(root);
     let target_id = if let Some(raw) = session_id {
-
         gray::resume::resolve_session_strict(&store, raw, all).await?
     } else if last {
         let cwd = std::env::current_dir().ok();
@@ -336,7 +334,6 @@ async fn run_resume_subcommand(
     } else {
         use std::io::IsTerminal as _;
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-
             let summaries = gray::resume::recent_summaries(&store, all).await;
             if summaries.is_empty() {
                 if all {
@@ -378,7 +375,6 @@ async fn run_resume_subcommand(
 }
 
 async fn run_plugin(cmd: gray::PluginCmd) -> anyhow::Result<()> {
-
     let res = run_plugin_inner(cmd).await;
     if let Err(e) = res {
         eprintln!("error: {e:#}");
@@ -650,7 +646,6 @@ async fn run_cron(cmd: gray::CronCmd, config: &gray::config::Config) -> anyhow::
             }
             let name = name.unwrap_or_else(|| {
                 if reminder {
-
                     gray::cron_fire::reminder_name(&prompt)
                 } else {
                     default_job_name(&prompt)

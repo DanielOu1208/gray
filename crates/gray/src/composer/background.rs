@@ -54,7 +54,6 @@ impl Background {
             return Ok(());
         }
         if !self.uploaded {
-
             self.uploaded = true;
             for (index, chunk) in self.png.as_bytes().chunks(4096).enumerate() {
                 let more = usize::from((index + 1) * 4096 < self.png.len());

@@ -11,7 +11,6 @@ static LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn cap_parsing_is_a_pure_table() {
-
     let max = tokio::sync::Semaphore::MAX_PERMITS;
     for (raw, want) in [
         (None, max),
@@ -21,9 +20,7 @@ fn cap_parsing_is_a_pure_table() {
         (Some("abc"), max),
         (Some(""), max),
         (Some("  "), max),
-
         (Some("18446744073709551615"), max),
-
         (Some("99999999999999999999999"), max),
     ] {
         assert_eq!(

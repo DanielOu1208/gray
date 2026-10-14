@@ -62,7 +62,6 @@ pub fn main() {
     let mut made = 0;
     for day in 1..=days {
         for round in 0..rounds {
-
             let mut touched = BTreeSet::new();
             let share = |n: usize| n / rounds + (round < n % rounds) as usize;
             let checkout = if day % 7 == 0 && round == 0 { CHECKOUT } else { 0 };

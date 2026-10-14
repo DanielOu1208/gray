@@ -10,7 +10,6 @@ pub(crate) const PENDING_TTL_SECS: i64 = 3600;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PendingDoc {
-
     #[serde(default)]
     pub(crate) kind: String,
     pub(crate) created_at: i64,

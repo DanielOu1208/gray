@@ -26,7 +26,6 @@ pub struct Reply {
 }
 
 impl Reply {
-
     pub fn parse(line: &str) -> Option<Reply> {
         let v: serde_json::Value = serde_json::from_str(line).ok()?;
         let strings = |k: &str| -> Option<Vec<String>> {

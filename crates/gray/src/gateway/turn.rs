@@ -16,7 +16,6 @@ const REAP_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct TurnRequest {
-
     pub key: String,
 
     pub session_id: Option<String>,
@@ -33,7 +32,6 @@ pub struct TurnRequest {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnOutcome {
-
     pub session_id: Option<String>,
 
     pub text: String,

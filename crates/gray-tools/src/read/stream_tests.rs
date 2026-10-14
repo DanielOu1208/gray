@@ -147,7 +147,6 @@ async fn big_lines_stream_with_tiny_buffers() {
     assert!(s.next_line().await.unwrap().is_none());
     #[cfg(target_os = "linux")]
     {
-
         let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
         let pages: u64 = statm.split_whitespace().nth(1).unwrap().parse().unwrap();
         let rss = pages * unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;

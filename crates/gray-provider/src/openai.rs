@@ -56,7 +56,6 @@ impl std::fmt::Debug for OpenAiProvider {
 }
 
 impl OpenAiProvider {
-
     pub fn new(
         api_key: impl Into<String>,
         model: impl Into<String>,
@@ -352,7 +351,6 @@ pub(crate) enum CapField {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ModelCaps {
-
     pub anthropic_cache: bool,
 
     pub replay_reasoning_content: bool,
@@ -371,7 +369,6 @@ pub(crate) struct ModelCaps {
 }
 
 impl ModelCaps {
-
     pub(crate) fn for_model(model: &str) -> Self {
         let id = model.to_ascii_lowercase();
         let leaf = id.rsplit('/').next().unwrap_or(&id);
@@ -616,7 +613,6 @@ fn map_chat_request(
                 };
 
                 let reasoning_content = if thinking_parts.is_empty() {
-
                     caps.replay_reasoning_content.then(String::new)
                 } else {
                     Some(thinking_parts.join("\n"))
@@ -878,7 +874,6 @@ fn map_finish_reason(reason: &str) -> Option<StopReason> {
 }
 
 fn map_usage(u: &OpenAiUsageChunk) -> Usage {
-
     let mut reasoning = 0usize;
     if let Some(details) = &u.completion_tokens_details {
         reasoning = details.reasoning_tokens;
@@ -903,11 +898,9 @@ fn map_usage(u: &OpenAiUsageChunk) -> Usage {
     let is_anthropic_shape = u.cache_creation_input_tokens != 0 || u.cache_read_input_tokens != 0;
 
     let (input_inclusive, non_cached) = if is_anthropic_shape {
-
         let inclusive = u.prompt_tokens + cache_read + cache_write;
         (inclusive, u.prompt_tokens)
     } else {
-
         let non_cached = if u.prompt_cache_miss_tokens != 0 {
             u.prompt_cache_miss_tokens
         } else {
@@ -1026,7 +1019,6 @@ fn map_chat_to_responses(
                             }
                         }
                         ContentBlock::Image { media_type, data } => {
-
                             let url = image_data_url(&media_type, &data);
                             if !text_parts.is_empty() {
                                 input.push(serde_json::json!({"role": role_str, "content": text_parts.join("\n")}));
@@ -1100,7 +1092,6 @@ fn map_chat_to_responses(
                             model: Some(m),
                             ..
                         } if m == model => {
-
                             reasoning_items.push(serde_json::json!({"type": "reasoning", "id": id, "summary": [], "encrypted_content": ec}));
                         }
                         ContentBlock::Thinking { .. } => {}
@@ -1342,7 +1333,6 @@ fn error_body_message(body: &str) -> Option<String> {
 
 const QUOTA_EXHAUSTED_HINTS: [&str; 14] = [
     "insufficient_quota",
-
     "subscription_sharing_usage_limit_exceeded",
     "insufficient quota",
     "insufficient credits",
@@ -1353,7 +1343,6 @@ const QUOTA_EXHAUSTED_HINTS: [&str; 14] = [
     "quota_exceeded",
     "gousagelimiterror",
     "available balance",
-
     "usage limit reached",
     "session limit",
     "resets in ~",
@@ -1395,7 +1384,6 @@ fn classify_http_error_inner(
     cf_ray: Option<&str>,
     req_id: Option<&str>,
 ) -> ProviderError {
-
     let shown = error_body_message(snippet).unwrap_or_else(|| snippet.to_string());
     let mut msg = if shown.is_empty() {
         format!("status {status}")
@@ -1461,7 +1449,6 @@ fn classify_http_error_inner(
 }
 
 pub(crate) fn is_retryable_error(err: &ProviderError) -> bool {
-
     err.retryable()
 }
 
@@ -2319,7 +2306,6 @@ fn emit_tool_calls_and_completion(
     pending_events: &mut VecDeque<StreamEvent>,
 ) -> Result<(), ProviderError> {
     for (index, (id, name, args)) in std::mem::take(accumulated_tools) {
-
         if name.is_empty() && args.trim().is_empty() {
             log::debug!(target: "gray_provider", "skipping ghost tool-call fragment at index {index} (no name, no args)");
             continue;
@@ -2343,14 +2329,12 @@ fn emit_responses_tool_calls_and_completion(
     usage: Option<Usage>,
     pending_events: &mut VecDeque<StreamEvent>,
 ) -> Result<(), ProviderError> {
-
     let mut ordered: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
     for (call_id, (idx, name, args)) in std::mem::take(tools_by_call_id) {
         ordered.insert(idx, (call_id, name, args));
     }
     index_to_call_id.clear();
     for (idx, (call_id, name, args)) in ordered {
-
         if name.is_empty() && args.trim().is_empty() {
             log::debug!(target: "gray_provider", "skipping ghost Responses tool-call fragment at index {idx} (no name, no args)");
             continue;
@@ -2393,7 +2377,6 @@ fn resume_body_and_tool_prefix(
     ResponsesToolsByCallId,
     ResponsesIndexToCallId,
 ) {
-
     let has_reasoning = body.reasoning.is_some()
         || body
             .include
@@ -2424,7 +2407,6 @@ fn stream_unfold_step(
                     attempt,
                     retry_after,
                 } => {
-
                     if attempt > 1 {
                         tokio::time::sleep(backoff_delay(
                             INITIAL_BACKOFF,
@@ -2469,7 +2451,6 @@ fn stream_unfold_step(
                             };
                         }
                         Err((err, floor, http_status)) => {
-
                             if attempt == 1
                                 && chat_has_reasoning_params(&body)
                                 && should_retry_without_reasoning(
@@ -2583,7 +2564,6 @@ fn stream_unfold_step(
                             };
                         }
                         Err((err, floor, http_status)) => {
-
                             if attempt == 1
                                 && body.previous_response_id.is_some()
                                 && should_retry_without_previous_response(
@@ -2708,7 +2688,6 @@ fn stream_unfold_step(
                         Some(Ok(sse_event)) => {
                             let data = sse_event.data.trim();
                             if data == "[DONE]" {
-
                                 if !completed {
                                     completed = true;
                                     if let Err(err) = emit_tool_calls_and_completion(
@@ -2757,7 +2736,6 @@ fn stream_unfold_step(
 
                                             if let Some(tool_calls) = choice.delta.tool_calls {
                                                 for tc in tool_calls {
-
                                                     let carries_anything = tc.id.is_some()
                                                         || tc.function.as_ref().is_some_and(|f| {
                                                             f.name.is_some()
@@ -2790,7 +2768,6 @@ fn stream_unfold_step(
                                             }
 
                                             if let Some(reason_str) = choice.finish_reason {
-
                                                 last_finish_reason = map_finish_reason(&reason_str);
                                             }
                                         }
@@ -2851,7 +2828,6 @@ fn stream_unfold_step(
                                 continue;
                             }
                             if emitted && accumulated_tools.is_empty() {
-
                                 let details = err.to_string().chars().take(200).collect::<String>();
                                 pending_events.push_back(StreamEvent::stream_error(
                                     "Connection interrupted; partial answer kept",
@@ -2885,7 +2861,6 @@ fn stream_unfold_step(
                         }
                         None => {
                             if last_finish_reason.is_none() {
-
                                 let complete = accumulated_tools.values().all(|(_, _, args)| {
                                     let trimmed = args.trim();
                                     !trimmed.is_empty()
@@ -3322,7 +3297,6 @@ fn stream_unfold_step(
                                     }
                                 }
                                 "response.failed" | "error" => {
-
                                     let detail = value
                                         .get("response")
                                         .and_then(|r| r.get("error"))
@@ -3349,7 +3323,6 @@ fn stream_unfold_step(
                                     ));
                                 }
                                 "response.output_item.done" => {
-
                                     if value
                                         .get("item")
                                         .and_then(|i| i.get("type"))
@@ -3411,7 +3384,6 @@ fn stream_unfold_step(
                             };
                         }
                         Some(Err(err)) => {
-
                             if stream_attempt < MAX_ATTEMPTS {
                                 log::warn!(target: "gray_provider", "responses stream error, resuming (stream attempt {stream_attempt}): {err}");
 
@@ -3448,7 +3420,6 @@ fn stream_unfold_step(
                             ));
                         }
                         None => {
-
                             if tools_by_call_id.is_empty() && saw_output_text {
                                 log::warn!(
                                     target: "gray_provider",

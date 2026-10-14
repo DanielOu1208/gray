@@ -247,7 +247,6 @@ fn model_result(config: &mut Config, home: &Path, rest: &str) -> Result<CommandR
         ));
     }
     let mut draft = store::ModelDraft {
-
         model: config
             .model
             .clone()
@@ -1122,7 +1121,6 @@ fn interact(
         ),
     };
     if let Some(a) = &action {
-
         match (&rec.user, &a.user) {
             (Some(owner), Some(u)) if u != owner => return Err(CmdError::not_owner()),
             (Some(_), None) => return Err(CmdError::not_owner()),

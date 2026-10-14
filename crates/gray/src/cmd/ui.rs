@@ -12,7 +12,6 @@ pub(crate) struct UiDoc {
 }
 
 impl UiDoc {
-
     pub(crate) fn message(
         document_id: &str,
         visibility: Visibility,

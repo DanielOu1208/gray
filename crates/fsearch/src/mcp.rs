@@ -100,7 +100,6 @@ impl Session {
                 let want = params["protocolVersion"].as_str().unwrap_or("");
                 let version = VERSIONS.iter().find(|v| **v == want).unwrap_or(&VERSIONS[0]);
                 if params.pointer("/capabilities/roots").is_some() {
-
                     self.asked_roots = 1;
                 }
                 self.warm();
@@ -372,7 +371,6 @@ impl Session {
             None => (self.ask(&req(&pattern, regex, &p.globs, offset)), Err(String::new())),
         };
         let mut r = match main {
-
             Err(e) if regex && !multi && a["regex"].as_bool().is_none() && e.contains("regex") => {
                 self.ask(&req(&pattern, false, &p.globs, offset))?
             }
@@ -383,7 +381,6 @@ impl Session {
             return Ok(format!("no more matches past cursor {offset}"));
         }
         if offset == 0 && files(&r).is_empty() {
-
             let ident = !regex && is_ident(&pattern);
             let tries: Vec<(String, bool, Vec<String>, String)> = [
                 p.globs.iter().any(|g| is_file_glob(g)).then(|| {
@@ -405,7 +402,6 @@ impl Session {
                 if let Ok(r2) = self.ask(&req(&pat, re, &globs, 0))
                     && !files(&r2).is_empty()
                 {
-
                     if ident
                         && !multi
                         && pat == variants(&pattern)
@@ -420,7 +416,6 @@ impl Session {
                 }
             }
             if note.is_none() {
-
                 let mut f = json!({"q": pattern, "kind": "file", "limit": 3});
                 if let Some(s) = &scope {
                     f["in"] = s.as_str().into();
@@ -538,7 +533,6 @@ impl View {
     }
 
     fn list_files(&self, hits: &[Value], words: &[String], next: Option<u64>, note: Option<String>) -> String {
-
         let at = |h: &&Value| {
             let p = self.show(h["path"].as_str().unwrap_or(""));
             words.iter().any(|w| w.contains('/') && (p == w.trim_start_matches("./") || p.ends_with(&format!("/{}", w.trim_start_matches("./")))))
@@ -639,7 +633,6 @@ impl View {
                             continue;
                         }
                         if context > 0 && !body.is_empty() {
-
                             for c in ln.saturating_sub(context).max(last + 1)..ln.min(body.len() + 1) {
                                 out.push(format!("{c}-{}", clip(body[c - 1], "", 160)));
                             }
@@ -655,7 +648,6 @@ impl View {
                             0
                         };
                         for c in ln + 1..=(ln + after).min(body.len()) {
-
                             if context == 0 && body[c - 1].trim().is_empty() {
                                 break;
                             }
@@ -834,7 +826,6 @@ fn split(query: &str, grep: bool) -> Parts {
         } else if is_glob(body) || (body.len() > 1 && body.ends_with('/')) {
             p.globs.push(w.clone());
         } else if neg {
-
             p.globs.push(format!("!*{body}*/"));
         } else if grep && texts > 0 && is_file(body) {
             p.globs.push(body.to_string());
@@ -1005,14 +996,12 @@ fn is_def(line: &str, name: Option<&str>) -> bool {
             let rest = s[k.len()..].trim_start_matches(|c: char| c.is_whitespace() || c == '*' || c == '&');
             let rest = rest.strip_prefix("mut ").unwrap_or(rest);
             let Some(tail) = rest.strip_prefix(n).filter(|t| !t.starts_with(|c: char| c.is_alphanumeric() || c == '_')) else {
-
                 return matches!(*k, "struct" | "union" | "enum") && c_fn(line, n);
             };
             let tail = tail.trim();
 
             match *k {
                 "struct" | "union" | "enum" | "class" => {
-
                     let tail = tail.strip_prefix('<').map_or(tail, |t| {
                         let mut depth = 1;
                         let end = t.find(|c| {
@@ -1198,7 +1187,6 @@ mod tests {
 
     #[test]
     fn context_past_the_end() {
-
         let path = std::env::temp_dir().join(format!("fsearch-mcp-{}.txt", std::process::id()));
         std::fs::write(&path, "a\nb\n").unwrap();
         let r = json!({"files": [{"path": path.to_str().unwrap(), "matches": [{"line": 50, "text": "x"}]}]});
@@ -1209,7 +1197,6 @@ mod tests {
 
     #[test]
     fn cursor_counts_what_was_shown() {
-
         let f = |p: &str, t: &str| json!({"path": p, "matches": [{"line": 1, "text": t}, {"line": 2, "text": t}, {"line": 3, "text": t}]});
         let r = json!({"files": [f("/p/tests/a.rs", "parse"), f("/p/src/b.rs", "parse"), f("/p/src/c.rs", "fn parse() {")], "next": 3});
         let v = View { base: "/p".into(), head: None };

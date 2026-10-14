@@ -90,7 +90,6 @@ pub(crate) fn try_attach_clipboard_image(tui: &mut Tui) -> bool {
             vec!["-selection", "clipboard", "-t", "image/png", "-o"],
         ),
     ] {
-
         if let Some(out) = super::clipboard::output_with_timeout(
             std::path::Path::new(cmd),
             &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),

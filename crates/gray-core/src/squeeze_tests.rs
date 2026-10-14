@@ -46,7 +46,6 @@ fn two_progress_lines_are_a_list_not_a_count() {
 
 #[test]
 fn a_mixed_pipeline_gets_only_the_generic_rule() {
-
     let mut text = String::new();
     for _ in 0..200 {
         text.push_str("src/a.rs:12:   Compiling thing v0.1.0\n");
@@ -123,7 +122,6 @@ fn small_output_is_never_touched() {
 
 #[test]
 fn a_compressor_never_returns_more_than_it_was_given() {
-
     let text = format!(
         "{}\n{}",
         "unique line of its own here", "another distinct one"
@@ -170,7 +168,6 @@ fn a_trailing_newline_is_preserved() {
 
 #[test]
 fn blank_floods_collapse_to_a_count() {
-
     let mut text = String::new();
     for _ in 0..3000 {
         text.push('\n');

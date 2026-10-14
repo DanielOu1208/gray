@@ -20,7 +20,6 @@ fn spark_levels_exclude_max_deepseek_v4_keeps_it() {
 
 #[test]
 fn clamp_max_to_xhigh_on_spark_keeps_supported_levels() {
-
     assert_eq!(
         clamp_thinking_level("muse-spark-1.3-contributor", "max"),
         "xhigh"
@@ -87,7 +86,6 @@ fn cached_list() -> Vec<(String, String)> {
 
 #[test]
 fn loopback_bases_get_no_disk_entry() {
-
     let dir = tempfile::TempDir::new().expect("temp home");
     save_provider_model_list_at(dir.path(), "http://127.0.0.1:35757/v1", &cached_list());
     save_provider_model_list_at(dir.path(), "http://[::1]:1234/v1", &cached_list());
@@ -109,7 +107,6 @@ fn model_list_round_trips_through_disk() {
     let dir = tempfile::TempDir::new().expect("temp home");
     save_provider_model_list_at(dir.path(), "https://api.x.ai/v1/", &cached_list());
     assert_eq!(
-
         load_provider_model_list_at(dir.path(), "https://api.x.ai/v1"),
         cached_list()
     );
@@ -213,7 +210,6 @@ fn a_legacy_pair_cache_still_loads_and_objects_keep_their_metadata() {
 
 #[test]
 fn key_check_request_picks_each_providers_probe() {
-
     let (url, style, r400) = key_check_request("https://openrouter.ai/api/v1/");
     assert_eq!(url, "https://openrouter.ai/api/v1/key");
     assert_eq!(style, AuthStyle::Bearer);
@@ -236,7 +232,6 @@ fn key_check_request_picks_each_providers_probe() {
 
 #[test]
 fn key_check_marks_400_as_rejection_only_on_measured_hosts() {
-
     for base in [
         "https://generativelanguage.googleapis.com/v1beta/openai",
         "https://api.x.ai/v1",

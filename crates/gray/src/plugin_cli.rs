@@ -130,7 +130,6 @@ fn metadata(home: &Path, name: &str) -> anyhow::Result<serde_json::Value> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrustGate {
-
     Ask,
 
     Quiet,
@@ -794,7 +793,6 @@ async fn register_native_gated(
     std::fs::create_dir_all(home.join("plugins"))?;
     let _guard = gray_pkg::ops::hold_registry_lock_in(&home.join("plugins"))?;
     if manifest["widget"].as_bool() == Some(true) && !wire_only {
-
         let path = home.join("plugins/widgets.json");
         if path.exists() {
             let old: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
@@ -840,7 +838,6 @@ async fn register_native_gated(
     metadata.persist(home.join("plugins").join(format!("{name}-manifest.json")))?;
     lock.save(&gray_plugin::lock::lock_path(home))?;
     if !(manifest["widget"].as_bool() == Some(true) && !wire_only) {
-
         let widgets = home.join("plugins/widgets.json");
         if let Ok(raw) = std::fs::read(&widgets)
             && serde_json::from_slice::<serde_json::Value>(&raw)
@@ -916,7 +913,6 @@ pub(crate) async fn adopt_cli(home: &Path, name: &str, dir: &Path) -> anyhow::Re
             Ok(true)
         }
         None => {
-
             if !entry.hash.is_empty() {
                 let mut changed = entry.cli_argv.take().is_some();
                 let manifest_path = plugins.join(format!("{name}-manifest.json"));
@@ -971,7 +967,6 @@ pub async fn capture_slash(name: &str, args: &[String]) -> anyhow::Result<Option
 }
 
 struct CompletionRow {
-
     command: String,
 
     plugin: String,

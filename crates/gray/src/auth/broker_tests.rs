@@ -413,7 +413,6 @@ async fn expired_credential_without_refresh_fails_closed() {
 
 #[tokio::test]
 async fn expired_credential_refreshes_when_supported() {
-
     let dir = tempfile::tempdir().unwrap();
     let store = CredentialStore::new(dir.path().join("auth.json"));
     store
@@ -664,7 +663,6 @@ async fn relay_chat_unavailable_maps_to_login_required() {
 
 #[tokio::test]
 async fn relay_verified_marker_counts_as_connected() {
-
     struct OkChat;
     #[async_trait::async_trait]
     impl ProviderRpc for OkChat {

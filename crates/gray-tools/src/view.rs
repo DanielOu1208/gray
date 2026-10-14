@@ -34,7 +34,6 @@ impl std::fmt::Display for ViewError {
 }
 
 pub fn load(path: &Path) -> Result<Shown, ViewError> {
-
     if !crate::images::is_image_extension(path) && !crate::images::is_video_extension(path) {
         return Err(ViewError::NotAnImage(path.to_path_buf()));
     }

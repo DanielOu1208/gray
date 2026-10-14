@@ -25,7 +25,6 @@ fn leaves_non_prefix_lines_alone() {
 
 #[test]
 fn strip_set_gates_on_old_text_both_or_neither() {
-
     let only_new = vec![e("foo", "   3\tbar")];
     assert!(strip_edit_prefixes(&only_new).is_none());
 

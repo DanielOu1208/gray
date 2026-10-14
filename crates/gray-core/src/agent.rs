@@ -39,7 +39,6 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
-
     pub fn class(&self) -> &ProviderError {
         let mut cur = self;
         while let Self::Detailed { class, .. } = cur {
@@ -215,7 +214,6 @@ pub(crate) async fn scope_tool_output<T>(
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-
     fn def(&self) -> crate::message::ToolDef;
 
     fn as_any(&self) -> &dyn std::any::Any;
@@ -273,7 +271,6 @@ pub trait ToolExecutor: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundJob {
-
     pub id: String,
     pub elapsed: Duration,
 
@@ -284,7 +281,6 @@ pub type ProviderStream = BoxStream<'static, Result<StreamEvent, ProviderError>>
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolBefore {
-
     Allow,
 
     Modify(serde_json::Value),
@@ -293,7 +289,6 @@ pub enum ToolBefore {
 }
 
 impl ToolBefore {
-
     pub fn from_result(v: &serde_json::Value) -> Self {
         match v.get("decision").and_then(|d| d.as_str()) {
             Some("deny") => Self::Deny(
@@ -316,7 +311,6 @@ impl ToolBefore {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputSubmit {
-
     Pass,
 
     Rewrite(String),
@@ -325,7 +319,6 @@ pub enum InputSubmit {
 }
 
 impl InputSubmit {
-
     pub fn from_result(v: &serde_json::Value) -> Self {
         if v.get("handled").and_then(|h| h.as_bool()) == Some(true) {
             return Self::Handled;
@@ -339,7 +332,6 @@ impl InputSubmit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginCommand {
-
     pub name: String,
     pub description: String,
 }
@@ -358,7 +350,6 @@ pub enum CommandOutcome {
 
 #[async_trait]
 pub trait PluginHooks: Send + Sync {
-
     async fn prompt_context(&self) -> Option<String> {
         None
     }
@@ -403,7 +394,6 @@ pub trait PluginHooks: Send + Sync {
 
 impl From<ProviderError> for CoreError {
     fn from(e: ProviderError) -> Self {
-
         match e {
             ProviderError::RateLimited(msg) => CoreError::RateLimited(msg),
             ProviderError::Auth(msg) => CoreError::Auth(msg),
@@ -428,7 +418,6 @@ use crate::message::{ContentBlock, Message, Role, ToolDef};
 pub use super::agent_compact::{estimate_message_tokens, summary_message};
 
 pub struct Agent {
-
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) executor: std::sync::Arc<dyn ToolExecutor>,
     pub(crate) system: String,
@@ -495,7 +484,6 @@ impl Provider for SharedProvider {
 }
 
 impl Agent {
-
     pub fn new(provider: Box<dyn Provider>, executor: std::sync::Arc<dyn ToolExecutor>) -> Self {
         Self {
             provider: Arc::from(provider),

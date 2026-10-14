@@ -115,7 +115,6 @@ fn coerce_null_dropped_only_when_optional() {
 
 #[test]
 fn aliases_respect_schema_and_floats_stay_lossless() {
-
     let text_def = ToolDef::new(
         "probe",
         "probe",
@@ -222,7 +221,6 @@ async fn registry_execute_applies_aliases_and_coercion() {
 
 #[tokio::test]
 async fn session_tools_share_one_ledger() {
-
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("note.txt");
     std::fs::write(&p, "hello\n").unwrap();

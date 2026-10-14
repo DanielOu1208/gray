@@ -34,7 +34,6 @@ pub fn detect_line_ending(content: &str) -> &'static str {
 }
 
 pub fn normalize_to_lf(text: &str) -> String {
-
     if !text.contains('\r') {
         return text.to_string();
     }
@@ -50,7 +49,6 @@ pub fn restore_line_endings(text: &str, ending: &str) -> String {
 }
 
 fn normalize_for_fuzzy_match(text: &str) -> String {
-
     let trimmed: String = text
         .split('\n')
         .map(|line| line.trim_end())
@@ -60,7 +58,6 @@ fn normalize_for_fuzzy_match(text: &str) -> String {
     let mut out = String::with_capacity(trimmed.len());
     for ch in trimmed.chars() {
         let mapped = match ch {
-
             '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
 
             '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
@@ -130,7 +127,6 @@ fn map_fuzzy_occurrences(
     base_content: &str,
     mut occurrences: Vec<Occurrence>,
 ) -> Result<Vec<Occurrence>, String> {
-
     let mut starts = Vec::new();
     let mut ends = Vec::new();
     let mut original_offset = 0;
@@ -223,7 +219,6 @@ pub fn apply_edits_to_normalized_content(
     let mut notes: Vec<String> = Vec::new();
 
     for (i, edit) in normalized_edits.iter().enumerate() {
-
         let mut occurrences = find_all_occurrences(normalized_content, &edit.old_text);
         if occurrences.is_empty() {
             let fuzzy_content = normalize_for_fuzzy_match(normalized_content);
@@ -332,7 +327,6 @@ pub fn apply_edits_to_normalized_content(
                 ));
             }
         } else if total > 1 {
-
             let occ = occurrences[0];
             let first_line = normalized_content[..occ.index].split('\n').count();
             matched.push(MatchedEdit {
@@ -345,7 +339,6 @@ pub fn apply_edits_to_normalized_content(
                 "[edit: found {total} occurrences of {edit_label} in {path}; edited occurrence 1 at line {first_line} (provide line_start, occurrence, or replace_all to disambiguate)]"
             ));
         } else {
-
             let occ = occurrences[0];
             matched.push(MatchedEdit {
                 edit_index: i,
@@ -406,7 +399,6 @@ fn lcs_diff(old_lines: &[String], new_lines: &[String]) -> Vec<DiffOp> {
 
     const MAX_CELLS: usize = 10_000_000;
     if n * m > MAX_CELLS {
-
         let mut ops = Vec::new();
         for l in old_lines {
             ops.push(DiffOp::Delete(l.clone()));
@@ -476,9 +468,7 @@ pub fn generate_unified_patch(
             DiffOp::Equal(_) => {
                 equal_run.push(op.clone());
                 if equal_run.len() > context_lines * 2 {
-
                     if cur.iter().any(|o| !matches!(o, DiffOp::Equal(_))) {
-
                         let keep = equal_run.drain(..context_lines).collect::<Vec<_>>();
                         cur.extend(keep);
                         hunks.push(std::mem::take(&mut cur));
@@ -491,7 +481,6 @@ pub fn generate_unified_patch(
 
                         cur = tail;
                     } else {
-
                         if equal_run.len() > context_lines {
                             equal_run.drain(..equal_run.len() - context_lines);
                         }
@@ -528,9 +517,7 @@ pub fn generate_unified_patch(
 
     let all_ops = &ops;
     for hunk in hunks {
-
         while op_idx < all_ops.len() {
-
             let mut matches = true;
             for (k, hop) in hunk.iter().enumerate() {
                 if op_idx + k >= all_ops.len() {
@@ -598,7 +585,6 @@ pub fn generate_unified_patch(
             }
         }
         op_idx += hunk.len();
-
     }
 
     out

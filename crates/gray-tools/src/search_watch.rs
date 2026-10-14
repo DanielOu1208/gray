@@ -38,7 +38,6 @@ impl Drop for Inner {
 }
 
 impl Watch {
-
     pub fn new(root: &Path) -> io::Result<Watch> {
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         if fd < 0 {
@@ -116,7 +115,6 @@ fn read_events(inner: &mut Inner) {
     loop {
         let n = unsafe { libc::read(inner.fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n <= 0 {
-
             if n < 0 && io::Error::last_os_error().kind() != io::ErrorKind::WouldBlock {
                 inner.broken = true;
             }

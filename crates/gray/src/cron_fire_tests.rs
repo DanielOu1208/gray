@@ -157,7 +157,6 @@ async fn script_timeout_covers_execution() {
 
 #[test]
 fn mirror_message_is_clean_user_label() {
-
     let out = mirror_message("nightly", "hello output");
     assert_eq!(out, "[Cron delivery: nightly]\nhello output");
     assert!(!out.contains("Cronjob Response:"));

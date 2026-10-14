@@ -33,7 +33,6 @@ pub struct Token {
 type May = (bool, bool, bool);
 
 impl Token {
-
     #[inline(always)]
     fn may(&self, m: u64) -> May {
         let miss = self.mask & !m;
@@ -89,7 +88,6 @@ struct Word {
 }
 
 impl Word {
-
     fn heads(&self) -> (Option<i32>, Option<i32>) {
         (self.own.get(self.oc).map(|x| x.0), self.dirs.get(self.dc).map(|x| x.0))
     }
@@ -107,7 +105,6 @@ struct Line<T>(T);
 type Pair = Line<[(u64, u64, u64); 2]>;
 
 struct TokenBits<'a> {
-
     seq: Vec<[&'a [u64]; 2]>,
 
     classes: Vec<([&'a [u64]; 2], bool, bool)>,
@@ -348,7 +345,6 @@ const TYPES: &[(&str, &[&str])] = &[
 ];
 
 impl Query {
-
     pub fn parse(s: &str, home: &str) -> Result<Query, String> {
         let mut q = Query::parse_form(s, home)?;
 
@@ -393,7 +389,6 @@ impl Query {
             let Some(exts) = g.alts.iter().map(|a| a.name.as_ref()?.ext()).collect::<Option<Vec<_>>>() else { continue };
             self.exts = if self.exts.is_empty() { exts } else { self.exts.iter().filter(|e| exts.contains(e)).cloned().collect() };
             if self.exts.is_empty() {
-
                 self.exts.push(b"/".to_vec());
             }
             for a in &mut g.alts {
@@ -499,7 +494,6 @@ impl Query {
             }
             "size" => self.size = range(v, parse_size)?,
             "mtime" | "modified" => {
-
                 let now = now_secs();
                 let (lo, hi) = range(v, parse_age)?;
                 self.mtime = (now.saturating_sub(hi.min(now as u64) as u32), now.saturating_sub(lo as u32));
@@ -750,7 +744,6 @@ impl Part {
 }
 
 impl Glob {
-
     fn tests_names(&self) -> bool {
         if self.negate { self.names_only() } else { self.alts.iter().all(|a| a.name.is_some()) }
     }
@@ -1326,7 +1319,6 @@ fn deep_typo_score(name: &[u8], wide: Wide, q: &[u8], k: u32) -> Option<i32> {
     let starts = (1u64 << off) | f.places(b' ') << 1;
 
     let best = |editable: u64| {
-
         let mut b = starts;
         let words = std::iter::from_fn(|| {
             let s = b.trailing_zeros() as usize;
@@ -1356,7 +1348,6 @@ fn edits(f: &Folded, q: &[u8], start: u64, editable: u64, n: usize, k: u32) -> O
     let (mut cur, mut prev) = ([0u64; 3], [0u64; 3]);
     cur[0] = start;
     for d in 1..=k {
-
         cur[d] = cur[d - 1] | (cur[d - 1] & editable) << 1;
     }
     let mut last = 0;
@@ -1369,7 +1360,6 @@ fn edits(f: &Folded, q: &[u8], start: u64, editable: u64, n: usize, k: u32) -> O
             let mut x = (cur[d] & here) << 1;
             if d > 0 {
                 if !c.is_ascii_digit() {
-
                     x |= (cur[d - 1] & editable) << 1 | cur[d - 1];
                     x |= ((prev[d - 1] & here) << 1 & before) << 1;
                 }
@@ -1667,7 +1657,6 @@ pub struct Searcher<'a> {
 }
 
 impl Searcher<'_> {
-
     pub fn scope_range(&self, q: &Query) -> Option<(usize, usize)> {
         let idx = &self.live.base;
         let Some(scope) = &q.scope else {
@@ -1730,7 +1719,6 @@ impl Searcher<'_> {
                 let (de, dp) = (idx.dir_entries(), idx.dir_parents());
                 let (lo, hi) = (idx.dir_start(from as usize), idx.dir_end(from as usize));
                 for d in self.dirs_named(parts[j].literal(), lo, hi) {
-
                     let mut names = Vec::new();
                     let mut k = d;
                     while k != from && k != 0 {
@@ -2377,7 +2365,6 @@ impl Searcher<'_> {
         let (mut hits, mut floor, mut fkey): (Vec<Hit>, i32, u64) = (Vec::new(), i32::MIN, 0);
         let (mut want, mut work) = (SPREAD_FIRST, 0);
         loop {
-
             let t: Vec<(i32, i32)> = words.iter().map(Word::term).collect();
             let (mut n, mut lower) = (0, true);
             while n < want {
@@ -2492,7 +2479,6 @@ impl Searcher<'_> {
                     for (run, p) in idx.blocks(a as usize, b as usize) {
                         let mut dm = None;
                         for i in run {
-
                             let k = en.get(i);
                             if (fits[k as usize >> 6] & !seen_names[k as usize >> 6]) >> (k & 63) & 1 == 0 {
                                 continue;
@@ -2674,7 +2660,6 @@ impl Searcher<'_> {
         }
         ents.extend(merged.iter().flat_map(|&(a, b)| a..b));
         if ents.len() <= INLINE_VISITS {
-
             let none = NameTable::new(Vec::new(), Vec::new(), Vec::new(), 0, false);
             let scan = Scan::new(q, self.live, &none, pos.len(), true, ranges);
             let joined = q.joined();
@@ -2726,7 +2711,6 @@ impl Searcher<'_> {
     }
 
     fn names(&self, q: &Query, pos: &[&Token], neg: &[&Token], lo: usize, hi: usize) -> std::sync::Arc<Scored> {
-
         let scope = (q.scope.is_some() && hi - lo <= self.live.base.u / 4).then_some((lo, hi));
         let key = NameKey::of(q, scope);
         let prev = self.live.names_cache.last.lock().unwrap().clone();
@@ -2777,7 +2761,6 @@ impl Searcher<'_> {
         let tails = q.path_re.as_ref().and_then(path_suffixes);
         let names_tested = !q.not_exts.is_empty() || q.globs.iter().any(Glob::tests_names);
         if pos.is_empty() && neg.is_empty() && q.exts.is_empty() && q.name_re.is_none() && tails.is_none() && !names_tested {
-
             return NameTable::new(Vec::new(), Vec::new(), Vec::new(), idx.n, true);
         }
 
@@ -2896,7 +2879,6 @@ impl Searcher<'_> {
                         p.0 = if pair { tb.words::<2>(w) } else { [tb.word(w), (0, 0, 0)] };
                     }
                     for j in 0..1 + pair as usize {
-
                         let (wi, w) = (wi + j, w + j);
                         rank[wi] = hits.len() as u16;
                         let mut any = per.iter().take(toks.len()).fold(0, |a, p| a | p.0[j].0);
@@ -2938,7 +2920,6 @@ impl Searcher<'_> {
         } else {
             let slots = Cells::new(chunks.map(Some));
             par_each(slots.0.len(), scratch, |per, c| {
-
                 let ((b, r), h) = unsafe { slots.take(c) }.unwrap();
                 chunk(c, b, r, h, per)
             })
@@ -3048,7 +3029,6 @@ impl<'a> Scan<'a> {
     }
 
     #[inline(always)]
-
     #[allow(clippy::too_many_arguments)]
     fn score(&self, i: usize, p: u32, nh: NameHit, memo: DirMemo, floor: u64, pbuf: &mut Vec<u8>, re: Option<&regex::bytes::Regex>) -> Option<u64> {
         let idx = &self.live.base;
@@ -3075,7 +3055,6 @@ impl<'a> Scan<'a> {
             }
             for t in 0..self.npos {
                 if nh.bits & (1 << t) == 0 {
-
                     score += memo.best.get(t).map_or(6, |&b| b as i32 * 3 / 4);
                 }
             }
@@ -3236,7 +3215,6 @@ impl NameKey {
                     } else if a.1 == Mode::Suffix {
                         a.0.ends_with(&b.0)
                     } else {
-
                         let typos = |t: &(Vec<u8>, Mode, bool, bool)| typo_edits(&t.0, t.1).min(1 + t.3 as u32);
                         a.0.starts_with(&b.0) && typos(a) == typos(b)
                     }
@@ -3273,7 +3251,6 @@ pub struct NameCache {
 }
 
 impl NameCache {
-
     pub fn trim_if_idle(&self, idle: std::time::Duration) {
         let mut g = self.last.lock().unwrap();
         if g.as_ref().is_some_and(|s| s.at.elapsed() > idle) {
@@ -3292,7 +3269,6 @@ pub struct DirMemo {
 }
 
 impl DirMemo {
-
     #[inline]
     fn own(hit: Option<NameHit>) -> DirMemo {
         match hit {
@@ -3331,7 +3307,6 @@ static DENSE_POOL: std::sync::Mutex<Vec<Vec<Short>>> = std::sync::Mutex::new(Vec
 
 impl Drop for NameTable {
     fn drop(&mut self) {
-
         if !self.bits.is_empty() {
             for (chunk, hits) in self.bits.chunks_mut(CHUNK_WORDS).zip(&self.hits) {
                 if !hits.is_empty() {

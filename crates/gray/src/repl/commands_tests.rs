@@ -1,7 +1,6 @@
 use super::{ReplCommand, parse_command};
 #[test]
 fn continue_payload_routes_to_the_model() {
-
     assert!(matches!(super::parse_command(""), ReplCommand::Empty));
     assert!(matches!(
         super::parse_command(super::super::CONTINUE_PROMPT),
@@ -11,7 +10,6 @@ fn continue_payload_routes_to_the_model() {
 
 #[test]
 fn slash_name_with_slash_is_plain_prompt_like_codex() {
-
     let pasted = "/// Default system prompt, shipped as markdown and materialized to `~/.gray/sys.md`\n/// on first run.";
     assert!(matches!(parse_command(pasted), ReplCommand::Prompt(_)));
     assert!(matches!(
@@ -73,7 +71,6 @@ fn usage_command_and_cost_alias() {
 
 #[test]
 fn empty_prompt_hides_slash_popup_like_codex() {
-
     use std::path::Path;
     let cwd = Path::new(".");
     assert!(super::completion_matches_dyn("", cwd).is_empty());

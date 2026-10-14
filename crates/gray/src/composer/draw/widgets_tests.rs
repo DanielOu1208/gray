@@ -9,7 +9,6 @@ fn row_texts(ibox: &InputBox) -> Vec<String> {
 
 #[test]
 fn input_box_wraps_at_word_boundaries() {
-
     let text = "aa bb cc dd ee ff with colors.";
     let ibox = build_input_box(text, text.len(), 20, None, None, &[]);
     let rows = row_texts(&ibox);
@@ -28,7 +27,6 @@ fn input_box_wraps_at_word_boundaries() {
 
 #[test]
 fn input_box_ghost_hint_shows_only_when_empty() {
-
     let ibox = build_input_box("", 0, 80, Some("Please continue…"), None, &[]);
     let rows = row_texts(&ibox);
     assert_eq!(rows.len(), 3, "{rows:?}");
@@ -110,7 +108,6 @@ fn home_box_is_the_flat_band_with_hints_stats_tip_and_notice_under_it() {
 
 #[test]
 fn home_box_wraps_at_the_column_width() {
-
     let text = "word ".repeat(18);
     let text = text.trim_end();
     let home = build_input_box(text, text.len(), 100, None, Some(HomeRows::default()), &[]);

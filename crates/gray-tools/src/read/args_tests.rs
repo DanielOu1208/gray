@@ -11,7 +11,6 @@ fn plain_integer_strings_and_numbers_coerce() {
 
 #[test]
 fn fractional_string_is_not_floored_to_1_regression() {
-
     assert_eq!(
         coerce_integer("offset", &json!("1.5")),
         Err("invalid argument 'offset': expected a whole number, got 1.5".to_string())

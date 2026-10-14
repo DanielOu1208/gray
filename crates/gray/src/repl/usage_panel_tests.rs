@@ -42,7 +42,6 @@ fn bar_cells(bar: &[Span<'static>]) -> usize {
 
 #[test]
 fn cache_bar_sums_to_24_and_nonzero_shares_keep_a_cell() {
-
     let bar = cache_bar(1_670_000, 112_000, 58_000);
     assert_eq!(bar_cells(&bar), 24);
     assert_eq!(bar.len(), 3);

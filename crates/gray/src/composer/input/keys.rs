@@ -5,7 +5,6 @@ use crate::keymap::{Action, Binding};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KeyOutcome {
-
     Edited,
 
     Ignored,
@@ -97,7 +96,6 @@ fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
             edited
         }
         Action::Submit => {
-
             if let Some((name, _)) = tui.matches.get(tui.sel).cloned() {
                 let cur = tui.textarea.text();
                 if cur != format!("/{name}") && cur != format!("/{name} ") {

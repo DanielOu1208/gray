@@ -55,7 +55,6 @@ impl Lists {
     fn drain(&mut self) {
         for c in 0..LISTS {
             while let Some(p) = self.take(c) {
-
                 unsafe { System.dealloc(p, Layout::from_size_align_unchecked(16 << c, 16)) };
             }
         }
@@ -73,7 +72,6 @@ struct Exit;
 impl Drop for Exit {
     fn drop(&mut self) {
         FREE.with(|f| {
-
             let f = unsafe { &mut *f.get() };
             if f.on {
                 f.on = false;
@@ -135,7 +133,6 @@ unsafe impl GlobalAlloc for Alloc {
     }
 
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-
         if l.size() >= BIG && l.align() <= 16384 {
             return unsafe { self.alloc(l) };
         }
@@ -160,7 +157,6 @@ unsafe impl GlobalAlloc for Alloc {
     }
 
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new_size: usize) -> *mut u8 {
-
         if l.size() < BIG && new_size < BIG && l.align() <= 16 && FREE.with(|f| unsafe { (*f.get()).on }) {
             if new_size <= l.size() {
                 return p;
@@ -175,7 +171,6 @@ unsafe impl GlobalAlloc for Alloc {
             return q;
         }
         if (l.size() < BIG && new_size < BIG) || l.align() > 16384 {
-
             return unsafe { System.realloc(p, small(l), new_size.max(16)) };
         }
         let q = unsafe { self.alloc(Layout::from_size_align_unchecked(new_size, l.align())) };

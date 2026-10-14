@@ -49,7 +49,6 @@ impl MemView {
         self.tail.extend(chunk.iter().copied());
         let excess = self.tail.len().saturating_sub(MEM_TAIL_BYTES);
         if excess > 0 {
-
             self.tail.drain(..excess);
         }
         self.total_bytes += chunk.len() as u64;
@@ -79,7 +78,6 @@ pub(crate) fn now_grindmill() -> u64 {
 pub struct Pump;
 
 impl Pump {
-
     pub fn start(
         stdout: Option<ChildStdout>,
         stderr: Option<ChildStderr>,
@@ -149,7 +147,6 @@ async fn pump_main(
         .unwrap_or(0);
     let mut log_truncated = false;
     while let Some(chunk) = rx.recv().await {
-
         let redacted = gray_core::redaction::redact_bytes_for_log(&chunk);
         mem.push(&redacted);
         if let Some(sink) = &output_sink {
@@ -206,7 +203,6 @@ where
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) | Ok(0) => break,
             Ok(n) => {
-
                 last_output.store(now_grindmill(), Ordering::Relaxed);
                 carry.extend_from_slice(&buf[..n]);
                 let out = match carry.iter().rposition(|b| *b == b'\n' || *b == b'\r') {

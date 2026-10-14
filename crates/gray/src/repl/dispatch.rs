@@ -97,7 +97,6 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
         ReplCommand::Help => {
-
             let mut out = String::new();
             for d in REGISTRY.iter().chain(commands::TUI_COMMANDS) {
                 out.push_str(&commands::format_help_line(d));
@@ -137,7 +136,6 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
         ReplCommand::Hehe => {
-
             let tui_shared = tui.as_ref().map(|(s, _)| s);
             let reverting = crate::mascot::mascot_shown();
             let shown = match tui_shared {
@@ -263,7 +261,6 @@ pub(crate) async fn dispatch_command(
             )
             .await
             {
-
                 *pending_command = Some(ReplCommand::Prompt(text));
             }
             Flow::Continue
@@ -320,14 +317,12 @@ pub(crate) async fn dispatch_command(
         }
 
         ReplCommand::CronJobs(arg) => {
-
             let tui_shared = tui.as_ref().map(|(s, _)| s);
             if let Some(on) = arg.as_deref().and_then(handlers::parse_on_off) {
                 let text = handlers::toggle_subsystem(handlers::Subsystem::Cron, on);
                 say(tui_shared, &text);
                 Flow::Continue
             } else if arg.is_none() && tui_shared.is_some() {
-
                 let home = crate::setup::gray_home()?;
                 let bg = tui_shared.map(|s| s.lock().expect("tui lock").snapshot());
                 let changed = with_modal_sync(tui_shared, || {
@@ -363,13 +358,11 @@ pub(crate) async fn dispatch_command(
         }
 
         ReplCommand::Restart => {
-
             super::maintenance::handle_restart(tui).await;
             Flow::Continue
         }
 
         ReplCommand::Gateway(arg) => {
-
             let tui_shared = tui.as_ref().map(|(s, _)| s);
             if let Some(on) = arg.as_deref().and_then(handlers::parse_on_off) {
                 let text = handlers::toggle_subsystem(handlers::Subsystem::Gateway, on);
@@ -509,10 +502,7 @@ pub(crate) async fn dispatch_command(
             }
             Flow::Continue
         }
-        ReplCommand::Skill(_) => {
-
-            Flow::Continue
-        }
+        ReplCommand::Skill(_) => Flow::Continue,
         ReplCommand::Plugin(raw) => {
             handle_plugin_command(&raw, tui.as_ref().map(|(s, _)| s)).await;
             Flow::Continue
@@ -543,7 +533,6 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
         ReplCommand::Unknown(cmd) => {
-
             if agent.is_none() && config.model.is_some() {
                 super::session::ensure_session_state(session_state, config, cwd).await;
                 let sid = session_state.as_ref().map(|s| s.session_id.as_str());

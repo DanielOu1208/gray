@@ -32,7 +32,6 @@ pub fn render_matches(
 }
 
 fn parse_vimgrep(line: &str) -> Option<(String, &str, &str)> {
-
     let is_drive = line.len() >= 3
         && line.as_bytes()[1] == b':'
         && line.as_bytes()[0].is_ascii_alphabetic()
@@ -54,7 +53,6 @@ fn parse_vimgrep(line: &str) -> Option<(String, &str, &str)> {
 }
 
 impl GrepTool {
-
     #[allow(clippy::too_many_arguments)]
     async fn execute_vimgrep(
         &self,
@@ -67,7 +65,6 @@ impl GrepTool {
         literal: bool,
         effective_limit: usize,
     ) -> Option<ToolOutput> {
-
         let mut cmd = Command::new("rg");
         cmd.arg("--vimgrep").arg("--color=never").arg("--hidden");
         if ignore_case {
@@ -248,7 +245,6 @@ fn format_matches(
     effective_limit: usize,
     match_limit_reached: bool,
 ) -> ToolOutput {
-
     let mut output_lines: Vec<String> = Vec::new();
     let mut lines_truncated = false;
 
@@ -360,7 +356,6 @@ impl Tool for GrepTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: Value) -> ToolOutput {
-
         if ctx.cancel.is_cancelled() {
             return finish("cancelled by user".to_string());
         }
@@ -584,7 +579,6 @@ impl Tool for GrepTool {
                     }
                 }
             } else if !status.success() {
-
                 if !match_limit_reached {
                     return fail("ripgrep was terminated".to_string());
                 }
@@ -635,7 +629,6 @@ mod vimgrep_tests {
 
     #[test]
     fn single_letter_unix_path_is_not_a_drive() {
-
         let (fp, no, text) = parse_vimgrep("a:3:12:content").unwrap();
         assert_eq!(fp, "a");
         assert_eq!(no, "3");

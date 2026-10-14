@@ -75,7 +75,6 @@ fn peel_wrappers(cmd: &str) -> &str {
             return trimmed;
         }
         let after = |n: usize| -> Option<&str> {
-
             let mut s = trimmed;
             for _ in 0..n {
                 let w = s.split_whitespace().next()?;
@@ -171,7 +170,6 @@ pub fn job_name(full: &str) -> String {
     let mut words = core.split_whitespace();
     let first = words.next().unwrap_or("");
     if !plain(first) {
-
         return "job".to_string();
     }
     let program = first.rsplit('/').next().unwrap_or(first);
@@ -182,7 +180,6 @@ pub fn job_name(full: &str) -> String {
     let mut parts = vec![program.to_string()];
     let rest: Vec<&str> = words.collect();
     if matches!(program, "python" | "python3") && rest.first() == Some(&"-m") {
-
         parts = vec![rest.get(1).copied().unwrap_or(program).to_string()];
     } else if WITH_SUBCOMMAND.contains(&program)
         && let Some(sub) = rest
@@ -230,7 +227,6 @@ pub fn unique_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Look {
-
     Viewed,
     Read,
     Listed,

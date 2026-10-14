@@ -554,7 +554,6 @@ pub(crate) fn render_entering_key(
     status_msg: &Option<String>,
     colors: &ConnectColors,
 ) {
-
     let provider_line = format!("Provider: {}", item.name);
     let provenance = env_var.map(|var| format!(" (from ${var})"));
     let get_a_key = catalog::key_url(&item.id).map(|url| format!(" Get a key: {url}"));
@@ -700,7 +699,6 @@ pub(crate) fn render_authorizing_plugin(
     status_msg: Option<&str>,
     colors: &ConnectColors,
 ) {
-
     let status = status_msg.unwrap_or("Checking your terminal login");
     let uri = verification_uri.unwrap_or("");
 

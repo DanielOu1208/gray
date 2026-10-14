@@ -70,7 +70,6 @@ async fn tool_before_allow_and_command_joins_argv() {
 
 #[tokio::test]
 async fn unclaimed_hooks_fail_open_without_rpc() {
-
     let p = SidecarPlugin::spawn(vec!["testdata/hang_plugin.sh".into()])
         .await
         .unwrap();
@@ -111,7 +110,6 @@ fn tool_before_parses_deny_modify_and_unknown() {
 
 #[tokio::test]
 async fn echo_reference_plugin_manifest_and_command_round_trip() {
-
     let p = SidecarPlugin::spawn(vec!["testdata/echo.sh".into()])
         .await
         .unwrap();

@@ -128,7 +128,6 @@ fn disabled_plugin_is_unavailable_in_help_commands_and_widget() {
 
 #[test]
 fn plugin_list_shows_registered_command_alongside_sidecars() {
-
     let temp = tempfile::tempdir().unwrap();
     let bin = fixture(temp.path(), "sample", false);
     assert!(install(temp.path(), &bin, "sample").status.success());
@@ -197,7 +196,6 @@ fn plugin_list_shows_registered_command_alongside_sidecars() {
 
 #[test]
 fn slash_plugin_list_alias_shows_registered_command() {
-
     let temp = tempfile::tempdir().unwrap();
     let bin = fixture(temp.path(), "sample", false);
     assert!(install(temp.path(), &bin, "sample").status.success());

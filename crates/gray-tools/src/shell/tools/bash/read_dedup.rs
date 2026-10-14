@@ -13,7 +13,6 @@ pub fn enabled() -> bool {
 
 #[derive(Debug, PartialEq)]
 pub struct PlainRead {
-
     pub path: PathBuf,
 
     pub command: String,

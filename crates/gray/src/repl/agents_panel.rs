@@ -13,7 +13,6 @@ use crate::composer::TranscriptEntry;
 use crate::session_store::SessionEntry;
 
 pub(crate) enum PanelAction {
-
     Resume { session: String, name: String },
 
     Say(String),
@@ -90,7 +89,6 @@ fn spawn_text(argv: &[String], args: &[&str]) -> Option<String> {
 }
 
 pub(crate) fn run_subagents_view(args: &[String]) -> Option<String> {
-
     if args == ["settings"] {
         return Some(
             "subagents settings: the modal opens when the turn finishes — rerun `/subagents settings`, or set directly with `settings --model/--effort/--context/--max-running`"
@@ -133,7 +131,6 @@ fn fetch_rows(argv: &[String], all: bool) -> Vec<Row> {
 }
 
 struct ChatInput {
-
     target: String,
 
     name: String,
@@ -151,7 +148,6 @@ struct SessionFeed {
 }
 
 impl SessionFeed {
-
     fn open(session: &str) -> Option<Self> {
         let ok = !session.is_empty()
             && session.len() <= 128
@@ -201,7 +197,6 @@ impl SessionFeed {
             }
             self.lines_seen += 1;
             if self.lines_seen == 1 {
-
                 if let Ok(v) = serde_json::from_str::<Value>(line)
                     && let Some(c) = v["cwd"].as_str()
                 {
@@ -665,7 +660,6 @@ fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer, chat: Option<&ChatIn
             body,
         );
     } else {
-
         let (pad, start, end) = viewport_window(v.lines.len(), body_h as usize, v.scroll as usize);
         let mut rows = vec![Line::default(); pad];
         rows.extend(v.lines[start..end].iter().cloned());
@@ -1294,11 +1288,7 @@ pub(crate) fn run_subagent_settings(
         q(
             "model",
             format!("default subagent model? (now: {})", cur_of("model")),
-            vec![
-                opt("keep", "leave unchanged"),
-                inherit(),
-
-            ],
+            vec![opt("keep", "leave unchanged"), inherit()],
         ),
         q(
             "effort",

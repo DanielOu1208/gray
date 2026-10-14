@@ -81,7 +81,6 @@ fn split(cmd: &str) -> Vec<String> {
             cur.push(c);
             i += 1;
         } else if c == '<' && i + 1 < n && chars[i + 1] == '<' {
-
             cur.push_str("<<");
             i += 2;
             if i < n && chars[i] == '-' {

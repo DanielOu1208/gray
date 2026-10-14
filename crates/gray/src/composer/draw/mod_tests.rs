@@ -3,7 +3,6 @@ use super::*;
 
 #[test]
 fn home_spacer_fills_to_the_last_row() {
-
     assert_eq!(home_spacer_rows(17, 2, 6, 30), 5);
     assert_eq!(17 + 2 + 6 + home_spacer_rows(17, 2, 6, 30), 30);
 
@@ -27,7 +26,6 @@ fn transcript_ends_blank_matches_ensure_gap() {
 
 #[test]
 fn desired_viewport_exact_fit() {
-
     let box_rows = build_input_box("", 0, 80, None, None, &[]).lines.len() as u16;
     assert_eq!(box_rows, 3, "top pad + prompt + bottom pad");
 
@@ -56,7 +54,6 @@ fn desired_viewport_exact_fit() {
 
 #[test]
 fn viewport_cap_is_screen_bounded_not_viewport_h() {
-
     assert_eq!(viewport_cap(40), 38);
 
     assert!(viewport_cap(40) < 40);
@@ -67,7 +64,6 @@ fn viewport_cap_is_screen_bounded_not_viewport_h() {
 
 #[test]
 fn multiline_input_is_not_clipped_by_the_viewport_cap() {
-
     let box_rows: u16 = 13;
     let rows: u16 = 40;
     let cap = viewport_cap(rows);
@@ -132,7 +128,6 @@ fn queued_preview_renders_header_and_entries() {
 
 #[test]
 fn live_tool_viewport_height_counts_live_rows() {
-
     let without = desired_viewport_h(2, 0, 0, 3, 0, 0, viewport_cap(40));
     let with = desired_viewport_h(2, 0, 1, 3, 0, 0, viewport_cap(40));
     assert_eq!(with, without + 1, "live rows must reserve viewport space");
@@ -190,7 +185,6 @@ fn footer_paint_row_clamps_into_the_frame_instead_of_vanishing() {
 
 #[test]
 fn latched_viewport_floor_covers_the_measured_frame_when_the_estimate_shortcuts_a_segment() {
-
     for status_h in 0..=3u16 {
         let floor = latched_viewport_floor(status_h, 0, 0, 3, 0, viewport_cap(40));
         assert!(
@@ -224,7 +218,6 @@ fn chrome_row_paints_the_whole_composer_band() {
 
 #[test]
 fn the_text_area_and_footer_are_never_trimmed_away() {
-
     assert_eq!(band_budget(30, 3 + 2 + 1), 24);
 
     assert_eq!(band_budget(30, 3 + 4 + 1), 22);
@@ -234,7 +227,6 @@ fn the_text_area_and_footer_are_never_trimmed_away() {
 
 #[test]
 fn a_busy_band_is_trimmed_most_transient_first() {
-
     let mut counts = [2, 2, 4, 10];
     trim_to_allowance(&mut counts, 6);
     assert_eq!(counts, [2, 2, 2, 0]);
@@ -250,7 +242,6 @@ fn a_busy_band_is_trimmed_most_transient_first() {
 
 #[test]
 fn continue_ghost_hides_while_a_turn_runs() {
-
     assert_eq!(
         continue_ghost(true, false, ""),
         Some(crate::repl::CONTINUE_GHOST)
@@ -260,7 +251,6 @@ fn continue_ghost_hides_while_a_turn_runs() {
 
     assert_eq!(continue_ghost(true, false, "hi"), None);
     assert_eq!(continue_ghost(false, false, ""), None);
-
 }
 
 #[test]

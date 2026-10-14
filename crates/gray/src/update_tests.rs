@@ -10,7 +10,6 @@ fn semver_compare() {
 
 #[test]
 fn semver_prereleases_order_by_full_precedence() {
-
     assert!(is_newer("1.0.0-alpha.2", "1.0.0-alpha.1"));
     assert!(!is_newer("1.0.0-alpha.1", "1.0.0-alpha.2"));
     assert!(is_newer("1.0.0-alpha.10", "1.0.0-alpha.9"));
@@ -296,7 +295,6 @@ fn shadow_guard_catches_a_stale_copy_that_wins_path() {
 #[test]
 #[cfg(unix)]
 fn shadow_guard_uses_the_default_local_bin_destination() {
-
     #[cfg(unix)]
     if unsafe { libc::geteuid() } == 0 {
         return;

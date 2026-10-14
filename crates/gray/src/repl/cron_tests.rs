@@ -130,7 +130,6 @@ fn disabled(name: &str) -> crate::cron::CronJob {
 
 #[test]
 fn picker_offers_no_switch_on_states_a_toggle_cannot_change() {
-
     for (built, tag) in [
         (finished as fn(&str) -> crate::cron::CronJob, "[done]"),
         (disabled, "[disabled]"),
@@ -144,7 +143,6 @@ fn picker_offers_no_switch_on_states_a_toggle_cannot_change() {
 
 #[test]
 fn picker_hides_the_ticker_row_when_there_are_no_jobs() {
-
     let health = crate::cron::CronHealth {
         last_tick: None,
         overdue: vec![],
@@ -197,7 +195,6 @@ fn scripted(answers: Vec<Option<()>>, pending: bool) -> std::sync::Arc<ScriptedW
 
 #[tokio::test]
 async fn a_job_longer_than_one_wait_slice_still_wakes_the_prompt() {
-
     let exec = scripted(vec![None, None, Some(())], true);
     wait_then_wake(
         exec.clone(),

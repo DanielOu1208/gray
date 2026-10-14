@@ -405,7 +405,6 @@ pub fn run_context_modal(
                             KeyCode::Enter => {
                                 let v = buf.trim().to_lowercase();
                                 let saved: Option<usize> = match idx {
-
                                     0 => {
                                         if ["auto", "clear", "reset", "0"].contains(&v.as_str()) {
                                             config.context_window = None;

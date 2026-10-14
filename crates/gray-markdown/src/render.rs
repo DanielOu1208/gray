@@ -50,7 +50,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
         if !applied {
             Cow::Borrowed(text)
         } else {
-
             if pos < end {
                 result.push_str(&text[(pos - start)..]);
             }
@@ -113,7 +112,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
     }
 
     pub fn render_ratatui(&mut self, pretty: bool) -> (MarkdownRenderOutput, Option<Checkpoint>) {
-
         let render_events = self.build_render_events();
 
         self.buffers.current_spans.clear();
@@ -164,7 +162,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
 
         for ev in &render_events {
             if replace.is_none() && table_replace.is_none() && ev.pos > last_pos {
-
                 let split_at_checkpoint = checkpoint_output_lines.is_none()
                     && checkpoint_info
                         .map(|(_, cp_byte)| last_pos < cp_byte && cp_byte <= ev.pos)
@@ -181,15 +178,12 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                 };
 
                 let ranges: &[(usize, usize)] = if split_at_checkpoint {
-
                     &[(last_pos, cp_byte), (cp_byte, ev.pos)]
                 } else {
-
                     &[(last_pos, ev.pos)]
                 };
 
                 for (range_idx, &(range_start, range_end)) in ranges.iter().enumerate() {
-
                     if split_at_checkpoint && range_idx == 1 {
                         if !self.buffers.current_spans.is_empty() {
                             line_source_map.push(current_source_line);
@@ -222,13 +216,11 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                         let at_line_start = range_start == 0
                             || self.text.as_bytes().get(range_start - 1) == Some(&b'\n');
                         if at_line_start {
-
                             let hidden_text = self.text[range_start..range_end].trim_start();
                             let is_code_fence =
                                 hidden_text.starts_with("```") || hidden_text.starts_with("~~~");
 
                             if is_code_fence {
-
                                 if !in_hidden_code_block
                                     && lines.last().is_some_and(|l| l.width() > 0)
                                 {
@@ -418,7 +410,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                         if !self.buffers.current_spans.is_empty() {
                             line_source_map.push(current_source_line);
                             lines.push(Line::from(std::mem::take(&mut self.buffers.current_spans)));
-
                         }
 
                         if trepl.range.start > last_line_count_pos {
@@ -479,7 +470,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
 
         let len = self.text.len();
         if last_pos < len {
-
             let raw = &self.text[last_pos..len];
             let transformed = self.apply_transforms(raw, last_pos, false);
             debug_assert_eq!(transformed.len(), raw.len());
@@ -579,7 +569,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
         if checkpoint_output_lines.is_none()
             && let Some((_, cp_byte)) = checkpoint_info
         {
-
             let source_line_at_cp = self.text[..cp_byte.min(self.text.len())]
                 .bytes()
                 .filter(|&b| b == b'\n')

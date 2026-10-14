@@ -33,7 +33,6 @@ fn gone(target: i32) -> bool {
 
 #[cfg(not(windows))]
 async fn escalate(sig_target: i32, what: &str, grace: Duration) -> Result<(), String> {
-
     #[cfg(not(unix))]
     {
         let _ = (sig_target, grace);

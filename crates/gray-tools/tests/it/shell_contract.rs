@@ -21,7 +21,6 @@ fn log_path(header: &str) -> PathBuf {
 
     match raw.strip_prefix("~/") {
         Some(rest) => {
-
             let base = match std::env::var_os("GRAY_HOME") {
                 Some(v) if !v.is_empty() => std::path::PathBuf::from(v),
                 _ => PathBuf::from(std::env::var_os("HOME").expect("abbreviated HOME")),
@@ -91,7 +90,6 @@ async fn exit_code_is_data_not_error() {
 
 #[tokio::test]
 async fn sigkill_is_honest() {
-
     let cmd = format!("exec sh {}", fixture("sigkill_self.sh"));
     let out = BashTool::default()
         .execute(&ToolContext::default(), json!({"command": cmd}))
@@ -142,7 +140,6 @@ async fn spew_is_bounded_but_logged_whole() {
 
 #[tokio::test]
 async fn timeout_hands_off_with_partial_output_instead_of_killing() {
-
     let ctx = ToolContext::default();
     let tool = BashTool::default();
     let t0 = Instant::now();
@@ -203,7 +200,6 @@ async fn malformed_background_arg_fails_loud() {
 
 #[tokio::test]
 async fn fence_escape_keeps_single_pair() {
-
     let out = BashTool::default()
         .execute(
             &ToolContext::default(),

@@ -34,7 +34,6 @@ pub(crate) const CONTAMINATED_SCRUB_MARKER: &str =
 const MASK_STALE_ROUNDS: usize = 10;
 
 impl Agent {
-
     pub(crate) fn scrubbed_messages(&self) -> Vec<Message> {
         let mut msgs = self.messages.clone();
         for &idx in &self.contaminated {
@@ -88,7 +87,6 @@ fn is_blank_input(msg: &Message) -> bool {
 }
 
 impl Agent {
-
     fn collect_background_notifications(&mut self, ctx: &ToolContext) -> bool {
         let notices = self.executor.drain_notifications(ctx);
         let any = !notices.is_empty();
@@ -224,7 +222,6 @@ impl Agent {
         ctx: ToolContext,
         mut sink: Option<&mut dyn FnMut(&AgentEvent)>,
     ) -> Result<Vec<AgentEvent>, CoreError> {
-
         self.session_id = ctx.session_id.clone();
 
         self.refresh_tools();
@@ -267,7 +264,6 @@ impl Agent {
             hook(&self.messages, self.history_revision()).await;
         }
         for hook in &self.hooks {
-
             if self.lean_prompt && !hook.is_global() {
                 continue;
             }
@@ -299,7 +295,6 @@ impl Agent {
         self.turn_system = Some(self.system.clone());
 
         'turn: loop {
-
             if ctx.cancel.is_cancelled() {
                 self.emit_turn_end(&billed).await;
                 return Err(CoreError::Cancelled);
@@ -341,7 +336,6 @@ impl Agent {
                 self.compact_reserve,
                 self.compact_ceiling,
             ) {
-
                 while needs_pre_turn_compact(
                     self.estimate_tokens(),
                     self.context_window,
@@ -508,7 +502,6 @@ impl Agent {
                             name,
                             arguments_delta,
                         })) => {
-
                             const MAX_TOOL_CALL_INDEX: usize = 4096;
                             if index > MAX_TOOL_CALL_INDEX {
                                 self.emit_turn_end(&billed).await;
@@ -562,7 +555,6 @@ impl Agent {
                             }
 
                             if slot.started && !arguments_delta.is_empty() {
-
                                 let live_id = slot.id.clone().unwrap();
                                 let live_name = slot.name.clone().unwrap();
                                 let ev = AgentEvent::tool_call_progress(
@@ -597,7 +589,6 @@ impl Agent {
                             emit!(AgentEvent::stream_error(message.clone(), details.clone()));
                         }
                         Some(Err(e)) => {
-
                             if e.retryable()
                                 && text_parts.is_empty()
                                 && !ctx.cancel.is_cancelled()
@@ -662,7 +653,6 @@ impl Agent {
                             return Err(err);
                         }
                         None => {
-
                             drain_held!();
                             if !text_parts.is_empty() {
                                 salvage_partial_text(
@@ -811,7 +801,6 @@ impl Agent {
             }
 
             if tool_uses.is_empty() {
-
                 if leaked_markup && leak_nudges < MAX_LEAK_NUDGES {
                     leak_nudges += 1;
                     log::info!(target: "gray_agent", "end turn leaked tool-call markup; nudging {leak_nudges}/{MAX_LEAK_NUDGES}");
@@ -884,7 +873,6 @@ impl Agent {
                     .collect()
             };
             for segment in segments {
-
                 if let crate::parallel::Segment::Parallel(idxs) = segment {
                     let (Some(run_start), Some(run_end)) =
                         (idxs.first().copied(), idxs.last().map(|i| *i + 1))
@@ -910,7 +898,6 @@ impl Agent {
                         }
                     }
                     if cancelled_at.is_some() {
-
                         crate::agent_tools::answer_pending_range(
                             self,
                             &tool_uses,
@@ -990,7 +977,6 @@ impl Agent {
                     for &idx in &idxs {
                         let (id, name, args) = &tool_uses[idx];
                         if let Some(err) = inline_errors.remove(&idx) {
-
                             emit!(AgentEvent::tool_call_end(id.clone(), args.clone()));
                             emit!(AgentEvent::tool_result(
                                 id.clone(),
@@ -1336,7 +1322,6 @@ mod leak_strip_tests {
 
     #[test]
     fn fence_state_survives_deltas_split_mid_fence_and_mid_special() {
-
         let (out, leaked) = run_stream(&["``", "`\n", &OPEN[..3], &OPEN[3..], "\n```\n", OPEN]);
         assert_eq!(out, format!("```\n{OPEN}\n```\n{}", ""));
 

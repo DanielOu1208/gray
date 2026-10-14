@@ -85,7 +85,6 @@ impl SessionTotals {
         entries: &[crate::session_store::SessionEntry],
         model: &str,
     ) -> Self {
-
         crate::setup::context::warm_rates_from_disk_cache();
         let mut t = SessionTotals::default();
         for e in entries.iter().filter(|e| e.usage.is_some()) {
@@ -154,7 +153,6 @@ pub(crate) fn handle_copy(agent: &Option<Agent>, tui: Option<&crate::composer::S
             &format!("copied {} chars to clipboard", text.chars().count()),
         );
     } else {
-
         super::say(tui, &format!("no clipboard available — response:\n{text}"));
     }
 }
@@ -221,7 +219,6 @@ fn handle_usage_inner(
     tui: Option<&crate::composer::SharedTui>,
     include_subscriptions: bool,
 ) {
-
     let subs = include_subscriptions
         .then(collect_subscription_usage)
         .unwrap_or_default();
@@ -237,7 +234,6 @@ fn handle_usage_inner(
     use usage_panel::{PanelInput, Warmth};
     if let Some(shared) = tui {
         if include_subscriptions {
-
             let bg = shared.lock().expect("tui lock").snapshot();
             let mut rebuild = || {
                 let warmth = {
@@ -435,7 +431,6 @@ pub(crate) async fn handle_context_window(
         context_breakdown_text(config, parts)
     }
     let Some(val) = direct else {
-
         if tui.is_some() {
             let model = config.model.clone().unwrap_or_default();
             let breakdown = collect_parts(cwd, agent, tui);
@@ -446,7 +441,6 @@ pub(crate) async fn handle_context_window(
             match res {
                 Ok(Some(summary)) => emit(summary, tui, true),
                 Ok(None) => {
-
                     if let Some(shared) = tui {
                         shared.lock().expect("tui lock").ensure_gap();
                     }
@@ -755,7 +749,6 @@ pub(crate) async fn handle_compact(
         .await;
     }
     let Some(ag) = agent.as_mut() else {
-
         return;
     };
 
@@ -820,7 +813,6 @@ pub(crate) async fn handle_compact(
 
     match compact_res {
         Ok(Some(summary)) => {
-
             if let Some(state) = session_state {
                 let _ = state
                     .store

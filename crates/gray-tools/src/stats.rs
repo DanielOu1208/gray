@@ -37,7 +37,6 @@ pub struct ToolStats<'a> {
 }
 
 impl ToolStats<'_> {
-
     pub fn line(&self) -> String {
         format!(
             "tool={} class={} path={} bytes={} lines={} est_tokens={} truncated_by={}",

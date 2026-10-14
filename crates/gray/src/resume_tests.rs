@@ -33,7 +33,6 @@ fn headless_row_shows_short_id_preview_and_age() {
 
 #[test]
 fn row_previews_the_latest_message_and_its_timestamp() {
-
     let s = summary(
         Some("how do I fix the resume picker"),
         Some("ok that worked, thanks"),
@@ -210,7 +209,6 @@ fn aged(id: &str, started: u64, last_active: u64) -> SessionSummary {
 
 #[test]
 fn the_last_session_is_the_most_recently_used_not_the_newest_made() {
-
     let summaries = vec![
         aged("old-but-active", 1_000, 9_000),
         aged("new-but-stale", 5_000, 2_000),
@@ -286,7 +284,6 @@ fn last_and_headless_lists_skip_empty_sessions() {
 
 #[tokio::test]
 async fn empty_sessions_exist_on_disk_but_hide_from_resume() {
-
     let dir = tempfile::tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path());
     let cwd = std::env::current_dir().unwrap();
@@ -317,7 +314,6 @@ async fn empty_sessions_exist_on_disk_but_hide_from_resume() {
 
 #[tokio::test]
 async fn auxiliary_sessions_exist_on_disk_but_hide_from_resume() {
-
     let dir = tempfile::tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path());
     let cwd = std::env::current_dir().unwrap();
@@ -360,7 +356,6 @@ async fn auxiliary_sessions_exist_on_disk_but_hide_from_resume() {
 
 #[tokio::test]
 async fn auxiliary_sessions_dont_bury_the_real_latest() {
-
     let dir = tempfile::tempdir().unwrap();
     let store = JsonlSessionStore::new(dir.path());
     let cwd = std::env::current_dir().unwrap();

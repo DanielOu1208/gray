@@ -47,7 +47,6 @@ struct PaneProvider {
 }
 
 impl PaneProvider {
-
     fn list_key(item: &ConnectItem) -> String {
         match &item.auth {
             ConnectAuth::Plugin { .. } => plugin_models_key(&item.id),
@@ -262,7 +261,6 @@ fn commit_pick(
     stepped: bool,
     toggles: PickerToggles,
 ) -> anyhow::Result<()> {
-
     config.model_parts.clear();
     match &p.installed {
         Some(installed) => activate_plugin_connection(config, installed, model)?,
@@ -750,7 +748,6 @@ pub(crate) fn run_model_panes(
             })
             .unwrap_or_default();
         loop {
-
             while let Ok((list_key, live)) = refresh_rx.try_recv() {
                 if !live.is_empty()
                     && let Some(p) = rail.iter().find(|p| p.list_key == list_key)

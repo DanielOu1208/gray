@@ -17,7 +17,6 @@ pub fn is_batchable(name: &str) -> bool {
 }
 
 pub fn bash_is_batchable(command: &str) -> bool {
-
     let scrubbed = command.replace("2>&1", "").replace("2>/dev/null", "");
 
     if scrubbed.contains('>') {
@@ -81,9 +80,8 @@ pub fn bash_is_batchable(command: &str) -> bool {
 const MUTATOR_WORDS: &[&str] = &[
     "rm", "mv", "cp", "mkdir", "touch", "rmdir", "unlink", "ln", "install", "dd", "shred",
     "truncate", "chmod", "chown", "chgrp", "sudo", "tee", "kill", "pkill", "killall", "shutdown",
-    "reboot", "poweroff", "halt", "npx", "scp", "rsync", "sftp", "-delete",
-
-    "tar", "bsdtar", "unzip", "gunzip", "7z", "cpio",
+    "reboot", "poweroff", "halt", "npx", "scp", "rsync", "sftp", "-delete", "tar", "bsdtar",
+    "unzip", "gunzip", "7z", "cpio",
 ];
 
 fn sed_edits_in_place(toks: &[&str]) -> bool {
@@ -314,7 +312,6 @@ fn unenumerable_syntax(c: char) -> bool {
 
 fn classify_call(name: &str, args: &Value) -> Option<Touch> {
     if is_write_call(name) {
-
         return write_target_path(name, args).map(|p| Touch::Writes {
             reads: Vec::new(),
             writes: vec![p],
@@ -324,7 +321,6 @@ fn classify_call(name: &str, args: &Value) -> Option<Touch> {
         return bash_touch(args.get("command").and_then(Value::as_str)?);
     }
     match name {
-
         "read" | "ls" | "find" | "grep" => match args.get("path").and_then(Value::as_str) {
             Some(p) if !p.is_empty() && !p.chars().any(unenumerable_syntax) => {
                 Some(Touch::Reads(vec![normalize_write_path(p)]))
@@ -336,10 +332,8 @@ fn classify_call(name: &str, args: &Value) -> Option<Touch> {
 }
 
 fn bash_touch(command: &str) -> Option<Touch> {
-
     let scrubbed = command.replace("2>&1", "").replace("2>/dev/null", "");
     if scrubbed.chars().any(unenumerable_syntax) {
-
         return bash_is_batchable(command).then_some(Touch::ReadsUnknown);
     }
     let mut parts = scrubbed.split('>');
@@ -377,10 +371,8 @@ fn bash_touch(command: &str) -> Option<Touch> {
     if (verb == "sed" && sed_edits_in_place(&toks)) || WRITE_VERBS.contains(&verb) {
         writes.extend(path_operands(&toks[1..]));
     } else if READ_VERBS.contains(&verb) {
-
         reads = path_operands(&toks[1..]);
     } else if !NOPATH_VERBS.contains(&verb) {
-
         return None;
     }
     if writes.is_empty() && reads.is_empty() {
@@ -511,7 +503,6 @@ pub async fn join_ordered(
     for (idx, fut) in futs {
         let sem = sem.clone();
         set.spawn(async move {
-
             let Ok(_permit) = sem.acquire_owned().await else {
                 return (idx, ToolOutput::error("parallel semaphore closed"));
             };

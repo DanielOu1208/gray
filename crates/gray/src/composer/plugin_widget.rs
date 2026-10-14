@@ -128,7 +128,6 @@ impl Widget {
                                 }
                             }
                         } else if resolved_fresh {
-
                             active = false;
                             if tx.try_send(Snapshot::default()).is_err()
                                 && flag.load(std::sync::atomic::Ordering::Relaxed)

@@ -28,7 +28,6 @@ pub struct ReadTool {
 }
 
 impl ReadTool {
-
     pub fn new(ledger: Arc<FileLedger>) -> Self {
         Self { ledger }
     }
@@ -89,7 +88,6 @@ impl Tool for ReadTool {
     }
 
     async fn execute(&self, ctx: &ToolContext, args: Value) -> ToolOutput {
-
         if let Some(out) = self.execute_bulk(ctx, &args).await {
             return out;
         }
@@ -158,7 +156,6 @@ impl Tool for ReadTool {
 }
 
 impl ReadTool {
-
     #[allow(clippy::too_many_arguments)]
     async fn execute_streamed(
         &self,
@@ -179,7 +176,6 @@ impl ReadTool {
         };
 
         if let Some(note) = s.binary_note() {
-
             if crate::images::is_image_extension(full)
                 && let Ok(bytes) = std::fs::read(full)
                 && let Ok((mime, out)) = crate::images::normalize_image_bytes(&bytes)
@@ -203,7 +199,6 @@ impl ReadTool {
         let win_off = offset.unwrap_or(1);
 
         if file_size == 0 {
-
             if let Ok(meta) = std::fs::metadata(full) {
                 self.ledger.record_read(
                     full,
@@ -227,7 +222,6 @@ impl ReadTool {
 
         let (raws, first_n, total, has_more, peeked_no, tail_mode);
         if let Some(n) = tail_n {
-
             let ring = match tail::drain_tail(&mut s, n).await {
                 Ok(r) => r,
                 Err(e) => return read_failed(e),
@@ -288,10 +282,8 @@ impl ReadTool {
                 ));
             }
             if eof {
-
                 let total_lines = s.line_no();
                 if start > 0 && start >= total_lines {
-
                     return ToolOutput::ok(with_repaired(
                         repaired,
                         notices::offset_past_eof(display, start as u64 + 1, total_lines),
@@ -356,7 +348,6 @@ impl ReadTool {
                     Err(e) => return read_failed(e),
                     Ok((rest, false)) => total = Some(s.line_no() + rest as usize),
                     Ok((_, true)) => {
-
                         s.discard_hash();
                         total = None;
                     }
@@ -368,7 +359,6 @@ impl ReadTool {
                     ));
                 }
             } else {
-
                 total = None;
             }
             raws = collected;
@@ -387,11 +377,9 @@ impl ReadTool {
             .collect::<Vec<_>>()
             .join("\n");
         if let Some(cut) = w.cut {
-
             let next = w.next_offset.unwrap_or(first_n);
             let hint = match cut {
                 window::Cut::Lines => match total {
-
                     Some(t) => notices::line_cap(first_n, last, t),
                     None => notices::line_cap_count_skipped(first_n, last, next, file_size, next),
                 },
@@ -400,7 +388,6 @@ impl ReadTool {
             };
             output = notices::join(&output, &hint);
         } else if !tail_mode && limit.is_some_and(|lim| raws.len() as u64 == lim) && has_more {
-
             let lim = limit
                 .map(|v| v.min(usize::MAX as u64) as usize)
                 .unwrap_or(0);
@@ -502,7 +489,6 @@ fn with_repaired(repaired: &Option<String>, content: String) -> String {
 }
 
 impl ReadTool {
-
     async fn execute_bulk(&self, ctx: &ToolContext, args: &Value) -> Option<ToolOutput> {
         let paths = get_str_list(args, "paths");
         if paths.is_empty() {

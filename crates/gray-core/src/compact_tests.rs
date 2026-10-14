@@ -85,7 +85,6 @@ fn sized_msg(tag: &str) -> Message {
 
 #[tokio::test]
 async fn budgeted_compact_keeps_recent_tail() {
-
     let mut agent = test_agent("FIXED-SUMMARY-123").with_context_window(Some(16_200));
     let bodies: Vec<String> = (1..=6).map(|i| format!("msg{i}")).collect();
     agent.set_messages(bodies.iter().map(|t| sized_msg(t)).collect());
@@ -118,7 +117,6 @@ async fn budgeted_compact_keeps_recent_tail() {
 
 #[tokio::test]
 async fn recompaction_repins_the_same_anchor() {
-
     let mut agent = test_agent("SUM").with_context_window(Some(16_200));
     let bodies: Vec<String> = (1..=8).map(|i| format!("msg{i}")).collect();
     agent.set_messages(bodies.iter().map(|t| sized_msg(t)).collect());
@@ -149,7 +147,6 @@ async fn recompaction_repins_the_same_anchor() {
 
 #[tokio::test]
 async fn tiny_history_keeps_the_anchor_unduplicated() {
-
     let mut agent = test_agent("SUM").with_context_window(Some(16_200));
     let bodies: Vec<String> = (1..=6).map(|i| format!("msg{i}")).collect();
     agent.set_messages(bodies.iter().map(|t| sized_msg(t)).collect());
@@ -164,7 +161,6 @@ async fn tiny_history_keeps_the_anchor_unduplicated() {
 
 #[tokio::test]
 async fn pipeline_summary_first_then_retained() {
-
     let mut agent = test_agent("S").with_context_window(Some(16_200));
     let bodies: Vec<String> = (1..=4).map(|i| format!("msg{i}")).collect();
     agent.set_messages(bodies.iter().map(|t| sized_msg(t)).collect());
@@ -202,7 +198,6 @@ async fn pipeline_summary_first_then_retained() {
 
 #[tokio::test]
 async fn compact_v2_caps_retained_under_ceiling() {
-
     let mut agent = test_agent("FIXED-SUMMARY-123")
         .with_context_window(Some(200_000))
         .with_compact_ceiling(Some(400), None);
@@ -249,7 +244,6 @@ async fn budgeted_compact_false_when_nothing_to_gain() {
 
 #[tokio::test]
 async fn budgeted_compact_false_when_summary_would_not_shrink() {
-
     let long = "z".repeat(2000);
     let mut agent = test_agent(&long);
     agent.set_messages(vec![summary_message("prior summary")]);
@@ -324,7 +318,6 @@ async fn compact_blank_summary_leaves_history_byte_identical() {
 
 #[tokio::test]
 async fn anchor_leads_even_when_the_walk_circles_back() {
-
     let mut agent = test_agent("LIVE-SUM").with_context_window(Some(24_000));
     let big = "y".repeat(40_000);
     let mut msgs = vec![Message::user("ANCHOR-TOKEN-7742: cat these files")];
@@ -374,7 +367,6 @@ async fn anchor_leads_even_when_the_walk_circles_back() {
 
 #[tokio::test]
 async fn a_repeated_prompt_survives_in_the_tail() {
-
     let mut agent = test_agent("LIVE-SUM").with_context_window(Some(16_200));
     let intent = "ANCHOR-TOKEN-7742: cat these files";
 
@@ -420,7 +412,6 @@ async fn a_repeated_prompt_survives_in_the_tail() {
 
 #[tokio::test]
 async fn compaction_never_summarizes_a_contaminated_partial() {
-
     let (mut agent, seen) = recording_agent("LIVE-SUM");
     agent = agent.with_context_window(Some(16_200));
     let partial = "BROKEN-TRAJECTORY-TOKEN: half a tool call that died mid-stream";
@@ -465,7 +456,6 @@ async fn compaction_never_summarizes_a_contaminated_partial() {
 
 #[test]
 fn inline_media_attachment_is_priced_per_block_not_per_base64_byte() {
-
     let payload = "A".repeat(10_700_000);
     let msg = Message {
         role: Role::User,

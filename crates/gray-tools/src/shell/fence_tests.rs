@@ -20,7 +20,6 @@ fn empty_body_has_no_fence() {
 
 #[test]
 fn trailing_newlines_do_not_add_phantom_blank_line() {
-
     assert_eq!(
         fence("hello world\nfoo bar baz\n"),
         "<untrusted-output>\nhello world\nfoo bar baz\n</untrusted-output>"

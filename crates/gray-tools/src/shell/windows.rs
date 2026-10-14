@@ -22,7 +22,6 @@ pub struct Job(OwnedHandle);
 
 impl Job {
     fn new() -> io::Result<Self> {
-
         let raw = unsafe { CreateJobObjectW(null(), null()) };
         if raw.is_null() {
             return Err(io::Error::last_os_error());
@@ -48,7 +47,6 @@ impl Job {
     }
 
     pub fn terminate(&self) -> io::Result<()> {
-
         if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -71,7 +69,6 @@ pub fn spawn_owned(cmd: &mut Command) -> io::Result<(Child, Job)> {
         resume_initial_thread(child.id().ok_or_else(|| io::Error::other("no shell PID"))?)
     })();
     if let Err(error) = attach {
-
         child.start_kill().map_err(|kill| {
             io::Error::other(format!(
                 "shell setup failed ({error}); cleanup failed ({kill})"
@@ -83,7 +80,6 @@ pub fn spawn_owned(cmd: &mut Command) -> io::Result<(Child, Job)> {
 }
 
 fn resume_initial_thread(pid: u32) -> io::Result<()> {
-
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
@@ -97,7 +93,6 @@ fn resume_initial_thread(pid: u32) -> io::Result<()> {
     let mut found = unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) };
     while found != 0 {
         if entry.th32OwnerProcessID == pid {
-
             let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
             if thread.is_null() {
                 return Err(io::Error::last_os_error());

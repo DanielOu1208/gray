@@ -69,7 +69,6 @@ fn an_evicted_or_unknown_handle_is_an_error_not_an_empty_result() {
 #[test]
 fn an_over_budget_result_keeps_its_preview_and_names_the_handle() {
     with_home(|| {
-
         let raw: String = (0..4000)
             .map(|i| format!("line {i:04} ...................................\n"))
             .collect();
@@ -167,7 +166,6 @@ fn a_torn_meter_line_does_not_hide_the_rest() {
 fn the_store_is_bounded_and_keeps_the_newest() {
     with_home(|| {
         for i in 0..MAX_ENTRIES + 20 {
-
             store(&format!("payload {i}")).expect("stored");
 
             std::thread::sleep(std::time::Duration::from_millis(2));

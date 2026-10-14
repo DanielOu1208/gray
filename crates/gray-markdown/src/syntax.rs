@@ -18,14 +18,12 @@ fn syntax_set_defaults() -> &'static SyntaxSet {
 }
 
 pub struct Syntect {
-
     pub theme: SyntectTheme,
 
     pub syntax_set: &'static SyntaxSet,
 }
 
 impl Syntect {
-
     pub fn new(theme_bytes: &[u8]) -> Self {
         let mut cursor = Cursor::new(theme_bytes);
         let theme =
@@ -188,7 +186,6 @@ pub fn syntect_to_ratatui_fg(style: syntect::highlighting::Style) -> ratatui::st
 }
 
 impl Syntect {
-
     pub fn find_syntax_by_file_path(&self, file_path: &Path) -> Option<&SyntaxReference> {
         let ext = file_path.extension()?.to_str()?;
         self.syntax_set.find_syntax_by_extension(ext)
@@ -220,7 +217,6 @@ impl Syntect {
     }
 
     pub(crate) fn find_syntax_for_fence_info(&self, fence_info: &str) -> Option<&SyntaxReference> {
-
         let token = fence_info.split_whitespace().next().unwrap_or("").trim();
         if token.is_empty() {
             return None;
@@ -232,7 +228,6 @@ impl Syntect {
         }
         self.find_syntax_by_token(token)
             .or_else(|| self.find_syntax_by_token(&token.to_ascii_lowercase()))
-
             .or_else(|| self.syntax_set.find_syntax_by_extension(token))
             .or_else(|| {
                 self.syntax_set

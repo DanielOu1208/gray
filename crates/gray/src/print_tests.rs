@@ -54,7 +54,6 @@ async fn saved_sessions_redact_secrets_and_paths() {
             Message::user(
                 "read /Users/hunter/src/app/main.rs with ZAI_API_KEY=supersecretvalue12345",
             ),
-
             Message::user("read crates/foo/src/main.rs"),
         ],
     )
@@ -328,7 +327,6 @@ async fn checkpoint_persists_the_redacted_copy() {
 
 #[test]
 fn provider_failures_classify_as_retryable_infra() {
-
     for error in [
         gray_core::error::CoreError::Connection("dns".into()),
         gray_core::error::CoreError::Timeout("read".into()),
@@ -345,7 +343,6 @@ fn provider_failures_classify_as_retryable_infra() {
 
 #[test]
 fn config_failures_are_not_retryable_even_though_they_arrive_from_the_provider() {
-
     let model_missing = PrintFailure::of(&anyhow::Error::new(
         gray_core::error::CoreError::BadRequest(
             "status 404 Not Found: model deepseek-v4.1-flash does not exist".into(),
@@ -389,7 +386,6 @@ fn agent_side_stops_are_not_retryable() {
 
 #[test]
 fn failure_message_never_carries_provider_detail() {
-
     let failure = PrintFailure::of(&anyhow::Error::new(gray_core::error::CoreError::Auth(
         "401 sk-live-secret".into(),
     )));
@@ -462,7 +458,6 @@ fn tool_rows_carry_a_display_name() {
 
 #[test]
 fn tool_detail_prefers_injected_preview_text() {
-
     let detail = tool_detail(
         "some_surface_tool",
         &serde_json::json!({"document": {"title": "Hi"}}),
@@ -482,7 +477,6 @@ fn tool_detail_prefers_injected_preview_text() {
 
 #[test]
 fn tool_ran_row_uses_declared_preview_path() {
-
     let mut out = json_out(false);
     out.previews
         .insert("send_card".into(), "document.title".into());
@@ -726,7 +720,6 @@ fn progress_detail_redacts_secrets_from_commands() {
 
 #[test]
 fn progress_detail_preserves_secret_free_paths() {
-
     let detail = tool_detail(
         "bash",
         &serde_json::json!({"command": "cat /tmp/shot.png"}),
@@ -760,7 +753,6 @@ fn progress_output_preserves_secret_free_paths() {
 
 #[test]
 fn progress_detail_for_an_unknown_tool_drops_the_args() {
-
     assert!(
         tool_detail(
             "some_plugin_tool",

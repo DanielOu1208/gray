@@ -61,7 +61,6 @@ pub struct Entry {
 }
 
 impl Entry {
-
     pub fn trusted(&self) -> bool {
         self.official || self.verified
     }
@@ -82,7 +81,6 @@ pub enum HashSpec {
 }
 
 impl HashSpec {
-
     pub fn primary(&self) -> Option<&str> {
         match self {
             HashSpec::Single(s) => Some(s.as_str()),

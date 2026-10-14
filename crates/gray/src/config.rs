@@ -61,7 +61,6 @@ fn scrub_url(url: &str) -> String {
 }
 
 fn desktop_bus(current: Option<&str>, home: &std::path::Path) -> Option<String> {
-
     let live = |addr: &str| {
         addr.strip_prefix("unix:path=")
             .is_none_or(|p| std::path::Path::new(p.split(',').next().unwrap_or(p)).exists())
@@ -83,7 +82,6 @@ fn desktop_bus(current: Option<&str>, home: &std::path::Path) -> Option<String> 
 
 #[derive(Clone, PartialEq)]
 pub struct Config {
-
     pub model: Option<String>,
 
     pub base_url: String,
@@ -140,7 +138,6 @@ impl std::fmt::Debug for Config {
 }
 
 impl Config {
-
     pub fn resolve(cli: &Cli) -> anyhow::Result<Self> {
         let config = Self::resolve_with(cli, |k| std::env::var(k).ok())?;
         if let Some(prefix) = config
@@ -148,11 +145,9 @@ impl Config {
             .as_deref()
             .filter(|p| !p.trim().is_empty())
         {
-
             unsafe { std::env::set_var(gray_tools::shell::spawn::EXEC_PREFIX_ENV, prefix) };
         }
         if config.bare {
-
             unsafe {
                 std::env::set_var("GRAY_NO_JOBS", "1");
                 std::env::set_var("GRAY_NO_AUTO_COMPACT", "1");
@@ -164,7 +159,6 @@ impl Config {
                 std::path::Path::new(&home),
             )
         {
-
             unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", bus) };
         }
         Ok(config)
@@ -174,7 +168,6 @@ impl Config {
     where
         F: FnMut(&str) -> Option<String>,
     {
-
         let saved = crate::setup::load_saved_config_at(
             &crate::setup::saved_config_path().unwrap_or_else(|_| PathBuf::from("/dev/null")),
         );

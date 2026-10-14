@@ -54,7 +54,6 @@ pub struct Redaction {
 }
 
 impl Redaction {
-
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
@@ -83,7 +82,6 @@ impl Redaction {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CredentialArm {
-
     None,
 
     IfShaped,
@@ -98,7 +96,6 @@ impl CredentialArm {
 }
 
 struct TokenOutcome {
-
     text: Option<String>,
 
     arm: CredentialArm,
@@ -126,7 +123,6 @@ impl TokenOutcome {
 
 #[must_use]
 pub fn redact_for_disclosure(input: &str) -> Redaction {
-
     if input.contains('\n') {
         let mut kinds = BTreeSet::new();
         let text = input
@@ -151,7 +147,6 @@ pub fn redact_for_disclosure(input: &str) -> Redaction {
             continue;
         }
         if arm.is_armed() {
-
             if is_auth_scheme(token) {
                 if is_canonical_auth_scheme(token) {
                     arm = CredentialArm::Certain;
@@ -166,7 +161,6 @@ pub fn redact_for_disclosure(input: &str) -> Redaction {
                 arm = CredentialArm::None;
                 continue;
             }
-
         }
 
         let next = tokens[index + 1..]
@@ -185,7 +179,6 @@ pub fn redact_for_disclosure(input: &str) -> Redaction {
 }
 
 fn redact_token(token: &str, next: Option<&str>, kinds: &mut BTreeSet<String>) -> TokenOutcome {
-
     for separator in ['=', ':'] {
         let Some((name, value)) = token.split_once(separator) else {
             continue;
@@ -195,7 +188,6 @@ fn redact_token(token: &str, next: Option<&str>, kinds: &mut BTreeSet<String>) -
             .iter()
             .any(|marker| lowered.contains(marker));
         if secret_name {
-
             if is_auth_scheme(value) {
                 return TokenOutcome::keep_and_arm(if is_canonical_auth_scheme(value) {
                     CredentialArm::Certain
@@ -414,7 +406,6 @@ pub fn contains_redactable(input: &str) -> bool {
 #[must_use]
 pub fn redact_bytes_for_log(chunk: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     let Ok(text) = std::str::from_utf8(chunk) else {
-
         let lossy = String::from_utf8_lossy(chunk);
         let redaction = redact_for_disclosure(&lossy);
         if redaction.has_secret() {

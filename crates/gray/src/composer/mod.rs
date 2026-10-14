@@ -78,7 +78,6 @@ pub(crate) fn pill_elapsed(
 }
 
 pub(crate) fn pill_context_tokens(u: &gray_core::event::Usage) -> usize {
-
     let input_part = if u.non_cached_input_tokens == 0
         && u.cache_read_input_tokens == 0
         && u.cache_write_input_tokens == 0
@@ -169,7 +168,6 @@ pub(crate) fn live_tool_rows(
             let mut headers = t.header.clone();
 
             if let Some(line) = headers.first_mut().filter(|_| t.running) {
-
                 let prefix =
                     usize::from(line.spans.first().is_some_and(|s| s.content == "\u{2b22} "));
                 if prefix == 1 {
@@ -326,7 +324,6 @@ pub struct Tui {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AskModal {
-
     pub rows: Vec<(String, String, String)>,
 
     pub cursor: usize,
@@ -784,7 +781,6 @@ fn play_logo_intro(
     h: usize,
     welcome_h: usize,
 ) -> Option<crossterm::event::Event> {
-
     let y0 = terminal.viewport_area.y as usize;
     let overflow = (y0 + welcome_h + draw::home_band_h(w)).saturating_sub(h);
     if overflow > y0 {
@@ -1145,12 +1141,10 @@ impl Tui {
     }
 
     pub(crate) fn reflow_on_resize(&mut self, new_cols: u16) {
-
         self.atomic(|t| t.reflow_on_resize_inner(new_cols));
     }
 
     fn reflow_on_resize_inner(&mut self, new_cols: u16) {
-
         self.painted_palette = crate::theme::theme();
         let _ = self.hide_background();
         self.last_width = new_cols;
@@ -1175,7 +1169,6 @@ impl Tui {
         for entry in &entries {
             match entry {
                 TranscriptEntry::Welcome => {
-
                     let lines = build_welcome_lines(w);
                     self.record_rows(lines.clone());
                     self.insert_paragraph(&lines, Some(crate::theme::theme().window_bg));
@@ -1311,7 +1304,6 @@ impl Tui {
         self.pending_pastes.clear();
     }
     pub fn set_usage(&mut self, usage: gray_core::event::Usage) {
-
         if !usage.any() {
             return;
         }
@@ -1321,7 +1313,6 @@ impl Tui {
         self.turn_output_accum = self.turn_output_accum.saturating_add(usage.output_tokens);
 
         self.streamed_bytes = 0;
-
     }
 
     pub fn seed_estimate_usage(&mut self, tokens: usize) {
@@ -1411,7 +1402,6 @@ impl Tui {
 
     pub(crate) fn remove_live_tool(&mut self, id: &str) {
         if let Some(pos) = self.live_tools.iter().position(|t| t.id == id) {
-
             self.live_tools.remove(pos);
             let _ = self.draw();
         }
@@ -1548,7 +1538,6 @@ impl Tui {
     }
 
     pub fn begin_turn(&mut self, label: &str) {
-
         self.left_home = true;
         let now = Instant::now();
 
@@ -1597,7 +1586,6 @@ impl Tui {
     }
 
     pub fn set_status(&mut self, label: Option<&str>) {
-
         if let Some(active) = self.active_compaction.clone() {
             self.status = Some((active.started_at, COMPACTION_HEADER.to_string()));
             let _ = self.draw();
@@ -1771,7 +1759,6 @@ impl Tui {
         }
     }
     pub fn tick_status(&mut self) {
-
         if self.modal_open {
             return;
         }

@@ -17,7 +17,6 @@ pub const WIDGET_OVERRIDE: &str = "widget.override";
 pub const PROVIDER_CREDENTIALS: &str = "provider.credentials";
 
 pub struct CapabilitySpec {
-
     pub id: &'static str,
 
     pub host_method: Option<&'static str>,
@@ -180,7 +179,6 @@ mod tests {
 
     #[test]
     fn legacy_entries_keep_everything_they_declare() {
-
         let e = entry(vec![], None);
         assert!(granted_for(&e, &["host.ask".into(), "host.turn".into()]).contains("host.ask"));
         assert!(pending_consent(&e, &["host.ask".into()]).is_empty());

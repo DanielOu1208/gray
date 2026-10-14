@@ -145,7 +145,6 @@ fn redacts_secret_named_assignments_but_not_ordinary_lines() {
 
 #[test]
 fn a_secret_free_transcript_keeps_its_paths_verbatim() {
-
     let home = tempfile::tempdir().unwrap();
     let t = "[tool:bash]\n[result:exit 0]\n<untrusted-output>\ndrwxr-xr-x 2 u u 4096 /home/u/roo\n</untrusted-output>\nTime to clean.";
     assert_eq!(redact_secrets(t, home.path()), t);

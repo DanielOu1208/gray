@@ -1,8 +1,6 @@
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum AgentCmd {
-
     Send {
-
         #[arg(required = true, trailing_var_arg = true)]
         text: Vec<String>,
 
@@ -16,7 +14,6 @@ pub enum AgentCmd {
     },
 
     Activity {
-
         #[arg(short = 'n', long, default_value_t = 30)]
         lines: usize,
     },

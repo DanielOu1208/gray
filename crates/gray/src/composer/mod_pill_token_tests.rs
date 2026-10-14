@@ -3,14 +3,12 @@ use gray_core::event::Usage;
 
 #[test]
 fn pill_suffix_empty_before_first_output() {
-
     assert_eq!(live_pill_suffix(0, 0), "");
     assert_eq!(live_context_total(None, 0), 0);
 }
 
 #[test]
 fn context_counts_last_report_only() {
-
     assert_eq!(live_context_total(Some(Usage::new(12_000, 500)), 0), 12_500);
 
     assert_eq!(
@@ -21,7 +19,6 @@ fn context_counts_last_report_only() {
 
 #[test]
 fn pill_sums_non_overlapping_parts_opencode_parity() {
-
     let u = Usage {
         input_tokens: 100_000,
         output_tokens: 2_000,
@@ -40,7 +37,6 @@ fn pill_sums_non_overlapping_parts_opencode_parity() {
 
 #[test]
 fn live_pill_tracks_streamed_output_between_reports() {
-
     assert_eq!(live_pill_suffix(0, 0), "");
     assert_eq!(live_pill_suffix(0, 4000), " · 1,000 tokens");
 
@@ -66,7 +62,6 @@ fn live_tps_ticks_with_stream_and_hides_until_measurable() {
 
 #[test]
 fn live_pill_ticks_immediately_without_freezing_on_previous_output() {
-
     let prev = Usage::new(20_000, 14_129);
     assert_eq!(live_pill_suffix(0, 20_000), " · 5,000 tokens");
     assert_eq!(live_context_total(Some(prev), 20_000), 39_129);
@@ -76,7 +71,6 @@ fn live_pill_ticks_immediately_without_freezing_on_previous_output() {
 
 #[test]
 fn live_top_and_bottom_share_delta_not_base() {
-
     let u = Usage::new(12_000, 500);
     assert_eq!(live_context_total(Some(u), 0), 12_500);
     assert_eq!(live_pill_suffix(500, 0), " · 500 tokens");

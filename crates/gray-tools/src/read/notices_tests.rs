@@ -18,7 +18,6 @@ fn empty_note_is_contract_exact() {
 
 #[test]
 fn eof_note_suggests_tail() {
-
     assert_eq!(
         offset_past_eof("long.txt", 9999, 3000),
         "[read: offset 9999 is beyond the end of long.txt (3000 lines). \

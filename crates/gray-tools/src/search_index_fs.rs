@@ -70,7 +70,6 @@ impl FsearchPool {
     fn engine(&self) -> Option<&Engine> {
         self.engine
             .get_or_init(|| {
-
                 fsearch::set_log_sink(Some(std::sync::Arc::new(|line: &str| {
                     log::info!(target: "fsearch", "{line}");
                 })));
@@ -270,7 +269,6 @@ fn glob_to_regex(pat: &str) -> Option<String> {
                                 break;
                             }
                             '[' if chars.peek() == Some(&':') => {
-
                                 out.push('[');
                                 for c in chars.by_ref() {
                                     out.push(c);

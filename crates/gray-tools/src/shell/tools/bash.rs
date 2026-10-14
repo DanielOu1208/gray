@@ -32,7 +32,6 @@ mod jobs;
 mod read_dedup;
 
 impl BashTool {
-
     pub async fn wait_any_job(&self, ctx: &ToolContext, timeout: Duration) -> bool {
         self.jobs.wait_any(ctx, timeout).await
     }
@@ -66,7 +65,6 @@ impl BashTool {
 
 #[derive(Default)]
 pub struct BashTool {
-
     jobs: std::sync::Arc<jobs::Jobs>,
 
     cwd: Mutex<BTreeMap<String, (PathBuf, PathBuf)>>,
@@ -75,7 +73,6 @@ pub struct BashTool {
 }
 
 impl BashTool {
-
     pub fn with_ledger(mut self, ledger: Arc<crate::ledger::FileLedger>) -> Self {
         self.ledger = Some(ledger);
         self
@@ -228,7 +225,6 @@ impl Tool for BashTool {
 }
 
 fn tool_def(jobs: bool) -> ToolDef {
-
     const VIEW: &str =
         "`cat` bare image, video, PDF or audio paths (as the whole command) to view them.";
     if !jobs {
@@ -280,7 +276,6 @@ fn removed_arg(args: &Value) -> Option<ToolOutput> {
         "task_id",
         "from_offset",
         "notify_on",
-
         "run_in_background",
         "is_background",
         "detach",
@@ -388,7 +383,6 @@ fn leading_sleep(command: &str) -> Option<u64> {
 }
 
 fn with_cwd_report(command: &str) -> String {
-
     #[cfg(windows)]
     let reported = "$(pwd -W)";
     #[cfg(not(windows))]
@@ -544,13 +538,11 @@ pub(crate) fn search_words(command: &str) -> Option<Vec<String>> {
 }
 
 impl BashTool {
-
     fn noop_steer(&self, ctx: &ToolContext, command: &str) -> Option<ToolOutput> {
         let trimmed = command.trim();
         let live = self.jobs.live_ids(ctx);
         let family = noop_family(trimmed, !live.is_empty())?;
         let mut note = match family {
-
             NoopFamily::JobControl => format!(
                 "`{trimmed}` can only see this one-shot shell's own children — \
                  there are none; session jobs live outside it — nothing ran and \
@@ -583,7 +575,6 @@ pub(crate) enum NoopFamily {
 pub(crate) fn noop_family(command: &str, live_jobs: bool) -> Option<NoopFamily> {
     let segments = top_level_segments(command);
     if segments.iter().all(|s| s.trim().is_empty()) {
-
         return None;
     }
     let mut family = NoopFamily::Plain;
@@ -648,7 +639,6 @@ fn top_level_segments(command: &str) -> Vec<String> {
 
 fn noop_segment(seg: &str, live_jobs: bool) -> Option<NoopFamily> {
     if seg.is_empty() || seg.starts_with('#') {
-
         return Some(NoopFamily::Plain);
     }
     if is_fn_def(seg) {
@@ -665,7 +655,6 @@ fn noop_segment(seg: &str, live_jobs: bool) -> Option<NoopFamily> {
     let head = words[0].as_str();
     let rest = &words[1..];
     match head {
-
         "true" | ":" | "false" => Some(NoopFamily::Plain),
 
         "jobs" | "wait" | "fg" | "bg" | "disown" => Some(NoopFamily::JobControl),
@@ -724,7 +713,6 @@ fn is_fn_def(seg: &str) -> bool {
     }
     let mut rest = t[name_len..].trim_start();
     match rest.strip_prefix('(') {
-
         Some(r) => match r.trim_start().strip_prefix(')') {
             Some(r) => rest = r.trim_start(),
             None => return false,
@@ -885,7 +873,6 @@ fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
         }
     }
     if images.is_empty() && media.is_empty() && texts.is_empty() {
-
         return None;
     }
     let mut content = format!("Shown: {}", shown.join(", "));
@@ -935,7 +922,6 @@ fn expand_tilde(raw: &str) -> Option<String> {
 }
 
 fn log_path(ctx: &ToolContext) -> PathBuf {
-
     let session = ctx.session_id.as_deref().unwrap_or("nosession");
     let safe: String = session
         .chars()
@@ -972,7 +958,6 @@ struct Handoff {
 }
 
 enum Settled {
-
     Done(ToolOutput),
 
     Stalled(Box<Handoff>),
@@ -1021,7 +1006,6 @@ async fn settle_command(
         _ = ctx.cancel.cancelled() => Cause::Cancel,
     };
     if handoff && matches!(cause, Cause::Timeout) {
-
         return Settled::Stalled(Box::new(Handoff {
             spawned,
             #[cfg(not(windows))]
@@ -1034,7 +1018,6 @@ async fn settle_command(
         Cause::Exit => None,
 
         Cause::Timeout => {
-
             match tokio::try_join!(term_then_kill(target, Duration::from_secs(2)), async {
                 child
                     .wait()
@@ -1054,7 +1037,6 @@ async fn settle_command(
             ))
         }
         Cause::Cancel => {
-
             match tokio::try_join!(term_then_kill(target, Duration::from_secs(2)), async {
                 child
                     .wait()
@@ -1333,18 +1315,15 @@ fn finish_inline(
         out.push_str(&fence(&view.body));
     }
     if let Some((start, end)) = view.omitted_range {
-
         let path = log_path
             .to_string_lossy()
             .replace('\\', "/")
             .replace('\'', "'\"'\"'");
         let command = if small_log_on_disk(log_path, summary) {
-
             let first = view.shown_lines.0.max(1);
             let last = first.saturating_add(199);
             format!("sed -n '{first},{last}p;{last}q' '{path}' | head -c {READ_CHUNK}")
         } else {
-
             let count = end.saturating_sub(start).min(READ_CHUNK);
             format!("dd if='{path}' bs=1 skip={start} count={count} 2>/dev/null")
         };
@@ -1432,7 +1411,6 @@ fn small_log_on_disk(log_path: &std::path::Path, summary: &PumpSummary) -> bool 
 }
 
 fn build_view(log_path: &std::path::Path, summary: &PumpSummary) -> View {
-
     let use_disk = small_log_on_disk(log_path, summary);
 
     if use_disk && let Ok(bytes) = std::fs::read(log_path) {
@@ -1455,7 +1433,6 @@ fn build_view(log_path: &std::path::Path, summary: &PumpSummary) -> View {
     )
     .unwrap_or(usize::MAX);
     if omitted_lines == 0 && omitted_bytes == 0 {
-
         let mut cat = summary.head.clone();
         cat.extend_from_slice(&summary.tail);
         return middle_out(&cat, INLINE_BUDGET_BYTES, VIEW_BUDGET_LINES, 0);

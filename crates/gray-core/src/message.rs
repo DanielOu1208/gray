@@ -21,10 +21,14 @@ impl std::fmt::Display for Role {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
+    Text {
+        text: String,
+    },
 
-    Text { text: String },
-
-    Image { media_type: String, data: String },
+    Image {
+        media_type: String,
+        data: String,
+    },
 
     #[serde(alias = "video")]
     Media {
@@ -66,7 +70,6 @@ pub enum ContentBlock {
 }
 
 impl ContentBlock {
-
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
     }
@@ -186,7 +189,6 @@ pub struct Message {
 }
 
 impl Message {
-
     pub fn new(role: Role, content: Vec<ContentBlock>) -> Self {
         Self {
             role,
@@ -261,13 +263,10 @@ impl Message {
                     text,
                     encrypted_content,
                     ..
-                } => {
-
-                    match encrypted_content {
-                        Some(blob) => format!("{text}{blob}"),
-                        None => text.clone(),
-                    }
-                }
+                } => match encrypted_content {
+                    Some(blob) => format!("{text}{blob}"),
+                    None => text.clone(),
+                },
 
                 ContentBlock::Image { data, .. } | ContentBlock::Media { data, .. } => data.clone(),
             };
@@ -325,7 +324,6 @@ pub struct ToolDef {
 }
 
 impl ToolDef {
-
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,

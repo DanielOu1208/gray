@@ -40,7 +40,6 @@ pub(crate) fn watch_dead_stdin() {
         loop {
             std::thread::sleep(Duration::from_millis(500));
             if stdin_gone() {
-
                 unsafe { libc::raise(libc::SIGHUP) };
                 std::thread::sleep(Duration::from_secs(2));
                 std::process::exit(129);
@@ -153,7 +152,6 @@ pub(crate) fn read_line(
     watch_dead_stdin();
     let mut needs_draw = true;
     loop {
-
         if stdin_gone() {
             return Ok(None);
         }
@@ -207,7 +205,6 @@ pub(crate) fn read_line(
         };
 
         if pending_ev.is_none() && !poll(timeout)? {
-
             if empty_draft && crate::host::wake_requested() {
                 return Ok(Some((String::new(), Vec::new())));
             }
@@ -234,73 +231,67 @@ pub(crate) fn read_line(
             Event::Paste(data) => {
                 handle_paste(tui, data);
             }
-            Event::Key(ev) if ev.kind != KeyEventKind::Release => {
-                match keys::dispatch(tui, &ev) {
-                    KeyOutcome::Edited | KeyOutcome::Ignored => {}
-                    KeyOutcome::Clear => {
-
-                        if has_draft(tui) {
-                            clear_draft(tui);
-                            continue;
-                        }
-                        return Ok(None);
+            Event::Key(ev) if ev.kind != KeyEventKind::Release => match keys::dispatch(tui, &ev) {
+                KeyOutcome::Edited | KeyOutcome::Ignored => {}
+                KeyOutcome::Clear => {
+                    if has_draft(tui) {
+                        clear_draft(tui);
+                        continue;
                     }
-                    KeyOutcome::Exit => return Ok(None),
-                    KeyOutcome::Interrupt => clear_draft(tui),
-                    KeyOutcome::Command(cmd) => {
+                    return Ok(None);
+                }
+                KeyOutcome::Exit => return Ok(None),
+                KeyOutcome::Interrupt => clear_draft(tui),
+                KeyOutcome::Command(cmd) => {
+                    tui.matches.clear();
+                    tui.sel = 0;
+                    if tui.is_task_running {
+                        tui.queued_inputs.push_back((cmd, Vec::new()));
+                        let _ = tui.draw();
+                        continue;
+                    }
+                    tui.push_user_prompt(&cmd, &[], false);
+                    return Ok(Some((cmd, Vec::new())));
+                }
+                KeyOutcome::Submit => {
+                    let mut text = tui.textarea.text().to_string();
+                    for (ph, full) in &tui.pending_pastes {
+                        text = text.replace(ph, full);
+                    }
+                    tui.pending_pastes.clear();
+                    let trimmed = text.trim().to_string();
+                    if trimmed.is_empty() && tui.attachments.is_empty() && !tui.allow_empty_submit {
+                        continue;
+                    }
+                    if !trimmed.is_empty() {
+                        tui.history.push(trimmed.clone());
+                        if tui.history.len() > 100 {
+                            tui.history.remove(0);
+                        }
+                    }
+                    tui.history_idx = None;
+                    tui.draft.clear();
+                    tui.textarea.set_text("");
+                    let attached: Vec<PathBuf> = std::mem::take(&mut tui.attachments);
+                    if tui.is_task_running {
+                        tui.queued_inputs
+                            .push_back((trimmed.clone(), attached.clone()));
                         tui.matches.clear();
                         tui.sel = 0;
-                        if tui.is_task_running {
-                            tui.queued_inputs.push_back((cmd, Vec::new()));
-                            let _ = tui.draw();
-                            continue;
-                        }
-                        tui.push_user_prompt(&cmd, &[], false);
-                        return Ok(Some((cmd, Vec::new())));
+                        let _ = tui.draw();
+                        continue;
                     }
-                    KeyOutcome::Submit => {
-                        let mut text = tui.textarea.text().to_string();
-                        for (ph, full) in &tui.pending_pastes {
-                            text = text.replace(ph, full);
-                        }
-                        tui.pending_pastes.clear();
-                        let trimmed = text.trim().to_string();
-                        if trimmed.is_empty()
-                            && tui.attachments.is_empty()
-                            && !tui.allow_empty_submit
-                        {
-                            continue;
-                        }
-                        if !trimmed.is_empty() {
-                            tui.history.push(trimmed.clone());
-                            if tui.history.len() > 100 {
-                                tui.history.remove(0);
-                            }
-                        }
-                        tui.history_idx = None;
-                        tui.draft.clear();
-                        tui.textarea.set_text("");
-                        let attached: Vec<PathBuf> = std::mem::take(&mut tui.attachments);
-                        if tui.is_task_running {
-                            tui.queued_inputs
-                                .push_back((trimmed.clone(), attached.clone()));
-                            tui.matches.clear();
-                            tui.sel = 0;
-                            let _ = tui.draw();
-                            continue;
-                        }
-                        tui.matches.clear();
-                        tui.sel = 0;
+                    tui.matches.clear();
+                    tui.sel = 0;
 
-                        if trimmed.is_empty() && attached.is_empty() {
-                            return Ok(Some((trimmed, attached)));
-                        }
-
-                        tui.push_user_prompt(&trimmed, &attached, !trimmed.starts_with('/'));
+                    if trimmed.is_empty() && attached.is_empty() {
                         return Ok(Some((trimmed, attached)));
                     }
+
+                    tui.push_user_prompt(&trimmed, &attached, !trimmed.starts_with('/'));
+                    return Ok(Some((trimmed, attached)));
                 }
-            }
+            },
             _ => {}
         }
     }

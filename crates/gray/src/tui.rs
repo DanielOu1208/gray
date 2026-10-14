@@ -5,7 +5,6 @@ pub(crate) fn strip_ansi(s: &str) -> String {
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-
             if chars.next() == Some('[') {
                 for t in chars.by_ref() {
                     if ('\u{40}'..='\u{7e}').contains(&t) {
@@ -32,7 +31,6 @@ pub fn visible_width(s: &str) -> usize {
 }
 
 pub fn wrap(s: &str, width: usize) -> Vec<String> {
-
     let mut toks: Vec<String> = Vec::new();
     for w in s.split_whitespace() {
         if visible_width(w) == 0 {
@@ -52,7 +50,6 @@ pub fn wrap(s: &str, width: usize) -> Vec<String> {
     let mut cur_w = 0usize;
     let mut active_codes: Vec<String> = Vec::new();
     for word in &toks {
-
         let sep = usize::from(cur_w > 0);
         let w_w = visible_width(word);
         if cur_w + sep + w_w > width && cur_w > 0 {

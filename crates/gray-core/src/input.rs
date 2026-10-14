@@ -45,7 +45,6 @@ impl fmt::Display for InputError {
 impl std::error::Error for InputError {}
 
 impl InputEnvelope {
-
     pub fn from_json(bytes: &[u8]) -> Result<Self, InputError> {
         if bytes.len() > MAX_INPUT_BYTES {
             return Err(InputError::TooLarge);

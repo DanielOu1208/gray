@@ -55,7 +55,6 @@ pub(crate) fn detect_plain_urls_with_offset(
                 let col_end = col_start + unicode_display_width(matched);
                 let url = match link.kind() {
                     LinkKind::Email => {
-
                         if matches!(span_text.as_bytes().get(end), Some(b':' | b'/')) {
                             continue;
                         }
@@ -113,7 +112,6 @@ pub(crate) fn detect_file_paths_with_offset(
             let bytes = span_text.as_bytes();
             let mut b = 0;
             while b < bytes.len() {
-
                 let is_slash = bytes[b] == b'/';
                 let is_tilde_slash =
                     b + 1 < bytes.len() && bytes[b] == b'~' && bytes[b + 1] == b'/';

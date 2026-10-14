@@ -65,7 +65,6 @@ fn full_view_writes_are_allowed() {
 
 #[test]
 fn partial_with_matching_hash_is_still_refused_hash_is_freshness_only() {
-
     let (_dir, p, old) = fixture(b"one\ntwo\n");
     let meta = std::fs::metadata(&p).unwrap();
     let partial = entry_for(&p, false, FileLedger::hash_bytes(old.as_bytes()));
@@ -76,7 +75,6 @@ fn partial_with_matching_hash_is_still_refused_hash_is_freshness_only() {
 
 #[test]
 fn hash_mismatch_with_same_mtime_shape_is_stale() {
-
     let (_dir, p, _old) = fixture(b"one\ntwo\n");
     let meta = std::fs::metadata(&p).unwrap();
     let entry = LedgerEntry {

@@ -538,7 +538,6 @@ fn complete_context_args(arg_text: &str) -> Vec<(String, String)> {
     }
     let head = parts[0].to_lowercase();
     if head == "reserve" || head == "keep" {
-
         if parts.len() == 1 && !trailing {
             let f = parts[0].to_lowercase();
             return L1
@@ -576,7 +575,6 @@ fn complete_context_args(arg_text: &str) -> Vec<(String, String)> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplCommand {
-
     Quit,
 
     Sys(SysAction),
@@ -649,7 +647,6 @@ pub enum ReplCommand {
 }
 
 impl ReplCommand {
-
     pub(crate) fn runs_local(&self) -> bool {
         match self {
             ReplCommand::Prompt(_)
@@ -676,7 +673,6 @@ pub struct ResumeArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SysAction {
-
     Edit,
 
     Show,
@@ -783,12 +779,10 @@ pub fn parse_command(line: &str) -> ReplCommand {
             if rest.is_empty() {
                 ReplCommand::Skill(None)
             } else {
-
                 ReplCommand::Skill(Some(rest.to_string()))
             }
         }
         _ => {
-
             let name = t[1..].split_whitespace().next().unwrap_or("");
             if name.is_empty() || name.contains('/') {
                 ReplCommand::Prompt(t.to_string())
@@ -796,7 +790,6 @@ pub fn parse_command(line: &str) -> ReplCommand {
                 .into_iter()
                 .find(|(short, _, _)| short.eq_ignore_ascii_case(name))
             {
-
                 match super::split_plugin_command(t) {
                     Some((cmd, argv)) => ReplCommand::ProviderCommand {
                         cmd,

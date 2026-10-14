@@ -92,7 +92,6 @@ pub struct KeyboardEnhancementGuard {
 }
 
 impl KeyboardEnhancementGuard {
-
     pub fn push() -> Self {
         if disabled() {
             return Self {
@@ -143,7 +142,6 @@ mod tests {
 
     #[test]
     fn disambiguation_and_alternate_keys_are_always_requested() {
-
         for (term, tmux) in [
             (None, None),
             (Some("ghostty"), None),
@@ -165,7 +163,6 @@ mod tests {
 
     #[test]
     fn event_types_are_withheld_where_they_backfire() {
-
         for term in ["ghostty", "Ghostty", "iTerm.app"] {
             assert!(
                 !flags_for(Some(term), None).contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
@@ -190,7 +187,6 @@ mod tests {
 
     #[test]
     fn the_push_is_the_kitty_csi_u_sequence() {
-
         let full = flags_for(Some("xterm-256color"), None);
         assert_eq!(push_sequence(full), "\x1b[>7u");
 
@@ -204,7 +200,6 @@ mod tests {
 
     #[test]
     fn the_modify_other_keys_sequences_are_the_xterm_private_modes() {
-
         assert_eq!(MODIFY_OTHER_KEYS_ON.as_bytes(), b"\x1b[>4;2m");
         assert_eq!(MODIFY_OTHER_KEYS_OFF.as_bytes(), b"\x1b[>4;0m");
     }

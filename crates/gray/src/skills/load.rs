@@ -29,7 +29,6 @@ pub(crate) fn parse_declared_args(val: &str) -> Vec<String> {
 pub(crate) fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), String> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
-
         return Ok((SkillFrontmatter::default(), content.to_string()));
     }
 
@@ -104,7 +103,6 @@ fn parse_yaml_like(s: &str) -> SkillFrontmatter {
         } else if (val.starts_with('"') && val.ends_with('"') && val.len() >= 2)
             || (val.starts_with('\'') && val.ends_with('\'') && val.len() >= 2)
         {
-
             val = val[1..val.len() - 1].to_string();
         }
         match key {

@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 #[test]
 fn should_compact_ceiling() {
-
     let (ceiling, _) = ceiling_for(None, 200_000, 12_500, Some(100_000));
     let s = CompactionSettings {
         reserve_tokens: 12_500,
@@ -99,7 +98,6 @@ fn summary_envelope_matches_core_helper_byte_for_byte() {
 
 #[test]
 fn estimate_counts_tool_results() {
-
     let big = Message::new(
         Role::User,
         vec![ContentBlock::tool_result("t1", "x".repeat(4096), false)],
@@ -353,7 +351,6 @@ async fn compact_with_keep_rejects_blank_summary() {
 
 #[tokio::test]
 async fn compact_refuses_non_shrinking_replacement() {
-
     let long = "z".repeat(2000);
     let mut ag = scripted_agent(&long);
     ag.set_messages(vec![Message::user("hi")]);
@@ -620,7 +617,6 @@ mod switch_tests {
     }
 
     fn agent() -> Agent {
-
         Agent::new(Box::new(FakeProvider), Arc::new(NoopExecutor)).with_messages(vec![
             Message::user("hello ".repeat(500)),
             Message::assistant("hi there ".repeat(500)),

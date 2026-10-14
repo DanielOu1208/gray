@@ -173,7 +173,6 @@ pub(crate) fn build_retained_with_session(
             kept_reversed.push(truncated);
             remaining = 0;
         }
-
     }
 
     for group in kept_reversed.iter_mut().skip(RECENT_IMAGE_GROUPS) {

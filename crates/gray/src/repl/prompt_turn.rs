@@ -11,7 +11,6 @@ async fn run_streaming_cancellable(
     cancel: &tokio_util::sync::CancellationToken,
     on_event: &mut dyn FnMut(&AgentEvent),
 ) -> Result<Vec<AgentEvent>, CoreError> {
-
     let mut seen_thinking = String::new();
     let mut seen_text = String::new();
     let mut sink = |ev: &AgentEvent| {
@@ -126,7 +125,6 @@ pub(crate) async fn run_prompt_turn(
             }
             Err(e) => {
                 if tui_stream.is_some() {
-
                     say(tui_stream.as_ref(), &format!("{e}"));
                     if let Some(s) = &tui_stream {
                         let mut t = s.lock().unwrap_or_else(|e| e.into_inner());
@@ -530,7 +528,6 @@ pub(crate) async fn run_prompt_turn(
     if interactive && let Some((shared, _)) = tui {
         let mut t = shared.lock().expect("tui lock");
         if let Some(text) = t.local_command.take() {
-
             drop(t);
 
             let parsed = parse_command(&text);
@@ -572,7 +569,6 @@ fn steer_direct_send(
     let sid = sid?;
     let msg = crate::session_send::claim_steerable(&home, sid);
     if let Some(shared) = tui {
-
         let pending: Vec<(String, Vec<std::path::PathBuf>)> =
             crate::session_send::peek_sends(&home, sid)
                 .into_iter()

@@ -143,7 +143,6 @@ pub(crate) async fn restart_with(tui: &TuiOpt, resume: bool) {
         Err(e) => Err(e),
     };
     if let Err(e) = spawned {
-
         let _ = crossterm::terminal::enable_raw_mode();
         super::say(
             shared,
@@ -175,7 +174,6 @@ fn is_scratch_home(set: &std::path::Path, default: Option<&std::path::Path>) -> 
 }
 
 async fn restart_gateway() -> GatewayRestart {
-
     if scratch_gray_home() {
         return GatewayRestart::Skipped;
     }
@@ -368,7 +366,6 @@ mod tests {
 
     #[test]
     fn a_bare_session_resumes_its_own_conversation() {
-
         assert_eq!(
             restart_argv(vec![], Some("viscous-lithium-meridian")),
             vec!["resume", "viscous-lithium-meridian"]
@@ -379,7 +376,6 @@ mod tests {
 
     #[test]
     fn anything_the_user_typed_is_passed_through() {
-
         for args in [
             vec!["resume".to_string(), "--last".to_string()],
             vec!["-r".to_string(), "other-session".to_string()],

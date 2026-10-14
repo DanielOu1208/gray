@@ -77,7 +77,6 @@ fn single_huge_line_cuts_at_codepoint_boundary() {
 
 #[test]
 fn emoji_straddling_head_cut_is_atomic() {
-
     let head_budget = ((50 * 1024) as f32 * VIEW_HEAD_FRACTION).floor() as usize;
     let mut log = vec![b'A'; head_budget - 2];
     log.extend_from_slice("😀".as_bytes());
@@ -127,7 +126,6 @@ fn resume_hint_marker_shape() {
 
 #[test]
 fn home_relative_respects_gray_home() {
-
     let dir = tempfile::tempdir().expect("tempdir");
     let gray = dir.path().to_string_lossy().into_owned();
     let prev = std::env::var("GRAY_HOME").ok();
@@ -147,7 +145,6 @@ fn home_relative_respects_gray_home() {
 
 #[test]
 fn header_goldens() {
-
     let r = report("exit 0", None);
     let v = middle_out(b"hi\n", 50 * 1024, 2000, 0);
     let h = header(&r, Some(&v), Duration::from_millis(1200), &log_path());
@@ -187,7 +184,6 @@ fn header_goldens() {
 
 #[test]
 fn crlf_sets_folded_flag_and_header_marker() {
-
     let v = middle_out(b"id,name\r\n1,ann\r\n", 50 * 1024, 2000, 0);
     assert!(v.has_cr);
     assert_eq!(v.body, "id,name\n1,ann\n");
@@ -213,7 +209,6 @@ fn crlf_sets_folded_flag_and_header_marker() {
 
 #[test]
 fn inline_budget_keeps_head_and_tail_with_elision() {
-
     assert_eq!(MEM_HEAD_BYTES, 6 * 1024);
     assert_eq!(MEM_TAIL_BYTES, 6 * 1024);
     assert_eq!(INLINE_BUDGET_BYTES, 12 * 1024);
@@ -257,7 +252,6 @@ fn carriage_return_progress_becomes_readable_lines() {
 
 #[test]
 fn the_paging_command_extracts_exactly_the_omitted_lines() {
-
     let dir = tempfile::tempdir().expect("tempdir");
     let log_path = dir.path().join("log");
     let log = numbered_lines(3000);
@@ -308,7 +302,6 @@ fn the_paging_command_extracts_exactly_the_omitted_lines() {
 
 #[test]
 fn strip_ansi_drops_every_escape_form_and_keeps_text() {
-
     let colored = "\u{1b}[31mred\u{1b}[0m\n\u{1b}[2J\u{1b}[Hhome\n";
     assert_eq!(strip_ansi(colored), "red\nhome\n");
     assert_eq!(

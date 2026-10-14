@@ -38,14 +38,12 @@ fn quote_and_apostrophe_entities() {
 
 #[test]
 fn numeric_decimal_and_hex_entities() {
-
     let lines = pretty_lines("a &#60;b&#x3e; c\n\n");
     assert_eq!(lines[0], "a <b> c", "got: {lines:#?}");
 }
 
 #[test]
 fn full_html5_named_entities_decoded() {
-
     let lines = pretty_lines("&mdash; &copy; &hellip; &rarr; &times;\n\n");
     assert_eq!(lines[0], "— © … → ×", "got: {lines:#?}");
 }
@@ -58,7 +56,6 @@ fn nbsp_decodes_to_no_break_space() {
 
 #[test]
 fn control_char_entities_are_not_injected() {
-
     for (src, literal) in [
         ("x &#27; y\n\n", "&#27;"),
         ("x &#x1b; y\n\n", "&#x1b;"),
@@ -92,7 +89,6 @@ fn entity_inside_link_text_decodes_and_keeps_link() {
 
 #[test]
 fn entity_inside_inline_math_does_not_corrupt() {
-
     let lines = pretty_lines("eq \\(a &lt; b\\) end\n\n");
     let joined = lines.join("\n");
     assert!(joined.contains("end"), "trailing text intact: {lines:#?}");
@@ -122,7 +118,6 @@ fn entities_decoded_inside_emphasis_and_heading() {
 
 #[test]
 fn entities_left_literal_in_code() {
-
     let inline = pretty_lines("call `vec&lt;i32&gt;` now.\n\n");
     assert!(
         inline.iter().any(|l| l.contains("vec&lt;i32&gt;")),
@@ -137,7 +132,6 @@ fn entities_left_literal_in_code() {
 
 #[test]
 fn unknown_or_bare_ampersand_untouched() {
-
     let lines = pretty_lines("Tom &amp Jerry &unknown; plain & text\n\n");
     assert_eq!(
         lines[0], "Tom &amp Jerry &unknown; plain & text",
@@ -147,7 +141,6 @@ fn unknown_or_bare_ampersand_untouched() {
 
 #[test]
 fn entity_in_table_cell_still_decodes() {
-
     let lines = pretty_lines("| H |\n|---|\n| a &lt; b |\n\n");
     let joined = lines.join("\n");
     assert!(joined.contains("a < b"), "got: {lines:#?}");
@@ -155,7 +148,6 @@ fn entity_in_table_cell_still_decodes() {
 
 #[test]
 fn decode_html_entities_text_decodes_and_leaves_unknown_literal() {
-
     let got = crate::decode_html_entities_text("&lt;a&gt; &amp; it&#x27;s &#27; &bogus; & alone");
     assert_eq!(got, "<a> & it's &#27; &bogus; & alone");
 }
@@ -174,12 +166,10 @@ fn no_panic_on_entity_edge_cases() {
         "&lt;&gt;&amp;",
         "&#xZZ;\n\n",
         "&CounterClockwiseContourIntegral;\n\n",
-
         "& é &lt; ñ\n\n",
         "café &lt; thé\n\n",
         "🦀 & 🦀\n\n",
         "&amp;🦀&lt;\n\n",
-
         "&&&&&&&&&&&&\n\n",
         &("&".repeat(200) + "\n\n"),
     ] {

@@ -23,7 +23,6 @@ pub(crate) enum McpSource {
 }
 
 pub(crate) enum CredSource {
-
     HermesAuth(&'static str),
 
     DotEnv(&'static str),

@@ -315,7 +315,6 @@ fn model_switch_relabels_the_miss() {
 
 #[test]
 fn read_only_provider_total_miss_counts() {
-
     let base = Instant::now();
     let mut tr = CacheTracker::default();
     tr.note(&usage(50_000, 100, 40_000, 0), "gpt", None, t(base, 0));

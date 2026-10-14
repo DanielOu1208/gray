@@ -1,6 +1,5 @@
 #[test]
 fn huge_line_count_uses_count_skipped_wording() {
-
     let note = super::notices::line_cap_count_skipped(1, 10, 100_000, 3_000_000, 11);
     assert!(note.contains("count skipped"), "{note}");
     assert!(note.contains("offset=11"), "{note}");

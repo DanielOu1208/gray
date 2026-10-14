@@ -3,7 +3,6 @@ use std::time::Duration;
 
 #[test]
 fn format_thought_line_is_just_verb_elapsed_and_turn_toks() {
-
     let line = format_thought_line("Thought for", "1m 17s", Some(4_045), Some(52));
     assert_eq!(line, "✻ Thought for 1m 17s · 4,045 tokens · 52 tps");
     assert_eq!(line.matches("1m 17s").count(), 1);
@@ -17,7 +16,6 @@ fn format_thought_line_no_ctx_is_bare() {
 
 #[test]
 fn format_thought_line_never_splits_reasoning() {
-
     let line = format_thought_line("Thought for", "59s", Some(2_973), None);
     assert_eq!(line, "✻ Thought for 59s · 2,973 tokens");
     assert!(!line.contains("reasoning"));
@@ -25,7 +23,6 @@ fn format_thought_line_never_splits_reasoning() {
 
 #[test]
 fn turn_footer_line_is_the_single_thought_line_with_billed_tokens() {
-
     let line = turn_footer_line(true, Duration::from_millis(77_000), Some(4_045), 1200);
     assert_eq!(line, "✻ Thought for 1m 17s · 4,045 tokens · 3371 tps");
     assert_eq!(line.matches("1m 17s").count(), 1);
@@ -40,14 +37,12 @@ fn turn_footer_line_without_thinking_works() {
 
 #[test]
 fn turn_footer_line_without_usage_is_bare_elapsed() {
-
     let line = turn_footer_line(true, Duration::from_millis(5800), None, 0);
     assert_eq!(line, "✻ Thought for 5.8s");
 }
 
 #[test]
 fn pill_clock_ignores_tool_status_restamps() {
-
     let turn_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(14));
     let restamped = std::time::Instant::now();
     let elapsed = super::pill_elapsed(turn_started, restamped, true);

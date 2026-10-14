@@ -17,7 +17,6 @@ pub struct OEnt {
 }
 
 impl OEnt {
-
     pub fn new(path: &[u8], kind: u8, size: u64, mtime: u32) -> OEnt {
         let name = &path[path.iter().rposition(|&b| b == b'/').map_or(0, |p| p + 1)..];
         OEnt { kind, size, mtime, mask: crate::index::name_mask(name), prior: 0, slot: 0 }
@@ -289,25 +288,21 @@ impl Live {
         }
         let p = std::mem::take(&mut f.path);
         if f.recursive && p == b"/" {
-
             self.root_missing.store(false, Ordering::Relaxed);
             return Applied::Rebuild;
         }
         if p == self.root {
             if f.attrs.is_none() && f.listing.is_none() {
-
                 self.root_missing.store(true, Ordering::Relaxed);
                 return Applied::Done;
             }
             if self.root_missing.swap(false, Ordering::Relaxed) {
-
                 let rec = f.recursive;
                 self.synced_at = if rec { crate::query::now_secs() } else { 0 };
                 let r = self.apply_diff(p, f);
                 return if rec { r } else { Applied::Rebuild };
             }
         } else if self.root_missing.load(Ordering::Relaxed) {
-
             return Applied::Done;
         }
         self.apply_diff(p, f)

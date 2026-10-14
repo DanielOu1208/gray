@@ -224,7 +224,6 @@ pub fn load_saved_config_at(path: &Path) -> SavedConfig {
     match serde_json::from_str::<SavedConfig>(&body) {
         Ok(cfg) => cfg,
         Err(e) => {
-
             let recovered = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()
                 .and_then(|v| v.as_object().cloned())
@@ -494,7 +493,6 @@ pub(crate) fn save_auth_key(pid: &str, key: &str) -> anyhow::Result<()> {
 }
 
 pub(crate) fn save_auth_key_at(path: &Path, pid: &str, key: &str) -> anyhow::Result<()> {
-
     let _lock = crate::auth::CredentialStore::new(path.to_path_buf()).lock()?;
     let mut store = load_mixed_store_strict(path)?;
     store.insert(pid.to_string(), AuthEntry::Key(key.to_string()));
@@ -524,7 +522,6 @@ impl ConnectItem {
         config: &crate::config::Config,
         auth: &BTreeMap<String, AuthEntry>,
     ) -> bool {
-
         (self.id != "custom"
             && match &self.auth {
                 ConnectAuth::Plugin { auth_ref, .. } => {
@@ -659,7 +656,6 @@ pub(crate) fn sort_connect_items(
 }
 
 impl SavedConfig {
-
     pub(crate) fn remembered_effort(&self, key: &str) -> Option<String> {
         self.effort_memory.get(key).cloned()
     }
@@ -723,7 +719,6 @@ pub fn plugin_models_key(provider_id: &str) -> String {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomEndpoint {
-
     pub name: String,
 
     pub base_url: String,

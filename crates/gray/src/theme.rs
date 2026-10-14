@@ -6,7 +6,6 @@ use ratatui::style::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiTheme {
-
     pub window_bg: Color,
     pub surface_bg: Color,
     pub raised_bg: Color,
@@ -192,7 +191,6 @@ pub const ROLE_NAMES: &[&str] = &[
 ];
 
 impl UiTheme {
-
     pub fn role_mut(&mut self, name: &str) -> Option<&mut Color> {
         Some(match name {
             "window_bg" => &mut self.window_bg,

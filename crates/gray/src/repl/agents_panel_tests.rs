@@ -89,7 +89,6 @@ fn feed_consumes_complete_lines_and_waits_on_torn_tail() {
 
 #[test]
 fn feed_keeps_the_full_session_past_a_compaction_boundary() {
-
     let path = tmp_path("boundary.jsonl");
     let mut text = String::from("{\"cwd\":\"/c\"}\n");
     for _ in 0..3 {
@@ -118,7 +117,6 @@ fn feed_keeps_the_full_session_past_a_compaction_boundary() {
 
 #[test]
 fn build_pending_replays_the_full_history() {
-
     let mut v = viewer_stub();
     let mut feed = feed_at(PathBuf::from("/nonexistent"));
     feed.entries
@@ -277,7 +275,6 @@ fn gap_marks_collapse_between_blocks() {
 
 #[test]
 fn viewport_window_bottom_anchors_short_content() {
-
     assert_eq!(viewport_window(10, 15, 0), (5, 0, 10));
     assert_eq!(viewport_window(10, 15, 5), (5, 0, 10));
     assert_eq!(viewport_window(0, 15, 0), (15, 0, 0));
@@ -285,7 +282,6 @@ fn viewport_window_bottom_anchors_short_content() {
 
 #[test]
 fn viewport_window_slices_long_content_contiguously() {
-
     assert_eq!(viewport_window(100, 15, 0), (0, 0, 15));
     assert_eq!(viewport_window(100, 15, 80), (0, 80, 95));
     assert_eq!(viewport_window(100, 15, 95), (0, 85, 100));
@@ -343,7 +339,6 @@ fn picker_spans_the_terminal_width() {
 
 #[test]
 fn picker_height_follows_the_screen() {
-
     assert_eq!(picker_list_h(40, 8), 8);
     assert_eq!(picker_list_h(24, 8), 7);
 
@@ -356,7 +351,6 @@ fn picker_height_follows_the_screen() {
 
 #[test]
 fn scrolling_reveals_the_eighth_run() {
-
     let (runs, visible) = (8, 7);
     let mut top = 0;
     for sel in 0..runs {

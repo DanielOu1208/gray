@@ -38,7 +38,6 @@ impl IgnoreChain {
     }
 
     pub fn is_ignored(&mut self, path: &Path, is_dir: bool) -> bool {
-
         let mut dirs: Vec<&Path> = path.ancestors().skip(1).collect();
         dirs.reverse();
 
@@ -47,7 +46,6 @@ impl IgnoreChain {
             seen.push(Rc::new(vec![self.global.clone()]));
         }
         for dir in dirs {
-
             if seen
                 .iter()
                 .flat_map(|v| v.iter())

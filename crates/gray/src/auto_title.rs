@@ -18,7 +18,6 @@ that says what the session is about. Plain text only: no quotes, no trailing per
 no preamble.";
 
 pub(crate) fn maybe_start(state: &SessionState, agent: &Agent, initial_count: usize) {
-
     if crate::session_store::session_origin_from_env().is_some() {
         return;
     }

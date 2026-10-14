@@ -42,7 +42,6 @@ pub struct CronHealth {
 }
 
 impl CronHealth {
-
     pub fn ticker_live(&self, now: i64) -> bool {
         self.last_tick
             .as_ref()

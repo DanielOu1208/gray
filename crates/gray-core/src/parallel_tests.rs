@@ -20,7 +20,6 @@ fn known() -> HashSet<String> {
 }
 #[test]
 fn planner_groups_only_contiguous_batchable_runs() {
-
     assert_eq!(
         plan_segments(&whole_case(), &known()),
         vec![
@@ -329,7 +328,6 @@ async fn join_cancel_marks_unfinished_none() {
 
 #[test]
 fn archive_extractors_never_batch_as_reads() {
-
     for command in [
         "tar xf a.tar",
         "tar -xzf release.tgz -C /tmp/x",
@@ -350,7 +348,6 @@ fn archive_extractors_never_batch_as_reads() {
 
 #[test]
 fn rewrite_conflicts_demotes_only_the_rewritten_offender() {
-
     let read = json!({"path": "a.rs"});
     let rewritten_write = json!({"path": "a.rs", "content": "x"});
     let calls: Vec<(&str, &Value)> = vec![("read", &read), ("write", &rewritten_write)];

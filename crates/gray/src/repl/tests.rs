@@ -305,7 +305,6 @@ fn delivered(name: &str, to_chat: bool, failed: bool) -> crate::cron_serve::Deli
 
 #[test]
 fn cron_tick_line_reads_as_a_notice() {
-
     let rep = crate::cron_serve::TickReport {
         fired: 1,
         errors: 1,

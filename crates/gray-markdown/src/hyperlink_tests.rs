@@ -193,7 +193,6 @@ fn streaming_byte_by_byte_matches_full_render() {
 
     let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
     for byte in text.as_bytes() {
-
         let buf = [*byte];
         let s = std::str::from_utf8(&buf).expect("ascii test input");
         renderer.push_and_render(s, None);

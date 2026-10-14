@@ -51,7 +51,6 @@ pub(crate) fn is_bare_plugin_cmd(raw: &str) -> bool {
 }
 
 pub(crate) async fn handle_plugin_command(raw: &str, tui: Option<&crate::composer::SharedTui>) {
-
     if is_bare_plugin_cmd(raw) && tui.is_some() {
         let bg = tui.map(|s| s.lock().expect("tui lock").snapshot());
         let result = with_modal_sync(tui, || crate::setup::run_plugins_modal(bg.as_ref()));
@@ -108,22 +107,17 @@ pub(crate) async fn handle_plugin_command(raw: &str, tui: Option<&crate::compose
             }
             Err(e) => say(tui, &format!("plugin list failed: {e:#}")),
         },
-        PluginAction::Install(spec) => {
-
-            match crate::plugin_cli::home() {
-                Ok(home) => {
-                    match crate::plugin_cli::install_spec_lines(&home, &spec, false).await {
-                        Ok(lines) => {
-                            for line in lines {
-                                say(tui, &line);
-                            }
-                        }
-                        Err(e) => say(tui, &format!("install failed: {e:#}")),
+        PluginAction::Install(spec) => match crate::plugin_cli::home() {
+            Ok(home) => match crate::plugin_cli::install_spec_lines(&home, &spec, false).await {
+                Ok(lines) => {
+                    for line in lines {
+                        say(tui, &line);
                     }
                 }
                 Err(e) => say(tui, &format!("install failed: {e:#}")),
-            }
-        }
+            },
+            Err(e) => say(tui, &format!("install failed: {e:#}")),
+        },
         PluginAction::Remove(name) => match crate::plugin_cli::remove_managed(&name) {
             Ok(()) => say(tui, &format!("removed {name}")),
             Err(e) => say(tui, &format!("remove failed: {e:#}")),

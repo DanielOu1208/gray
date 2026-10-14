@@ -239,11 +239,9 @@ async fn run_pre_script_with_timeout(
     workdir: &std::path::Path,
     timeout: std::time::Duration,
 ) -> ScriptOutcome {
-
     #[cfg(windows)]
     let mut command = match gray_tools::shell::shell_path() {
         Ok(shell) => {
-
             let script_fs = script.to_string_lossy().replace('\\', "/");
             let mut cmd = tokio::process::Command::new(shell);
             cmd.arg("-c").arg("exec \"$1\"").arg("sh").arg(script_fs);
@@ -268,7 +266,6 @@ async fn run_pre_script_with_timeout(
             stderr_tail: "pre-script timed out".to_string(),
         },
         Ok(Err(e)) => {
-
             if e.raw_os_error() == Some(26) {
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                 match tokio::time::timeout(timeout, command.output()).await {

@@ -28,7 +28,6 @@ const REPLAY_QUIET: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct Options {
-
     pub dir: PathBuf,
     pub home: String,
 
@@ -203,7 +202,6 @@ fn warmer() -> &'static std::thread::Thread {
                 if now >= until {
                     WARM_IDLE.store(true, Ordering::SeqCst);
                     if now_ns() >= WARM_UNTIL.load(Ordering::SeqCst) {
-
                         if crate::alloc::kept() {
                             pool().spawn_broadcast(|_| crate::alloc::drain());
                         }
@@ -232,7 +230,6 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
 }
 
 impl Engine {
-
     pub fn start(opts: Options) -> Result<Engine, String> {
         std::fs::create_dir_all(&opts.dir).map_err(|e| e.to_string())?;
 
@@ -316,13 +313,11 @@ impl Engine {
                     (Live::lazy(b).rooted(&s.root), Some(from))
                 }
                 None if owner => {
-
                     let since = fsevents::current_id();
                     s.watch(since);
                     (Live::lazy(full_build(&s, since)).rooted(&s.root), None)
                 }
                 None => {
-
                     let b = wait_for_index(&s.dir);
                     s.watch(b.event_id);
                     (Live::lazy(b).rooted(&s.root), None)
@@ -333,7 +328,6 @@ impl Engine {
             *s.loading.0.lock().unwrap() = false;
             s.loading.1.notify_all();
             if let Some(from) = replay {
-
                 s.watch(if owner && from == 0 { fsevents::current_id() } else { from });
             }
             if let Some(l) = s.live.read().unwrap().as_ref() {
@@ -411,14 +405,12 @@ impl Engine {
             let c = self.s.content.read().unwrap();
 
             if q.scope.as_ref().is_none_or(|s| c.holds(s)) {
-
                 return Ok((c.search_with(g, q, &fresh), true));
             }
         }
 
         let scope = q.scope.as_deref();
         if indexed && !built {
-
             let (docs, early) = self.s.with_names(scope, |live| content::wanted(live, home, scope.unwrap_or(home), true))?;
             if !docs.is_empty() {
                 let hold = walk::Hold::new();
@@ -776,7 +768,6 @@ fn content_pool(threads: usize, qos: Qos) -> rayon::ThreadPool {
 }
 
 fn content_loop(shared: &Shared, rx: Receiver<Resync>) {
-
     set_qos(QOS_UTILITY);
     let pool = content_pool(4, QOS_UTILITY);
     let home = shared.home.as_bytes().to_vec();
@@ -807,7 +798,6 @@ fn content_loop(shared: &Shared, rx: Receiver<Resync>) {
                 let mut changed = Vec::new();
                 for (d, t) in std::iter::once(first).chain(rx.try_iter()) {
                     for key in d.into_iter().map(|p| (p, false)).chain(t.into_iter().map(|p| (p, true))) {
-
                         if content::in_scope(&key.0, &home) || (key.1 && home.starts_with(&key.0)) {
                             pending.entry(key.clone()).and_modify(|e| e.1 = now).or_insert((now, now));
                             changed.push(key);
@@ -909,7 +899,6 @@ fn build_batches(shared: &Shared, pool: &rayon::ThreadPool, todo: &content::Docs
 }
 
 fn scan_rooted(root: &[u8], threads: usize) -> Vec<walk::Listing> {
-
     let mut ls = if root == b"/" { walk::scan_disk(threads) } else { walk::scan(root, threads) };
     let comps: Vec<&[u8]> = root.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
     if comps.is_empty() {
@@ -1041,7 +1030,6 @@ const RELIST_AHEAD: Duration = Duration::from_millis(2500);
 
 #[derive(Default)]
 struct Pace {
-
     paid: HashMap<Vec<u8>, Instant>,
 
     held: HashMap<Vec<u8>, (bool, u64)>,
@@ -1050,7 +1038,6 @@ struct Pace {
 }
 
 impl Pace {
-
     fn free(&self, dir: &[u8], now: Instant) -> bool {
         self.paid.get(dir).is_none_or(|&t| t <= now + RELIST_AHEAD)
     }
@@ -1111,7 +1098,6 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
         let mut events = match rx.recv_timeout(wait) {
             Ok(b) => b,
             Err(RecvTimeoutError::Timeout) => {
-
                 #[cfg(target_os = "linux")]
                 if shared.owner() && shared.live.read().unwrap().is_some() {
                     relist_changed(shared, "watcher tick", 0);
@@ -1135,7 +1121,6 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
             let current = shared.streams.load(Ordering::Relaxed);
             for e in events {
                 if e.path == b"/" && e.flags & MUST_SCAN_SUBDIRS != 0 {
-
                     if e.flags & (USER_DROPPED | KERNEL_DROPPED) == USER_DROPPED {
                         if e.stream == current {
                             let from = if shared.replaying.load(Ordering::Relaxed) { shared.since.load(Ordering::Relaxed) } else { last_good };
@@ -1164,7 +1149,6 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
         let now = Instant::now();
         pace.sort(&mut dirs, now);
         if !dirs.is_empty() {
-
             let hooks = shared.on_change.read().unwrap();
             if !hooks.is_empty() {
                 let changed: Vec<(&[u8], bool)> = dirs.iter().map(|(p, &(r, _))| (p.as_slice(), r)).collect();
@@ -1218,7 +1202,6 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
             shared.watch(from);
             (gap, replays) = (None, replays + 1);
         } else if had_events && gap.is_none() && pace.held.is_empty() && !shared.replaying.load(Ordering::Relaxed) {
-
             shared.live.write().unwrap().as_mut().unwrap().synced_at = crate::query::now_secs();
         }
         if let Some(l) = shared.live.read().unwrap().as_ref() {

@@ -32,7 +32,6 @@ fn whitegold_then_gray_repaints_each_switch_once() {
 
 #[test]
 fn a_modal_preview_waits_for_the_modal_to_close() {
-
     assert!(!palette_repaint_due(GRAY_UI_THEME, cream(), true));
     assert!(palette_repaint_due(GRAY_UI_THEME, cream(), false));
 }

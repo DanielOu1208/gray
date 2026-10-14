@@ -3,12 +3,10 @@ use std::path::PathBuf;
 pub fn user_home() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-
         std::env::home_dir()
     }
     #[cfg(not(windows))]
     {
-
         std::env::var_os("HOME").map(PathBuf::from)
     }
 }

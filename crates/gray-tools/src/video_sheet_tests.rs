@@ -101,7 +101,6 @@ fn a_bigger_tile_count_yields_a_taller_sheet() {
 
 #[test]
 fn a_hanging_media_helper_times_out() {
-
     let err = run("sh", &["-c", "sleep 30"], Duration::from_millis(150))
         .expect_err("a hanging helper must fail");
     assert!(err.to_string().contains("timed out"), "{err}");

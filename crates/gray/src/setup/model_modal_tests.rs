@@ -96,7 +96,6 @@ fn mock_models_server(body: &'static str) -> u16 {
 
 #[test]
 fn the_live_fetch_works_from_a_thread_with_no_runtime() {
-
     let body = r#"{"data":[{"id":"m-one","name":"Model One"},{"id":"m-two","name":"Model Two"}]}"#;
     let port = mock_models_server(body);
     let base = format!("http://127.0.0.1:{port}/v1");
@@ -115,7 +114,6 @@ fn the_live_fetch_works_from_a_thread_with_no_runtime() {
 
 #[test]
 fn saved_models_need_no_network() {
-
     let _ = super::saved_models_for("http://127.0.0.1:1/v1", "http://127.0.0.1:1/v1");
 }
 
@@ -132,7 +130,6 @@ fn a_live_list_merges_into_the_saved_ordering() {
 }
 
 fn sorted_models() -> Vec<(String, String)> {
-
     vec![
         ("cur/m".to_string(), "Current".to_string()),
         ("a/1".to_string(), "A".to_string()),
@@ -169,7 +166,6 @@ fn recent_prefix_stops_at_the_first_unknown() {
 
 #[test]
 fn head_first_lifts_the_head_and_keeps_the_tail_order() {
-
     let models = sorted_models();
     let refs: Vec<&(String, String)> = models.iter().collect();
     let head = vec!["c/3".to_string(), "a/1".to_string()];
@@ -210,7 +206,6 @@ use super::split_effort_variant;
 
 #[test]
 fn collapsed_variant_splits_to_base_and_tier() {
-
     let rows = vec![
         ("swe-2".to_string(), "SWE-2".to_string()),
         ("swe-1-7".to_string(), "SWE-1.7".to_string()),
@@ -227,7 +222,6 @@ fn collapsed_variant_splits_to_base_and_tier() {
 
 #[test]
 fn declared_row_never_splits() {
-
     let rows = vec![
         ("qwen3".to_string(), "Qwen 3".to_string()),
         ("qwen3-max".to_string(), "Qwen 3 Max".to_string()),
@@ -248,7 +242,6 @@ use super::{compose_fast_model, decompose_model_variant};
 
 #[test]
 fn fast_variant_decomposes_to_base_tier_fast() {
-
     let rows = vec![
         ("claude-opus-5-5".to_string(), "Opus 5.5".to_string()),
         (
@@ -466,7 +459,6 @@ fn rows_open_at_the_remembered_effort_and_the_live_level() {
 
 #[test]
 fn enter_commits_model_and_row_effort_together() {
-
     let mut config = effort_config(STEP_MODEL, Some("high"));
     let mut saved = SavedConfig::default();
     commit_row_effort(&mut config, &mut saved, Some("low"), true);
@@ -546,7 +538,6 @@ fn effort_labels_read_as_words() {
 
 #[test]
 fn the_list_window_keeps_the_selection_in_view_and_hints_hidden_rows() {
-
     assert_eq!(list_window(5, 4, 0, 8), (0, 5));
 
     assert_eq!(list_window(20, 0, 0, 8), (0, 7));
@@ -573,7 +564,6 @@ fn prices_read_per_million_tokens() {
 
 #[test]
 fn the_price_level_is_absolute_bands_on_blended_per_million() {
-
     assert_eq!(price_level(0.0), 1, "free");
     assert_eq!(price_level(0.20), 1, "sub-$0.50");
     assert_eq!(price_level(0.60), 2);
@@ -667,7 +657,6 @@ use crate::setup::variants::{Parts, RowShape, cache_row_shape, row_shape};
 
 #[test]
 fn enter_walks_a_composites_slots_and_esc_backs_out() {
-
     assert_eq!(enter_level(PickLevel::List, 0), (PickLevel::List, true));
     assert_eq!(esc_level(PickLevel::List), None);
 
@@ -711,7 +700,6 @@ fn fusion_shape() -> RowShape {
                 lead_sidekick("opus", "a"),
             ),
             var("f-opus-b-high", "high", false, lead_sidekick("opus", "b")),
-
             var("f-sonnet-c-low", "low", false, lead_sidekick("sonnet", "c")),
         ],
         slots: vec![
@@ -830,7 +818,6 @@ fn composite_rows_lead_and_the_plain_rows_keep_their_order() {
 
 #[test]
 fn a_composite_leads_the_sorted_list_above_the_active_model() {
-
     let fusion = "picker-test/fusion-lead";
     let shape = fusion_shape();
     cache_row_shape(fusion, shape.variants, shape.slots);

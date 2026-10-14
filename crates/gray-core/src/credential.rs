@@ -49,7 +49,6 @@ impl<'de> Deserialize<'de> for SecretString {
 pub struct SecretMap(BTreeMap<String, SecretString>);
 
 impl SecretMap {
-
     #[allow(clippy::should_implement_trait)]
     pub fn from_iter<I, K, V>(iter: I) -> Self
     where

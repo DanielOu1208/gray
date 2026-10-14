@@ -6,7 +6,6 @@ pub const RESTART_MARKER: &str = "restart_pending";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Previous {
-
     FirstBoot,
 
     Clean { restart: bool },

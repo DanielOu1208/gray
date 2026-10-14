@@ -76,7 +76,6 @@ fn shell_env(session: Option<&str>, cwd_report: Option<&Path>) -> Vec<(String, S
         ("GIT_TERMINAL_PROMPT", "0"),
         ("SUDO_ASKPASS", "/bin/false"),
         ("TERM", "dumb"),
-
         ("NO_COLOR", "1"),
         ("CLICOLOR", "0"),
         ("PAGER", "cat"),
@@ -215,7 +214,6 @@ fn spawn_child(cmd: &mut Command) -> io::Result<Spawned> {
     {
         unsafe {
             cmd.pre_exec(|| {
-
                 if check_setsid(libc::setsid()).is_err() {
                     return Err(io::Error::last_os_error());
                 }

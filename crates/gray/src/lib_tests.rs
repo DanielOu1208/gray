@@ -2,7 +2,6 @@ use super::*;
 
 #[test]
 fn plugin_cli_alias_plugins_resolves() {
-
     for (a, b) in [
         (["gray", "plugin", "list"], ["gray", "plugins", "list"]),
         (["gray", "plugin", "update"], ["gray", "plugins", "update"]),
@@ -23,7 +22,6 @@ fn plugin_cli_alias_plugins_resolves() {
 
 #[test]
 fn cron_cli_parses_add_shapes() {
-
     let cli = Cli::try_parse_from([
         "gray",
         "cron",
@@ -144,7 +142,6 @@ fn cache_key_prefers_session_id() {
 
 #[test]
 fn cache_key_fallback_is_stable_per_process() {
-
     assert_eq!(provider_cache_key(None), provider_cache_key(None));
     assert_eq!(provider_cache_key(Some("")), provider_cache_key(None));
 }
@@ -298,7 +295,6 @@ fn warm_config(base_url: &str, effort: Option<&str>, plugin: bool) -> Config {
 
 #[test]
 fn cache_warm_covers_openai_compatible_hosts() {
-
     if std::env::var_os("GRAY_NO_CACHE_WARM").is_some() {
         return;
     }

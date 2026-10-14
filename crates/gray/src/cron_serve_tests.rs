@@ -72,7 +72,6 @@ fn test_config() -> crate::config::Config {
 
 #[test]
 fn fire_follows_saved_model_switches() {
-
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");
     std::fs::write(
@@ -375,7 +374,6 @@ async fn cron_runner_receives_job_workdir() {
 
 #[tokio::test]
 async fn local_and_target_jobs_are_save_only() {
-
     for (id, d) in [
         ("l1", serde_json::json!("local")),
         ("t1", serde_json::json!({"target": "somewhere"})),
@@ -502,7 +500,6 @@ fn delivery_json_without_an_origin_still_renders() {
 
 #[tokio::test]
 async fn a_platform_chat_id_gets_its_own_transcript() {
-
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().to_path_buf();
     let store_dir = home.join("sessions");
@@ -562,7 +559,6 @@ async fn a_platform_chat_id_gets_its_own_transcript() {
 
 #[tokio::test]
 async fn a_missing_origin_session_still_delivers_to_the_route() {
-
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().to_path_buf();
     let job = crate::cron::CronJob {
@@ -722,7 +718,6 @@ async fn chat_gets_only_the_final_text_while_the_transcript_stays_on_disk() {
 
 #[tokio::test]
 async fn a_session_origin_fire_goes_to_that_sessions_inbox_once() {
-
     let home = tempfile::tempdir().unwrap();
     let mut record = one_due("s3", serde_json::json!("origin"));
     record[0]["origin"] = serde_json::json!({"platform": SESSION_PLATFORM, "chat": "sess-1"});
@@ -766,7 +761,6 @@ async fn a_session_origin_fire_goes_to_that_sessions_inbox_once() {
 
 #[tokio::test]
 async fn hosted_delivery_survives_a_non_host_driver() {
-
     let home = tempfile::tempdir().unwrap();
     let origin = serde_json::json!({"platform": "discord", "chat": "c1", "route": "chan-9"});
     let mut hosted = one_due("d1", serde_json::json!("origin"));

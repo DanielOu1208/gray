@@ -26,7 +26,6 @@ fn find_substring(
     }
     if !allow_outside {
         if let CowStr::Borrowed(needle) = needle {
-
             let hp = haystack.as_ptr().addr();
             let np = needle.as_ptr().addr();
             let (he, ne) = (hp + haystack.len(), np + needle.len());
@@ -62,7 +61,6 @@ fn decode_html_entity(entity: &str) -> Option<String> {
 }
 
 pub fn decode_html_entities_text(text: &str) -> String {
-
     const MAX_ENTITY_LEN: usize = 33;
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -143,7 +141,6 @@ fn is_br_tag(html: &str) -> bool {
 pub(crate) fn cell_word_separator<'a>(
     line: &'a str,
 ) -> Box<dyn Iterator<Item = textwrap::core::Word<'a>> + 'a> {
-
     let mut breaks: Vec<(usize, usize)> = Vec::new();
     {
         let mut in_whitespace = false;
@@ -162,7 +159,6 @@ pub(crate) fn cell_word_separator<'a>(
                 if ch.is_alphabetic() {
                     true
                 } else if ch.is_ascii_digit() && digit_before_break {
-
                     last_break_ch != ',' && last_break_ch != '.'
                 } else {
                     false
@@ -214,13 +210,10 @@ pub(crate) fn cell_word_separator<'a>(
         let len = line.len();
         for (i, &(attach_left, attach_right)) in breaks.iter().enumerate() {
             if attach_left == attach_right {
-
                 split_positions.push(attach_left);
             } else {
-
                 let seg_start = if i == 0 { 0 } else { split_positions[i - 1] };
                 let seg_end = if i + 1 < breaks.len() {
-
                     breaks[i + 1].0
                 } else {
                     len
@@ -264,7 +257,6 @@ pub(crate) fn cell_word_separator<'a>(
 
 #[derive(Default)]
 struct FormattedTable {
-
     lines: Vec<String>,
 
     styled_lines: Vec<Line<'static>>,
@@ -344,7 +336,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
         );
 
         let ancestor_styles: Vec<Option<Style>> = if !skip_inner_style {
-
             let in_link = self
                 .tag_stack
                 .iter()
@@ -392,14 +383,12 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             Event::Start(tag) => self.on_start(tag, range),
             Event::End(tag_end) => self.on_end(tag_end, range),
             Event::Text(text) => {
-
                 if let Some(ref mut state) = self.table_state {
                     state.push_text(&text);
                 }
 
                 if let Some(parent_code_block) = parent_code_block {
                     let highlighted = match parent_code_block {
-
                         Some(lang) => syntax_highlight_raw(self.syntect, &lang, &text),
                         None => None,
                     };
@@ -414,7 +403,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                     }
                 } else {
                     if ancestor_styles.is_empty() {
-
                         self.push_highlight(Some(self.ms.text), &range);
                     } else {
                         self.push_highlight(None, &range);
@@ -425,7 +413,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 }
             }
             Event::Code(code) => {
-
                 if let Some(ref mut state) = self.table_state {
                     let prev_code = state.cell_code;
                     state.cell_code = true;
@@ -435,7 +422,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 self.style_inline_code_span(&code, &range);
             }
             Event::InlineMath(math) => {
-
                 if let Some(ref mut state) = self.table_state {
                     let prev_code = state.cell_code;
                     state.cell_code = true;
@@ -446,7 +432,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 self.style_inline_code_span(&math, &range);
             }
             Event::SoftBreak => {
-
                 if let Some(ref mut state) = self.table_state {
                     state.push_text(" ");
                 } else {
@@ -471,7 +456,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 self.push_highlight(None, &range);
             }
             Event::Html(_) => {
-
                 self.push_highlight(Some(self.ms.text), &range);
             }
             Event::InlineHtml(html) => {
@@ -499,7 +483,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 }
             }
             Event::DisplayMath(math) => {
-
                 if let Some(ref mut state) = self.table_state {
                     let prev_code = state.cell_code;
                     state.cell_code = true;
@@ -527,18 +510,15 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 self.push_highlight(Some(self.ms.link_outer), &range);
             }
             Event::Rule => {
-
                 self.push_highlight(Some(self.ms.rule), &range);
                 let rule_text = &self.text[range.clone()];
                 if let Some(marker_end) = rule_text.find('\n') {
-
                     self.buffers.transforms.push(Transform {
                         range: range.start..range.start + marker_end,
                         to: "───".to_string(),
                         force: false,
                     });
                 } else {
-
                     self.buffers.transforms.push(Transform {
                         range: range.clone(),
                         to: "───".to_string(),
@@ -561,7 +541,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
     }
 
     fn on_start(&mut self, tag: Tag<'a>, range: Range<usize>) {
-
         match &tag {
             Tag::BlockQuote(_) | Tag::List(_) | Tag::Item | Tag::Table(_) => {
                 self.depth += 1;
@@ -590,12 +569,10 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 }
             }
             Tag::BlockQuote(_) => {
-
                 let bq_text = &self.text[range.clone()];
                 let mut pos = range.start;
 
                 for line in bq_text.split_inclusive('\n') {
-
                     let at_line_start =
                         pos == 0 || self.text.as_bytes().get(pos - 1) == Some(&b'\n');
 
@@ -627,7 +604,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 None
             }
             Tag::CodeBlock(code) => {
-
                 let line_start = self.text[..range.start].rfind('\n').map_or(0, |p| p + 1);
                 let fence_start = if self.text[line_start..range.start]
                     .bytes()
@@ -657,10 +633,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 }
                 None
             }
-            Tag::HtmlBlock => {
-
-                None
-            }
+            Tag::HtmlBlock => None,
             Tag::List(_) => None,
             Tag::Item => {
                 let item_text = &self.text[range.clone()];
@@ -745,7 +718,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             | Tag::Image {
                 dest_url, title, ..
             } => {
-
                 if let Some(ref mut state) = self.table_state {
                     let id = self.link_id_counter;
                     self.link_id_counter += 1;
@@ -862,14 +834,12 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
 
         let style = match &tag_end {
             TagEnd::Emphasis => {
-
                 if let Some(ref mut state) = self.table_state {
                     state.cell_italic = false;
                 }
                 None
             }
             TagEnd::Strong => {
-
                 if let Some(ref mut state) = self.table_state {
                     state.cell_bold = false;
                 }
@@ -877,14 +847,12 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             }
             TagEnd::Strikethrough => None,
             TagEnd::Link | TagEnd::Image => {
-
                 if let Some(ref mut state) = self.table_state {
                     state.cell_link = None;
                 }
                 None
             }
             TagEnd::TableCell => {
-
                 if let Some(ref mut state) = self.table_state {
                     state
                         .current_row
@@ -898,7 +866,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 None
             }
             TagEnd::TableRow => {
-
                 if let Some(ref mut state) = self.table_state
                     && !state.in_header
                 {
@@ -908,7 +875,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 None
             }
             TagEnd::TableHead => {
-
                 if let Some(ref mut state) = self.table_state {
                     state.header = std::mem::take(&mut state.current_row);
                     state.in_header = false;
@@ -916,7 +882,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 None
             }
             TagEnd::Table => {
-
                 if let Some(mut state) = self.table_state.take() {
                     state.range.end = range.end;
                     let FormattedTable {
@@ -971,7 +936,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                 let code_block_properly_closed = is_code_block && !at_eof;
 
                 if has_blank || code_block_properly_closed {
-
                     let checkpoint_pos = if is_code_block && has_blank {
                         range.end + 1
                     } else {
@@ -984,7 +948,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
     }
 
     fn style_inline_code_span(&mut self, code: &CowStr<'_>, range: &Range<usize>) {
-
         let outer_text = &self.text[range.clone()];
         if let Some(inner_range) = find_substring(outer_text, code, false, false)
             .or_else(|| find_substring(outer_text, code, true, false))
@@ -1108,7 +1071,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             let total_content: usize = col_widths.iter().sum();
 
             if total_content > content_budget && total_content > 0 {
-
                 let mut min_col_widths: Vec<usize> = vec![1; num_cols];
 
                 let mut hard_floors: Vec<usize> = vec![0; num_cols];
@@ -1156,7 +1118,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
 
                 let mut new_widths = base_widths.clone();
                 if total_extra_want > 0 && extra_budget > 0 {
-
                     for (width, &want) in new_widths.iter_mut().zip(&extra_wants) {
                         let share = (want as f64 * extra_budget as f64 / total_extra_want as f64)
                             .floor() as usize;
@@ -1351,7 +1312,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
         border_style: ratatui::style::Style,
         is_header: bool,
     ) -> (Vec<String>, Vec<Line<'static>>, Vec<TableHyperlink>) {
-
         let wrapped_cells: Vec<Vec<String>> = (0..col_widths.len())
             .map(|i| {
                 let text = cells.get(i).map(|c| c.plain_text()).unwrap_or_default();
@@ -1408,7 +1368,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
 
                 if !cell_line_text.is_empty() {
                     if let Some(cell) = cells.get(i) {
-
                         let full_text = cell.plain_text();
 
                         let cursor = full_text
@@ -1454,7 +1413,6 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                                 style = anstyle_to_ratatui_style(self.ms.inline_code_inner);
                             }
                             if let Some((url, id)) = &cell_span.link {
-
                                 let link_style: ratatui::style::Style =
                                     anstyle_to_ratatui_style(self.ms.link_text);
                                 style = style.patch(link_style);

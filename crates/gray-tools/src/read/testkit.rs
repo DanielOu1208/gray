@@ -15,12 +15,10 @@ pub fn big_enabled() -> bool {
 pub const SPARSE_BYTES: u64 = 200 * 1024 * 1024;
 
 pub struct Zoo {
-
     dir: TempDir,
 }
 
 impl Zoo {
-
     pub fn build() -> std::io::Result<Self> {
         let dir = TempDir::new()?;
         write_fixtures(dir.path(), big_enabled())?;
@@ -49,7 +47,6 @@ impl Zoo {
 }
 
 pub fn write_fixtures(root: &Path, big: bool) -> std::io::Result<()> {
-
     let long: Vec<String> = (1..=3000).map(|i| format!("line {i:04}")).collect();
     std::fs::write(root.join("long.txt"), long.join("\n") + "\n")?;
 

@@ -37,7 +37,6 @@ fn export_set_env_timeout_and_friends_peel() {
 
 #[test]
 fn anything_that_could_do_work_stops_the_peel() {
-
     let risky = "rm -rf build && cargo check";
     assert_eq!(core_command(risky).command, risky);
 
@@ -124,7 +123,6 @@ fn bare_cat_of_media_is_a_view() {
 
 #[test]
 fn media_cat_that_the_tool_does_not_attach_is_a_plain_read() {
-
     assert_eq!(look("cd ~/x && cat a.png").map(|l| l.0), Some(Look::Read));
     assert_eq!(
         look("cat a.png | head -c 10").map(|l| l.0),

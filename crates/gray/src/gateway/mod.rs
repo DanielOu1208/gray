@@ -44,7 +44,6 @@ async fn setup_platform(platform: Option<String>) -> anyhow::Result<()> {
         None => {
             let apps = crate::plugin_cli::setup_apps(&home);
             match apps.len() {
-
                 0 => "discord".to_string(),
                 1 => apps[0].clone(),
                 _ => {

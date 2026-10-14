@@ -42,7 +42,6 @@ fn script_execution_demotes() {
 
 #[test]
 fn shell_c_string_and_version_stay_allowed() {
-
     assert!(bash_is_batchable("bash -c 'ls'"));
     assert!(bash_is_batchable("bash --version"));
 

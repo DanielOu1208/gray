@@ -14,7 +14,6 @@ pub fn summary_message(summary: &str) -> Message {
 }
 
 impl Agent {
-
     pub(crate) fn ceiling_reason(&self, estimate: usize) -> crate::event::CompactReason {
         use crate::event::CompactReason;
         match self.compact_ceiling.filter(|&c| estimate >= c) {
@@ -104,7 +103,6 @@ impl Agent {
 }
 
 pub fn estimate_message_tokens(m: &Message) -> usize {
-
     if m.content.iter().any(|b| {
         matches!(
             b,
@@ -146,7 +144,6 @@ pub(crate) fn needs_soft_elide(estimate: usize, window: Option<usize>) -> bool {
 }
 
 impl Agent {
-
     pub(crate) fn soft_elide(&mut self) -> usize {
         let Some(window) = self.context_window else {
             return 0;

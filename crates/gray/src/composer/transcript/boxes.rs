@@ -2,7 +2,6 @@ use super::*;
 
 impl Tui {
     pub fn push_tool_box(&mut self, header: Line<'static>, body: Vec<Line<'static>>) {
-
         self.atomic(|t| {
             t.insert_tool_box(header, body);
             t.ensure_gap();
@@ -21,7 +20,6 @@ impl Tui {
     }
 
     fn insert_tool_box_lines(&mut self, header: Vec<Line<'static>>, body: Vec<Line<'static>>) {
-
         self.flush_markdown();
         self.ensure_gap();
         let w = self.width().max(10);
@@ -32,7 +30,6 @@ impl Tui {
     }
 
     fn insert_tool_box(&mut self, header: Line<'static>, body: Vec<Line<'static>>) {
-
         self.flush_markdown();
         self.ensure_gap();
         let w = self.width().max(10);
@@ -109,7 +106,6 @@ impl Tui {
                 let hl_owned: Vec<HyperlinkTarget> = if src_range.end == usize::MAX {
                     line_hyperlinks.iter().map(|h| (*h).clone()).collect()
                 } else {
-
                     line_hyperlinks
                         .iter()
                         .filter_map(|h| {
@@ -132,7 +128,6 @@ impl Tui {
         }
         let lines_only: Vec<Line<'static>> = all_wrapped.iter().map(|(l, _)| l.clone()).collect();
         if self.modal_open {
-
             self.modal_pending
                 .push(crate::composer::PendingInsert::Styled(all_wrapped));
             return lines_only;
@@ -327,7 +322,6 @@ impl Tui {
                             | gray_core::ContentBlock::Media {
                                 media_type, data, ..
                             } => {
-
                                 if let Some(p) =
                                     gray_core::paths::materialize_media(media_type, data)
                                 {
@@ -372,7 +366,6 @@ impl Tui {
                     for block in &entry.message.content {
                         match block {
                             gray_core::ContentBlock::Thinking { text, .. } => {
-
                                 let rows = thinking_replay_lines(text);
                                 if !rows.is_empty() {
                                     self.ensure_gap();
@@ -448,7 +441,6 @@ impl Tui {
             .sum();
         self.seed_estimate_usage(replay_estimate);
         self.end_insert_batch();
-
     }
 }
 

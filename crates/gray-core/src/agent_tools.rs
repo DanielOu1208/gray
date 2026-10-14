@@ -50,7 +50,6 @@ pub(crate) struct PendingToolCall {
 }
 
 impl PendingToolCall {
-
     pub(crate) fn parsed_args(&self) -> serde_json::Value {
         if self.arguments.is_empty() {
             return serde_json::Value::Null;
@@ -58,7 +57,6 @@ impl PendingToolCall {
         let parsed = serde_json::from_str(&self.arguments)
             .or_else(|_| serde_json::from_str(&escape_raw_controls(&self.arguments)));
         match parsed {
-
             Ok(serde_json::Value::String(inner)) => serde_json::from_str(&inner)
                 .ok()
                 .filter(serde_json::Value::is_object)

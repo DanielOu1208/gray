@@ -11,7 +11,6 @@ fn editor_program(editor: Option<&str>) -> &str {
 }
 
 pub fn split_editor_words(editor: &str) -> Vec<String> {
-
     shlex::split(editor).unwrap_or_else(|| {
         editor
             .split_whitespace()

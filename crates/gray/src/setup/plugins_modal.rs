@@ -504,20 +504,18 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                     modifiers,
                     kind: KeyEventKind::Press,
                     ..
-                }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    match code {
-                        KeyCode::Char('c') => return Ok(changed),
+                }) if modifiers.contains(KeyModifiers::CONTROL) => match code {
+                    KeyCode::Char('c') => return Ok(changed),
 
-                        KeyCode::Char('u') if updating.is_none() => {
-                            if let Some(&ri) = filtered.get(sel) {
-                                let target = rows[ri].name.clone();
-                                updating = Some(target.clone());
-                                spawn_update(upd_tx.clone(), target);
-                            }
+                    KeyCode::Char('u') if updating.is_none() => {
+                        if let Some(&ri) = filtered.get(sel) {
+                            let target = rows[ri].name.clone();
+                            updating = Some(target.clone());
+                            spawn_update(upd_tx.clone(), target);
                         }
-                        _ => {}
                     }
-                }
+                    _ => {}
+                },
                 Event::Key(KeyEvent {
                     code,
                     kind: KeyEventKind::Press,
@@ -525,7 +523,6 @@ pub(crate) fn run_plugins_manager(bg: Option<&BackgroundSnapshot>) -> anyhow::Re
                     ..
                 }) => {
                     if detail {
-
                         match code {
                             KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace => detail = false,
                             KeyCode::Char(' ') => {
