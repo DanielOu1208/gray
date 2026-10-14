@@ -67,7 +67,7 @@ impl FsearchPool {
         }
     }
 
-    fn engine(&self) -> Option<&Engine> {
+    pub(crate) fn engine(&self) -> Option<&Engine> {
         self.engine
             .get_or_init(|| {
                 fsearch::set_log_sink(Some(std::sync::Arc::new(|line: &str| {

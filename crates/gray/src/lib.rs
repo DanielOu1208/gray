@@ -592,6 +592,9 @@ pub enum Commands {
 
         #[arg(long, value_name = "PATH")]
         sock: std::path::PathBuf,
+
+        #[arg(long, value_name = "DIR")]
+        index_dir: Option<std::path::PathBuf>,
     },
 
     #[command(external_subcommand)]

@@ -397,10 +397,15 @@ impl Live {
     }
 
     pub fn changed_dirs(&self, since: u32) -> Vec<Vec<u8>> {
+        self.changed_dirs_in(since, &[])
+    }
+
+    pub fn changed_dirs_in(&self, since: u32, scopes: &[Vec<u8>]) -> Vec<Vec<u8>> {
         use rayon::prelude::*;
         let idx = &self.base;
         let de = idx.dir_entries();
-        let check = |p: &[u8]| self.under_root(p) && !walk::blocked(p) && lstat(p).is_some_and(|o| o.mtime >= since);
+        let in_scope = |p: &[u8]| scopes.is_empty() || scopes.iter().any(|s| crate::engine::under(p, s));
+        let check = |p: &[u8]| self.under_root(p) && !walk::blocked(p) && in_scope(p) && lstat(p).is_some_and(|o| o.mtime >= since);
         let pool = stat_pool();
         let mut out: Vec<Vec<u8>> = pool.install(|| {
             (1..idx.d)
@@ -415,7 +420,7 @@ impl Live {
                 .collect()
         });
         out.extend(self.over.iter().filter(|(p, o)| o.kind & 3 == KIND_DIR && o.kind & FLAG_MOUNT == 0 && check(p)).map(|(p, _)| p.clone()));
-        if lstat(&self.root).is_some_and(|o| o.mtime >= since) {
+        if in_scope(&self.root) && lstat(&self.root).is_some_and(|o| o.mtime >= since) {
             out.push(self.root.clone());
         }
         out.sort();

@@ -22,7 +22,7 @@ pub fn serve(dir: PathBuf, home: String) {
         return;
     };
     if !try_lock(&lock) {
-        eprintln!("{} another fsearch daemon is running", fsearch::query::now_secs());
+        fsearch::diag_line("another fsearch daemon is running");
         return;
     }
 
@@ -34,7 +34,7 @@ pub fn serve(dir: PathBuf, home: String) {
     let engine = match Engine::start(Options { dir: dir.clone(), home, root, skip: None }) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("{} {e}", fsearch::query::now_secs());
+            fsearch::diag_line(format!("{e}"));
             return;
         }
     };

@@ -66,8 +66,17 @@ async fn run() -> anyhow::Result<()> {
         return gray::spill::run_cli(cmd);
     }
     #[cfg(unix)]
-    if let Some(gray::Commands::SearchServe { root, sock }) = &cli.command {
-        return Ok(gray_tools::search_serve::serve(root, sock)?);
+    if let Some(gray::Commands::SearchServe {
+        root,
+        sock,
+        index_dir,
+    }) = &cli.command
+    {
+        return Ok(gray_tools::search_serve::serve(
+            root,
+            sock,
+            index_dir.as_deref(),
+        )?);
     }
     match &cli.command {
         Some(gray::Commands::Find {

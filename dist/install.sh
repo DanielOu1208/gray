@@ -73,6 +73,12 @@ fi
 mv "${TMP}/gray" "${DEST}/gray"
 chmod +x "${DEST}/gray"
 
+shadow="$HOME/.cargo/bin/gray"
+if [ -e "$shadow" ]; then
+    rm -f "$shadow"
+    echo "removed stale $shadow (cargo-install shadow)"
+fi
+
 echo "→ installed to ${DEST}/gray ($(${DEST}/gray --version 2>/dev/null || echo '?'), ${CHANNEL})"
 
 case ":$PATH:" in

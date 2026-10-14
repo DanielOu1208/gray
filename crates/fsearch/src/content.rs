@@ -2045,12 +2045,19 @@ impl Content {
     }
 
     pub fn changed_dirs(&self, since: u32) -> Vec<Vec<u8>> {
+        self.changed_dirs_in(since, &[])
+    }
+
+    pub fn changed_dirs_in(&self, since: u32, scopes: &[Vec<u8>]) -> Vec<Vec<u8>> {
         let pool = crate::live::stat_pool();
+        let in_scope = |p: &[u8]| scopes.is_empty() || scopes.iter().any(|s| crate::engine::under(p, s));
         let mut out: Vec<Vec<u8>> = pool.install(|| {
             self.segs
                 .par_iter()
                 .flat_map_iter(|s| (0..s.ndocs as u32).filter(|&d| !s.is_dead(d)).map(move |d| (s, d)))
-                .filter(|&(s, d)| crate::live::lstat(&s.path(d)).is_none_or(|o| o.mtime >= since || o.size != s.size()[d as usize] as u64))
+                .filter(|&(s, d)| {
+                    in_scope(&s.path(d)) && crate::live::lstat(&s.path(d)).is_none_or(|o| o.mtime >= since || o.size != s.size()[d as usize] as u64)
+                })
                 .map(|(s, d)| {
                     let p = s.path(d);
                     p[..p.iter().rposition(|&b| b == b'/').unwrap_or(0).max(1)].to_vec()
@@ -3028,6 +3035,10 @@ impl Grep {
 
     fn re(&self) -> &Regex {
         self.re.get_or_init(|| self.build().expect("literal regex"))
+    }
+
+    pub fn matches_buf(&self, buf: &[u8]) -> bool {
+        self.re().is_match(buf)
     }
 
     fn probes(&self) -> Probes {

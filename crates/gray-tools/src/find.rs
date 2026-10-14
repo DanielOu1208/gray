@@ -86,6 +86,10 @@ impl Tool for FindTool {
             Err(e) => return fail(format!("Path not found: {}: {e}", search_path.display())),
         }
 
+        if let Some(out) = indexed_find(&pattern, &search_path, effective_limit).await {
+            return out;
+        }
+
         if let Some(output) = try_fd(&pattern, &search_path, effective_limit, &ctx.cancel).await {
             return output;
         }
@@ -225,12 +229,47 @@ async fn try_fd(
         .filter(|s| !s.is_empty())
         .collect();
 
-    if relativized.is_empty() {
-        return Some(finish("No files found matching pattern".to_string()));
+    Some(finish_find(relativized, effective_limit))
+}
+
+#[cfg(unix)]
+async fn indexed_find(
+    pattern: &str,
+    search_path: &Path,
+    effective_limit: usize,
+) -> Option<ToolOutput> {
+    let crate::search_cmd::IndexBackend::Fs(pool) = crate::search_cmd::global_index() else {
+        return None;
+    };
+    let (dir, pat) = (search_path.to_path_buf(), pattern.to_string());
+    let hits =
+        crate::search_cmd::spawn_index(move || pool.indexed_glob(&dir, &pat, effective_limit))
+            .await?;
+
+    Some(finish_find(
+        hits.iter()
+            .map(|h| h.strip_suffix('/').unwrap_or(h).to_string())
+            .collect(),
+        effective_limit,
+    ))
+}
+
+#[cfg(not(unix))]
+async fn indexed_find(
+    _pattern: &str,
+    _search_path: &Path,
+    _effective_limit: usize,
+) -> Option<ToolOutput> {
+    None
+}
+
+fn finish_find(rel_paths: Vec<String>, effective_limit: usize) -> ToolOutput {
+    if rel_paths.is_empty() {
+        return finish("No files found matching pattern".to_string());
     }
 
-    let result_limit_reached = relativized.len() >= effective_limit;
-    let raw_output = relativized.join("\n");
+    let result_limit_reached = rel_paths.len() >= effective_limit;
+    let raw_output = rel_paths.join("\n");
     let trunc = truncate_head(&raw_output);
     let mut output = trunc.content;
 
@@ -251,7 +290,7 @@ async fn try_fd(
         append_notices(&mut output, &notices);
     }
 
-    Some(finish(output))
+    finish(output)
 }
 
 async fn fallback_walk(pattern: &str, search_path: &Path, effective_limit: usize) -> ToolOutput {
