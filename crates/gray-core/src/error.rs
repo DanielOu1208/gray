@@ -12,6 +12,15 @@ pub struct ProviderDetail {
     pub cf_ray: Option<String>,
 
     pub request_id: Option<String>,
+
+    #[serde(default)]
+    pub retry_after_ms: Option<u64>,
+}
+
+impl ProviderDetail {
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        self.retry_after_ms.map(std::time::Duration::from_millis)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -74,6 +83,10 @@ impl CoreError {
         } else {
             None
         }
+    }
+
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        self.detail().and_then(ProviderDetail::retry_after)
     }
 
     pub fn code(&self) -> &'static str {

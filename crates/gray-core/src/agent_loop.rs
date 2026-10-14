@@ -1,7 +1,8 @@
 use futures::StreamExt as _;
 
 use crate::agent::{
-    Agent, InputSubmit, ToolBefore, ToolContext, ToolOutput, salvage_partial_text, thinking_block,
+    Agent, InputSubmit, ProviderError, ToolBefore, ToolContext, ToolOutput, salvage_partial_text,
+    thinking_block,
 };
 use crate::agent_compact::{needs_pre_turn_compact, needs_soft_elide};
 use crate::agent_tools::{PendingToolCall, answer_pending_tools};
@@ -17,15 +18,82 @@ const MAX_CONTINUATIONS: u8 = 2;
 
 const MAX_LEAK_NUDGES: u8 = 3;
 
-const MAX_TURN_RETRIES: u8 = 2;
+const MAX_TURN_RETRIES: u8 = 8;
+
+const MAX_TURN_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
 #[cfg(not(test))]
 fn turn_retry_delay() -> std::time::Duration {
-    std::time::Duration::from_secs(3)
+    std::env::var("GRAY_TURN_RETRY_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(
+            std::time::Duration::from_secs(3),
+            std::time::Duration::from_millis,
+        )
 }
 #[cfg(test)]
 fn turn_retry_delay() -> std::time::Duration {
     std::time::Duration::ZERO
+}
+
+const QUOTA_WINDOW_HINTS: [&str; 6] = [
+    "quota",
+    "usage limit",
+    "session limit",
+    "resets in ~",
+    "insufficient balance",
+    "insufficient credits",
+];
+
+fn quota_flavored(e: &ProviderError) -> bool {
+    let ProviderError::Auth(msg) = e.class() else {
+        return false;
+    };
+    if e.detail().is_some_and(|d| d.status == Some(429)) {
+        return true;
+    }
+    let lower = msg.to_lowercase();
+    QUOTA_WINDOW_HINTS.iter().any(|h| lower.contains(h))
+}
+
+fn reset_hint_from_text(msg: &str) -> Option<std::time::Duration> {
+    let lower = msg.to_lowercase();
+    let rest = &lower[lower.find("resets in ~")? + "resets in ~".len()..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let n: u64 = rest.get(..digits)?.parse().ok()?;
+    Some(match rest.as_bytes().get(digits) {
+        Some(b'h') => std::time::Duration::from_secs(n * 3600),
+        Some(b's') => std::time::Duration::from_secs(n),
+        _ => std::time::Duration::from_secs(n * 60),
+    })
+}
+
+fn provider_reset_hint(e: &ProviderError) -> Option<std::time::Duration> {
+    if let Some(d) = e.detail() {
+        if let Some(hint) = d.retry_after() {
+            return Some(hint);
+        }
+        if let Some(hint) = d.vendor_message.as_deref().and_then(reset_hint_from_text) {
+            return Some(hint);
+        }
+    }
+    reset_hint_from_text(&e.to_string())
+}
+
+fn turn_retry_wait(e: &ProviderError, attempt: u8) -> Option<std::time::Duration> {
+    if attempt >= MAX_TURN_RETRIES {
+        return None;
+    }
+    let hint = provider_reset_hint(e);
+    if hint.is_some_and(|h| h > MAX_TURN_RETRY_WAIT) {
+        return None;
+    }
+    if !e.retryable() && !quota_flavored(e) {
+        return None;
+    }
+    let backoff = turn_retry_delay().saturating_mul(1u32 << attempt.min(10));
+    Some(hint.map_or(backoff, |h| h.max(backoff)))
 }
 
 pub(crate) const CONTAMINATED_SCRUB_MARKER: &str =
@@ -589,21 +657,19 @@ impl Agent {
                             emit!(AgentEvent::stream_error(message.clone(), details.clone()));
                         }
                         Some(Err(e)) => {
-                            if e.retryable()
-                                && text_parts.is_empty()
+                            if text_parts.is_empty()
                                 && !ctx.cancel.is_cancelled()
-                                && turn_retries < MAX_TURN_RETRIES
+                                && let Some(delay) = turn_retry_wait(&e, turn_retries)
                             {
                                 turn_retries += 1;
-                                let delay = if turn_retries > 1 {
-                                    turn_retry_delay() * 2
-                                } else {
-                                    turn_retry_delay()
-                                };
                                 log::warn!(
                                     target: "gray_agent",
                                     "turn failed retryably with nothing streamed; whole-turn retry {turn_retries}/{MAX_TURN_RETRIES} in {delay:?}: {e}"
                                 );
+                                emit!(AgentEvent::stream_error(
+                                    format!("Retrying turn... {turn_retries}/{MAX_TURN_RETRIES}"),
+                                    e.to_string().chars().take(200).collect::<String>()
+                                ));
                                 if !delay.is_zero() {
                                     tokio::time::sleep(delay).await;
                                 }
@@ -672,6 +738,7 @@ impl Agent {
                 }
             };
 
+            turn_retries = 0;
             if usage.any() {
                 total_usage = usage;
                 total_usage.normalize();
@@ -1337,5 +1404,97 @@ mod leak_strip_tests {
     #[test]
     fn leaked_call_markup_still_fires_for_prose_specials() {
         assert!(leaked_call_markup(&format!("{OPEN} do it {CLOSE}")));
+    }
+}
+
+#[cfg(test)]
+mod turn_retry_tests {
+    use super::*;
+
+    fn detailed(e: ProviderError, detail: crate::error::ProviderDetail) -> ProviderError {
+        ProviderError::Detailed {
+            class: Box::new(e),
+            detail,
+        }
+    }
+
+    #[test]
+    fn rate_limited_retries_with_no_hint() {
+        assert!(turn_retry_wait(&ProviderError::RateLimited("429".into()), 0).is_some());
+    }
+
+    #[test]
+    fn quota_flavored_auth_retries() {
+        let e = ProviderError::Auth("status 429: usage limit reached".into());
+        assert!(turn_retry_wait(&e, 0).is_some());
+        let e = detailed(
+            ProviderError::Auth("status 429".into()),
+            crate::error::ProviderDetail {
+                status: Some(429),
+                ..Default::default()
+            },
+        );
+        assert!(turn_retry_wait(&e, 0).is_some());
+    }
+
+    #[test]
+    fn genuine_auth_failure_stays_terminal() {
+        let e = ProviderError::Auth("status 401: invalid api key".into());
+        assert!(turn_retry_wait(&e, 0).is_none());
+    }
+
+    #[test]
+    fn terminal_classes_stay_terminal() {
+        for e in [
+            ProviderError::BadRequest("bad".into()),
+            ProviderError::ContextOverflow("full".into()),
+        ] {
+            assert!(turn_retry_wait(&e, 0).is_none());
+        }
+    }
+
+    #[test]
+    fn retry_after_detail_sets_the_wait() {
+        let e = detailed(
+            ProviderError::RateLimited("429".into()),
+            crate::error::ProviderDetail {
+                retry_after_ms: Some(90_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            turn_retry_wait(&e, 0),
+            Some(std::time::Duration::from_secs(90))
+        );
+    }
+
+    #[test]
+    fn text_reset_hint_sets_the_wait() {
+        let e = ProviderError::Auth("usage limit reached, resets in ~4m".into());
+        assert_eq!(
+            turn_retry_wait(&e, 0),
+            Some(std::time::Duration::from_secs(240))
+        );
+    }
+
+    #[test]
+    fn long_reset_hint_is_terminal() {
+        let e = ProviderError::Auth("usage limit reached, resets in ~2h".into());
+        assert!(turn_retry_wait(&e, 0).is_none());
+        let e = detailed(
+            ProviderError::RateLimited("429".into()),
+            crate::error::ProviderDetail {
+                retry_after_ms: Some(2 * 3600 * 1000),
+                ..Default::default()
+            },
+        );
+        assert!(turn_retry_wait(&e, 0).is_none());
+    }
+
+    #[test]
+    fn retry_cap_is_honored() {
+        let e = ProviderError::RateLimited("429".into());
+        assert!(turn_retry_wait(&e, MAX_TURN_RETRIES - 1).is_some());
+        assert!(turn_retry_wait(&e, MAX_TURN_RETRIES).is_none());
     }
 }

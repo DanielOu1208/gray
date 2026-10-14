@@ -544,6 +544,12 @@ async fn retryable_failure_budget_exhausts_and_surfaces() {
         ProviderError::ServerError("503".into()),
         ProviderError::ServerError("503".into()),
         ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
     ]);
     let mut agent = Agent::new(
         Box::new(provider),
@@ -576,6 +582,76 @@ async fn non_retryable_failure_never_retries_whole_turn() {
         .expect_err("auth failure must surface");
     assert!(err.to_string().contains("auth"), "got {err}");
     assert_eq!(seen.lock().expect("seen lock").len(), 1, "no replay");
+}
+
+#[tokio::test]
+async fn quota_failure_retries_whole_turn_in_place_and_recovers() {
+    let provider = FakeProvider::new(vec![end_script()]).with_failures(vec![ProviderError::Auth(
+        "status 429: usage limit reached".into(),
+    )]);
+    let seen = provider.seen_requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
+    );
+
+    let events = agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .expect("quota-window failure must retry inside the session");
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnEnd { .. })),
+        "recovered turn must complete: {events:?}"
+    );
+    assert_eq!(
+        seen.lock().expect("seen lock").len(),
+        2,
+        "failed request + one replay, same session"
+    );
+}
+
+#[tokio::test]
+async fn quota_failure_with_long_reset_window_is_terminal() {
+    let provider = FakeProvider::new(vec![end_script()]).with_failures(vec![ProviderError::Auth(
+        "usage limit reached, resets in ~2h".into(),
+    )]);
+    let seen = provider.seen_requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
+    );
+
+    agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .expect_err("a multi-hour quota window must not be waited out");
+    assert_eq!(seen.lock().expect("seen lock").len(), 1, "no replay");
+}
+
+#[tokio::test]
+async fn mid_stream_quota_failure_does_not_replay() {
+    let provider = FakeProvider::new(vec![end_script()]).with_partial_failures(vec![(
+        vec![StreamEvent::text_delta("visible half")],
+        ProviderError::Auth("status 429: usage limit reached".into()),
+    )]);
+    let seen = provider.seen_requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
+    );
+
+    agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .expect_err("quota failure after a visible delta must surface");
+    assert_eq!(
+        seen.lock().expect("seen lock").len(),
+        1,
+        "no replay after a visible delta"
+    );
 }
 
 #[tokio::test]
