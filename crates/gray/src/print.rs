@@ -1168,9 +1168,9 @@ async fn run_print_inner(
             .messages()
             .last()
             .filter(|m| m.role == gray_core::message::Role::Assistant)
-        {
-            output.text = redact_message(message).text_content();
-        }
+    {
+        output.text = redact_message(message).text_content();
+    }
 
     let checkpoint_failed = checkpoint_failed.load(std::sync::atomic::Ordering::Relaxed);
     let rewritten = agent.history_revision() != history_revision || checkpoint_failed;
