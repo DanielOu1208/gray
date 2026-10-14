@@ -8,7 +8,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::ffi::OsStrExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::{UnixListener, UnixStream};
-#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
