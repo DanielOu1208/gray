@@ -186,7 +186,14 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let tail_est = stream_tail.len() as u16 + tail_gap;
 
     let chips = attachment_cells(&tui.attachments, &text);
-    let ibox = build_input_box(&text, cursor, w, ghost, home, &chips);
+    let mut ibox = build_input_box(&text, cursor, w, ghost, home, &chips);
+    if home.is_some() {
+        let (_, col_w) = crate::composer::home_column(w);
+        let mut head = crate::composer::welcome_body_lines_at(0, col_w, 1.0, None);
+        head.push(Line::from(""));
+        head.extend(ibox.lines);
+        ibox.lines = head;
+    }
     let box_h = ibox.lines.len().max(1) as u16;
 
     let box_rows_est: u16 = box_h;
