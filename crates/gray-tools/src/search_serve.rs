@@ -1,16 +1,28 @@
+#[cfg(target_os = "linux")]
 use std::collections::{BTreeSet, HashMap};
+#[cfg(target_os = "linux")]
 use std::ffi::{OsStr, OsString};
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
 use std::time::Instant;
 
+#[cfg(target_os = "linux")]
 use serde_json::{Value, json};
 
+#[cfg(target_os = "linux")]
 use crate::search_plan::{self, GrepPlan};
+#[cfg(target_os = "linux")]
 use crate::search_watch::Watch;
+#[cfg(target_os = "linux")]
 
 struct Server {
     root: PathBuf,
@@ -23,7 +35,7 @@ struct Server {
     _index_dir: tempfile::TempDir,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub fn serve(root: &Path, sock: &Path) -> std::io::Result<()> {
     let root = root.canonicalize()?;
     let home = root
@@ -62,12 +74,12 @@ pub fn serve(root: &Path, sock: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 pub fn serve(_root: &Path, _sock: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::other("search-serve needs a unix socket"))
+    Err(std::io::Error::other("search-serve needs linux inotify"))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn answer(server: &Server, mut stream: UnixStream) -> std::io::Result<()> {
     let mut line = String::new();
     BufReader::new(stream.try_clone()?).read_line(&mut line)?;
@@ -76,6 +88,7 @@ fn answer(server: &Server, mut stream: UnixStream) -> std::io::Result<()> {
     stream.write_all(out.as_bytes())
 }
 
+#[cfg(target_os = "linux")]
 fn decide(server: &Server, line: &str) -> Value {
     let started = Instant::now();
     let mut reply = match serve_line(server, line) {
@@ -88,8 +101,10 @@ fn decide(server: &Server, line: &str) -> Value {
     reply
 }
 
+#[cfg(target_os = "linux")]
 type Answer = (Vec<String>, Vec<String>);
 
+#[cfg(target_os = "linux")]
 fn serve_line(server: &Server, line: &str) -> Result<Answer, &'static str> {
     let req: Value = serde_json::from_str(line).map_err(|_| "bad request")?;
     let argv = req["argv"]
@@ -107,6 +122,7 @@ fn serve_line(server: &Server, line: &str) -> Result<Answer, &'static str> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static str> {
     let plan = search_plan::grep_plan(argv)?;
     let st = server.engine.status();
@@ -165,6 +181,7 @@ fn grep(server: &Server, argv: &[String], cwd: &Path) -> Result<Answer, &'static
     Ok((plan.argv, found.into_iter().map(|(_, f)| f).collect()))
 }
 
+#[cfg(target_os = "linux")]
 fn walk_key(
     order: &mut HashMap<PathBuf, Option<HashMap<OsString, usize>>>,
     scope: &Path,
@@ -183,6 +200,7 @@ fn walk_key(
     Some(key)
 }
 
+#[cfg(target_os = "linux")]
 fn readdir_order(dir: &Path) -> Option<HashMap<OsString, usize>> {
     let names: Vec<OsString> = std::fs::read_dir(dir)
         .ok()?
@@ -195,8 +213,10 @@ fn readdir_order(dir: &Path) -> Option<HashMap<OsString, usize>> {
     Some(names.into_iter().enumerate().map(|(i, n)| (n, i)).collect())
 }
 
+#[cfg(target_os = "linux")]
 const FTS_INODE_SORT_ENTRIES: usize = 10_000;
 
+#[cfg(target_os = "linux")]
 fn operand(root: &Path, cwd: &Path, plan: &GrepPlan) -> Result<(PathBuf, String), &'static str> {
     let raw = cwd.join(&plan.operand);
     if !raw.is_dir() {
@@ -221,6 +241,7 @@ fn operand(root: &Path, cwd: &Path, plan: &GrepPlan) -> Result<(PathBuf, String)
     Ok((scope, prefix))
 }
 
+#[cfg(target_os = "linux")]
 fn walked(plan: &GrepPlan, rel: &Path) -> bool {
     let mut comps = rel.components().peekable();
     while let Some(c) = comps.next() {

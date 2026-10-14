@@ -15,7 +15,7 @@ pub mod search_plan;
 pub mod search_serve;
 #[cfg(unix)]
 pub mod search_shim;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub mod search_watch;
 pub mod shell;
 pub mod stats;
