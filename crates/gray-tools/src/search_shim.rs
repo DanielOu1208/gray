@@ -41,8 +41,14 @@ pub struct Reply {
     pub candidates: usize,
     pub server_ms: f64,
     /// "index" when the index pruned the file list, "pass" for a verbatim
-    /// pass-through (identical output but no index work), "" when declined.
+    /// pass-through (identical output but no index work), "answer" when the
+    /// server computed the output itself, "" when declined.
     pub mode: String,
+    /// `"answer"` replies carry the real tool's output and exit code,
+    /// base64: no process runs at all.
+    pub stdout: String,
+    pub stderr: String,
+    pub code: i32,
 }
 
 impl Reply {
@@ -71,6 +77,9 @@ impl Reply {
             candidates: v.get("candidates").and_then(|c| c.as_u64()).unwrap_or(0) as usize,
             server_ms: v.get("server_ms").and_then(|c| c.as_f64()).unwrap_or(0.0),
             mode: v.get("mode").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
+            stdout: v.get("stdout").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
+            stderr: v.get("stderr").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
+            code: v.get("code").and_then(|c| c.as_i64()).unwrap_or(1) as i32,
         })
     }
 }
@@ -103,9 +112,25 @@ pub fn run(tool: &str) -> ! {
         start,
     );
     match reply {
+        Some(r) if r.served && r.mode == "answer" => print_answer(r),
         Some(r) if r.served => run_batches(tool, &original[0], r),
         _ => exec_real(tool, &original),
     }
+}
+
+/// The server computed the real tool's output itself: write it and exit
+/// with its code. Any undecodable payload falls back to the real tool.
+fn print_answer(r: Reply) -> ! {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let (Ok(out), Ok(err)) = (b64.decode(r.stdout), b64.decode(r.stderr)) else {
+        exec_real("grep", &std::env::args_os().collect::<Vec<_>>());
+    };
+    use std::io::Write as _;
+    let _ = std::io::stdout().write_all(&out);
+    let _ = std::io::stderr().write_all(&err);
+    let _ = std::io::stdout().flush();
+    std::process::exit(r.code);
 }
 
 /// Ask the session index. `None` when there is no index to ask or it did

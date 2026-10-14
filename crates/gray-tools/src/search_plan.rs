@@ -77,6 +77,130 @@ pub struct GrepPlan {
     pub with_name: Option<bool>,
     /// `-r`/`--recursive` was given.
     pub recursive: bool,
+    /// The matcher `-E`/`-F`/`-G` selected (default: basic).
+    pub syntax: Syntax,
+    /// Every pattern operand (`-e` values, or the positional one).
+    pub patterns: Vec<String>,
+    pub line_number: bool,
+    pub only_matching: bool,
+    pub count: bool,
+    pub files_only: bool,
+    pub word: bool,
+    pub line_match: bool,
+    pub quiet: bool,
+    pub no_messages: bool,
+    pub ignore_binary: bool,
+    pub before: usize,
+    pub after: usize,
+    pub max_count: Option<usize>,
+    /// `--color=always` (or a bare `--color`): the real tool would emit ANSI
+    /// colors even piped. The index cannot serve those bytes yet.
+    pub color_always: bool,
+}
+
+impl GrepPlan {
+    /// Can the index print the real tool's bytes for this plan, given every
+    /// operand resolved to an indexed directory? Anything it cannot express
+    /// exactly falls back to handing the real tool the candidate files.
+    pub fn answerable(&self) -> bool {
+        if self.color_always {
+            return false;
+        }
+        self.fsearch_grep().is_some()
+    }
+
+    /// The patterns as one `fsearch::Grep`, when the index can run them
+    /// exactly: `-F` patterns are literal, a `-G` pattern that is pure
+    /// literals (BRE `a\|b` included), and `-E` patterns the regex crate
+    /// compiles (GNU-ERE backrefs `\1`..`\9` are refused — they change the
+    /// language). `-x` wraps the pattern in line anchors; `-w` stays a
+    /// post-filter on the hit ranges.
+    pub fn fsearch_grep(&self) -> Option<fsearch::Grep> {
+        use fsearch::{Case, Grep, GrepMode};
+        let case = if self.ignore_case { Case::Insensitive } else { Case::Sensitive };
+        let mut src = match self.syntax {
+            Syntax::Fixed => {
+                if self.patterns.len() == 1 && !self.line_match {
+                    let mut g = Grep::with_case(&self.patterns[0], GrepMode::Literal, case).ok()?;
+                    g.max_per_file = usize::MAX;
+                    g.budget = None;
+                    return Some(g);
+                }
+                self.patterns.iter().map(|p| regex::escape(p)).collect::<Vec<_>>().join("|")
+            }
+            Syntax::Basic => {
+                let mut lits = Vec::new();
+                for p in &self.patterns {
+                    lits.extend(bre_literal(p)?);
+                }
+                lits.iter().map(|p| regex::escape(p)).collect::<Vec<_>>().join("|")
+            }
+            Syntax::Extended => {
+                if self.patterns.iter().any(|p| p.chars().zip(p.chars().skip(1)).any(|(a, b)| a == '\\' && b.is_ascii_digit())) {
+                    return None;
+                }
+                self.patterns.iter().map(|p| format!("(?:{p})")).collect::<Vec<_>>().join("|")
+            }
+        };
+        if self.line_match {
+            src = format!("^(?:{src})$");
+        }
+        let mut g = Grep::with_case(&src, GrepMode::Regex, case).ok()?;
+        g.max_per_file = usize::MAX;
+        g.budget = None;
+        g.before = self.before;
+        g.after = self.after;
+        if let Some(m) = self.max_count {
+            g.max_per_file = m;
+        }
+        Some(g)
+    }
+}
+
+/// A BRE pattern reduced to the literals it matches, when every top-level
+/// `\|` branch is itself a pure literal (`foo\|bar` -> [foo, bar]).
+/// `None` when any branch has an active BRE metacharacter.
+fn bre_literal(p: &str) -> Option<Vec<String>> {
+    let branches = split_bre_alternatives(p)?;
+    let mut out = Vec::new();
+    for b in &branches {
+        out.push(bre_branch_literal(b)?);
+    }
+    Some(out)
+}
+
+/// One BRE branch as a literal string. BRE metacharacters: an unescaped
+/// `.` `*` `[` anywhere, `^` at the start, `$` at the end, and the escapes
+/// `\(` `\)` `\{` `\|` `\+` `\?` `\<` `\>` `\b` `\B` `\w` `\W`
+/// `\s` `\S` `` \` `` `\'` `\N` (digit). Any other `\x` is the literal
+/// `x`. Plain `(` `)` `{` `}` `|` `+` `?` are literal characters in a BRE.
+fn bre_branch_literal(b: &str) -> Option<String> {
+    let cs: Vec<char> = b.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            '\\' => {
+                let n = *cs.get(i + 1)?;
+                match n {
+                    '.' | '*' | '^' | '$' | '[' | ']' | '/' | '-' | '&' | '~' | '#' | '@' | '!' | '%' | ':' | ';' | ',' | '=' | '"' | '_' => out.push(n),
+                    '(' | ')' | '{' | '}' | '|' | '+' | '?' | '<' | '>' | 'b' | 'B' | 'w' | 'W' | 's' | 'S' | '`' | '\'' => return None,
+                    c if c.is_ascii_digit() => return None,
+                    '\\' => out.push('\\'),
+                    _ => out.push(n),
+                }
+                i += 2;
+            }
+            '.' | '*' | '[' => return None,
+            '^' if i == 0 => return None,
+            '$' if i == cs.len() - 1 => return None,
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    Some(out)
 }
 
 /// Parse a grep argv (without argv[0]) into a plan, or the reason to decline.
@@ -86,6 +210,9 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
     let mut positional: Vec<String> = Vec::new();
     let mut syntax: Option<Syntax> = None;
     let (mut ignore_case, mut recursive, mut with_name) = (false, false, None);
+    let (mut line_number, mut only_matching, mut count, mut files_only) = (false, false, false, false);
+    let (mut word, mut line_match, mut quiet, mut no_messages, mut ignore_binary) = (false, false, false, false, false);
+    let (mut before, mut after, mut max_count, mut color_always) = (0usize, 0usize, None, false);
     let mut walk = Walk::default();
     let mut set_syntax = |s: Syntax| match syntax {
         Some(old) if old != s => Err("conflicting matchers"),
@@ -120,8 +247,47 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
                     ignore_case = true;
                     argv.push(a.to_string());
                 }
-                "word-regexp" | "line-regexp" | "line-number" | "files-with-matches" | "only-matching" | "no-messages" | "quiet" | "silent" => {
+                "word-regexp" => {
+                    word = true;
                     argv.push(a.to_string());
+                }
+                "line-regexp" => {
+                    line_match = true;
+                    argv.push(a.to_string());
+                }
+                "line-number" => {
+                    line_number = true;
+                    argv.push(a.to_string());
+                }
+                "count" => {
+                    count = true;
+                    argv.push(a.to_string());
+                }
+                "files-with-matches" => {
+                    files_only = true;
+                    argv.push(a.to_string());
+                }
+                "only-matching" => {
+                    only_matching = true;
+                    argv.push(a.to_string());
+                }
+                "no-messages" => {
+                    no_messages = true;
+                    argv.push(a.to_string());
+                }
+                "quiet" | "silent" => {
+                    quiet = true;
+                    argv.push(a.to_string());
+                }
+                "binary-files" => {
+                    match value.as_deref() {
+                        Some("without-match") => {
+                            ignore_binary = true;
+                            argv.push(a.to_string());
+                        }
+                        Some("binary") => argv.push(a.to_string()),
+                        _ => return Err("binary-files mode"),
+                    }
                 }
                 "with-filename" => {
                     with_name = Some(true);
@@ -131,9 +297,18 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
                     with_name = Some(false);
                     argv.push(a.to_string());
                 }
-                "fixed-strings" => set_syntax(Syntax::Fixed)?,
-                "extended-regexp" => set_syntax(Syntax::Extended)?,
-                "basic-regexp" => set_syntax(Syntax::Basic)?,
+                "fixed-strings" => {
+                    set_syntax(Syntax::Fixed)?;
+                    argv.push(a.to_string());
+                }
+                "extended-regexp" => {
+                    set_syntax(Syntax::Extended)?;
+                    argv.push(a.to_string());
+                }
+                "basic-regexp" => {
+                    set_syntax(Syntax::Basic)?;
+                    argv.push(a.to_string());
+                }
                 "recursive" => recursive = true,
                 "include" | "exclude" | "exclude-dir" => {
                     let g = take(&mut i)?;
@@ -151,12 +326,25 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
                 "regexp" => patterns.push(take(&mut i)?),
                 "after-context" | "before-context" | "context" | "max-count" => {
                     let v = take(&mut i)?;
-                    if v.parse::<usize>().is_err() {
-                        return Err("numeric option");
-                    }
+                    let n: usize = v.parse().map_err(|_| "numeric option")?;
                     argv.push(format!("--{name}={v}"));
+                    match name {
+                        "after-context" => after = n,
+                        "before-context" => before = n,
+                        "context" => {
+                            before = n;
+                            after = n;
+                        }
+                        _ => max_count = Some(n),
+                    }
                 }
-                "color" | "colour" => argv.push(a.to_string()),
+                "color" | "colour" => {
+                    argv.push(a.to_string());
+                    match value.as_deref() {
+                        Some("auto") | Some("never") | Some("tty") | Some("if-tty") => {}
+                        _ => color_always = true,
+                    }
+                }
                 _ => return Err("unsupported long option"),
             }
             continue;
@@ -179,10 +367,17 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
                     match c {
                         'e' => patterns.push(v),
                         _ => {
-                            if v.parse::<usize>().is_err() {
-                                return Err("numeric option");
-                            }
+                            let n: usize = v.parse().map_err(|_| "numeric option")?;
                             argv.push(format!("-{c}{v}"));
+                            match c {
+                                'A' => after = n,
+                                'B' => before = n,
+                                'C' => {
+                                    before = n;
+                                    after = n;
+                                }
+                                _ => max_count = Some(n),
+                            }
                         }
                     }
                     break;
@@ -192,8 +387,46 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
                         ignore_case = true;
                         argv.push("-i".into());
                     }
-                    'n' | 'w' | 'x' | 'l' | 'o' | 's' | 'q' | 'I' => argv.push(format!("-{c}")),
-                    'G' => set_syntax(Syntax::Basic)?,
+                    'n' => {
+                        line_number = true;
+                        argv.push("-n".into());
+                    }
+                    'w' => {
+                        word = true;
+                        argv.push("-w".into());
+                    }
+                    'x' => {
+                        line_match = true;
+                        argv.push("-x".into());
+                    }
+                    'l' => {
+                        files_only = true;
+                        argv.push("-l".into());
+                    }
+                    'c' => {
+                        count = true;
+                        argv.push("-c".into());
+                    }
+                    'o' => {
+                        only_matching = true;
+                        argv.push("-o".into());
+                    }
+                    's' => {
+                        no_messages = true;
+                        argv.push("-s".into());
+                    }
+                    'q' => {
+                        quiet = true;
+                        argv.push("-q".into());
+                    }
+                    'I' => {
+                        ignore_binary = true;
+                        argv.push("-I".into());
+                    }
+                    'G' => {
+                        set_syntax(Syntax::Basic)?;
+                        argv.push("-G".into());
+                    }
                     'h' => {
                         with_name = Some(false);
                         argv.push("-h".into());
@@ -202,8 +435,14 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
                         with_name = Some(true);
                         argv.push("-H".into());
                     }
-                    'E' => set_syntax(Syntax::Extended)?,
-                    'F' => set_syntax(Syntax::Fixed)?,
+                    'E' => {
+                        set_syntax(Syntax::Extended)?;
+                        argv.push("-E".into());
+                    }
+                    'F' => {
+                        set_syntax(Syntax::Fixed)?;
+                        argv.push("-F".into());
+                    }
                     'r' => recursive = true,
                     _ => return Err("unsupported option"),
                 }
@@ -248,11 +487,35 @@ pub fn grep_plan(args: &[String]) -> Result<GrepPlan, &'static str> {
     }
     needles.sort();
     needles.dedup();
-    for p in patterns {
+    for p in &patterns {
         argv.push("-e".into());
-        argv.push(p);
+        argv.push(p.clone());
     }
-    Ok(GrepPlan { argv, operands, needles, all_needled, ignore_case, walk, with_name, recursive })
+    Ok(GrepPlan {
+        argv,
+        operands,
+        needles,
+        all_needled,
+        ignore_case,
+        walk,
+        with_name,
+        recursive,
+        syntax,
+        patterns,
+        line_number,
+        only_matching,
+        count,
+        files_only,
+        word,
+        line_match,
+        quiet,
+        no_messages,
+        ignore_binary,
+        before,
+        after,
+        max_count,
+        color_always,
+    })
 }
 
 fn glob(pat: &str) -> Result<GlobMatcher, &'static str> {

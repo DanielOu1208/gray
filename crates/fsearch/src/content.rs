@@ -3446,6 +3446,12 @@ impl Grep {
         self.re.get_or_init(|| self.build().expect("literal regex"))
     }
 
+    /// Does the pattern match anywhere in `buf`? Used to announce a
+    /// matching binary the way the real tool does.
+    pub fn matches_buf(&self, buf: &[u8]) -> bool {
+        self.re().is_match(buf)
+    }
+
     /// Hashes of the grams every match holds (see `SHORT`).
     fn probes(&self) -> Probes {
         let grams = |n: usize| {

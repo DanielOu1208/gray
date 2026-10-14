@@ -52,7 +52,7 @@ fn plans_serve_recursive_greps_and_decline_the_rest() {
     // only when an operand needs the index.
     assert!(!grep_plan(&args("-rE a|b x")).expect("plans").all_needled);
     assert!(!grep_plan(&args("-r fo .")).expect("plans").all_needled);
-    for line in ["-v foo .", "-c foo .", "-P foo .", "foo", "foo -", "-rl foo . -E -F"] {
+    for line in ["-v foo .", "-P foo .", "foo", "foo -", "-rl foo . -E -F"] {
         assert!(grep_plan(&args(line)).is_err(), "must decline: {line}");
     }
 }
