@@ -228,6 +228,7 @@ fn detailed_provider_error_classifies_by_variant_and_fields_not_text() {
             vendor_message: Some("Rate limit reached for requests per min.".into()),
             cf_ray: Some("a35cf09b-SEA".into()),
             request_id: Some("req_abc123".into()),
+            retry_after_ms: None,
         },
     };
     let out = format_core_error(&err, "https://example.com");
