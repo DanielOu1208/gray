@@ -403,6 +403,7 @@ impl PrintFailure {
             "cancelled" => "Cancelled.",
             "serialization" => "Serialization failure.",
             "session_locked" => "The session is already open in another process.",
+            "quota_exhausted" => "The provider's usage allowance is exhausted.",
             _ => {
                 "Agent turn failed; actions may already have occurred. Do not automatically retry."
             }
@@ -425,6 +426,9 @@ impl PrintFailure {
             "timeout" => "Retry, or raise the request timeout for slow providers.",
             "server_error" | "stream_broken" => "Retrying the turn usually succeeds.",
             "session_locked" => "Close the other instance, or open a different session.",
+            "quota_exhausted" => {
+                "Wait for the quota window to reset, or switch models with `/models`."
+            }
             _ => return None,
         })
     }
@@ -1143,7 +1147,7 @@ async fn run_print_inner(
     };
     let map_err = |e: gray_core::error::CoreError| {
         let msg = crate::repl::format_core_error(&e, &config.base_url);
-        anyhow::anyhow!(scrub_error_text(&msg))
+        anyhow::Error::new(e).context(scrub_error_text(&msg))
     };
     let mut run_result = agent
         .run_streaming(user_msg, ctx.clone(), &mut on_event)

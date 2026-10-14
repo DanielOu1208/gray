@@ -1421,12 +1421,13 @@ pub(crate) fn classify_http_error(
     let class = classify_http_error_inner(status, snippet, cf_ray, req_id);
     let vendor_message = error_body_message(snippet);
     let mut vendor_code = error_body_code(snippet);
+    let mut resets_in = None;
     if matches!(
         class.class(),
         ProviderError::Auth(_) | ProviderError::BadRequest(_)
     ) && quota_hinted(snippet)
     {
-        let resets_in = vendor_message
+        resets_in = vendor_message
             .as_deref()
             .and_then(parse_quota_reset_delay)
             .or_else(|| parse_quota_reset_delay(snippet));
@@ -1440,6 +1441,8 @@ pub(crate) fn classify_http_error(
             vendor_message,
             cf_ray: cf_ray.map(str::to_string),
             request_id: req_id.map(str::to_string),
+            retry_after_ms: resets_in
+                .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64),
         },
     }
 }
@@ -2300,6 +2303,8 @@ fn stream_failure(event: &Value, detail: String) -> ProviderError {
                 vendor_message: Some(detail),
                 cf_ray: None,
                 request_id: None,
+                retry_after_ms: resets_in
+                    .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64),
             },
         };
     }
