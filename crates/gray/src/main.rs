@@ -65,7 +65,7 @@ async fn run() -> anyhow::Result<()> {
     if let Some(gray::Commands::Spill { cmd }) = &cli.command {
         return gray::spill::run_cli(cmd);
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     if let Some(gray::Commands::SearchServe {
         root,
         sock,
@@ -238,11 +238,12 @@ async fn run() -> anyhow::Result<()> {
             }
             gray::Commands::Find { .. }
             | gray::Commands::Grep { .. }
-            | gray::Commands::Spill { .. }
-            | gray::Commands::SearchServe { .. } => {
-                unreachable!(
-                    "find/grep/spill/search-serve CLI dispatch happens before configuration"
-                )
+            | gray::Commands::Spill { .. } => {
+                unreachable!("find/grep/spill CLI dispatch happens before configuration")
+            }
+            #[cfg(target_os = "linux")]
+            gray::Commands::SearchServe { .. } => {
+                unreachable!("search-serve CLI dispatch happens before configuration")
             }
         }
     }

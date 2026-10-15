@@ -636,6 +636,7 @@ pub enum Commands {
         cmd: SpillCmd,
     },
 
+    #[cfg(target_os = "linux")]
     #[command(hide = true)]
     SearchServe {
         #[arg(long, value_name = "DIR")]
