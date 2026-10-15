@@ -261,7 +261,8 @@ fn tool_def(jobs: bool) -> ToolDef {
              (read-only ones run concurrently). It blocks until the command exits or `timeout` passes; then it is \
              NOT killed but keeps running as a background job, and you get its log and a stop command. \
              To wait for it, end your turn: a finished job wakes you, no polling needed. Peek with \
-             `tail <log>`. If a command sleeps, pass a `timeout` longer than the sleep. For a hard \
+             `tail <log>`. A command that exits while leaving its process group alive (`nohup ... &`, \
+             `cmd &`) is registered as a background job the same way. If a command sleeps, pass a `timeout` longer than the sleep. For a hard \
              limit, write `timeout N cmd` yourself. {VIEW}{CRON}"
         ),
         json!({
@@ -1121,6 +1122,33 @@ async fn settle_command(
             guard,
             pump,
         }));
+    }
+    #[cfg(unix)]
+    if matches!(cause, Cause::Exit) && crate::shell::kill::group_alive(target) {
+        if handoff {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            if crate::shell::kill::group_alive(target) {
+                return Settled::Stalled(Box::new(Handoff {
+                    spawned,
+                    #[cfg(not(windows))]
+                    guard,
+                    pump,
+                }));
+            }
+        } else {
+            loop {
+                let cancelled = tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => false,
+                    _ = ctx.cancel.cancelled() => true,
+                };
+                if cancelled {
+                    let _ = term_then_kill(target, Duration::from_secs(2)).await;
+                }
+                if !crate::shell::kill::group_alive(target) {
+                    break;
+                }
+            }
+        }
     }
 
     let first_line: Option<String> = match cause {

@@ -31,6 +31,14 @@ fn gone(target: i32) -> bool {
     }
 }
 
+#[cfg(unix)]
+pub(crate) fn group_alive(pgid: i32) -> bool {
+    pgid > 1
+        && pgid != std::process::id() as i32
+        && pgid != unsafe { libc::getpgrp() }
+        && !gone(-pgid)
+}
+
 #[cfg(not(windows))]
 async fn escalate(sig_target: i32, what: &str, grace: Duration) -> Result<(), String> {
     #[cfg(not(unix))]
