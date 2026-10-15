@@ -15,6 +15,7 @@ pub(crate) use widgets::{
     queued_preview_lines, shimmer_spans, status_dock_h, tail_block_h, tail_gap_h,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn desired_viewport_h(
     status_h: u16,
     queued_h: u16,
@@ -22,9 +23,11 @@ pub(crate) fn desired_viewport_h(
     box_rows: u16,
     panel_h: u16,
     attach_h: u16,
+    footer_h: u16,
     max_h: u16,
 ) -> u16 {
-    (status_h + queued_h + live_h + box_rows + panel_h + attach_h + 1).clamp(MIN_VIEWPORT_H, max_h)
+    (status_h + queued_h + live_h + box_rows + panel_h + attach_h + footer_h)
+        .clamp(MIN_VIEWPORT_H, max_h)
 }
 
 pub(crate) fn latched_viewport_floor(
@@ -33,25 +36,14 @@ pub(crate) fn latched_viewport_floor(
     live_h: u16,
     box_rows: u16,
     attach_h: u16,
+    footer_h: u16,
     max_h: u16,
 ) -> u16 {
-    let with_dock = status_h + queued_h + live_h + box_rows + attach_h + 1;
-    let no_status = queued_h + live_h + box_rows + attach_h + 1;
+    let with_dock = status_h + queued_h + live_h + box_rows + attach_h + footer_h;
+    let no_status = queued_h + live_h + box_rows + attach_h + footer_h;
 
-    let live_overrun = live_h + box_rows + attach_h + 1;
+    let live_overrun = live_h + box_rows + attach_h + footer_h;
     with_dock.max(no_status).max(live_overrun).min(max_h)
-}
-
-pub(crate) fn home_spacer_rows(
-    visible_above: u16,
-    reserved: u16,
-    box_rows: u16,
-    screen_rows: u16,
-) -> u16 {
-    screen_rows
-        .saturating_sub(visible_above)
-        .saturating_sub(reserved)
-        .saturating_sub(box_rows)
 }
 
 pub(crate) fn attachment_cells(attachments: &[std::path::PathBuf], text: &str) -> Vec<InputCell> {
@@ -149,9 +141,66 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let cursor = tui.textarea.cursor().min(text.len());
 
     let ghost = continue_ghost(tui.allow_empty_submit, tui.is_task_running, &text);
+    let model_display = tui
+        .model_label
+        .clone()
+        .unwrap_or_else(|| crate::setup::friendly_model_name(&tui.model_name));
+    let line_cfg = crate::statusline::config();
+    let effort_seg = line_cfg
+        .left()
+        .iter()
+        .chain(line_cfg.right().iter())
+        .any(|s| s == "effort");
+    let show_effort = footer_badge_visible(&tui.model_name, tui.turn_show_effort);
+    let effort_display = if !show_effort || tui.thinking_effort == "off" {
+        String::new()
+    } else if tui.hide_thinking {
+        if tui.thinking_effort.is_empty() {
+            "hidden".to_string()
+        } else {
+            format!("{} · hidden", tui.thinking_effort)
+        }
+    } else {
+        tui.thinking_effort.clone()
+    };
+    let model_text = match effort_display.chars().next() {
+        Some(c)
+            if !effort_seg
+                && tui.model_label_parts.is_none()
+                && !model_display
+                    .to_lowercase()
+                    .contains(&tui.thinking_effort.to_lowercase()) =>
+        {
+            let rest = &effort_display[c.len_utf8()..];
+            format!("{model_display} {}{rest}", c.to_uppercase())
+        }
+        _ => model_display.clone(),
+    };
+    let (home_model_name, home_model_tail) = tui
+        .model_label_parts
+        .as_ref()
+        .map(|parts| {
+            (
+                parts.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+                String::new(),
+            )
+        })
+        .unwrap_or_else(|| {
+            if effort_display.is_empty()
+                || model_display
+                    .to_lowercase()
+                    .contains(&tui.thinking_effort.to_lowercase())
+            {
+                (model_display.clone(), String::new())
+            } else {
+                (model_display.clone(), format!(" {effort_display}"))
+            }
+        });
     let home = tui.is_home().then_some(HomeRows {
         notice: tui.home_notice.as_deref(),
         stats: tui.plugin_stats.as_deref(),
+        model: Some(home_model_name.as_str()),
+        model_tail: (!home_model_tail.is_empty()).then_some(home_model_tail.as_str()),
         above: tui.home_update.as_deref(),
         qol: tui.home_qol.as_deref(),
         session: tui.home_session.as_deref(),
@@ -159,6 +208,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let home_mode = home.is_some();
 
     let attach_h: u16 = 0;
+    let footer_h: u16 = u16::from(!home_mode);
 
     let needs_seam = needs_seam(&tui.transcript);
     let status_h: u16 = status_dock_h(tui.status.is_some(), needs_seam);
@@ -170,10 +220,10 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     } else {
         1 + n.min(3) as u16 + u16::from(n > 3) + 1
     };
-    let panel_est: u16 = if home.is_some() {
+    let panel_est: u16 = if tui.matches.is_empty() {
         0
     } else {
-        tui.matches.len().min(PANEL_ROWS) as u16
+        tui.matches.len().min(PANEL_ROWS) as u16 + 1
     };
 
     let ask_est: u16 = tui
@@ -198,30 +248,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let tail_est = stream_tail.len() as u16 + tail_gap;
 
     let chips = attachment_cells(&tui.attachments, &text);
-    let mut ibox = build_input_box(&text, cursor, w, ghost, home, &chips);
-    if home.is_some() {
-        let above: usize = {
-            let transcript_h: usize = tui
-                .transcript
-                .iter()
-                .map(|l| l.width().max(1).div_ceil(w.max(1)))
-                .sum();
-            if paint {
-                transcript_h.min(usize::from(tui.terminal.viewport_area.y))
-            } else {
-                transcript_h
-            }
-        };
-
-        let spacer = usize::from(home_spacer_rows(
-            above as u16,
-            status_h + queued_est + live_est + tail_est + panel_est + ask_est + attach_h + 1,
-            ibox.lines.len() as u16,
-            rows,
-        ));
-        ibox.lines
-            .extend(std::iter::repeat_n(Line::default(), spacer));
-    }
+    let ibox = build_input_box(&text, cursor, w, ghost, home, &chips);
     let box_h = ibox.lines.len().max(1) as u16;
 
     let box_rows_est: u16 = box_h;
@@ -233,7 +260,8 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
     let mut widget_rows = tui.plugin_widget.rows(widget_budget as usize, w);
     let max_viewport_h = viewport_cap(rows);
 
-    let mut band_allowance = band_budget(max_viewport_h, status_h + box_h + attach_h + 1);
+    let mut band_allowance =
+        band_budget(max_viewport_h, status_h + box_h + attach_h + panel_est + 1);
 
     let reserve_overflow_row = tui.live_tool_overflow() > 0 && band_allowance > 0;
     if reserve_overflow_row {
@@ -261,6 +289,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         box_rows_est,
         panel_est,
         attach_h,
+        footer_h,
         max_viewport_h,
     );
 
@@ -270,6 +299,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         live_est + tail_est + widget_h + ask_est,
         box_rows_est,
         attach_h,
+        footer_h,
         max_viewport_h,
     ));
 
@@ -416,26 +446,20 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
         let ask_h = rows_h[0];
         let widget_h = rows_h[2];
 
-        let avail = area.height.saturating_sub(
-            status_h + queued_h + tail_h + live_h + widget_h + box_h + attach_h + 1,
-        );
-        let need = PANEL_ROWS as u16;
-        let panel_cap = need.min(avail).max((PANEL_ROWS as u16).min(avail));
-        let visible_count = if tui.matches.is_empty() {
-            0
-        } else if home_mode {
-            tui.matches.len().min(PANEL_ROWS)
+        let visible_count = tui.matches.len().min(PANEL_ROWS);
+        let panel_gap: u16 = if visible_count > 0 {
+            visible_count as u16 + 1
         } else {
-            tui.matches.len().min(panel_cap as usize)
+            0
         };
-        let panel_h = visible_count as u16;
+        let panel_h: u16 = 0;
         let box_rows = box_h;
         let tail_y = status_y + seam_h;
         let queued_y = status_y + status_h + tail_h;
         let live_y = queued_y + queued_h;
         let ask_y = live_y + live_h;
         let widget_y = ask_y + ask_h;
-        let box_y = widget_y + widget_h;
+        let box_y = widget_y + widget_h + panel_gap;
         let panel_y = if home_mode {
             (area.y + area.height.saturating_sub(1)).saturating_sub(panel_h)
         } else {
@@ -560,6 +584,36 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
             let end = (start + visible_count).min(total);
             let hidden_above = start;
             let hidden_below = total.saturating_sub(end);
+
+            let pad_x: u16 = 2;
+            let mut item_w = 24usize;
+            for (name, desc) in tui.matches.iter().skip(start).take(visible_count) {
+                let sw = theme_row_swatch(name).map_or(0, |sw| {
+                    sw.iter()
+                        .map(|sp| display_width(sp.content.as_ref()))
+                        .sum::<usize>()
+                });
+                item_w = item_w.max(
+                    display_width(&format!(" /{name} "))
+                        + display_width(&format!(" {desc} "))
+                        + sw
+                        + 1,
+                );
+            }
+            let pop_w = (item_w as u16 + pad_x * 2)
+                .min(area.width.saturating_sub(4))
+                .max(30);
+            let inner_w = (pop_w - pad_x * 2) as usize;
+            let pop_h = visible_count as u16;
+            let pop_x = (area.x + ibox.x as u16).min(area.right().saturating_sub(pop_w));
+            let pop_y = box_y.saturating_sub(pop_h).max(area.y);
+            let rect = Rect::new(pop_x, pop_y, pop_w, pop_h);
+            frame.render_widget(ratatui::widgets::Clear, rect);
+            frame.render_widget(
+                Block::default().style(Style::default().bg(crate::theme::theme().surface_bg)),
+                rect,
+            );
+
             for (i, (name, desc)) in tui
                 .matches
                 .iter()
@@ -567,11 +621,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 .skip(start)
                 .take(visible_count)
             {
-                let y = (i - start) as u16;
-                let item_y = panel_y + y;
-                if item_y < area.y || item_y >= area.y + area.height {
-                    continue;
-                }
+                let item_y = pop_y + (i - start) as u16;
                 let is_sel = i == tui.sel;
                 let cmd_str = format!(" /{name} ");
                 let desc_str = format!(" {desc} ");
@@ -593,7 +643,7 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                     (false, true) => "↓",
                     (false, false) => "",
                 };
-                let pad_len = w.saturating_sub(used_len + display_width(marker));
+                let pad_len = inner_w.saturating_sub(used_len + display_width(marker));
                 let line_bg = if is_sel {
                     crate::theme::theme().accent
                 } else {
@@ -658,294 +708,260 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
                 frame.render_widget(
                     Paragraph::new(line)
                         .block(Block::default().style(Style::default().bg(line_bg))),
-                    Rect::new(area.x, item_y, area.width, 1),
+                    Rect::new(pop_x + pad_x, item_y, inner_w as u16, 1),
                 );
             }
         }
 
-        let (max_tokens, max_label) = crate::setup::model_context_info(&tui.model_name);
+        if !home_mode {
+            let (max_tokens, max_label) = crate::setup::model_context_info(&tui.model_name);
 
-        let (used_tokens, hit_rate) = if let Some(u) = tui.latest_usage.or(tui.cumulative_usage) {
-            (
-                super::live_context_total(Some(u), tui.streamed_bytes),
-                u.cache_hit_rate() * 100.0,
-            )
-        } else if tui.streamed_bytes > 0 {
-            (super::live_context_total(None, tui.streamed_bytes), 0.0)
-        } else {
-            (0, 0.0)
-        };
-        let ctx_pct = (used_tokens * 100).checked_div(max_tokens).unwrap_or(0);
-        let ctx_display = format!(
-            "{} / {}",
-            crate::setup::format_context_length(used_tokens),
-            max_label
-        );
-        let ctx_compact = format!("ctx {ctx_pct}%");
-        let cache_display = format!("{hit_rate:.1}% cache");
-
-        let model_display = tui
-            .model_label
-            .clone()
-            .unwrap_or_else(|| crate::setup::friendly_model_name(&tui.model_name));
-
-        let show_effort = footer_badge_visible(&tui.model_name, tui.turn_show_effort);
-
-        let effort_display = if !show_effort || tui.thinking_effort == "off" {
-            String::new()
-        } else if tui.hide_thinking {
-            if tui.thinking_effort.is_empty() {
-                "hidden".to_string()
+            let (used_tokens, hit_rate) = if let Some(u) = tui.latest_usage.or(tui.cumulative_usage)
+            {
+                (
+                    super::live_context_total(Some(u), tui.streamed_bytes),
+                    u.cache_hit_rate() * 100.0,
+                )
+            } else if tui.streamed_bytes > 0 {
+                (super::live_context_total(None, tui.streamed_bytes), 0.0)
             } else {
-                format!("{} · hidden", tui.thinking_effort)
-            }
-        } else {
-            tui.thinking_effort.clone()
-        };
-        let cache_color = if hit_rate > 0.0 {
-            crate::theme::theme().cache_hit
-        } else {
-            crate::theme::theme().text_faint
-        };
-
-        let line_cfg = crate::statusline::config();
-        let sep = line_cfg.separator();
-
-        let effort_seg = line_cfg
-            .left()
-            .iter()
-            .chain(line_cfg.right().iter())
-            .any(|s| s == "effort");
-        let model_text = match effort_display.chars().next() {
-            Some(c)
-                if !effort_seg
-                    && tui.model_label_parts.is_none()
-                    && !model_display
-                        .to_lowercase()
-                        .contains(&tui.thinking_effort.to_lowercase()) =>
-            {
-                let rest = &effort_display[c.len_utf8()..];
-                format!("{model_display} {}{rest}", c.to_uppercase())
-            }
-            _ => model_display.clone(),
-        };
-        let muted = crate::theme::theme().text_muted;
-
-        let level = std::cell::Cell::new(0u8);
-        let dir_name = std::path::Path::new(&tui.cwd)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let compute_builtin = |name: &str| -> Option<crate::statusline::Seg> {
-            use crate::statusline::Seg;
-            let t = crate::theme::theme();
-            let pieces = |parts: Vec<(String, Color)>| Seg {
-                text: parts.iter().map(|(s, _)| s.as_str()).collect(),
-                color: muted,
-                parts: Some(parts),
+                (0, 0.0)
             };
-            Some(match name {
-                "cache" | "timer" if level.get() > 3 => Seg::new("", muted),
-                "location" => {
-                    let mut parts = vec![("\u{28ff} ".to_string(), t.text_bright)];
-                    let dir = if level.get() > 1 {
-                        dir_name.clone()
-                    } else {
-                        crate::statusline::short_cwd(&tui.cwd)
-                    };
-                    parts.push((dir, t.text_body));
-                    let branch = crate::statusline::git_branch(std::path::Path::new(&tui.cwd));
-                    if level.get() == 0 && !branch.is_empty() {
-                        parts.push((format!(" ({branch})"), muted));
-                    }
-                    pieces(parts)
-                }
-                "state" => match turn_started.filter(|_| is_task_running) {
-                    Some(start) => {
-                        let frame = (start.elapsed().as_millis() / 80) as usize % 10;
-                        let spin = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".chars().nth(frame).unwrap_or('⠋');
-                        pieces(vec![
-                            (spin.to_string(), muted),
-                            (" working".to_string(), t.text_bright),
-                        ])
-                    }
-                    None => Seg::new("\u{25cb} idle", muted),
-                },
-                "context" if level.get() > 2 => Seg::new(ctx_compact.clone(), muted),
-                "context" => Seg::new(ctx_display.clone(), muted),
-                "cache" => Seg::new(cache_display.clone(), cache_color),
-                "timer" => cache_timer
-                    .as_ref()
-                    .map(|(text, color)| Seg::new(text.clone(), *color))
-                    .unwrap_or_else(|| Seg::new("", muted)),
-                "work" => Seg::new(tui.background_work.clone().unwrap_or_default(), t.accent),
-                "model" => {
-                    let mut seg = Seg::new(model_text.clone(), t.text_bright);
-                    if let Some(parts) = &tui.model_label_parts {
-                        let sk_lit = tui
-                            .live_tools
-                            .iter()
-                            .any(|tl| tl.running && tl.name.contains("handoff"));
-                        let lit = if sk_lit {
-                            Some(1)
-                        } else if tui.turn_started.is_some() {
-                            Some(0)
+            let ctx_pct = (used_tokens * 100).checked_div(max_tokens).unwrap_or(0);
+            let ctx_display = format!(
+                "{} / {}",
+                crate::setup::format_context_length(used_tokens),
+                max_label
+            );
+            let ctx_compact = format!("ctx {ctx_pct}%");
+            let cache_display = format!("{hit_rate:.1}% cache");
+
+            let cache_color = if hit_rate > 0.0 {
+                crate::theme::theme().cache_hit
+            } else {
+                crate::theme::theme().text_faint
+            };
+
+            let sep = line_cfg.separator();
+            let muted = crate::theme::theme().text_muted;
+
+            let level = std::cell::Cell::new(0u8);
+            let dir_name = std::path::Path::new(&tui.cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let compute_builtin = |name: &str| -> Option<crate::statusline::Seg> {
+                use crate::statusline::Seg;
+                let t = crate::theme::theme();
+                let pieces = |parts: Vec<(String, Color)>| Seg {
+                    text: parts.iter().map(|(s, _)| s.as_str()).collect(),
+                    color: muted,
+                    parts: Some(parts),
+                };
+                Some(match name {
+                    "cache" | "timer" if level.get() > 3 => Seg::new("", muted),
+                    "location" => {
+                        let mut parts = vec![("\u{28ff} ".to_string(), t.text_bright)];
+                        let dir = if level.get() > 1 {
+                            dir_name.clone()
                         } else {
-                            None
+                            crate::statusline::short_cwd(&tui.cwd)
                         };
-                        seg.parts = Some(
-                            parts
+                        parts.push((dir, t.text_body));
+                        let branch = crate::statusline::git_branch(std::path::Path::new(&tui.cwd));
+                        if level.get() == 0 && !branch.is_empty() {
+                            parts.push((format!(" ({branch})"), muted));
+                        }
+                        pieces(parts)
+                    }
+                    "state" => match turn_started.filter(|_| is_task_running) {
+                        Some(start) => {
+                            let frame = (start.elapsed().as_millis() / 80) as usize % 10;
+                            let spin = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".chars().nth(frame).unwrap_or('⠋');
+                            pieces(vec![
+                                (spin.to_string(), muted),
+                                (" working".to_string(), t.text_bright),
+                            ])
+                        }
+                        None => Seg::new("\u{25cb} idle", muted),
+                    },
+                    "context" if level.get() > 2 => Seg::new(ctx_compact.clone(), muted),
+                    "context" => Seg::new(ctx_display.clone(), muted),
+                    "cache" => Seg::new(cache_display.clone(), cache_color),
+                    "timer" => cache_timer
+                        .as_ref()
+                        .map(|(text, color)| Seg::new(text.clone(), *color))
+                        .unwrap_or_else(|| Seg::new("", muted)),
+                    "work" => Seg::new(tui.background_work.clone().unwrap_or_default(), t.accent),
+                    "model" => {
+                        let mut seg = Seg::new(model_text.clone(), t.text_bright);
+                        if let Some(parts) = &tui.model_label_parts {
+                            let sk_lit = tui
+                                .live_tools
                                 .iter()
-                                .map(|(txt, slot)| {
-                                    let c = match slot {
-                                        Some(_) if *slot == lit => t.accent,
-                                        Some(_) => t.text_bright,
-                                        None => muted,
-                                    };
-                                    (txt.clone(), c)
-                                })
-                                .collect(),
-                        );
+                                .any(|tl| tl.running && tl.name.contains("handoff"));
+                            let lit = if sk_lit {
+                                Some(1)
+                            } else if tui.turn_started.is_some() {
+                                Some(0)
+                            } else {
+                                None
+                            };
+                            seg.parts = Some(
+                                parts
+                                    .iter()
+                                    .map(|(txt, slot)| {
+                                        let c = match slot {
+                                            Some(_) if *slot == lit => t.accent,
+                                            Some(_) => t.text_bright,
+                                            None => muted,
+                                        };
+                                        (txt.clone(), c)
+                                    })
+                                    .collect(),
+                            );
+                        }
+                        seg
                     }
-                    seg
-                }
-                "effort" => Seg::new(effort_display.clone(), muted),
-                "cwd" => Seg::new(crate::statusline::short_cwd(&tui.cwd), muted),
-                "dir" => Seg::new(dir_name.clone(), muted),
-                "branch" => Seg::new(
-                    crate::statusline::git_branch(std::path::Path::new(&tui.cwd)),
-                    t.tool_dim,
-                ),
-                "command" => Seg::new(crate::statusline::command_output(), muted),
-                "status" => Seg::new(crate::statusline::all_statuses(&sep), muted),
-                other => match other.strip_prefix("status:") {
-                    Some(key) => {
-                        Seg::new(crate::statusline::status(key).unwrap_or_default(), muted)
-                    }
-                    None => return None,
-                },
-            })
-        };
-
-        let seg_memo: std::cell::RefCell<
-            std::collections::HashMap<String, Vec<Option<crate::statusline::Seg>>>,
-        > = Default::default();
-        let builtin = |name: &str| -> Option<crate::statusline::Seg> {
-            let l = level.get() as usize;
-            if let Some(hit) = seg_memo
-                .borrow()
-                .get(name)
-                .and_then(|slots| slots.get(l))
-                .and_then(|slot| slot.as_ref())
-            {
-                return Some(hit.clone());
-            }
-            let seg = compute_builtin(name);
-            if let Some(seg) = &seg {
-                let mut memo = seg_memo.borrow_mut();
-                if let Some(slot) = memo
-                    .entry(name.to_string())
-                    .or_insert_with(|| vec![None; 5])
-                    .get_mut(l)
-                {
-                    *slot = Some(seg.clone());
-                }
-            }
-            seg
-        };
-        let sep_color = crate::theme::theme().text_faint;
-        let right_sep = line_cfg.right_separator();
-        let seg_width = |segs: &[crate::statusline::Seg]| -> usize {
-            segs.iter().map(|s| display_width(&s.text)).sum()
-        };
-
-        let (mut left_segs, mut right_segs) = (Vec::new(), Vec::new());
-        for l in 0..=4 {
-            level.set(l);
-            left_segs =
-                crate::statusline::compose(&line_cfg.left(), &builtin, &sep, sep_color, muted);
-            right_segs = crate::statusline::compose(
-                &line_cfg.right(),
-                &builtin,
-                &right_sep,
-                sep_color,
-                muted,
-            );
-            if seg_width(&left_segs) + seg_width(&right_segs) + 5 <= w {
-                break;
-            }
-        }
-        let left_segs =
-            crate::statusline::clip(left_segs, w.saturating_sub(seg_width(&right_segs) + 5));
-        if line_cfg.command.is_some() {
-            static LAST_FACTS_KEY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-            let branch = crate::statusline::git_branch(std::path::Path::new(&tui.cwd));
-            let key = format!(
-                "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-                tui.cwd,
-                tui.model_name,
-                model_display,
-                tui.thinking_effort,
-                used_tokens,
-                max_label,
-                hit_rate.to_bits(),
-                branch,
-            );
-            let fresh = match LAST_FACTS_KEY.lock() {
-                Ok(mut g) if g.as_deref() != Some(key.as_str()) => {
-                    *g = Some(key);
-                    true
-                }
-                _ => false,
+                    "effort" => Seg::new(effort_display.clone(), muted),
+                    "cwd" => Seg::new(crate::statusline::short_cwd(&tui.cwd), muted),
+                    "dir" => Seg::new(dir_name.clone(), muted),
+                    "branch" => Seg::new(
+                        crate::statusline::git_branch(std::path::Path::new(&tui.cwd)),
+                        t.tool_dim,
+                    ),
+                    "command" => Seg::new(crate::statusline::command_output(), muted),
+                    "status" => Seg::new(crate::statusline::all_statuses(&sep), muted),
+                    other => match other.strip_prefix("status:") {
+                        Some(key) => {
+                            Seg::new(crate::statusline::status(key).unwrap_or_default(), muted)
+                        }
+                        None => return None,
+                    },
+                })
             };
-            if fresh {
-                crate::statusline::publish_facts(serde_json::json!({
-                    "cwd": tui.cwd,
-                    "workspace": { "current_dir": tui.cwd },
-                    "model": { "id": tui.model_name, "display_name": model_display },
-                    "effort": tui.thinking_effort,
-                    "context": { "used_tokens": used_tokens, "max": max_label },
-                    "cache_hit_rate": hit_rate,
-                    "branch": branch,
-                    "version": env!("CARGO_PKG_VERSION"),
-                }));
-            }
-        }
-        let left_len = 1 + seg_width(&left_segs);
-        let right_len = seg_width(&right_segs) + 1;
-        let pad_len = w.saturating_sub(left_len + right_len);
-        let to_spans = |s: crate::statusline::Seg| -> Vec<Span<'static>> {
-            match s.parts {
-                Some(parts) => parts
-                    .into_iter()
-                    .map(|(text, color)| Span::styled(text, Style::default().fg(color)))
-                    .collect(),
-                None => vec![Span::styled(s.text, Style::default().fg(s.color))],
-            }
-        };
-        let mut footer_spans = vec![Span::raw(" ")];
-        footer_spans.extend(left_segs.into_iter().flat_map(to_spans));
-        footer_spans.push(Span::raw(" ".repeat(pad_len)));
-        footer_spans.extend(right_segs.into_iter().flat_map(to_spans));
 
-        if let Some(footer_y) = footer_paint_row(footer_y, area) {
-            frame.render_widget(
-                Paragraph::new(Line::from(footer_spans)),
-                Rect::new(area.x, footer_y, area.width, 1),
-            );
-        }
+            let seg_memo: std::cell::RefCell<
+                std::collections::HashMap<String, Vec<Option<crate::statusline::Seg>>>,
+            > = Default::default();
+            let builtin = |name: &str| -> Option<crate::statusline::Seg> {
+                let l = level.get() as usize;
+                if let Some(hit) = seg_memo
+                    .borrow()
+                    .get(name)
+                    .and_then(|slots| slots.get(l))
+                    .and_then(|slot| slot.as_ref())
+                {
+                    return Some(hit.clone());
+                }
+                let seg = compute_builtin(name);
+                if let Some(seg) = &seg {
+                    let mut memo = seg_memo.borrow_mut();
+                    if let Some(slot) = memo
+                        .entry(name.to_string())
+                        .or_insert_with(|| vec![None; 5])
+                        .get_mut(l)
+                    {
+                        *slot = Some(seg.clone());
+                    }
+                }
+                seg
+            };
+            let sep_color = crate::theme::theme().text_faint;
+            let right_sep = line_cfg.right_separator();
+            let seg_width = |segs: &[crate::statusline::Seg]| -> usize {
+                segs.iter().map(|s| display_width(&s.text)).sum()
+            };
 
-        let used_bottom = footer_y + 1;
-        if used_bottom < area.y + area.height {
-            frame.render_widget(
-                ratatui::widgets::Clear,
-                Rect::new(
-                    area.x,
-                    used_bottom,
-                    area.width,
-                    (area.y + area.height) - used_bottom,
-                ),
-            );
+            let (mut left_segs, mut right_segs) = (Vec::new(), Vec::new());
+            for l in 0..=4 {
+                level.set(l);
+                left_segs =
+                    crate::statusline::compose(&line_cfg.left(), &builtin, &sep, sep_color, muted);
+                right_segs = crate::statusline::compose(
+                    &line_cfg.right(),
+                    &builtin,
+                    &right_sep,
+                    sep_color,
+                    muted,
+                );
+                if seg_width(&left_segs) + seg_width(&right_segs) + 5 <= w {
+                    break;
+                }
+            }
+            let left_segs =
+                crate::statusline::clip(left_segs, w.saturating_sub(seg_width(&right_segs) + 5));
+            if line_cfg.command.is_some() {
+                static LAST_FACTS_KEY: std::sync::Mutex<Option<String>> =
+                    std::sync::Mutex::new(None);
+                let branch = crate::statusline::git_branch(std::path::Path::new(&tui.cwd));
+                let key = format!(
+                    "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                    tui.cwd,
+                    tui.model_name,
+                    model_display,
+                    tui.thinking_effort,
+                    used_tokens,
+                    max_label,
+                    hit_rate.to_bits(),
+                    branch,
+                );
+                let fresh = match LAST_FACTS_KEY.lock() {
+                    Ok(mut g) if g.as_deref() != Some(key.as_str()) => {
+                        *g = Some(key);
+                        true
+                    }
+                    _ => false,
+                };
+                if fresh {
+                    crate::statusline::publish_facts(serde_json::json!({
+                        "cwd": tui.cwd,
+                        "workspace": { "current_dir": tui.cwd },
+                        "model": { "id": tui.model_name, "display_name": model_display },
+                        "effort": tui.thinking_effort,
+                        "context": { "used_tokens": used_tokens, "max": max_label },
+                        "cache_hit_rate": hit_rate,
+                        "branch": branch,
+                        "version": env!("CARGO_PKG_VERSION"),
+                    }));
+                }
+            }
+            let left_len = 1 + seg_width(&left_segs);
+            let right_len = seg_width(&right_segs) + 1;
+            let pad_len = w.saturating_sub(left_len + right_len);
+            let to_spans = |s: crate::statusline::Seg| -> Vec<Span<'static>> {
+                match s.parts {
+                    Some(parts) => parts
+                        .into_iter()
+                        .map(|(text, color)| Span::styled(text, Style::default().fg(color)))
+                        .collect(),
+                    None => vec![Span::styled(s.text, Style::default().fg(s.color))],
+                }
+            };
+            let mut footer_spans = vec![Span::raw(" ")];
+            footer_spans.extend(left_segs.into_iter().flat_map(to_spans));
+            footer_spans.push(Span::raw(" ".repeat(pad_len)));
+            footer_spans.extend(right_segs.into_iter().flat_map(to_spans));
+
+            if let Some(footer_y) = footer_paint_row(footer_y, area) {
+                frame.render_widget(
+                    Paragraph::new(Line::from(footer_spans)),
+                    Rect::new(area.x, footer_y, area.width, 1),
+                );
+            }
+
+            let used_bottom = footer_y + 1;
+            if used_bottom < area.y + area.height {
+                frame.render_widget(
+                    ratatui::widgets::Clear,
+                    Rect::new(
+                        area.x,
+                        used_bottom,
+                        area.width,
+                        (area.y + area.height) - used_bottom,
+                    ),
+                );
+            }
         }
 
         let cur_x = (area.x + ibox.x as u16 + 3 + ibox.cur_col as u16)

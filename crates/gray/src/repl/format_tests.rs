@@ -147,6 +147,41 @@ fn typed_image_link_becomes_vision_block() {
 }
 
 #[test]
+fn inline_markers_interleave_attachments_with_text_in_send_order() {
+    let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]));
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.png");
+    let b = dir.path().join("b.png");
+    img.save(&a).unwrap();
+    img.save(&b).unwrap();
+    let ma = super::super::attachments::attachment_marker(&a);
+    let mb = super::super::attachments::attachment_marker(&b);
+    let text = format!("first {ma} second {mb} last");
+    let msg = build_user_message_with_attachments(&text, &[a, b]);
+    use gray_core::message::ContentBlock;
+    let kinds: Vec<&str> = msg
+        .content
+        .iter()
+        .map(|b| match b {
+            ContentBlock::Text { .. } => "text",
+            ContentBlock::Image { .. } => "image",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, vec!["text", "image", "text", "image", "text"]);
+    let texts: Vec<String> = msg
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts[0], format!("first {ma}"));
+    assert_eq!(texts[2], " last");
+}
+
+#[test]
 fn typed_auth_error_names_connect_not_agent_error() {
     let out = format_core_error(
         &CoreError::Auth(
@@ -222,13 +257,14 @@ fn localize_utc_time_converts_to_offset() {
 fn detailed_provider_error_classifies_by_variant_and_fields_not_text() {
     let err = CoreError::Detailed {
         class: Box::new(CoreError::RateLimited("status 429: slow down".into())),
-        detail: ProviderDetail {
+        detail: Box::new(ProviderDetail {
             status: Some(429),
             vendor_code: Some("rate_limit_exceeded".into()),
             vendor_message: Some("Rate limit reached for requests per min.".into()),
             cf_ray: Some("a35cf09b-SEA".into()),
             request_id: Some("req_abc123".into()),
-        },
+            retry_after_ms: None,
+        }),
     };
     let out = format_core_error(&err, "https://example.com");
     assert!(out.starts_with("✗ Rate limited (retryable):"), "{out}");
@@ -246,10 +282,10 @@ fn detailed_provider_error_classifies_by_variant_and_fields_not_text() {
 fn detailed_error_class_survives_the_wrap_for_code_and_retryable() {
     let err = CoreError::Detailed {
         class: Box::new(CoreError::Auth("status 401: bad key".into())),
-        detail: ProviderDetail {
+        detail: Box::new(ProviderDetail {
             status: Some(401),
             ..Default::default()
-        },
+        }),
     };
     assert_eq!(err.code(), "auth_failed");
     assert!(!err.retryable());

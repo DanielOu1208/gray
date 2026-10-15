@@ -13,7 +13,6 @@ trap - EXIT
 echo "installed $src -> $dst"
 shadow="$HOME/.cargo/bin/gray"
 if [ -e "$shadow" ]; then
-    echo ""
-    echo "WARNING: $shadow exists — if it sits earlier on PATH it shadows $dst and new shells launch the old build."
-    echo "  fix: rm $shadow"
+    rm -f "$shadow"
+    echo "removed stale $shadow (cargo-install shadow; $dst is the only gray)"
 fi

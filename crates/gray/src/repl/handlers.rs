@@ -375,7 +375,8 @@ pub(crate) async fn handle_sys(
                     return;
                 }
             }
-            if let Err(e) = std::fs::write(&path, DEFAULT_SYS_PROMPT) {
+            if let Err(e) = std::fs::write(&path, crate::stamped_system_prompt(DEFAULT_SYS_PROMPT))
+            {
                 say(tui, &format!("failed to reset {}: {e}", path.display()));
                 return;
             }
@@ -386,13 +387,11 @@ pub(crate) async fn handle_sys(
             reload_agent(agent, config, cwd, session_id, tui).await;
         }
         SysAction::Edit => {
-            let initial = match load_or_create_system_prompt_at(&path) {
-                Ok(b) => b,
-                Err(e) => {
-                    say(tui, &format!("{e}"));
-                    return;
-                }
-            };
+            if let Err(e) = load_or_create_system_prompt_at(&path) {
+                say(tui, &format!("{e}"));
+                return;
+            }
+            let initial = std::fs::read_to_string(&path).unwrap_or_default();
 
             let _ = crate::sys_editor::backup_before_overwrite(&path);
             let tui_snap = tui.cloned();
@@ -443,7 +442,7 @@ pub(crate) async fn handle_undo(
     retry: bool,
     agent: &mut Option<Agent>,
     session_state: &mut Option<SessionState>,
-    pending_history: &mut Vec<Message>,
+    pending_history: &mut std::sync::Arc<Vec<Message>>,
     tui: Option<&crate::composer::SharedTui>,
 ) -> Option<String> {
     let Some(ag) = agent.as_mut() else {
@@ -469,7 +468,7 @@ pub(crate) async fn handle_undo(
         return None;
     }
     ag.set_messages(kept.clone());
-    pending_history.truncate(kept.len());
+    std::sync::Arc::make_mut(pending_history).truncate(kept.len());
     let dropped = messages.len() - kept.len();
     say(
         tui,

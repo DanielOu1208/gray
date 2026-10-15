@@ -41,6 +41,11 @@ async fn drain_in_flight_turn(limit: std::time::Duration) -> bool {
     true
 }
 
+pub(crate) fn take_pending_history(h: &mut std::sync::Arc<Vec<Message>>) -> Vec<Message> {
+    let arc = std::mem::replace(h, std::sync::Arc::new(Vec::new()));
+    std::sync::Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
+}
+
 fn signal_exit_text(session_id: Option<&str>, styled: bool) -> String {
     match session_id {
         Some(id) => format!("{}\r\n", session::exit_hint_line(id, styled)),
@@ -548,6 +553,8 @@ pub async fn run_repl_mode(
     let _ = crossterm::terminal::disable_raw_mode();
     crate::tui::clear_screen();
     let cwd = std::env::current_dir()?;
+    log::debug!(target: "gray_timing", "repl start elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
+    tokio::task::spawn_blocking(crate::setup::context::warm_rates_from_disk_cache);
 
     use std::io::IsTerminal;
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
@@ -615,9 +622,8 @@ pub async fn run_repl_mode(
     let mut agent: Option<Agent> = None;
     let mut session_state: Option<SessionState> = None;
     let mut session_totals = SessionTotals::default();
-    let mut pending_history: Vec<Message> = Vec::new();
-    let mut resumed_session_info: Option<(SessionId, Vec<crate::session_store::SessionEntry>)> =
-        None;
+    let mut pending_history: std::sync::Arc<Vec<Message>> = std::sync::Arc::new(Vec::new());
+    let mut resumed_session_info: Option<(SessionId, std::sync::Arc<Vec<Message>>)> = None;
 
     type Resumed = (
         SessionId,
@@ -682,6 +688,7 @@ pub async fn run_repl_mode(
         }
     }
 
+    log::debug!(target: "gray_timing", "repl session_load_done elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
     if let Some((sid, meta, entries, store)) = loaded {
         let open_guard = Some(store.acquire_open(&sid).await?);
         if config.model.is_none() && !meta.model.is_empty() {
@@ -691,10 +698,6 @@ pub async fn run_repl_mode(
         if let Some((old, new)) = normalize_adopted_model(config) {
             println!("Thinking effort clamped from {old} to {new} (not supported by this model)");
         }
-        let history: Vec<Message> = entries.iter().map(|e| e.message.clone()).collect();
-
-        pending_history = history;
-
         if let Some(ledger) = gray_plugin::builder::current_file_ledger() {
             ledger.clear();
         }
@@ -704,10 +707,19 @@ pub async fn run_repl_mode(
             store,
             _open_guard: open_guard,
         });
+        log::debug!(target: "gray_timing", "repl open_done elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
         session::export_session_env(sid.as_str());
         session_totals =
             SessionTotals::from_entries(&entries, config.model.as_deref().unwrap_or(""));
-        resumed_session_info = Some((sid, entries));
+        log::debug!(target: "gray_timing", "repl totals_done elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
+        let shared_history = std::sync::Arc::new(
+            entries
+                .into_iter()
+                .map(|e| e.message)
+                .collect::<Vec<Message>>(),
+        );
+        pending_history = shared_history.clone();
+        resumed_session_info = Some((sid, shared_history));
     }
 
     if let Some((old, new)) = normalize_adopted_model(config) {
@@ -722,6 +734,7 @@ pub async fn run_repl_mode(
     } else {
         None
     };
+    log::debug!(target: "gray_timing", "repl pre_tui elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
     let tui: TuiOpt = if interactive {
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         if crossterm::terminal::size().is_err() {
@@ -730,12 +743,21 @@ pub async fn run_repl_mode(
                  (could not query terminal size); pipe input or run under a TTY"
             );
         }
-        let mut t = crate::composer::Tui::new().map_err(|e| {
-            anyhow::anyhow!(
-                "not a terminal — the interactive composer needs a real terminal \
+        let mut t = {
+            let t = if resumed_session_info.is_some() {
+                crate::composer::Tui::new_no_intro()
+            } else {
+                crate::composer::Tui::new()
+            }
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "not a terminal — the interactive composer needs a real terminal \
                  (cursor position could not be read: {e:#}); pipe input or run under a TTY"
-            )
-        })?;
+                )
+            })?;
+            log::debug!(target: "gray_timing", "repl tui_new elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
+            t
+        };
         if let Some(m) = &config.model {
             t.set_model(m.clone());
             t.set_model_label(crate::setup::composite_label_for(config));
@@ -750,8 +772,10 @@ pub async fn run_repl_mode(
         t.set_cwd(cwd.display().to_string());
 
         t.set_home_session(session::current_session_line(&session_state));
-        if let Some((ref sid, ref entries)) = resumed_session_info {
+        if let Some((sid, shared_history)) = resumed_session_info.take() {
+            let n_entries = shared_history.len();
             let _ = t.draw();
+            log::debug!(target: "gray_timing", "repl first_draw elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
 
             let tool_defs = if config.bare {
                 Vec::new()
@@ -769,21 +793,21 @@ pub async fn run_repl_mode(
                 .unwrap_or_default()
             };
             let (tool_labels, tool_previews) = session::tool_display_maps(&tool_defs);
+            let replay_started = std::time::Instant::now();
             t.replay_session_history_with_tools(
-                entries,
+                shared_history,
                 &cwd,
                 crate::tool_fmt::ToolDisplay {
                     labels: Some(&tool_labels),
                     previews: Some(&tool_previews),
                 },
+                vec![format!(
+                    "\u{2b22} Resumed session {} ({} messages)",
+                    sid.as_str(),
+                    n_entries
+                )],
             );
-            t.ensure_gap();
-            t.push_dim(format!(
-                "\u{2b22} Resumed session {} ({} messages)",
-                sid.as_str(),
-                entries.len()
-            ));
-            t.ensure_gap();
+            log::debug!(target: "gray_timing", "repl history_replay elapsed_ms={} entries={}", replay_started.elapsed().as_millis(), n_entries);
         }
         let shared = std::sync::Arc::new(std::sync::Mutex::new(t));
         crate::host::register_tui(&shared);
@@ -807,6 +831,7 @@ pub async fn run_repl_mode(
         if let Ok(mut t) = shared.lock() {
             t.enable_reveal_pacing();
         }
+        log::debug!(target: "gray_timing", "repl ready elapsed_ms={}", crate::turn_caps::process_start().elapsed().as_millis());
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let ticker_stop = stop.clone();
         let ticker_tui = shared.clone();
@@ -814,7 +839,7 @@ pub async fn run_repl_mode(
             let mut last_status = std::time::Instant::now();
             let exe_watch = crate::exe_watch::ExeWatch::capture();
             let mut last_exe_check = std::time::Instant::now();
-            let mut exe_notified = false;
+            let mut exe_notified = None;
             loop {
                 if ticker_stop.load(AtomicOrdering::Relaxed) {
                     break;
@@ -832,12 +857,13 @@ pub async fn run_repl_mode(
                         last_status = std::time::Instant::now();
                         t.tick_status();
                     }
-                    if !exe_notified
-                        && last_exe_check.elapsed() >= std::time::Duration::from_secs(30)
-                    {
+                    if last_exe_check.elapsed() >= std::time::Duration::from_secs(30) {
                         last_exe_check = std::time::Instant::now();
-                        if exe_watch.as_ref().is_some_and(|w| w.replaced()) {
-                            exe_notified = true;
+                        if let Some(w) = exe_watch.as_ref()
+                            && w.replaced()
+                            && exe_notified != w.disk_id()
+                        {
+                            exe_notified = w.disk_id();
                             let notice = "gray was updated — /restart to load it".to_string();
                             if t.is_home() {
                                 t.set_home_update(Some(notice));

@@ -70,7 +70,11 @@ fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
-fn shell_env(session: Option<&str>, cwd_report: Option<&Path>) -> Vec<(String, String)> {
+fn shell_env(
+    session: Option<&str>,
+    cwd_report: Option<&Path>,
+    ps_report: Option<&Path>,
+) -> Vec<(String, String)> {
     let mut env: Vec<(&str, &str)> = vec![
         ("DEBIAN_FRONTEND", "noninteractive"),
         ("GIT_TERMINAL_PROMPT", "0"),
@@ -88,6 +92,9 @@ fn shell_env(session: Option<&str>, cwd_report: Option<&Path>) -> Vec<(String, S
     }
     if let Some(report) = cwd_report {
         env.push(("GRAY_CWD_REPORT", report.to_str().unwrap_or_default()));
+    }
+    if let Some(report) = ps_report {
+        env.push(("GRAY_PS_REPORT", report.to_str().unwrap_or_default()));
     }
     env.into_iter()
         .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -113,6 +120,7 @@ pub fn spawn(
     cwd: &Path,
     session: Option<&str>,
     cwd_report: Option<&Path>,
+    ps_report: Option<&Path>,
 ) -> io::Result<Spawned> {
     let raw = std::env::var(EXEC_PREFIX_ENV).unwrap_or_default();
     let prefix = match raw.trim() {
@@ -129,7 +137,39 @@ pub fn spawn(
             _ => None,
         },
     };
-    spawn_with_prefix(command, cwd, session, cwd_report, prefix)
+    spawn_with_prefix(command, cwd, session, cwd_report, prefix, ps_report)
+}
+
+pub fn pipestatus_shell() -> bool {
+    if std::env::var(EXEC_PREFIX_ENV)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        bash_available()
+    }
+}
+
+#[cfg(not(windows))]
+fn bash_available() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        std::process::Command::new("bash")
+            .args(["-c", "true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
 }
 
 pub fn spawn_with_prefix(
@@ -138,15 +178,29 @@ pub fn spawn_with_prefix(
     session: Option<&str>,
     cwd_report: Option<&Path>,
     prefix: Option<Vec<String>>,
+    ps_report: Option<&Path>,
 ) -> io::Result<Spawned> {
-    let env = shell_env(session, cwd_report);
+    let env = shell_env(session, cwd_report, ps_report);
     let mut cmd = match &prefix {
         Some(argv) => {
             let mut cmd = Command::new(&argv[0]);
             cmd.args(&argv[1..]);
             cmd
         }
-        None => local_command()?,
+        None => {
+            #[cfg(not(windows))]
+            {
+                if ps_report.is_some() {
+                    Command::new("bash")
+                } else {
+                    local_command()?
+                }
+            }
+            #[cfg(windows)]
+            {
+                local_command()?
+            }
+        }
     };
     cmd.current_dir(cwd)
         .stdout(std::process::Stdio::piped())

@@ -55,7 +55,7 @@ pub enum IndexBackend {
     Off,
 }
 
-fn global_index() -> IndexBackend {
+pub(crate) fn global_index() -> IndexBackend {
     static BACKEND: std::sync::OnceLock<IndexBackend> = std::sync::OnceLock::new();
     BACKEND
         .get_or_init(
@@ -199,7 +199,7 @@ async fn grep_call(args: &SearchArgs, ctx: &ToolContext) -> String {
 }
 
 #[cfg(unix)]
-async fn spawn_index<F, T>(f: F) -> Option<T>
+pub(crate) async fn spawn_index<F, T>(f: F) -> Option<T>
 where
     F: FnOnce() -> Option<T> + Send + 'static,
     T: Send + 'static,

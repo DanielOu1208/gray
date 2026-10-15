@@ -403,6 +403,7 @@ impl PrintFailure {
             "cancelled" => "Cancelled.",
             "serialization" => "Serialization failure.",
             "session_locked" => "The session is already open in another process.",
+            "quota_exhausted" => "The provider's usage allowance is exhausted.",
             _ => {
                 "Agent turn failed; actions may already have occurred. Do not automatically retry."
             }
@@ -425,6 +426,9 @@ impl PrintFailure {
             "timeout" => "Retry, or raise the request timeout for slow providers.",
             "server_error" | "stream_broken" => "Retrying the turn usually succeeds.",
             "session_locked" => "Close the other instance, or open a different session.",
+            "quota_exhausted" => {
+                "Wait for the quota window to reset, or switch models with `/models`."
+            }
             _ => return None,
         })
     }
@@ -928,7 +932,12 @@ async fn run_print_inner(
         None
     };
     let cwd = std::env::current_dir()?;
+    if !config.bare {
+        let _ = crate::plugin_status::ensure_boot(None);
+    }
     let store = JsonlSessionStore::default();
+    let prompt_text = crate::failed_turn::prompt_text(prompt, &user_message);
+    let prompt_hash = crate::failed_turn::prompt_hash(&prompt_text);
 
     let (resume_target, needs_maintain): (Option<SessionId>, bool) = match session {
         Some(raw)
@@ -943,7 +952,10 @@ async fn run_print_inner(
             false,
         ),
         None if continue_last => (crate::resume::latest_session_anywhere(&store).await, false),
-        None => (None, false),
+        None => (
+            crate::failed_turn::resume_session(&store, &cwd, &prompt_hash).await,
+            false,
+        ),
     };
 
     let mut _open_guard = None;
@@ -1138,7 +1150,7 @@ async fn run_print_inner(
     };
     let map_err = |e: gray_core::error::CoreError| {
         let msg = crate::repl::format_core_error(&e, &config.base_url);
-        anyhow::anyhow!(scrub_error_text(&msg))
+        anyhow::Error::new(e).context(scrub_error_text(&msg))
     };
     let mut run_result = agent
         .run_streaming(user_msg, ctx.clone(), &mut on_event)
@@ -1211,18 +1223,15 @@ async fn run_print_inner(
         }
     }
 
-    if render_broken {
+    let result = if render_broken {
         match (&run_result, &persist_result) {
-            (_, Err(p)) => return Err(anyhow::anyhow!("{p:#}")),
-            (Ok(_), Ok(_)) => return Ok(()),
-            (Err(r), Ok(_)) if r.to_string().to_lowercase().contains("cancel") => {
-                return Ok(());
-            }
-            (Err(_), Ok(_)) => return run_result.map(|_| ()),
+            (_, Err(p)) => Err(anyhow::anyhow!("{p:#}")),
+            (Ok(_), Ok(_)) => Ok(()),
+            (Err(r), Ok(_)) if r.to_string().to_lowercase().contains("cancel") => Ok(()),
+            (Err(_), Ok(_)) => run_result.map(|_| ()),
         }
-    }
-    if let Some(e) = render_err {
-        return match (run_result, persist_result) {
+    } else if let Some(e) = render_err {
+        match (run_result, persist_result) {
             (Err(r), Err(p)) => Err(anyhow::anyhow!(
                 "{r:#}; stdout write failed: {e}; also failed to persist session: {p:#}"
             )),
@@ -1231,17 +1240,33 @@ async fn run_print_inner(
                 "stdout write failed: {e}; also failed to persist session: {p:#}"
             )),
             _ => Err(anyhow::anyhow!("stdout write failed: {e}")),
-        };
+        }
+    } else {
+        crate::ask::shutdown();
+        match (run_result, persist_result) {
+            (Err(r), Err(p)) => Err(anyhow::anyhow!(
+                "{r:#}; also failed to persist session: {p:#}"
+            )),
+            (Err(r), _) => Err(r),
+            (_, Err(p)) => Err(p),
+            (Ok(_), Ok(_)) => Ok(()),
+        }
+    };
+    match &result {
+        Ok(()) => crate::failed_turn::clear_checkpoint(&session_id, &cwd, &prompt_hash),
+        Err(e) => {
+            let failure = PrintFailure::of(e);
+            crate::failed_turn::record_failure(
+                &session_id,
+                &cwd,
+                &prompt_text,
+                &prompt_hash,
+                failure.code,
+                failure.exit,
+            );
+        }
     }
-    crate::ask::shutdown();
-    match (run_result, persist_result) {
-        (Err(r), Err(p)) => Err(anyhow::anyhow!(
-            "{r:#}; also failed to persist session: {p:#}"
-        )),
-        (Err(r), _) => Err(r),
-        (_, Err(p)) => Err(p),
-        (Ok(_), Ok(_)) => Ok(()),
-    }
+    result
 }
 
 pub(crate) fn scrub_error_text(s: &str) -> String {

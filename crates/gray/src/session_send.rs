@@ -318,6 +318,13 @@ fn usage(msg: String) -> ! {
     std::process::exit(2)
 }
 
+pub(crate) fn owner_home() -> anyhow::Result<PathBuf> {
+    match std::env::var_os("GRAY_USER_HOME").filter(|v| !v.to_string_lossy().trim().is_empty()) {
+        Some(home) => Ok(PathBuf::from(home)),
+        None => crate::setup::gray_home(),
+    }
+}
+
 pub async fn run_cli(
     session: &str,
     text: &str,
@@ -325,14 +332,13 @@ pub async fn run_cli(
     from: Option<&str>,
     wait: Option<u64>,
 ) -> anyhow::Result<()> {
-    let home = crate::setup::gray_home()?;
-    let root = crate::session_store::default_root()
-        .ok_or_else(|| anyhow::anyhow!("no gray home for sessions"))?;
+    let home = owner_home()?;
+    let root = home.join("sessions");
     if cron_serve::session_inbox(&home, session).is_none() {
         usage(format!("invalid session id {session:?}"));
     }
     if !root.join(format!("{session}.jsonl")).is_file() {
-        usage(format!("no session {session:?}"));
+        usage(format!("no session {session:?} in {}", root.display()));
     }
     if text.trim().is_empty() && attach.is_empty() {
         usage("nothing to send: give text or --attach".to_string());

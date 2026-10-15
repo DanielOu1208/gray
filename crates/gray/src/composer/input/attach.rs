@@ -1,8 +1,26 @@
 use super::*;
 
 pub(crate) fn attach_image(tui: &mut Tui, path: PathBuf) {
+    let marker = crate::repl::attachments::attachment_marker(&path);
     tui.attachments.push(path);
+    tui.textarea.insert_element(&marker);
     let _ = tui.draw();
+}
+
+pub(crate) fn sync_attachment_markers(tui: &mut Tui) {
+    let mut open = std::collections::HashMap::<String, usize>::new();
+    for (_, name) in crate::repl::attachments::attachment_markers(tui.textarea.text()) {
+        *open.entry(name).or_default() += 1;
+    }
+    tui.attachments.retain(|p| {
+        match open.get_mut(&crate::repl::attachments::attachment_label(p)) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                true
+            }
+            _ => false,
+        }
+    });
 }
 
 pub(crate) fn strip_attachment_marker(tui: &mut Tui, path: &std::path::Path) {

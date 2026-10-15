@@ -278,31 +278,98 @@ impl Tui {
 
     pub fn replay_session_history(
         &mut self,
-        entries: &[crate::session_store::SessionEntry],
+        history: std::sync::Arc<Vec<gray_core::Message>>,
         cwd: &std::path::Path,
+        tail: Vec<String>,
     ) {
         self.replay_session_history_with_tools(
-            entries,
+            history,
             cwd,
             crate::tool_fmt::ToolDisplay::default(),
+            tail,
         );
     }
 
     pub fn replay_session_history_with_tools(
         &mut self,
-        entries: &[crate::session_store::SessionEntry],
+        history: std::sync::Arc<Vec<gray_core::Message>>,
+        cwd: &std::path::Path,
+        display: crate::tool_fmt::ToolDisplay<'_>,
+        tail: Vec<String>,
+    ) {
+        self.left_home = true;
+        let estimate: usize = history.iter().map(crate::compact::estimate_tokens).sum();
+        self.replay_queue = Some(Box::new(crate::composer::ReplayQueue {
+            history,
+            next: 0,
+            tail,
+            tool_calls: HashMap::new(),
+            labels: display.labels.cloned(),
+            previews: display.previews.cloned(),
+            cwd: cwd.to_path_buf(),
+            estimate,
+        }));
+        self.tick_replay();
+    }
+
+    pub(crate) fn tick_replay(&mut self) {
+        let Some(mut q) = self.replay_queue.take() else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(4);
+        self.begin_insert_batch();
+        while q.next < q.history.len() {
+            let display = crate::tool_fmt::ToolDisplay {
+                labels: q.labels.as_ref(),
+                previews: q.previews.as_ref(),
+            };
+            self.replay_entry(&q.history[q.next], &mut q.tool_calls, &q.cwd, display);
+            q.next += 1;
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+        let done = q.next >= q.history.len();
+        if done {
+            let display = crate::tool_fmt::ToolDisplay {
+                labels: q.labels.as_ref(),
+                previews: q.previews.as_ref(),
+            };
+            for (_id, (name, args)) in q.tool_calls.drain() {
+                let header = crate::tool_fmt::format_tool_card_lines(
+                    &name,
+                    &args,
+                    Some(&q.cwd),
+                    display.label(&name),
+                    display.preview(&name),
+                );
+                self.push_tool_box_lines(header, Vec::new());
+            }
+            self.seed_estimate_usage(q.estimate);
+            for line in std::mem::take(&mut q.tail) {
+                self.push_dim(line);
+            }
+        }
+        self.end_insert_batch();
+        if !done {
+            self.replay_queue = Some(q);
+        }
+        let _ = self.draw();
+    }
+
+    fn replay_entry(
+        &mut self,
+        msg: &gray_core::Message,
+        tool_calls: &mut HashMap<String, (String, serde_json::Value)>,
         cwd: &std::path::Path,
         display: crate::tool_fmt::ToolDisplay<'_>,
     ) {
-        self.left_home = true;
-        self.begin_insert_batch();
-        let mut tool_calls: HashMap<String, (String, serde_json::Value)> = HashMap::new();
-        for entry in entries {
-            match entry.message.role {
+        {
+            match msg.role {
                 gray_core::Role::User => {
                     let mut user_text = String::new();
                     let mut attached: Vec<std::path::PathBuf> = Vec::new();
-                    for block in &entry.message.content {
+                    for block in &msg.content {
                         match block {
                             gray_core::ContentBlock::Text { text } => {
                                 if !user_text.is_empty() {
@@ -333,20 +400,13 @@ impl Tui {
                                 content,
                                 is_error,
                             } => replay_tool_result(
-                                self,
-                                &mut tool_calls,
-                                id,
-                                content,
-                                *is_error,
-                                cwd,
-                                display,
+                                self, tool_calls, id, content, *is_error, cwd, display,
                             ),
                             _ => {}
                         }
                     }
-                    let typed = !entry.message.injected
-                        && entry
-                            .message
+                    let typed = !msg.injected
+                        && msg
                             .content
                             .iter()
                             .any(|b| matches!(b, gray_core::ContentBlock::Text { .. }));
@@ -363,7 +423,7 @@ impl Tui {
                     }
                 }
                 gray_core::Role::Assistant => {
-                    for block in &entry.message.content {
+                    for block in &msg.content {
                         match block {
                             gray_core::ContentBlock::Thinking { text, .. } => {
                                 let rows = thinking_replay_lines(text);
@@ -403,7 +463,7 @@ impl Tui {
                     }
                 }
                 gray_core::Role::System => {
-                    for block in &entry.message.content {
+                    for block in &msg.content {
                         if let gray_core::ContentBlock::ToolResult {
                             id,
                             content,
@@ -411,36 +471,13 @@ impl Tui {
                         } = block
                         {
                             replay_tool_result(
-                                self,
-                                &mut tool_calls,
-                                id,
-                                content,
-                                *is_error,
-                                cwd,
-                                display,
+                                self, tool_calls, id, content, *is_error, cwd, display,
                             );
                         }
                     }
                 }
             }
         }
-        for (_id, (name, args)) in tool_calls {
-            let header = crate::tool_fmt::format_tool_card_lines(
-                &name,
-                &args,
-                Some(cwd),
-                display.label(&name),
-                display.preview(&name),
-            );
-            self.push_tool_box_lines(header, Vec::new());
-        }
-
-        let replay_estimate: usize = entries
-            .iter()
-            .map(|e| crate::compact::estimate_tokens(&e.message))
-            .sum();
-        self.seed_estimate_usage(replay_estimate);
-        self.end_insert_batch();
     }
 }
 

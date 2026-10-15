@@ -317,7 +317,8 @@ pub struct Tui {
 
     pub(crate) left_home: bool,
 
-    pub(crate) pending_input: Option<crossterm::event::Event>,
+    pub(crate) intro_started: Option<std::time::Instant>,
+    pub(crate) replay_queue: Option<Box<ReplayQueue>>,
 
     status_line_seen: u64,
 }
@@ -426,84 +427,6 @@ pub enum TranscriptEntry {
     Gap(usize),
 }
 
-const WELCOME_HINTS: &[(&str, &str)] = &[("/", "commands")];
-
-const WELCOME_TIPS: &[(&str, &str)] = &[
-    ("/", "shows every command and skill"),
-    ("/models", "picks a model"),
-    ("/plugins", "manages installed plugins"),
-    ("/sessions", "reopens an earlier session"),
-    ("/compact", "summarizes context"),
-    ("/undo", "drops the last exchange"),
-    ("/retry", "asks again"),
-    ("/context", "sets the context window"),
-    ("/jobs", "lists background jobs"),
-    ("/update auto", "toggles auto-updates"),
-    ("/theme", "picks a color theme"),
-    ("/skills", "lists skills"),
-    ("/cron", "lists scheduled jobs"),
-    ("/usage", "shows session tokens"),
-    ("/hotkeys", "shows keybindings"),
-    ("/gateway", "shows connections"),
-    ("alt+enter", "inserts a newline"),
-    ("ctrl+v", "pastes an image from the clipboard"),
-    ("esc", "cancels the running turn"),
-    ("gray -p \"…\"", "runs one prompt and exits"),
-    ("gray cmd list", "lists commands for gateways"),
-    ("gray plugin update --check all", "finds stale plugins"),
-];
-
-fn welcome_tip_index() -> usize {
-    static PICK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *PICK.get_or_init(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as usize)
-            .unwrap_or(0)
-            % WELCOME_TIPS.len()
-    })
-}
-
-pub(crate) fn hint_spans(col_w: usize) -> Vec<Span<'static>> {
-    let theme = crate::theme::theme();
-    let hint_w = |hints: &[(&str, &str)]| -> usize {
-        hints
-            .iter()
-            .map(|(k, l)| k.len() + 1 + l.len())
-            .sum::<usize>()
-            + hints.len().saturating_sub(1) * 3
-    };
-    let mut hints = WELCOME_HINTS.to_vec();
-    while hints.len() > 1 && hint_w(&hints) > col_w {
-        hints.pop();
-    }
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (i, (key, label)) in hints.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw("   "));
-        }
-        spans.push(Span::styled(
-            key.to_string(),
-            Style::default().fg(theme.text_bright),
-        ));
-        spans.push(Span::styled(
-            format!(" {label}"),
-            Style::default().fg(theme.text_muted),
-        ));
-    }
-    spans
-}
-
-pub(crate) fn tip_spans() -> Vec<Span<'static>> {
-    let theme = crate::theme::theme();
-    let (key, text) = WELCOME_TIPS[welcome_tip_index()];
-    vec![
-        Span::styled("● Tip ", Style::default().fg(theme.text_bright)),
-        Span::styled(key, Style::default().fg(theme.text_bright)),
-        Span::styled(format!(" {text}"), Style::default().fg(theme.text_muted)),
-    ]
-}
-
 pub(crate) fn stats_spans(stats: &str) -> Vec<Span<'static>> {
     vec![Span::styled(
         stats.to_string(),
@@ -516,7 +439,6 @@ pub(crate) fn home_column(w: usize) -> (usize, usize) {
     (w.saturating_sub(col_w) / 2, col_w)
 }
 
-const INTRO_FRAME_MS: u64 = 33;
 const INTRO_TOTAL_MS: u64 = 1000;
 const INTRO_FRAMES_TXT: &str = include_str!("../../assets/logo-intro-frames.txt");
 
@@ -670,10 +592,18 @@ fn intro_settle_frames(from: &[String]) -> Vec<(Vec<String>, Vec<String>)> {
 }
 
 fn welcome_body_lines(w: usize, progress: f32, intro: Option<Duration>) -> Vec<Line<'static>> {
+    let (x, col_w) = home_column(w);
+    welcome_body_lines_at(x, col_w, progress, intro)
+}
+
+pub(crate) fn welcome_body_lines_at(
+    x: usize,
+    col_w: usize,
+    progress: f32,
+    intro: Option<Duration>,
+) -> Vec<Line<'static>> {
     let theme = crate::theme::theme();
     let version = env!("CARGO_PKG_VERSION").to_string();
-
-    let (x, col_w) = home_column(w);
 
     let centered = |segs: Vec<Span<'static>>, text_w: usize| -> Line<'static> {
         let pad = x + col_w.saturating_sub(text_w) / 2;
@@ -775,12 +705,7 @@ pub fn build_welcome_lines(w: usize) -> Vec<Line<'static>> {
     welcome_lines_at(w, 1.0, None)
 }
 
-fn play_logo_intro(
-    terminal: &mut Term,
-    w: usize,
-    h: usize,
-    welcome_h: usize,
-) -> Option<crossterm::event::Event> {
+fn intro_stage(terminal: &mut Term, w: usize, h: usize, welcome_h: usize) -> Option<u16> {
     let y0 = terminal.viewport_area.y as usize;
     let overflow = (y0 + welcome_h + draw::home_band_h(w)).saturating_sub(h);
     if overflow > y0 {
@@ -808,57 +733,18 @@ fn play_logo_intro(
             _ => break,
         }
     }
-    let intro_start = std::time::Instant::now();
-    let dim = Style::default().fg(crate::theme::theme().text_dim);
-    let mut skipped = None;
-    loop {
-        let elapsed = intro_start.elapsed();
-        if elapsed >= Duration::from_millis(INTRO_TOTAL_MS) {
-            break;
-        }
-        let progress = (elapsed.as_secs_f64() * 1000.0 / INTRO_TOTAL_MS as f64) as f32;
-        let _ = terminal.draw(|frame| {
-            let area = frame.area();
-            frame.render_widget(
-                Paragraph::new(welcome_lines_at(w, progress, Some(elapsed))),
-                area,
-            );
-            let row = ratatui::layout::Rect::new(0, area.height.saturating_sub(1), area.width, 1);
-            frame.render_widget(Paragraph::new(Line::styled("enter to skip", dim)), row);
-            frame.render_widget(
-                Paragraph::new(Line::styled("/intro disable to disable", dim))
-                    .alignment(ratatui::layout::Alignment::Right),
-                row,
-            );
-        });
+    Some(start as u16)
+}
 
-        if crossterm::event::poll(Duration::from_millis(INTRO_FRAME_MS)).unwrap_or(false) {
-            match crossterm::event::read() {
-                Ok(crossterm::event::Event::Key(key)) => {
-                    let swallow = matches!(
-                        key.code,
-                        crossterm::event::KeyCode::Enter
-                            | crossterm::event::KeyCode::Esc
-                            | crossterm::event::KeyCode::Char(' ')
-                    ) || key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL);
-                    if !swallow {
-                        skipped = Some(crossterm::event::Event::Key(key));
-                    }
-                    break;
-                }
-                Ok(ev @ crossterm::event::Event::Paste(_)) => {
-                    skipped = Some(ev);
-                    break;
-                }
-                Ok(_) | Err(_) => {}
-            }
-        }
-    }
-
-    terminal.set_viewport_area(ratatui::layout::Rect::new(0, start as u16, w as u16, 0));
-    skipped
+pub(crate) struct ReplayQueue {
+    pub history: Arc<Vec<gray_core::Message>>,
+    pub next: usize,
+    pub tail: Vec<String>,
+    pub tool_calls: std::collections::HashMap<String, (String, serde_json::Value)>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
+    pub previews: Option<std::collections::HashMap<String, String>>,
+    pub cwd: std::path::PathBuf,
+    pub estimate: usize,
 }
 
 pub(crate) fn palette_repaint_due(
@@ -871,6 +757,14 @@ pub(crate) fn palette_repaint_due(
 
 impl Tui {
     pub fn new() -> anyhow::Result<Self> {
+        Self::with_intro(true)
+    }
+
+    pub fn new_no_intro() -> anyhow::Result<Self> {
+        Self::with_intro(false)
+    }
+
+    fn with_intro(play: bool) -> anyhow::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
 
@@ -893,13 +787,14 @@ impl Tui {
         let welcome_lines = build_welcome_lines(cols as usize);
         let welcome_h = welcome_lines.len() as u16;
 
-        let pending_input = if crate::setup::intro_enabled() {
-            play_logo_intro(
+        let intro = if play && crate::setup::intro_enabled() {
+            intro_stage(
                 &mut terminal,
                 cols as usize,
                 rows as usize,
                 welcome_h as usize,
             )
+            .map(|_| std::time::Instant::now())
         } else {
             None
         };
@@ -915,7 +810,7 @@ impl Tui {
             rows,
             welcome_lines,
             vec![TranscriptEntry::Welcome],
-            pending_input,
+            intro,
         ))
     }
 
@@ -925,7 +820,7 @@ impl Tui {
         rows: u16,
         transcript: Vec<Line<'static>>,
         history_entries: Vec<TranscriptEntry>,
-        pending_input: Option<crossterm::event::Event>,
+        intro: Option<std::time::Instant>,
     ) -> Self {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
@@ -1004,7 +899,8 @@ impl Tui {
             home_qol: None,
             home_session: None,
             left_home: false,
-            pending_input,
+            intro_started: intro,
+            replay_queue: None,
         }
     }
 
@@ -1530,7 +1426,50 @@ impl Tui {
     }
 
     pub(crate) fn draw(&mut self) -> anyhow::Result<()> {
+        if self.intro_started.is_some() {
+            self.draw_intro();
+            return Ok(());
+        }
         draw::draw(self)
+    }
+
+    pub(crate) fn end_intro(&mut self) {
+        if self.intro_started.take().is_some() {
+            self.reflow_on_resize_inner(self.last_width);
+        }
+    }
+
+    fn draw_intro(&mut self) {
+        if self.modal_open {
+            return;
+        }
+        let Some(started) = self.intro_started else {
+            return;
+        };
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_millis(INTRO_TOTAL_MS) {
+            self.end_intro();
+            return;
+        }
+        let w = self.last_width as usize;
+        let progress = (elapsed.as_secs_f64() * 1000.0 / INTRO_TOTAL_MS as f64) as f32;
+        let dim = Style::default().fg(crate::theme::theme().text_dim);
+        let _ = self.terminal.draw(|frame| {
+            let area = frame.area();
+            frame.render_widget(
+                Paragraph::new(welcome_lines_at(w, progress, Some(elapsed))),
+                area,
+            );
+            let row = ratatui::layout::Rect::new(0, area.height.saturating_sub(1), area.width, 1);
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    "enter to skip · /intro disable to disable",
+                    dim,
+                ))
+                .alignment(ratatui::layout::Alignment::Center),
+                row,
+            );
+        });
     }
 
     pub fn handle_paste(&mut self, pasted: String) -> bool {
@@ -1785,7 +1724,11 @@ impl Tui {
 
         let cache_ticking = self.cache_remaining().is_some();
         let footer_changed = crate::statusline::version() != self.status_line_seen;
-        if self.status.is_none()
+        if self.intro_started.is_none() {
+            self.tick_replay();
+        }
+        if self.intro_started.is_none()
+            && self.status.is_none()
             && self.live_tools.is_empty()
             && !self.plugin_widget.active()
             && !widget_changed

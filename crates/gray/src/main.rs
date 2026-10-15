@@ -65,9 +65,18 @@ async fn run() -> anyhow::Result<()> {
     if let Some(gray::Commands::Spill { cmd }) = &cli.command {
         return gray::spill::run_cli(cmd);
     }
-    #[cfg(unix)]
-    if let Some(gray::Commands::SearchServe { root, sock }) = &cli.command {
-        return Ok(gray_tools::search_serve::serve(root, sock)?);
+    #[cfg(target_os = "linux")]
+    if let Some(gray::Commands::SearchServe {
+        root,
+        sock,
+        index_dir,
+    }) = &cli.command
+    {
+        return Ok(gray_tools::search_serve::serve(
+            root,
+            sock,
+            index_dir.as_deref(),
+        )?);
     }
     match &cli.command {
         Some(gray::Commands::Find {
@@ -127,6 +136,16 @@ async fn run() -> anyhow::Result<()> {
     }) = &cli.command
     {
         return gray::session_send::run_cli(session, text, attach, from.as_deref(), *wait).await;
+    }
+
+    if let Some(gray::Commands::Read {
+        session,
+        live,
+        last,
+        json,
+    }) = &cli.command
+    {
+        return gray::session_read::run_cli(session.as_deref(), *live, *last, *json).await;
     }
 
     if let Some(gray::Commands::External(args)) = &cli.command {
@@ -198,6 +217,9 @@ async fn run() -> anyhow::Result<()> {
             gray::Commands::Send { .. } => {
                 unreachable!("send dispatch happens before configuration")
             }
+            gray::Commands::Read { .. } => {
+                unreachable!("read dispatch happens before configuration")
+            }
             gray::Commands::Gateway { cmd } => {
                 return gray::gateway::run_cli(cmd, &config).await;
             }
@@ -216,11 +238,12 @@ async fn run() -> anyhow::Result<()> {
             }
             gray::Commands::Find { .. }
             | gray::Commands::Grep { .. }
-            | gray::Commands::Spill { .. }
-            | gray::Commands::SearchServe { .. } => {
-                unreachable!(
-                    "find/grep/spill/search-serve CLI dispatch happens before configuration"
-                )
+            | gray::Commands::Spill { .. } => {
+                unreachable!("find/grep/spill CLI dispatch happens before configuration")
+            }
+            #[cfg(target_os = "linux")]
+            gray::Commands::SearchServe { .. } => {
+                unreachable!("search-serve CLI dispatch happens before configuration")
             }
         }
     }

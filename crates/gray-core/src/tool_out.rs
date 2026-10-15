@@ -9,10 +9,20 @@ pub const MAX_BYTES: usize = 12 * 1024;
 
 pub const MAX_ERROR_BYTES: usize = 2048;
 
+fn strip_ns(n: &str) -> &str {
+    n.rsplit("__").next().unwrap_or(n)
+}
+
 pub fn unknown_tool(name: &str, available: &[String]) -> String {
+    let bare = strip_ns(name);
     let mut scored: Vec<(&str, f64)> = available
         .iter()
-        .map(|n| (n.as_str(), strsim::jaro_winkler(name, n)))
+        .map(|n| {
+            let s = strsim::jaro_winkler(name, n)
+                .max(strsim::jaro_winkler(bare, strip_ns(n)))
+                .max(strsim::jaro_winkler(name, strip_ns(n)));
+            (n.as_str(), s)
+        })
         .filter(|(_, score)| *score >= 0.87)
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

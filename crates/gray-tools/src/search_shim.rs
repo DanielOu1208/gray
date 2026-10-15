@@ -23,6 +23,12 @@ pub struct Reply {
     pub files: Vec<String>,
     pub candidates: usize,
     pub server_ms: f64,
+
+    pub mode: String,
+
+    pub stdout: String,
+    pub stderr: String,
+    pub code: i32,
 }
 
 impl Reply {
@@ -49,6 +55,22 @@ impl Reply {
             files: strings("files")?,
             candidates: v.get("candidates").and_then(|c| c.as_u64()).unwrap_or(0) as usize,
             server_ms: v.get("server_ms").and_then(|c| c.as_f64()).unwrap_or(0.0),
+            mode: v
+                .get("mode")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            stdout: v
+                .get("stdout")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            stderr: v
+                .get("stderr")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            code: v.get("code").and_then(|c| c.as_i64()).unwrap_or(1) as i32,
         })
     }
 }
@@ -63,9 +85,15 @@ pub fn run(tool: &str) -> ! {
     let original: Vec<OsString> = std::env::args_os().collect();
     let start = Instant::now();
     let reply = ask(tool, &original[1..]);
-    let (served, reason, candidates, server_ms) = match &reply {
-        Some(r) => (r.served, r.reason.as_str(), r.candidates, r.server_ms),
-        None => (false, "no index", 0, 0.0),
+    let (served, reason, candidates, server_ms, mode) = match &reply {
+        Some(r) => (
+            r.served,
+            r.reason.as_str(),
+            r.candidates,
+            r.server_ms,
+            r.mode.as_str(),
+        ),
+        None => (false, "no index", 0, 0.0, ""),
     };
     trace(
         tool,
@@ -74,12 +102,27 @@ pub fn run(tool: &str) -> ! {
         reason,
         candidates,
         server_ms,
+        mode,
         start,
     );
     match reply {
+        Some(r) if r.served && r.mode == "answer" => print_answer(tool, r),
         Some(r) if r.served => run_batches(tool, &original[0], r),
         _ => exec_real(tool, &original),
     }
+}
+
+fn print_answer(tool: &str, r: Reply) -> ! {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let (Ok(out), Ok(err)) = (b64.decode(r.stdout), b64.decode(r.stderr)) else {
+        exec_real(tool, &std::env::args_os().collect::<Vec<_>>());
+    };
+    use std::io::Write as _;
+    let _ = std::io::stdout().write_all(&out);
+    let _ = std::io::stderr().write_all(&err);
+    let _ = std::io::stdout().flush();
+    std::process::exit(r.code);
 }
 
 fn ask(tool: &str, args: &[OsString]) -> Option<Reply> {
@@ -184,6 +227,7 @@ pub fn real_tool(tool: &str) -> Option<PathBuf> {
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn trace(
     tool: &str,
     argv: &[OsString],
@@ -191,6 +235,7 @@ fn trace(
     reason: &str,
     candidates: usize,
     server_ms: f64,
+    mode: &str,
     start: Instant,
 ) {
     let Some(path) = std::env::var_os(TRACE_ENV) else {
@@ -208,6 +253,7 @@ fn trace(
         "reason": reason,
         "candidates": candidates,
         "server_ms": server_ms,
+        "mode": mode,
         "total_ms": start.elapsed().as_secs_f64() * 1000.0,
     });
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -215,6 +261,6 @@ fn trace(
         .append(true)
         .open(path)
     {
-        let _ = writeln!(f, "{line}");
+        let _ = f.write_all(format!("{line}\n").as_bytes());
     }
 }

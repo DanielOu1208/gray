@@ -308,6 +308,27 @@ fn first_gray_on_path() -> Option<PathBuf> {
     first_gray_in(&entries)
 }
 
+fn cargo_shadow(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    path == PathBuf::from(home).join(".cargo/bin/gray")
+}
+
+fn drop_cargo_shadow(resolved: PathBuf, other: &Path) -> PathBuf {
+    if cargo_shadow(&resolved)
+        && !same_binary(&resolved, other)
+        && std::fs::remove_file(&resolved).is_ok()
+    {
+        log::info!("removed stale cargo-install shadow {}", resolved.display());
+        if let Some(next) = first_gray_on_path() {
+            return next;
+        }
+        return resolved;
+    }
+    resolved
+}
+
 fn same_binary(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -334,7 +355,7 @@ fn post_update_shadow_warning() -> Option<String> {
     let installed = installer_dest()?.join("gray");
 
     let installed_version = binary_version(&installed)?;
-    let resolved = first_gray_on_path()?;
+    let resolved = drop_cargo_shadow(first_gray_on_path()?, &installed);
     shadow_warning(&installed, &installed_version, &resolved)
 }
 
@@ -357,7 +378,7 @@ fn divergence_warning(current: &Path, running: &str, resolved: &Path) -> Option<
 
 fn path_divergence_warning() -> Option<String> {
     let current = std::env::current_exe().ok()?;
-    let resolved = first_gray_on_path()?;
+    let resolved = drop_cargo_shadow(first_gray_on_path()?, &current);
     divergence_warning(&current, env!("CARGO_PKG_VERSION"), &resolved)
 }
 

@@ -416,3 +416,46 @@ fn resume_flag_parses_bare_id_and_conflicts() {
     assert!(Cli::try_parse_from(["gray", "-r", "x", "--session", "y"]).is_err());
     assert!(Cli::try_parse_from(["gray", "-r", "x", "-c"]).is_err());
 }
+
+#[test]
+fn managed_prompt_regenerates_only_while_pristine() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("AGENTS.md");
+
+    let body = crate::load_or_create_system_prompt_at(&path).unwrap();
+    assert_eq!(body, crate::DEFAULT_SYS_PROMPT);
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.starts_with("<!-- gray:managed sha256:"),
+        "{on_disk}"
+    );
+
+    let stale = crate::stamped_system_prompt("old default text");
+    std::fs::write(&path, &stale).unwrap();
+    let body = crate::load_or_create_system_prompt_at(&path).unwrap();
+    assert_eq!(
+        body,
+        crate::DEFAULT_SYS_PROMPT,
+        "pristine stale default refreshes"
+    );
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains(&crate::DEFAULT_SYS_PROMPT[..40])
+    );
+
+    std::fs::write(&path, "my custom rules").unwrap();
+    let body = crate::load_or_create_system_prompt_at(&path).unwrap();
+    assert_eq!(body, "my custom rules", "edited file is never touched");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "my custom rules");
+
+    std::fs::write(&path, crate::LEGACY_SYS_PROMPT).unwrap();
+    let body = crate::load_or_create_system_prompt_at(&path).unwrap();
+    assert_eq!(body, crate::LEGACY_SYS_PROMPT);
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("<!-- gray:managed sha256:"),
+        "legacy pristine default gets stamped in place"
+    );
+}

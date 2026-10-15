@@ -113,7 +113,7 @@ pub fn estimate_tokens(msg: &Message) -> usize {
     }) {
         gray_core::agent::estimate_message_tokens(msg)
     } else {
-        msg.context_text().len().div_ceil(4)
+        msg.context_text_len().div_ceil(4)
     }
 }
 

@@ -81,7 +81,7 @@ async fn plugin_list_dispatches_without_unknown_command() {
     let mut session_state: Option<super::SessionState> = None;
     let mut totals = super::SessionTotals::default();
     let mut pending: Option<super::ReplCommand> = None;
-    let mut history = Vec::new();
+    let mut history = std::sync::Arc::new(Vec::new());
     let mut unconfigured = false;
     let mut hide_thinking = false;
     let flow = dispatch_command(
@@ -143,7 +143,7 @@ async fn background_off_dispatches_without_provider_or_prompt() {
     let mut session = None;
     let mut totals = super::SessionTotals::default();
     let mut pending = None;
-    let mut history = Vec::new();
+    let mut history = std::sync::Arc::new(Vec::new());
     let flow = dispatch_command(
         super::parse_command("/background off"),
         &mut agent,

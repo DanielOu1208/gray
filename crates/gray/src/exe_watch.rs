@@ -46,6 +46,12 @@ impl ExeWatch {
         })
     }
 
+    pub(crate) fn disk_id(&self) -> Option<(u64, u64, Option<SystemTime>)> {
+        let m = std::fs::metadata(&self.path).ok()?;
+        let (dev, ino) = dev_ino(&m);
+        Some((dev, ino, m.modified().ok()))
+    }
+
     pub(crate) fn replaced(&self) -> bool {
         #[cfg(unix)]
         if let Ok(link) = std::fs::read_link("/proc/self/exe")

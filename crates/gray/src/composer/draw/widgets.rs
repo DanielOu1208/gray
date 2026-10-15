@@ -127,9 +127,9 @@ fn styled_runs(cells: &[InputCell]) -> Vec<Span<'static>> {
 }
 
 fn restyle_attachment_markers(cells: &mut [InputCell]) {
-    let st = Style::default()
-        .fg(crate::theme::theme().text_muted)
-        .bg(crate::theme::theme().surface_bg);
+    let t = crate::theme::theme();
+    let pill = Style::default().fg(t.text_bright).bg(t.input_bg);
+    let label = Style::default().fg(t.text_muted).bg(t.surface_bg);
     let n = cells.len();
     let mut i = 0;
     while i < n {
@@ -137,26 +137,33 @@ fn restyle_attachment_markers(cells: &mut [InputCell]) {
             i += 1;
             continue;
         }
-        let name_start = crate::repl::attachments::MARKER_PREFIXES
-            .iter()
-            .find_map(|p| {
-                let fits = p
-                    .chars()
-                    .enumerate()
-                    .all(|(k, c)| cells.get(i + 1 + k).is_some_and(|cell| cell.0 == c));
-                fits.then_some(i + 1 + p.len())
-            });
-        let Some(name_start) = name_start else {
+        let matched = crate::repl::attachments::MARKER_PREFIXES.iter().find(|p| {
+            p.chars()
+                .enumerate()
+                .all(|(k, c)| cells.get(i + 1 + k).is_some_and(|cell| cell.0 == c))
+        });
+        let Some(prefix) = matched else {
             i += 1;
             continue;
         };
+        let klen = prefix.len() - 2;
+        let name_start = i + 1 + prefix.len();
         let mut j = name_start;
         while j < n && cells[j].0 != ']' && cells[j].0 != '\n' {
             j += 1;
         }
         if j < n && cells[j].0 == ']' && j > name_start {
-            for cell in &mut cells[i..=j] {
-                cell.1 = st;
+            cells[i].0 = ' ';
+            for (k, c) in prefix[..klen].to_uppercase().chars().enumerate() {
+                cells[i + 1 + k].0 = c;
+            }
+            cells[i + klen + 1].0 = ' ';
+            cells[j].0 = ' ';
+            for cell in &mut cells[i..i + klen + 2] {
+                cell.1 = pill;
+            }
+            for cell in &mut cells[i + klen + 2..=j] {
+                cell.1 = label;
             }
             i = j + 1;
         } else {
@@ -268,6 +275,8 @@ pub(crate) struct HomeRows<'a> {
     pub(crate) notice: Option<&'a str>,
 
     pub(crate) stats: Option<&'a str>,
+    pub(crate) model: Option<&'a str>,
+    pub(crate) model_tail: Option<&'a str>,
     pub(crate) qol: Option<&'a str>,
 
     pub(crate) above: Option<&'a str>,
@@ -314,47 +323,59 @@ fn left_right_rows(
 
 fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
     let mut rows: Vec<Line<'static>> = Vec::new();
-    let tip = crate::composer::tip_spans();
-    let hints = crate::composer::hint_spans(w.saturating_sub(spans_width(&tip) + 2).max(1));
-    rows.extend(left_right_rows(w, tip, hints));
-    if home.notice.is_some() || home.stats.is_some() {
+    let t = crate::theme::theme();
+    let mut model: Vec<Span<'static>> = Vec::new();
+    if let Some(m) = home.model {
+        model.push(Span::styled(
+            m.to_string(),
+            Style::default().fg(t.text_bright),
+        ));
+    }
+    if let Some(tail) = home.model_tail {
+        model.push(Span::styled(
+            tail.to_string(),
+            Style::default().fg(t.text_muted),
+        ));
+    }
+    let stats = home
+        .stats
+        .map(crate::composer::stats_spans)
+        .unwrap_or_default();
+    if !model.is_empty() || !stats.is_empty() {
+        rows.push(Line::default());
+        rows.extend(left_right_rows(w, model, stats));
+    }
+    if home.notice.is_some() && !rows.is_empty() {
         rows.push(Line::default());
     }
-    match (home.notice, home.stats) {
-        (Some(notice), stats) => {
-            let t = crate::theme::theme();
-            let mut parts = notice.split(" · ");
-            let headline = vec![Span::styled(
-                parts.next().unwrap_or_default().to_string(),
-                Style::default().fg(t.text_bright),
-            )];
-            let right = stats.map(crate::composer::stats_spans).unwrap_or_default();
-            rows.extend(left_right_rows(w, headline, right));
-            let cmds: Vec<(&str, &str)> = parts
-                .map(|p| p.split_once(" to ").unwrap_or((p, "")))
-                .collect();
-            let key_w = cmds
-                .iter()
-                .map(|(k, _)| display_width(k))
-                .max()
-                .unwrap_or(0);
-            for (key, action) in cmds {
-                rows.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("{key:<key_w$}   "),
-                        Style::default().fg(t.text_body),
-                    ),
-                    Span::styled(action.to_string(), Style::default().fg(t.text_muted)),
-                ]));
-            }
+    if let Some(notice) = home.notice {
+        let mut parts = notice.split(" · ");
+        let headline = vec![Span::styled(
+            parts.next().unwrap_or_default().to_string(),
+            Style::default().fg(t.text_bright),
+        )];
+        rows.push(Line::from(headline));
+        let cmds: Vec<(&str, &str)> = parts
+            .map(|p| p.split_once(" to ").unwrap_or((p, "")))
+            .collect();
+        let key_w = cmds
+            .iter()
+            .map(|(k, _)| display_width(k))
+            .max()
+            .unwrap_or(0);
+        for (key, action) in cmds {
+            rows.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("{key:<key_w$}   "),
+                    Style::default().fg(t.text_body),
+                ),
+                Span::styled(action.to_string(), Style::default().fg(t.text_muted)),
+            ]));
         }
-        (None, Some(stats)) => rows.push(Line::from(crate::composer::stats_spans(stats))),
-        (None, None) => {}
     }
     if let Some(qol) = home.qol {
-        let t = crate::theme::theme();
-        if home.notice.is_none() && home.stats.is_none() {
+        if rows.is_empty() {
             rows.push(Line::default());
         }
         rows.push(Line::from(Span::styled(
@@ -366,9 +387,19 @@ fn home_rows(home: HomeRows, w: usize) -> Vec<Line<'static>> {
 }
 
 pub(crate) fn home_band_h(w: usize) -> usize {
-    build_input_box("", 0, w, None, Some(HomeRows::default()), &[])
-        .lines
-        .len()
+    build_input_box(
+        "",
+        0,
+        w,
+        None,
+        Some(HomeRows {
+            model: Some(" "),
+            ..HomeRows::default()
+        }),
+        &[],
+    )
+    .lines
+    .len()
         + 1
 }
 

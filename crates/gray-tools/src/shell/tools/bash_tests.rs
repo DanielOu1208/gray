@@ -108,7 +108,16 @@ fn truncated_log_has_executable_bounded_recovery() {
             .args(["-c", "exit 0"])
             .status()
             .unwrap();
-        let result = finish_inline("probe", &path, status, &summary, Instant::now(), None);
+        let result = finish_inline(
+            "probe",
+            &path,
+            status,
+            &summary,
+            Instant::now(),
+            None,
+            None,
+            dir.path(),
+        );
         let command = result
             .content
             .lines()
@@ -212,6 +221,44 @@ fn known_missing_binaries_get_their_real_substitute() {
         "{unknown}"
     );
     assert!(unknown.contains("command -v goyacc"), "{unknown}");
+}
+
+#[test]
+fn missing_path_gets_a_sibling_suggestion() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src/repl")).unwrap();
+    std::fs::write(dir.path().join("src/repl/mod.rs"), "x").unwrap();
+    std::fs::write(dir.path().join("README.md"), "x").unwrap();
+
+    let hint = missing_path_hint(
+        "cat: src/repl/mode.rs: No such file or directory",
+        dir.path(),
+    )
+    .unwrap();
+    assert!(hint.contains("src/repl/mod.rs"), "{hint}");
+
+    let hint = missing_path_hint(
+        &format!(
+            "ls: cannot access '{}': No such file or directory",
+            dir.path().join("READM.md").display()
+        ),
+        dir.path(),
+    )
+    .unwrap();
+    assert!(hint.contains("README.md"), "{hint}");
+
+    let hint =
+        missing_path_hint("bash: cd: src/repp: No such file or directory", dir.path()).unwrap();
+    assert!(hint.contains("src/repl"), "{hint}");
+
+    assert!(missing_path_hint("exit 0\nall good", dir.path()).is_none());
+    assert!(
+        missing_path_hint(
+            "cat: totallyalien.zzz: No such file or directory",
+            dir.path()
+        )
+        .is_none()
+    );
 }
 
 fn png_bytes() -> Vec<u8> {
@@ -740,17 +787,17 @@ async fn two_sessions_do_not_share_a_working_directory() {
 
 #[test]
 fn the_cwd_report_suffix_is_appended_not_substituted() {
-    let wrapped = with_cwd_report("echo hi");
+    let wrapped = with_cwd_report("echo hi", false);
     assert!(wrapped.starts_with("echo hi"), "{wrapped}");
     assert!(wrapped.contains("$GRAY_CWD_REPORT"), "{wrapped}");
 
-    let commented = with_cwd_report("echo hi # note");
+    let commented = with_cwd_report("echo hi # note", false);
     assert!(commented.starts_with("echo hi # note"), "{commented}");
 }
 
 #[test]
 fn the_cwd_report_keeps_a_trailing_heredoc_terminator_alone() {
-    let wrapped = with_cwd_report("cat > f <<'EOF'\nbody\nEOF");
+    let wrapped = with_cwd_report("cat > f <<'EOF'\nbody\nEOF", false);
     assert!(
         wrapped.starts_with("cat > f <<'EOF'\nbody\nEOF\n"),
         "{wrapped}"
@@ -760,7 +807,7 @@ fn the_cwd_report_keeps_a_trailing_heredoc_terminator_alone() {
 
 #[test]
 fn the_cwd_report_asks_for_a_path_rust_can_resolve() {
-    let wrapped = with_cwd_report("echo hi");
+    let wrapped = with_cwd_report("echo hi", false);
     #[cfg(windows)]
     assert!(
         wrapped.contains("pwd -W"),
@@ -1129,6 +1176,7 @@ async fn run_lane(
         Path::new("/"),
         ctx.session_id.as_deref(),
         Some(&report),
+        None,
     )
     .expect("spawn");
     let pgid = spawned.pgid;
@@ -1142,6 +1190,7 @@ async fn run_lane(
         crate::shell::kill::GroupGuard::new(pgid),
         jobs_lane.then_some(&*tool.jobs),
         report.clone(),
+        None,
     )
     .await;
     (out, pgid, log, report)

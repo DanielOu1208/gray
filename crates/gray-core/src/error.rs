@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +13,15 @@ pub struct ProviderDetail {
     pub cf_ray: Option<String>,
 
     pub request_id: Option<String>,
+
+    #[serde(default)]
+    pub retry_after_ms: Option<u64>,
+}
+
+impl ProviderDetail {
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        self.retry_after_ms.map(std::time::Duration::from_millis)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -27,6 +37,12 @@ pub enum CoreError {
 
     #[error("rate limited: {0}")]
     RateLimited(String),
+
+    #[error("quota exhausted: {message}")]
+    Quota {
+        message: String,
+        resets_in: Option<Duration>,
+    },
 
     #[error("bad request: {0}")]
     BadRequest(String),
@@ -55,7 +71,7 @@ pub enum CoreError {
     #[error("{class}")]
     Detailed {
         class: Box<CoreError>,
-        detail: ProviderDetail,
+        detail: Box<ProviderDetail>,
     },
 }
 
@@ -70,16 +86,21 @@ impl CoreError {
 
     pub fn detail(&self) -> Option<&ProviderDetail> {
         if let Self::Detailed { detail, .. } = self {
-            Some(detail)
+            Some(detail.as_ref())
         } else {
             None
         }
+    }
+
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        self.detail().and_then(ProviderDetail::retry_after)
     }
 
     pub fn code(&self) -> &'static str {
         match self.class() {
             Self::Auth(_) => "auth_failed",
             Self::RateLimited(_) => "rate_limited",
+            Self::Quota { .. } => "quota_exhausted",
             Self::BadRequest(_) => "bad_request",
             Self::ContextOverflow(_) => "context_overflow",
             Self::ServerError(_) => "server_error",

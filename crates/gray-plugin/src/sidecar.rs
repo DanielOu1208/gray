@@ -132,6 +132,8 @@ pub struct SidecarPlugin {
     session_id: std::sync::Mutex<String>,
 
     global: std::sync::atomic::AtomicBool,
+
+    context_oversize_logged: std::sync::atomic::AtomicBool,
 }
 
 fn spawn_retrying_etxtbsy(
@@ -589,6 +591,15 @@ async fn refresh_tools_into(
 }
 
 impl SidecarPlugin {
+    fn note_context_oversize(&self) {
+        if !self
+            .context_oversize_logged
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            log::warn!(target: "gray_plugin", "sidecar context/build skipped: session exceeds the {MAX_FRAME}-byte frame cap; plugin context is unavailable for this session");
+        }
+    }
+
     pub async fn spawn(argv: Vec<String>) -> anyhow::Result<Self> {
         let started = std::time::Instant::now();
         let spawned = Self::spawn_inner(argv).await;
@@ -631,6 +642,7 @@ impl SidecarPlugin {
             asks,
             session_id: std::sync::Mutex::new(String::new()),
             global: std::sync::atomic::AtomicBool::new(false),
+            context_oversize_logged: std::sync::atomic::AtomicBool::new(false),
         };
         if dynamic {
             plugin.install_tools_changed_handler();
@@ -1001,8 +1013,12 @@ impl Plugin for SidecarPlugin {
         match res {
             Ok(v) => ToolBefore::from_result(&v),
             Err(e) => {
-                log::warn!(target: "gray_plugin", "sidecar tool/before failed: {e}");
-                ToolBefore::Deny("plugin policy unavailable; tool not executed".to_string())
+                log::warn!(target: "gray_plugin", "sidecar {} tool/before failed: {e}", self.manifest.name);
+                ToolBefore::Deny(format!(
+                    "plugin '{}' policy check failed ({:.160}); tool not executed — retry may succeed",
+                    self.manifest.name,
+                    e.to_string()
+                ))
             }
         }
     }
@@ -1046,9 +1062,18 @@ impl Plugin for SidecarPlugin {
             return None;
         }
 
-        let (mut wire, media) = scrub_media_for_frame(messages);
         let session = session_json(&self.pinned_sid(), &self.cwd);
-        let text = scrub_text_for_frame(&mut wire, &session);
+        if context_frame_floor(messages) + serialized_len(&session) + 128 > MAX_FRAME {
+            self.note_context_oversize();
+            return None;
+        }
+
+        let (mut wire, media) = scrub_media_for_frame(messages);
+        let (text, frame_len) = scrub_text_for_frame(&mut wire, &session);
+        if frame_len + 128 > MAX_FRAME {
+            self.note_context_oversize();
+            return None;
+        }
         let params = json!({"messages": wire, "session": session});
         let ttl = if self.asks { ASK_TTL } else { HOST_TTL };
         match self
@@ -1197,6 +1222,44 @@ fn restore_media(
 
 const MIN_STUB_BYTES: usize = 256;
 
+fn value_len_estimate(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Null | serde_json::Value::Bool(_) => 8,
+        serde_json::Value::Number(_) => 24,
+        serde_json::Value::String(s) => s.len(),
+        serde_json::Value::Array(a) => a.iter().map(value_len_estimate).sum::<usize>() + 8,
+        serde_json::Value::Object(o) => {
+            o.iter()
+                .map(|(k, v)| k.len() + value_len_estimate(v))
+                .sum::<usize>()
+                + 8
+        }
+    }
+}
+
+fn context_frame_floor(messages: &[Message]) -> usize {
+    let mut total = 64usize;
+    for m in messages {
+        total += 64;
+        for b in &m.content {
+            total += match b {
+                gray_core::message::ContentBlock::Text { text } => {
+                    text.len().min(MIN_STUB_BYTES + 64)
+                }
+                gray_core::message::ContentBlock::ToolResult { content, .. } => {
+                    content.len().min(MIN_STUB_BYTES + 64)
+                }
+                gray_core::message::ContentBlock::ToolUse { args, .. } => {
+                    value_len_estimate(args).min(MIN_STUB_BYTES + 64)
+                }
+                gray_core::message::ContentBlock::Thinking { text, .. } => text.len() + 64,
+                _ => 128,
+            };
+        }
+    }
+    total
+}
+
 fn serialized_len<T: serde::Serialize + ?Sized>(v: &T) -> usize {
     serde_json::to_string(v).map(|s| s.len()).unwrap_or(0)
 }
@@ -1219,10 +1282,14 @@ fn largest_scrubbable(wire: &[Message]) -> Option<(usize, usize)> {
     best.map(|(mi, bi, _)| (mi, bi))
 }
 
+#[allow(clippy::type_complexity)]
 fn scrub_text_for_frame(
     wire: &mut Vec<Message>,
     session: &Value,
-) -> Vec<Vec<(usize, gray_core::message::ContentBlock, String)>> {
+) -> (
+    Vec<Vec<(usize, gray_core::message::ContentBlock, String)>>,
+    usize,
+) {
     let mut pulled: Vec<Vec<(usize, gray_core::message::ContentBlock, String)>> =
         wire.iter().map(|_| Vec::new()).collect();
     let mut frame_len = serialized_len(&json!({"messages": &*wire, "session": session}));
@@ -1242,7 +1309,7 @@ fn scrub_text_for_frame(
         pulled[mi].push((bi, original, stub));
         frame_len = frame_len.saturating_sub(saved);
     }
-    pulled
+    (pulled, frame_len)
 }
 
 fn restore_text(

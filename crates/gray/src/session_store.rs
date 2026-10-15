@@ -1500,17 +1500,14 @@ impl JsonlSessionStore {
         Ok(dropped)
     }
 
-    async fn read_session_text(path: &Path) -> Result<Option<(String, Vec<u8>)>> {
+    async fn read_session_text(path: &Path) -> Result<Option<(String, Option<Vec<u8>>)>> {
         let bytes = match tokio::fs::read(path).await {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(SessionError::Io(e)),
         };
         match String::from_utf8(bytes) {
-            Ok(text) => {
-                let raw = text.clone().into_bytes();
-                Ok(Some((text, raw)))
-            }
+            Ok(text) => Ok(Some((text, None))),
             Err(error) => {
                 let valid = error.utf8_error().valid_up_to();
                 let rest = &error.as_bytes()[valid..];
@@ -1525,7 +1522,7 @@ impl JsonlSessionStore {
                 let prefix = std::str::from_utf8(&bytes[..valid])
                     .expect("prefix bounded by valid_up_to is valid UTF-8")
                     .to_owned();
-                Ok(Some((prefix, bytes)))
+                Ok(Some((prefix, Some(bytes))))
             }
         }
     }
@@ -1562,12 +1559,25 @@ impl JsonlSessionStore {
 
         let mut damaged_tail = false;
         let entry_lines = &all_lines[1..];
+        let parsed: Vec<std::result::Result<SessionEntry, serde_json::Error>> =
+            if content.len() > (1 << 21) {
+                use rayon::prelude::*;
+                entry_lines
+                    .par_iter()
+                    .map(|(_, line_str)| serde_json::from_str::<SessionEntry>(line_str))
+                    .collect()
+            } else {
+                entry_lines
+                    .iter()
+                    .map(|(_, line_str)| serde_json::from_str::<SessionEntry>(line_str))
+                    .collect()
+            };
         let mut entries = Vec::with_capacity(entry_lines.len());
         let mut entry_line_nums = Vec::with_capacity(entry_lines.len());
 
-        for (idx, (line_num, line_str)) in entry_lines.iter().enumerate() {
+        for (idx, ((line_num, _), result)) in entry_lines.iter().zip(parsed).enumerate() {
             let is_final_line = idx == entry_lines.len() - 1;
-            match serde_json::from_str::<SessionEntry>(line_str) {
+            match result {
                 Ok(entry) => {
                     entries.push(entry);
                     entry_line_nums.push(*line_num);
@@ -1606,7 +1616,7 @@ impl JsonlSessionStore {
             let mut backup = tempfile::Builder::new()
                 .prefix("session-tail-backup-")
                 .tempfile_in(&self.root_dir)?;
-            backup.write_all(&raw)?;
+            backup.write_all(raw.as_deref().unwrap_or(content.as_bytes()))?;
             let (_, backup_path) = backup.keep().map_err(|e| SessionError::Io(e.error))?;
             let mut repaired = String::new();
             let keep = if damaged_tail {

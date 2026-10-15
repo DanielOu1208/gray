@@ -5,7 +5,11 @@ use super::contract::ExitReport;
 
 use super::split::split_pipeline;
 
-pub fn exit_report(status: std::process::ExitStatus, command: &str) -> ExitReport {
+pub fn exit_report(
+    status: std::process::ExitStatus,
+    command: &str,
+    pipe_stages: Option<&[i32]>,
+) -> ExitReport {
     let code = status.code();
     #[cfg(unix)]
     let signal: Option<i32> = status.signal();
@@ -27,7 +31,7 @@ pub fn exit_report(status: std::process::ExitStatus, command: &str) -> ExitRepor
         (None, None) => (1, "exit unknown".to_string()),
     };
     let note = if effective == 0 {
-        masked_note(command)
+        masked_note(command, pipe_stages)
     } else {
         None
     };
@@ -61,10 +65,27 @@ fn base_head(cmd: &str) -> &str {
     head.rsplit('/').next().unwrap_or(head)
 }
 
-fn masked_note(command: &str) -> Option<String> {
-    const TAIL_CMDS: [&str; 8] = ["tail", "head", "grep", "tee", "sort", "wc", "less", "cat"];
+const TAIL_CMDS: [&str; 8] = ["tail", "head", "grep", "tee", "sort", "wc", "less", "cat"];
+
+pub fn masks_pipeline(command: &str) -> bool {
     let segs = split_pipeline(command);
     if segs.len() < 2 {
+        return false;
+    }
+    let last = base_head(&segs[segs.len() - 1]);
+    UNMASKABLE_TAILS.contains(&last) || TAIL_CMDS.contains(&last)
+}
+
+fn masked_note(command: &str, stages: Option<&[i32]>) -> Option<String> {
+    let segs = split_pipeline(command);
+    if segs.len() < 2 {
+        return None;
+    }
+    let earlier_failed = match stages {
+        Some(s) if s.len() == segs.len() => s[..s.len() - 1].iter().any(|c| *c != 0),
+        _ => false,
+    };
+    if !earlier_failed {
         return None;
     }
     let last = base_head(&segs[segs.len() - 1]);

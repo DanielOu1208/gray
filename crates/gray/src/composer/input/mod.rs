@@ -10,7 +10,9 @@ pub(crate) mod keys;
 
 use keys::KeyOutcome;
 
-pub(crate) use attach::{try_attach_clipboard_image, try_attach_image_paste};
+pub(crate) use attach::{
+    sync_attachment_markers, try_attach_clipboard_image, try_attach_image_paste,
+};
 pub(crate) use clipboard::paste_from_system_clipboard;
 
 #[cfg(unix)]
@@ -145,7 +147,7 @@ pub(crate) fn strip_escape_sequences(raw: &str) -> String {
 pub(crate) fn read_line(
     shared: &super::SharedTui,
 ) -> anyhow::Result<Option<(String, Vec<PathBuf>)>> {
-    use crossterm::event::{Event, KeyEventKind, poll, read};
+    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, poll, read};
 
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
     let _keyboard_enhancement = KeyboardEnhancementGuard::push();
@@ -159,7 +161,7 @@ pub(crate) fn read_line(
             return Ok(None);
         }
 
-        let (timeout, empty_draft, pending_ev) = {
+        let (timeout, empty_draft) = {
             let mut guard = shared.lock().expect("tui lock");
             let tui: &mut super::Tui = &mut guard;
             if tui.ask_modal.is_some() || tui.modal_open {
@@ -204,10 +206,10 @@ pub(crate) fn read_line(
             let empty_draft = tui.textarea.is_empty()
                 && tui.attachments.is_empty()
                 && tui.pending_pastes.is_empty();
-            (timeout, empty_draft, tui.pending_input.take())
+            (timeout, empty_draft)
         };
 
-        if pending_ev.is_none() && !poll(timeout)? {
+        if !poll(timeout)? {
             if empty_draft && crate::host::wake_requested() {
                 return Ok(Some((String::new(), Vec::new())));
             }
@@ -217,10 +219,21 @@ pub(crate) fn read_line(
 
         let mut guard = shared.lock().expect("tui lock");
         let tui: &mut super::Tui = &mut guard;
-        let ev = match pending_ev {
-            Some(ev) => ev,
-            None => read()?,
-        };
+        let ev = read()?;
+        if tui.intro_started.is_some() {
+            tui.end_intro();
+            let swallow = match ev {
+                Event::Key(key) => {
+                    matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char(' '))
+                        || key.modifiers.contains(KeyModifiers::CONTROL)
+                }
+                Event::Resize(..) => true,
+                _ => false,
+            };
+            if swallow {
+                continue;
+            }
+        }
         match ev {
             Event::Resize(cols, rows) => {
                 if cols != tui.last_width || rows != tui.last_height {
@@ -274,8 +287,9 @@ pub(crate) fn read_line(
                     }
                     tui.history_idx = None;
                     tui.draft.clear();
-                    tui.textarea.set_text("");
+                    attach::sync_attachment_markers(tui);
                     let attached: Vec<PathBuf> = std::mem::take(&mut tui.attachments);
+                    tui.textarea.set_text("");
                     if tui.is_task_running {
                         tui.queued_inputs
                             .push_back((trimmed.clone(), attached.clone()));

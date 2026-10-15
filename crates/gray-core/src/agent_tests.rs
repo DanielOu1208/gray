@@ -410,8 +410,8 @@ async fn tool_error_is_fed_back_and_model_recovers() {
 }
 
 #[tokio::test]
-async fn loop_guard_nudges_once_at_four_then_aborts_at_six() {
-    let scripts: Vec<Vec<StreamEvent>> = (0..6).map(|i| tool_script(&format!("c{i}"))).collect();
+async fn loop_guard_aborts_at_twelve_identical_rounds() {
+    let scripts: Vec<Vec<StreamEvent>> = (0..12).map(|i| tool_script(&format!("c{i}"))).collect();
     let provider = FakeProvider::new(scripts);
     let executor = FakeExecutor::new(ToolOutput::ok("ok"));
     let mut agent = Agent::new(Box::new(provider), Arc::new(executor)).with_tools(vec![tool_def()]);
@@ -419,19 +419,16 @@ async fn loop_guard_nudges_once_at_four_then_aborts_at_six() {
     let err = agent
         .run(Message::user("loop forever"), ToolContext::default())
         .await
-        .expect_err("six identical rounds must abort");
+        .expect_err("twelve identical rounds must abort");
 
     assert!(matches!(err, CoreError::LoopDetected(_)), "got {err:?}");
-    let nudges: Vec<usize> = agent
-        .messages()
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.injected && m.text_content().contains("tool calls were identical"))
-        .map(|(i, _)| i)
-        .collect();
-    assert_eq!(nudges.len(), 1, "exactly one stall reminder: {nudges:?}");
-
-    assert_eq!(nudges[0], 9, "reminder follows the 4th identical round");
+    assert!(
+        !agent
+            .messages()
+            .iter()
+            .any(|m| m.injected && m.text_content().contains("tool calls were identical")),
+        "abort without a stall reminder"
+    );
 }
 
 #[tokio::test]
@@ -544,6 +541,12 @@ async fn retryable_failure_budget_exhausts_and_surfaces() {
         ProviderError::ServerError("503".into()),
         ProviderError::ServerError("503".into()),
         ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
+        ProviderError::ServerError("503".into()),
     ]);
     let mut agent = Agent::new(
         Box::new(provider),
@@ -576,6 +579,76 @@ async fn non_retryable_failure_never_retries_whole_turn() {
         .expect_err("auth failure must surface");
     assert!(err.to_string().contains("auth"), "got {err}");
     assert_eq!(seen.lock().expect("seen lock").len(), 1, "no replay");
+}
+
+#[tokio::test]
+async fn quota_failure_retries_whole_turn_in_place_and_recovers() {
+    let provider = FakeProvider::new(vec![end_script()]).with_failures(vec![ProviderError::Auth(
+        "status 429: usage limit reached".into(),
+    )]);
+    let seen = provider.seen_requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
+    );
+
+    let events = agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .expect("quota-window failure must retry inside the session");
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnEnd { .. })),
+        "recovered turn must complete: {events:?}"
+    );
+    assert_eq!(
+        seen.lock().expect("seen lock").len(),
+        2,
+        "failed request + one replay, same session"
+    );
+}
+
+#[tokio::test]
+async fn quota_failure_with_long_reset_window_is_terminal() {
+    let provider = FakeProvider::new(vec![end_script()]).with_failures(vec![ProviderError::Auth(
+        "usage limit reached, resets in ~2h".into(),
+    )]);
+    let seen = provider.seen_requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
+    );
+
+    agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .expect_err("a multi-hour quota window must not be waited out");
+    assert_eq!(seen.lock().expect("seen lock").len(), 1, "no replay");
+}
+
+#[tokio::test]
+async fn mid_stream_quota_failure_does_not_replay() {
+    let provider = FakeProvider::new(vec![end_script()]).with_partial_failures(vec![(
+        vec![StreamEvent::text_delta("visible half")],
+        ProviderError::Auth("status 429: usage limit reached".into()),
+    )]);
+    let seen = provider.seen_requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
+    );
+
+    agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .expect_err("quota failure after a visible delta must surface");
+    assert_eq!(
+        seen.lock().expect("seen lock").len(),
+        1,
+        "no replay after a visible delta"
+    );
 }
 
 #[tokio::test]
@@ -821,6 +894,23 @@ async fn unknown_tool_name_skips_executor_with_error_result() {
 
     let hint = crate::tool_out::unknown_tool("lookpu", &[TOOL_NAME.to_string()]);
     assert!(hint.contains("'lookup'"), "got {hint}");
+
+    let namespaced = crate::tool_out::unknown_tool(
+        "read_file",
+        &["native__read_file".to_string(), "bash".to_string()],
+    );
+    assert!(
+        namespaced.contains("'native__read_file'"),
+        "unprefixed call should surface the namespaced tool: {namespaced}"
+    );
+    let unprefixed = crate::tool_out::unknown_tool(
+        "native__read_file",
+        &["read_file".to_string(), "bash".to_string()],
+    );
+    assert!(
+        unprefixed.contains("'read_file'"),
+        "namespaced call should surface the bare tool: {unprefixed}"
+    );
     assert_eq!(agent.messages()[1].role, Role::Assistant);
     assert!(matches!(
         &agent.messages()[2].content[0],
@@ -1822,7 +1912,7 @@ async fn turn_end_hook_called_once_on_end_and_on_error() {
 
     let ends_err = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls_err = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
-    let scripts: Vec<Vec<StreamEvent>> = (0..6).map(|i| tool_script(&format!("c{i}"))).collect();
+    let scripts: Vec<Vec<StreamEvent>> = (0..16).map(|i| tool_script(&format!("c{i}"))).collect();
     let mut agent = Agent::new(
         Box::new(FakeProvider::new(scripts)),
         Arc::new(FakeExecutor::new(ToolOutput::ok("ok"))),

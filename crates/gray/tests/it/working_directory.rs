@@ -2,7 +2,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
-async fn first_request_sends_saved_prompt_verbatim_without_changing_it() {
+async fn first_request_sends_saved_prompt_first_then_session_card() {
     check_first_request(false).await;
 }
 
@@ -114,7 +114,7 @@ async fn check_first_request(native_profile: bool) {
 
     assert!(system.starts_with("Custom instructions."), "{system}");
     assert!(!system.contains("private editor note"));
-    assert!(!system.contains("Working directory"), "{system}");
+    assert!(system.contains("Working directory"), "{system}");
     assert_eq!(
         std::fs::read_to_string(home.join("AGENTS.md")).unwrap(),
         saved

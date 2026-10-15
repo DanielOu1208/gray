@@ -2,7 +2,6 @@ use gray_core::message::{ContentBlock, Role};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -134,7 +133,8 @@ struct ChatInput {
     target: String,
 
     name: String,
-    buf: String,
+    buf: crate::composer::TextArea,
+    focus: bool,
 }
 
 struct SessionFeed {
@@ -246,6 +246,7 @@ struct Viewer {
     last_tick: Instant,
 
     note: Option<String>,
+    chat: ChatInput,
 }
 
 impl Viewer {
@@ -277,6 +278,12 @@ impl Viewer {
             view_h: 1,
             last_tick: Instant::now(),
             note: None,
+            chat: ChatInput {
+                target: row.target.clone(),
+                name: row.name.clone(),
+                buf: crate::composer::TextArea::new(),
+                focus: false,
+            },
         };
         v.refresh_feed();
         v
@@ -571,70 +578,89 @@ fn scroll_by(v: &mut Viewer, delta: i64) {
     v.stick = v.scroll >= v.max_scroll;
 }
 
-fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer, chat: Option<&ChatInput>) {
+fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer) {
+    use ratatui::layout::{Alignment, Position};
+    use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+
     let area = frame.area();
     let theme = crate::theme::theme();
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.surface_bg)),
-        area,
-    );
 
+    let w = (u32::from(area.width) * 4 / 5)
+        .max(40)
+        .min(u32::from(area.width)) as u16;
+    let h = (u32::from(area.height) * 4 / 5)
+        .max(10)
+        .min(u32::from(area.height)) as u16;
+    let modal = Rect::new(
+        area.x + area.width.saturating_sub(w) / 2,
+        area.y + area.height.saturating_sub(h) / 4,
+        w,
+        h,
+    );
+    frame.render_widget(Clear, modal);
+
+    let dim = Style::default().fg(theme.text_dim).bg(theme.surface_bg);
     let state = if v.running {
         "running".to_string()
     } else {
         v.status.clone()
     };
-    let title = format!(" {} {} · {} · {} ", v.icon, v.name, state, v.stats);
-    let title: String = title.chars().take(area.width as usize).collect();
-    let footer = if chat.is_some() {
-        " enter send · esc unfocus · ↑↓/PgUp/PgDn/Home/End scroll "
+    let hints = if v.chat.focus {
+        "enter send · esc back · ↑↓ scroll"
     } else {
-        " ↑↓/jk scroll · PgUp/PgDn · Home/End · c/i chat · x stop · o resume · esc "
+        "type to chat · jk/↑↓ scroll · PgUp/PgDn · x stop · o resume · esc close"
     };
-    let footer: String = footer.chars().take(area.width as usize).collect();
+    let footer = match &v.note {
+        Some(n) => format!(" {n} · {hints} "),
+        None => format!(" {hints} "),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .style(Style::default().bg(theme.surface_bg))
+        .border_style(Style::default().fg(theme.bezel_mid).bg(theme.surface_bg))
+        .title_top(Line::from(vec![
+            Span::styled(
+                format!(" {} {} ", v.icon, v.name),
+                Style::default()
+                    .fg(theme.text_bright)
+                    .bg(theme.surface_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("· {state} · {} ", v.stats), dim),
+        ]))
+        .title_top(Line::from(Span::styled(" esc ", dim)).alignment(Alignment::Right))
+        .title_bottom(Line::from(Span::styled(footer, dim)).alignment(Alignment::Center));
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
 
-    let header_rect = Rect::new(area.x, area.y, area.width, 1);
-    let footer_rect = Rect::new(
-        area.x,
-        area.y + area.height.saturating_sub(1),
-        area.width,
-        1,
-    );
-    let inner = Rect::new(
-        area.x,
-        area.y + 1,
-        area.width,
-        area.height.saturating_sub(2),
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            title,
-            Style::default()
-                .fg(theme.text_bright)
-                .add_modifier(Modifier::BOLD)
-                .bg(theme.surface_bg),
-        ))),
-        header_rect,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            footer,
-            Style::default().fg(theme.text_dim).bg(theme.surface_bg),
-        ))),
-        footer_rect,
-    );
-
-    let body_h = inner.height.saturating_sub(1);
-    let body = Rect {
-        height: body_h,
-        ..inner
+    let ghost = if v.managed {
+        format!("message {}", v.name)
+    } else {
+        "raw worker — read only".to_string()
     };
-    let input = Rect {
-        y: inner.y + body_h,
-        height: 1,
-        ..inner
+    let ibox = crate::composer::draw::build_input_box(
+        v.chat.buf.text(),
+        v.chat.buf.cursor(),
+        inner.width as usize,
+        Some(&ghost),
+        None,
+        &[],
+    );
+    let cap = (usize::from(inner.height) / 3).clamp(3, 8);
+    let len = ibox.lines.len();
+    let first = if len > cap {
+        (ibox.cur_row + 1).saturating_sub(cap).min(len - cap)
+    } else {
+        0
     };
+    let box_h = (len - first).min(cap) as u16;
+    let body_h = inner.height.saturating_sub(box_h);
+    let body = Rect::new(inner.x, inner.y, inner.width, body_h);
+    let input = Rect::new(inner.x, inner.y + body_h, inner.width, box_h);
 
     v.view_h = body_h;
     v.layout(inner.width as usize);
@@ -653,10 +679,7 @@ fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer, chat: Option<&ChatIn
             "(empty transcript)"
         };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("  {hint}"),
-                Style::default().fg(theme.text_dim).bg(theme.surface_bg),
-            ))),
+            Paragraph::new(Line::from(Span::styled(format!("  {hint}"), dim))),
             body,
         );
     } else {
@@ -666,39 +689,30 @@ fn paint_viewer(frame: &mut ratatui::Frame, v: &mut Viewer, chat: Option<&ChatIn
         frame.render_widget(Paragraph::new(rows), body);
     }
 
-    let spans = if let Some(c) = chat {
-        let mut spans = vec![
-            Span::styled(
-                " chat ▸ ",
-                Style::default().fg(theme.accent).bg(theme.surface_bg),
-            ),
-            Span::styled(
-                c.buf.clone(),
-                Style::default().fg(theme.text_body).bg(theme.surface_bg),
-            ),
-            Span::styled("_", Style::default().fg(theme.accent).bg(theme.surface_bg)),
-        ];
-        if let Some(n) = &v.note {
-            spans.push(Span::styled(
-                format!("  {n}"),
-                Style::default().fg(theme.text_dim).bg(theme.surface_bg),
-            ));
+    let mut rows: Vec<Line<'static>> = ibox.lines[first..first + box_h as usize].to_vec();
+    for line in &mut rows {
+        for (i, span) in line.spans.iter_mut().enumerate() {
+            span.style = if i == 0 && span.content == " ❯ " {
+                span.style.fg(if v.chat.focus {
+                    theme.accent
+                } else {
+                    theme.text_dim
+                })
+            } else if !v.chat.focus {
+                span.style.fg(theme.text_dim)
+            } else {
+                span.style
+            };
         }
-        spans
-    } else {
-        let mut spans = vec![Span::styled(
-            " chat ▸ ",
-            Style::default().fg(theme.text_dim).bg(theme.surface_bg),
-        )];
-        if let Some(n) = &v.note {
-            spans.push(Span::styled(
-                n.clone(),
-                Style::default().fg(theme.text_dim).bg(theme.surface_bg),
-            ));
-        }
-        spans
-    };
-    frame.render_widget(Paragraph::new(Line::from(spans)), input);
+    }
+    frame.render_widget(Paragraph::new(rows), input);
+    if v.chat.focus && box_h > 0 {
+        let cx = (input.x + 3 + u16::try_from(ibox.cur_col).unwrap_or(u16::MAX))
+            .min(input.x + input.width.saturating_sub(1));
+        let cy = (input.y + ibox.cur_row.saturating_sub(first) as u16)
+            .min(input.y + box_h.saturating_sub(1));
+        frame.set_cursor_position(Position::new(cx, cy));
+    }
 }
 
 fn picker_modal_w(term_w: u16) -> u16 {
@@ -860,11 +874,11 @@ fn run_agents_panel(
                 if area.width < 40 || area.height < 10 {
                     return;
                 }
+                crate::setup::render_dimmed_background(frame, &bg_snapshot);
                 if let Some(vw) = viewer.as_mut() {
-                    paint_viewer(frame, vw, chat_in.as_ref());
+                    paint_viewer(frame, vw);
                     return;
                 }
-                crate::setup::render_dimmed_background(frame, &bg_snapshot);
 
                 let list_h = picker_list_h(area.height, rows.len());
                 let modal_w = picker_modal_w(area.width);
@@ -967,7 +981,7 @@ fn run_agents_panel(
 
                 let status_y = inner.height.saturating_sub(2);
                 if let Some(c) = &chat_in {
-                    let prompt = format!(" chat {}: {}_", c.name, c.buf);
+                    let prompt = format!(" chat {}: {}_", c.name, c.buf.text());
                     let clipped: String = prompt.chars().take(inner.width as usize).collect();
                     put(
                         status_y,
@@ -1045,59 +1059,33 @@ fn run_agents_panel(
                         let Some(c) = chat_in.take() else {
                             continue;
                         };
-                        let msg = c.buf.trim().to_string();
-                        let receipt = if msg.is_empty() {
-                            Some("chat cancelled".to_string())
+                        let msg = c.buf.text().trim().to_string();
+                        if msg.is_empty() {
+                            status = "chat cancelled".to_string();
                         } else {
-                            let r = spawn_text(&argv, &["chat", &c.target, &msg])
+                            status = spawn_text(&argv, &["chat", &c.target, &msg])
                                 .unwrap_or_else(|| "chat failed".into());
                             rows = fetch_rows(&argv, all);
-                            Some(r)
-                        };
-                        if let Some(vw) = viewer.as_mut() {
-                            vw.note = receipt;
-                            vw.running = true;
-                            let upd = rows.iter().find(|r| r.target == vw.target).cloned();
-                            vw.sync_row(upd.as_ref());
-
-                            if !msg.is_empty() {
-                                chat_in = Some(ChatInput {
-                                    target: c.target,
-                                    name: c.name,
-                                    buf: String::new(),
-                                });
-                            }
-                        } else if let Some(r) = receipt {
-                            status = r;
-                        }
-                    }
-
-                    KeyCode::Up
-                    | KeyCode::Down
-                    | KeyCode::PageUp
-                    | KeyCode::PageDown
-                    | KeyCode::Home
-                    | KeyCode::End => {
-                        if let Some(vw) = viewer.as_mut() {
-                            let d = match code {
-                                KeyCode::Up => -1,
-                                KeyCode::Down => 1,
-                                KeyCode::PageUp => -i64::from(vw.view_h.max(1)),
-                                KeyCode::PageDown => i64::from(vw.view_h.max(1)),
-                                KeyCode::Home => -i64::from(vw.scroll),
-                                _ => i64::from(vw.max_scroll),
-                            };
-                            scroll_by(vw, d);
                         }
                     }
                     KeyCode::Backspace => {
                         if let Some(c) = chat_in.as_mut() {
-                            c.buf.pop();
+                            c.buf.delete_backward();
+                        }
+                    }
+                    KeyCode::Left => {
+                        if let Some(c) = chat_in.as_mut() {
+                            c.buf.move_left();
+                        }
+                    }
+                    KeyCode::Right => {
+                        if let Some(c) = chat_in.as_mut() {
+                            c.buf.move_right();
                         }
                     }
                     KeyCode::Char(ch) if !modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Some(c) = chat_in.as_mut() {
-                            c.buf.push(ch)
+                            c.buf.insert_str(&ch.to_string());
                         }
                     }
                     _ => {}
@@ -1105,11 +1093,48 @@ fn run_agents_panel(
                 continue;
             }
             if let Some(vw) = viewer.as_mut() {
-                if matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
-                    viewer = None;
+                if vw.chat.focus {
+                    match code {
+                        KeyCode::Esc => vw.chat.focus = false,
+                        KeyCode::Enter => {
+                            let msg = vw.chat.buf.text().trim().to_string();
+                            if !msg.is_empty() {
+                                let receipt = spawn_text(&argv, &["chat", &vw.chat.target, &msg])
+                                    .unwrap_or_else(|| "chat failed".into());
+                                vw.chat.buf.set_text("");
+                                vw.note = Some(receipt);
+                                vw.running = true;
+                                vw.stick = true;
+                                rows = fetch_rows(&argv, all);
+                                let upd = rows.iter().find(|r| r.target == vw.target).cloned();
+                                vw.sync_row(upd.as_ref());
+                            }
+                        }
+                        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                            break;
+                        }
+                        KeyCode::Backspace => vw.chat.buf.delete_backward(),
+                        KeyCode::Delete => vw.chat.buf.delete_forward(),
+                        KeyCode::Left => vw.chat.buf.move_left(),
+                        KeyCode::Right => vw.chat.buf.move_right(),
+                        KeyCode::Up => scroll_by(vw, -1),
+                        KeyCode::Down => scroll_by(vw, 1),
+                        KeyCode::PageUp => scroll_by(vw, -i64::from(vw.view_h.max(1))),
+                        KeyCode::PageDown => scroll_by(vw, i64::from(vw.view_h.max(1))),
+                        KeyCode::Home => scroll_by(vw, -i64::from(vw.scroll)),
+                        KeyCode::End => scroll_by(vw, i64::from(vw.max_scroll)),
+                        KeyCode::Char(ch) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                            vw.chat.buf.insert_str(&ch.to_string());
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
                 match code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        viewer = None;
+                        continue;
+                    }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Up | KeyCode::Char('k') => scroll_by(vw, -1),
                     KeyCode::Down | KeyCode::Char('j') => scroll_by(vw, 1),
@@ -1117,20 +1142,6 @@ fn run_agents_panel(
                     KeyCode::PageDown => scroll_by(vw, i64::from(vw.view_h.max(1))),
                     KeyCode::Home => scroll_by(vw, -i64::from(vw.scroll)),
                     KeyCode::End => scroll_by(vw, i64::from(vw.max_scroll)),
-                    KeyCode::Char('c') | KeyCode::Char('i') => {
-                        if !vw.managed {
-                            vw.note = Some(format!(
-                                "{} is a raw worker — nothing to chat through",
-                                vw.name
-                            ));
-                        } else {
-                            chat_in = Some(ChatInput {
-                                target: vw.target.clone(),
-                                name: vw.name.clone(),
-                                buf: String::new(),
-                            });
-                        }
-                    }
                     KeyCode::Char('x') => {
                         if vw.running {
                             let receipt = spawn_text(&argv, &["stop", &vw.target])
@@ -1156,6 +1167,27 @@ fn run_agents_panel(
                             vw.note = Some(format!("{} is still running", vw.name));
                         } else {
                             vw.note = Some(format!("{} has no session to resume", vw.name));
+                        }
+                    }
+                    KeyCode::Enter | KeyCode::Char('c') | KeyCode::Char('i') => {
+                        if !vw.managed {
+                            vw.note = Some(format!(
+                                "{} is a raw worker — nothing to chat through",
+                                vw.name
+                            ));
+                        } else {
+                            vw.chat.focus = true;
+                        }
+                    }
+                    KeyCode::Char(ch) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                        if !vw.managed {
+                            vw.note = Some(format!(
+                                "{} is a raw worker — nothing to chat through",
+                                vw.name
+                            ));
+                        } else {
+                            vw.chat.focus = true;
+                            vw.chat.buf.insert_str(&ch.to_string());
                         }
                     }
                     _ => {}
@@ -1222,7 +1254,8 @@ fn run_agents_panel(
                             chat_in = Some(ChatInput {
                                 target: row.target.clone(),
                                 name: row.name.clone(),
-                                buf: String::new(),
+                                buf: crate::composer::TextArea::new(),
+                                focus: true,
                             });
                         } else {
                             status =

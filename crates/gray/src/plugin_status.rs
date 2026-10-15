@@ -15,7 +15,7 @@ type SharedBoot = Shared<BoxFuture<'static, BootOut>>;
 
 static BOOT: Mutex<Option<SharedBoot>> = Mutex::new(None);
 
-fn ensure_boot(handler: Option<gray_plugin::HostHandler>) -> Option<SharedBoot> {
+pub(crate) fn ensure_boot(handler: Option<gray_plugin::HostHandler>) -> Option<SharedBoot> {
     let mut slot = BOOT.lock().ok()?;
     if slot.is_none() {
         let boot: SharedBoot = async move {
@@ -104,7 +104,7 @@ pub(crate) fn stats_line() -> Option<String> {
     }
     let loaded = results.iter().filter(|r| r.error.is_none()).count();
     let failed = plugins - loaded;
-    let mut parts = vec![format!("{plugins} plugins"), format!("{loaded} loaded")];
+    let mut parts = vec![format!("{loaded}/{plugins} plugins loaded")];
     if failed > 0 {
         parts.push(format!("{failed} failed"));
     }

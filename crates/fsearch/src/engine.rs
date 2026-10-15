@@ -7,7 +7,7 @@ use crate::walk::{self, KIND_DIR, KIND_FILE, Listing, NONE, RawEnt};
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
@@ -115,7 +115,28 @@ struct Shared {
 
     #[allow(clippy::type_complexity)]
     on_change: RwLock<Vec<Box<dyn Fn(&[(&[u8], bool)]) + Send + Sync>>>,
+
+    hot: Mutex<std::collections::BTreeMap<Vec<u8>, HotScope>>,
+
+    verified_all: AtomicU32,
 }
+
+#[derive(Clone, Copy)]
+struct HotScope {
+    seen: Instant,
+
+    verified: u32,
+}
+
+const TICK_SECS: u32 = 60;
+
+#[cfg(target_os = "linux")]
+const FULL_SWEEP_SECS: u32 = 30 * 60;
+
+#[cfg(target_os = "linux")]
+const HOT_RETAIN: Duration = Duration::from_secs(2 * 3600);
+
+const HOT_MAX: usize = 64;
 
 fn try_lock(f: &std::fs::File) -> bool {
     unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(f), libc::LOCK_EX | libc::LOCK_NB) == 0 }
@@ -297,6 +318,8 @@ impl Engine {
             content_ready,
             content_early: Mutex::new(Vec::new()),
             on_change: RwLock::new(Vec::new()),
+            hot: Mutex::new(std::collections::BTreeMap::new()),
+            verified_all: AtomicU32::new(crate::query::now_secs()),
         });
         if owner {
             start_content(&shared);
@@ -361,7 +384,53 @@ impl Engine {
         }
     }
 
+    fn saw_scope(&self, scope: Option<&[u8]>) {
+        let Some(scope) = scope.filter(|s| s.len() > 1) else { return };
+        {
+            let mut h = self.s.hot.lock().unwrap();
+            if let Some(r) = h.get_mut(scope) {
+                r.seen = Instant::now();
+            } else {
+                if h.len() >= HOT_MAX
+                    && let Some(oldest) = h.iter().min_by_key(|(_, s)| s.seen).map(|(p, _)| p.clone())
+                {
+                    h.remove(&oldest);
+                }
+                h.insert(scope.to_vec(), HotScope { seen: Instant::now(), verified: 0 });
+            }
+        }
+        let now = crate::query::now_secs();
+        let bound = now.saturating_sub(TICK_SECS);
+        let stale = {
+            let h = self.s.hot.lock().unwrap();
+            let cover = h.iter().filter(|(p, _)| under(scope, p)).map(|(_, s)| s.verified).max().unwrap_or(0);
+            cover.max(self.s.verified_all.load(Ordering::Relaxed))
+        };
+        if stale >= bound {
+            return;
+        }
+        let from = stale.saturating_sub(SYNC_MARGIN);
+        let mut dirs = {
+            let g = self.s.live.read().unwrap();
+            let Some(live) = g.as_ref() else { return };
+            live.changed_dirs_in(from, &[scope.to_vec()])
+        };
+        dirs.extend(self.s.content.read().unwrap().changed_dirs_in(from, &[scope.to_vec()]));
+        dirs.sort();
+        dirs.dedup();
+        let t = Instant::now();
+        let n = dirs.len();
+        apply_dirs(&self.s, dirs);
+        if let Some(r) = self.s.hot.lock().unwrap().get_mut(scope) {
+            r.verified = now;
+        }
+        if n > 0 {
+            log(format!("cold scope {}: relisted {n} folders in {t:.2?}", String::from_utf8_lossy(scope)));
+        }
+    }
+
     pub fn search(&self, q: &Query) -> Result<Vec<Found>, String> {
+        self.saw_scope(q.scope.as_deref());
         WARM_UNTIL.store(0, Ordering::Relaxed);
         let (found, early) = self.s.with_names(q.scope.as_deref(), |live| {
             let mut p = Vec::new();
@@ -396,6 +465,7 @@ impl Engine {
     }
 
     pub fn grep(&self, q: &Query, g: &Grep) -> Result<(GrepResult, bool), String> {
+        self.saw_scope(q.scope.as_deref());
         WARM_UNTIL.store(0, Ordering::Relaxed);
         let home = self.s.home.as_bytes();
         let indexed = q.scope.as_ref().is_none_or(|s| content::in_scope(s, home));
@@ -427,6 +497,7 @@ impl Engine {
     }
 
     pub fn unheld_files(&self, scope: &[u8]) -> Option<Vec<Vec<u8>>> {
+        self.saw_scope(Some(scope));
         if !self.s.content_holds(Some(scope)) {
             return None;
         }
@@ -451,6 +522,7 @@ impl Engine {
     }
 
     pub fn held_matches(&self, scope: &[u8], pats: &[String], ignore_case: bool) -> Option<Vec<Vec<u8>>> {
+        self.saw_scope(Some(scope));
         if !self.s.content_holds(Some(scope)) {
             return None;
         }
@@ -689,7 +761,7 @@ fn files_under(live: &Live, scope: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
-fn under(path: &[u8], dir: &[u8]) -> bool {
+pub(crate) fn under(path: &[u8], dir: &[u8]) -> bool {
     path.starts_with(dir) && (path.len() == dir.len() || path[dir.len()] == b'/')
 }
 
@@ -989,23 +1061,15 @@ fn compact(shared: &Shared) {
     log(format!("compacted to {n} entries in {:.2?}", t.elapsed()));
 }
 
-fn relist_changed(shared: &Shared, why: &str, flags: u32) {
-    let t = Instant::now();
-    let started = crate::query::now_secs();
+fn sweep_from(shared: &Shared) -> u32 {
+    let g = shared.live.read().unwrap();
+    let live = g.as_ref().unwrap();
+    let missing = crate::live::lstat(&live.root).is_none();
+    let was = live.root_missing.fetch_or(missing, Ordering::Relaxed);
+    if missing || was { 0 } else { live.synced_at.saturating_sub(SYNC_MARGIN) }
+}
 
-    let (from, mut dirs) = {
-        let g = shared.live.read().unwrap();
-        let live = g.as_ref().unwrap();
-        let missing = crate::live::lstat(&live.root).is_none();
-        let was = live.root_missing.fetch_or(missing, Ordering::Relaxed);
-        let from = if missing || was { 0 } else { live.synced_at.saturating_sub(SYNC_MARGIN) };
-        (from, live.changed_dirs(from))
-    };
-    dirs.extend(shared.content.read().unwrap().changed_dirs(from));
-    dirs.sort();
-    dirs.dedup();
-    let stat_time = t.elapsed();
-
+fn apply_dirs(shared: &Shared, dirs: Vec<Vec<u8>>) {
     for d in &dirs {
         let f = shared.live.read().unwrap().as_ref().unwrap().fetch(d, false);
         shared.live.write().unwrap().as_mut().unwrap().apply(f);
@@ -1013,16 +1077,81 @@ fn relist_changed(shared: &Shared, why: &str, flags: u32) {
     let trees = {
         let mut g = shared.live.write().unwrap();
         let live = g.as_mut().unwrap();
-        live.synced_at = started;
+        live.synced_at = crate::query::now_secs();
         std::mem::take(&mut live.trees)
     };
-    let n = dirs.len();
     let _ = shared.content_tx.send((dirs, trees));
     shared.on_change.read().unwrap().iter().for_each(|f| f(&[(&b"/"[..], true)]));
+}
+
+fn relist_changed(shared: &Arc<Shared>, why: &str, flags: u32) {
+    let t = Instant::now();
+    let from = sweep_from(shared);
+    let mut dirs = {
+        let g = shared.live.read().unwrap();
+        g.as_ref().unwrap().changed_dirs(from)
+    };
+    dirs.extend(shared.content.read().unwrap().changed_dirs(from));
+    dirs.sort();
+    dirs.dedup();
+    let stat_time = t.elapsed();
+    let n = dirs.len();
+    apply_dirs(shared, dirs);
     log(format!(
         "FSEvents lost track of / ({why}, flags {flags:#x}): relisted {n} folders changed since {from} in {:.2?} ({stat_time:.2?} checking)",
         t.elapsed()
     ));
+}
+
+#[cfg(target_os = "linux")]
+fn tick_reconcile(shared: &Arc<Shared>) {
+    let t = Instant::now();
+    let now = crate::query::now_secs();
+    let hot: Vec<Vec<u8>> = {
+        let mut h = shared.hot.lock().unwrap();
+        h.retain(|_, s| s.seen.elapsed() < HOT_RETAIN);
+        h.keys().cloned().collect()
+    };
+    let full_due = now >= shared.verified_all.load(Ordering::Relaxed).saturating_add(FULL_SWEEP_SECS);
+    if hot.is_empty() && !full_due {
+        return;
+    }
+    let from = sweep_from(shared);
+    let mut dirs = Vec::new();
+    if !hot.is_empty() {
+        dirs.extend({
+            let g = shared.live.read().unwrap();
+            g.as_ref().unwrap().changed_dirs_in(from, &hot)
+        });
+        dirs.extend(shared.content.read().unwrap().changed_dirs_in(from, &hot));
+    }
+    if full_due {
+        dirs.extend({
+            let g = shared.live.read().unwrap();
+            g.as_ref().unwrap().changed_dirs(from)
+        });
+        dirs.extend(shared.content.read().unwrap().changed_dirs(from));
+    }
+    dirs.sort();
+    dirs.dedup();
+    let stat_time = t.elapsed();
+    let n = dirs.len();
+    apply_dirs(shared, dirs);
+    if full_due {
+        shared.verified_all.store(now, Ordering::Relaxed);
+    }
+    {
+        let mut h = shared.hot.lock().unwrap();
+        for k in &hot {
+            if let Some(s) = h.get_mut(k) {
+                s.verified = now;
+            }
+        }
+    }
+    if n > 0 || full_due {
+        let what = if full_due { "full reconcile" } else { "reconcile" };
+        log(format!("index {what}: relisted {n} folders changed since {from} in {:.2?} ({stat_time:.2?} checking)", t.elapsed()));
+    }
 }
 
 const RELIST_SHARE: u32 = 50;
@@ -1100,7 +1229,7 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
             Err(RecvTimeoutError::Timeout) => {
                 #[cfg(target_os = "linux")]
                 if shared.owner() && shared.live.read().unwrap().is_some() {
-                    relist_changed(shared, "watcher tick", 0);
+                    tick_reconcile(shared);
                 }
                 Vec::new()
             }

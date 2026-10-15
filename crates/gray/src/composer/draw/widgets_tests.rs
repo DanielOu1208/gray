@@ -44,12 +44,14 @@ fn input_box_ghost_hint_shows_only_when_empty() {
 }
 
 #[test]
-fn home_box_is_the_flat_band_with_hints_stats_tip_and_notice_under_it() {
+fn home_box_is_the_flat_band_with_hints_stats_and_notice_under_it() {
     let home = HomeRows {
         notice: Some(
             "⚠ 3 interrupted sessions in ~/gray · /sessions to pick up · /sessions dismiss to clear",
         ),
-        stats: Some("65 plugins · 65 loaded"),
+        stats: Some("65/65 plugins loaded"),
+        model: Some("SWE 2"),
+        model_tail: Some(" max"),
         above: None,
         session: None,
         qol: None,
@@ -63,27 +65,19 @@ fn home_box_is_the_flat_band_with_hints_stats_tip_and_notice_under_it() {
     assert_eq!(rows[1], " ❯ hi");
     assert_eq!((ibox.cur_row, ibox.cur_col), (1, 2));
 
-    assert_eq!(rows.len(), 8, "{rows:?}");
-    assert!(rows[3].starts_with("● Tip"), "{rows:?}");
-    assert!(rows[3].ends_with("/ commands"), "{rows:?}");
+    assert_eq!(rows.len(), 9, "{rows:?}");
+    assert_eq!(rows[3], "");
+    assert!(rows[4].starts_with("SWE 2 max"), "{rows:?}");
+    assert!(rows[4].ends_with("65/65 plugins loaded"), "{rows:?}");
     assert_eq!(
-        display_width(&rows[3]),
+        display_width(&rows[4]),
         78,
-        "tip + hints span the box's width"
+        "model + stats span the box's width"
     );
-    assert!(
-        rows[5].starts_with("⚠ 3 interrupted sessions in ~/gray"),
-        "{rows:?}"
-    );
-    assert!(rows[5].ends_with("65 plugins · 65 loaded"), "{rows:?}");
-    assert_eq!(
-        display_width(&rows[5]),
-        78,
-        "headline + stats span the box's width"
-    );
-    assert_eq!(rows[4], "");
-    assert_eq!(rows[6], "  /sessions           pick up");
-    assert_eq!(rows[7], "  /sessions dismiss   clear");
+    assert_eq!(rows[5], "");
+    assert_eq!(rows[6], "⚠ 3 interrupted sessions in ~/gray");
+    assert_eq!(rows[7], "  /sessions           pick up");
+    assert_eq!(rows[8], "  /sessions dismiss   clear");
 
     let quiet = build_input_box(
         "",
@@ -91,19 +85,24 @@ fn home_box_is_the_flat_band_with_hints_stats_tip_and_notice_under_it() {
         w,
         None,
         Some(HomeRows {
-            stats: Some("65 plugins · 65 loaded"),
+            stats: Some("65/65 plugins loaded"),
+            model: Some("SWE 2 max"),
             ..HomeRows::default()
         }),
         &[],
     );
     let quiet_rows = row_texts(&quiet);
-    assert_eq!(quiet_rows.len(), 6, "{quiet_rows:?}");
-    assert_eq!(quiet_rows[5], "65 plugins · 65 loaded");
+    assert_eq!(quiet_rows.len(), 5, "{quiet_rows:?}");
+    assert!(quiet_rows[4].starts_with("SWE 2 max"), "{quiet_rows:?}");
+    assert!(
+        quiet_rows[4].ends_with("65/65 plugins loaded"),
+        "{quiet_rows:?}"
+    );
 
     let chat = build_input_box("hi", 2, w, None, None, &[]);
     assert_eq!((chat.lines.len(), chat.x, chat.width), (3, 0, w));
 
-    assert_eq!(home_band_h(w), 3 + 1 + 1);
+    assert_eq!(home_band_h(w), 3 + 2 + 1);
 }
 
 #[test]
@@ -146,6 +145,17 @@ fn two_chips() -> Vec<InputCell> {
 
 fn cells_text(cells: &[InputCell]) -> String {
     cells.iter().map(|c| c.0).collect()
+}
+
+#[test]
+fn an_inline_attachment_marker_renders_as_a_chip_not_literal_text() {
+    let text = "see [image: pic.png] here";
+    let ibox = build_input_box(text, text.len(), 100, None, None, &[]);
+    assert_eq!(row_texts(&ibox)[1], " ❯ see  IMAGE  pic.png  here");
+
+    let text = "watch [video: clip.mp4] now";
+    let ibox = build_input_box(text, text.len(), 100, None, None, &[]);
+    assert_eq!(row_texts(&ibox)[1], " ❯ watch  VIDEO  clip.mp4  now");
 }
 
 #[test]
