@@ -149,6 +149,15 @@ async fn run() -> anyhow::Result<()> {
         return gray::session_read::run_cli(session.as_deref(), *live, *last, *json).await;
     }
 
+    match &cli.command {
+        Some(gray::Commands::Login { code }) => {
+            return gray::account::run_login(code.as_deref()).await;
+        }
+        Some(gray::Commands::Whoami) => return gray::account::run_whoami().await,
+        Some(gray::Commands::Logout) => return gray::account::run_logout().await,
+        _ => {}
+    }
+
     if let Some(gray::Commands::External(args)) = &cli.command {
         let (name, rest) = args
             .split_first()
@@ -236,6 +245,9 @@ async fn run() -> anyhow::Result<()> {
 
             gray::Commands::External(_) => {
                 unreachable!("plugin CLI dispatch happens before configuration")
+            }
+            gray::Commands::Login { .. } | gray::Commands::Whoami | gray::Commands::Logout => {
+                unreachable!("account CLI dispatch happens before configuration")
             }
             gray::Commands::Find { .. }
             | gray::Commands::Grep { .. }

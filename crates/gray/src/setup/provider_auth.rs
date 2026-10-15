@@ -250,6 +250,7 @@ fn activate_plugin_connection_at(
     saved.model = config.model.clone();
 
     apply_connection_effort(config, &mut saved);
+    crate::config::export_provider_env(config);
     save_saved_config_at(path, &saved)
 }
 
@@ -284,6 +285,7 @@ fn api_key_selection_at(config: &mut Config, path: &Path) {
     let _lock = lock_saved_config_at(path).ok();
     let mut saved = load_saved_config_at(path);
     clear_plugin_identity(config, &mut saved);
+    crate::config::export_provider_env(config);
     let _ = save_saved_config_at(path, &saved);
 }
 
@@ -450,6 +452,7 @@ pub async fn forget_plugin_connection(
     let _lock = lock_saved_config_at(&saved_path).ok();
     let mut saved = load_saved_config_at(&saved_path);
     clear_plugin_selection(config, &mut saved, &item.id);
+    crate::config::export_provider_env(config);
     save_saved_config_at(&saved_path, &saved)?;
 
     if let (Some(installed), Some(credential)) = (installed, credential)

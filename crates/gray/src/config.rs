@@ -161,6 +161,7 @@ impl Config {
         {
             unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", bus) };
         }
+        export_provider_env(&config);
         Ok(config)
     }
 
@@ -342,6 +343,26 @@ impl Config {
         self.credential_source == "plugin"
             && !self.provider_id.is_empty()
             && !self.auth_ref.is_empty()
+    }
+}
+
+/// Children spawned under this process — plugin sidecars, `gray -p`
+/// subagents, agent-run CLIs — inherit the session's provider rather than
+/// racing the last-writer-wins saved config. A non-plugin selection clears
+/// the vars so a stale inherited pin can't leak into grandchildren.
+pub(crate) fn export_provider_env(config: &Config) {
+    unsafe {
+        if config.uses_plugin_credentials() {
+            std::env::set_var("GRAY_PROVIDER_ID", &config.provider_id);
+            std::env::set_var("GRAY_AUTH_REF", &config.auth_ref);
+            std::env::set_var("GRAY_CREDENTIAL_SOURCE", "plugin");
+        } else {
+            std::env::remove_var("GRAY_PROVIDER_ID");
+            std::env::remove_var("GRAY_AUTH_REF");
+            if std::env::var("GRAY_CREDENTIAL_SOURCE").as_deref() == Ok("plugin") {
+                std::env::remove_var("GRAY_CREDENTIAL_SOURCE");
+            }
+        }
     }
 }
 

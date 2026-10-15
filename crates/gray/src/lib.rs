@@ -1,3 +1,4 @@
+pub mod account;
 pub mod ask;
 pub mod auth;
 pub mod auto_title;
@@ -606,6 +607,19 @@ pub enum Commands {
         #[arg(long)]
         revoke: bool,
     },
+
+    #[command(about = "Log in to gray.alignment.id with a one-time enrollment code")]
+    Login {
+        /// The code the site minted; prompted for when omitted.
+        #[arg(value_name = "CODE")]
+        code: Option<String>,
+    },
+
+    #[command(about = "Show the gray.alignment.id account the stored token belongs to")]
+    Whoami,
+
+    #[command(about = "Revoke the stored registry token and forget it locally")]
+    Logout,
 
     #[command(visible_alias = "upgrade")]
     Update {
