@@ -291,6 +291,17 @@ fn sanitize_origin_tag(raw: &str) -> Option<String> {
     .then_some(t)
 }
 
+static INHERITED_SESSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+pub fn capture_inherited_session_env() {
+    INHERITED_SESSION.get_or_init(|| {
+        std::env::var("GRAY_SESSION_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+}
+
 pub fn session_origin_from_env() -> Option<String> {
     if let Some(v) = std::env::var("GRAY_SESSION_ORIGIN")
         .ok()
@@ -298,7 +309,13 @@ pub fn session_origin_from_env() -> Option<String> {
     {
         return Some(v);
     }
-    (std::env::var("GRAY_SUBAGENTS_ACTIVE").as_deref() == Ok("1")).then(|| "subagent".to_string())
+    if std::env::var("GRAY_SUBAGENTS_ACTIVE").as_deref() == Ok("1") {
+        return Some("subagent".to_string());
+    }
+    if INHERITED_SESSION.get().and_then(Option::as_deref).is_some() {
+        return Some("nested".to_string());
+    }
+    None
 }
 
 pub fn print_session_origin() -> Option<String> {

@@ -52,6 +52,7 @@ async fn gray_main() -> anyhow::Result<()> {
 
 async fn run() -> anyhow::Result<()> {
     gray::turn_caps::init_process_start();
+    gray::session_store::capture_inherited_session_env();
     gray::logging::init();
     install_panic_hook();
     let _ = crossterm::terminal::disable_raw_mode();
