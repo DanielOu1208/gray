@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Self-detached commands now register as background jobs.** A command
+  that exits while its process group keeps running (`nohup ... &`,
+  `cmd &`) used to report a clean exit and leave the group invisible:
+  nothing in the status line or `/jobs`, and no wake when it died. The
+  handoff now also triggers when the leader exits with a live group,
+  and the job stays running until every member is gone.
+- **Attachment markers render as chips in the transcript.** A pasted
+  file echoed back as raw `[image: ...]` text; it now draws the same
+  ` IMAGE ` chip the composer shows.
+- **Agent-spawned sessions stay out of `/sessions`.** A `gray` launched
+  inside another gray's bash tool inherits `GRAY_SESSION_ID`; it now
+  records `origin: "nested"` so the picker hides it like subagent and
+  print sessions.
+
 ## [0.2.1] - 2026-10-15
 
 ### Fixed
