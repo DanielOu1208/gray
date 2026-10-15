@@ -72,6 +72,7 @@ pub struct GrepPlan {
 }
 
 impl GrepPlan {
+    #[cfg(unix)]
     pub fn answerable(&self) -> bool {
         if self.color_always {
             return false;
@@ -79,6 +80,7 @@ impl GrepPlan {
         self.fsearch_grep().is_some()
     }
 
+    #[cfg(unix)]
     pub fn fsearch_grep(&self) -> Option<fsearch::Grep> {
         use fsearch::{Case, Grep, GrepMode};
         let case = if self.ignore_case {
@@ -781,6 +783,7 @@ pub struct RgPlan {
 }
 
 impl RgPlan {
+    #[cfg(unix)]
     pub fn answerable(&self) -> bool {
         !self.color_always && !self.exec_only && self.fsearch_grep().is_some()
     }
@@ -804,6 +807,7 @@ impl RgPlan {
         self.line_number.unwrap_or(self.column || self.vimgrep)
     }
 
+    #[cfg(unix)]
     pub fn fsearch_grep(&self) -> Option<fsearch::Grep> {
         use fsearch::{Case, Grep, GrepMode};
         let case = match self.case {

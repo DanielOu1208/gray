@@ -1912,7 +1912,7 @@ async fn turn_end_hook_called_once_on_end_and_on_error() {
 
     let ends_err = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls_err = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
-    let scripts: Vec<Vec<StreamEvent>> = (0..6).map(|i| tool_script(&format!("c{i}"))).collect();
+    let scripts: Vec<Vec<StreamEvent>> = (0..16).map(|i| tool_script(&format!("c{i}"))).collect();
     let mut agent = Agent::new(
         Box::new(FakeProvider::new(scripts)),
         Arc::new(FakeExecutor::new(ToolOutput::ok("ok"))),
