@@ -3,7 +3,10 @@ use super::*;
 pub(crate) fn attach_image(tui: &mut Tui, path: PathBuf) {
     let marker = crate::repl::attachments::attachment_marker(&path);
     tui.attachments.push(path);
+    let cur = tui.textarea.cursor();
+    tui.textarea.move_to_end();
     tui.textarea.insert_element(&marker);
+    tui.textarea.set_cursor(cur);
     let _ = tui.draw();
 }
 
@@ -21,16 +24,6 @@ pub(crate) fn sync_attachment_markers(tui: &mut Tui) {
             _ => false,
         }
     });
-}
-
-pub(crate) fn strip_attachment_marker(tui: &mut Tui, path: &std::path::Path) {
-    let label = crate::repl::attachments::attachment_label(path);
-    let hit = crate::repl::attachments::attachment_markers(tui.textarea.text())
-        .into_iter()
-        .find(|(_, name)| *name == label);
-    if let Some((range, _)) = hit {
-        tui.textarea.replace_range(range, "");
-    }
 }
 
 pub(crate) const MAX_ATTACH_FILE_BYTES: u64 = 100 * 1024 * 1024;
