@@ -189,8 +189,6 @@ pub(crate) fn build_input_box(
 
     let mut box_lines: Vec<Line<'static>> = Vec::new();
 
-    box_lines.push(Line::from(""));
-
     let arrow_span = Span::styled(
         " ❯ ",
         Style::default()
