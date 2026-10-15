@@ -24,20 +24,20 @@ fn raw_paths_pass_through() {
 }
 
 #[test]
-fn attach_image_inserts_marker_at_caret() {
+fn attach_image_appends_marker_and_keeps_caret() {
     let mut tui = Tui::test_tui(80, 30);
     tui.textarea.set_text("prefix suffix");
     tui.textarea.set_cursor(7);
     let path = PathBuf::from("/tmp/pic one.png");
     let marker = crate::repl::attachments::attachment_marker(&path);
     attach_image(&mut tui, path.clone());
-    assert_eq!(tui.textarea.text(), format!("prefix {marker}suffix"));
-    assert_eq!(tui.textarea.cursor(), 7 + marker.len());
+    assert_eq!(tui.textarea.text(), format!("prefix suffix{marker}"));
+    assert_eq!(tui.textarea.cursor(), 7);
     assert_eq!(tui.attachments, vec![path]);
 }
 
 #[test]
-fn attach_image_marks_each_paste_at_its_caret() {
+fn attach_image_appends_each_paste_in_order() {
     let mut tui = Tui::test_tui(80, 30);
     tui.textarea.set_text("middle ");
     tui.textarea.set_cursor(7);
@@ -48,7 +48,7 @@ fn attach_image_marks_each_paste_at_its_caret() {
     attach_image(&mut tui, pa.clone());
     tui.textarea.insert_str("tail");
     attach_image(&mut tui, pb.clone());
-    assert_eq!(tui.textarea.text(), format!("middle {ma}tail{mb}"));
+    assert_eq!(tui.textarea.text(), format!("middle tail{ma}{mb}"));
     let end = tui.textarea.text().len();
     tui.textarea.replace_range(end - mb.len()..end, "");
     super::sync_attachment_markers(&mut tui);

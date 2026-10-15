@@ -157,26 +157,7 @@ fn apply(tui: &mut Tui, a: Action) -> Option<KeyOutcome> {
             tui.textarea.set_cursor(p);
             edited
         }
-        Action::DeleteCharBackward => {
-            if tui.textarea.cursor() == 0 && !tui.attachments.is_empty() {
-                let markers = crate::repl::attachments::attachment_markers(tui.textarea.text());
-                let idx = tui
-                    .attachments
-                    .iter()
-                    .rposition(|p| {
-                        !markers
-                            .iter()
-                            .any(|(_, n)| *n == crate::repl::attachments::attachment_label(p))
-                    })
-                    .unwrap_or(tui.attachments.len() - 1);
-                let path = tui.attachments.remove(idx);
-                super::attach::strip_attachment_marker(tui, &path);
-                tui.sel = 0;
-                edited
-            } else {
-                edit(tui, |t| t.textarea.delete_backward())
-            }
-        }
+        Action::DeleteCharBackward => edit(tui, |t| t.textarea.delete_backward()),
         Action::DeleteCharForward => edit(tui, |t| t.textarea.delete_forward()),
         Action::DeleteWordBackward => edit(tui, |t| t.textarea.delete_word_backward()),
         Action::DeleteWordForward => edit(tui, |t| t.textarea.delete_word_forward()),

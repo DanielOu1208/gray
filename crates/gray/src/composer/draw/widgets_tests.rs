@@ -169,62 +169,57 @@ fn chip_cells_are_pill_then_label_with_a_gap_between_chips() {
 }
 
 #[test]
-fn chips_open_the_prompt_row_and_the_draft_follows_them() {
+fn chips_close_the_prompt_row_after_the_draft() {
     let chips = one_chip();
     let ibox = build_input_box("wtf is this", 11, 100, None, None, &chips);
     let rows = row_texts(&ibox);
 
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[1], format!(" ❯ {}wtf is this", cells_text(&chips)));
-    assert_eq!((ibox.cur_row, ibox.cur_col), (1, chips.len() + 11));
+    assert_eq!(rows[1], format!(" ❯ wtf is this{}", cells_text(&chips)));
+    assert_eq!((ibox.cur_row, ibox.cur_col), (1, 11));
 }
 
 #[test]
-fn the_cursor_at_start_middle_and_end_of_the_draft_sits_after_the_chips() {
+fn the_cursor_stays_put_regardless_of_trailing_chips() {
     let chips = one_chip();
     for (cursor, col) in [(0, 0), (5, 5), (11, 11)] {
         let ibox = build_input_box("hello world", cursor, 100, None, None, &chips);
-        assert_eq!(
-            (ibox.cur_row, ibox.cur_col),
-            (1, chips.len() + col),
-            "cursor {cursor}"
-        );
+        assert_eq!((ibox.cur_row, ibox.cur_col), (1, col), "cursor {cursor}");
     }
 }
 
 #[test]
-fn an_empty_draft_puts_the_cursor_right_after_two_chips_and_before_the_ghost() {
+fn an_empty_draft_shows_chips_without_the_ghost() {
     let chips = two_chips();
     let ibox = build_input_box("", 0, 100, Some("Please continue…"), None, &chips);
-    assert_eq!(
-        row_texts(&ibox)[1],
-        format!(" ❯ {}Please continue…", cells_text(&chips))
-    );
-    assert_eq!((ibox.cur_row, ibox.cur_col), (1, chips.len()));
+    assert_eq!(row_texts(&ibox)[1], format!(" ❯ {}", cells_text(&chips)));
+    assert_eq!((ibox.cur_row, ibox.cur_col), (1, 0));
 }
 
 #[test]
-fn the_cursor_on_a_later_line_ignores_the_chips() {
+fn the_chips_sit_on_the_last_line() {
     let chips = one_chip();
     let ibox = build_input_box("a\nbc", 4, 100, None, None, &chips);
     let rows = row_texts(&ibox);
-    assert_eq!(rows[1], format!(" ❯ {}a", cells_text(&chips)));
-    assert_eq!(rows[2], "   bc");
+    assert_eq!(rows[1], " ❯ a");
+    assert_eq!(rows[2], format!("   bc{}", cells_text(&chips)));
     assert_eq!((ibox.cur_row, ibox.cur_col), (2, 2));
 }
 
 #[test]
-fn the_draft_wraps_after_the_chips_on_the_first_row_and_indents_below() {
+fn the_draft_wraps_before_the_trailing_chips() {
     let chips = one_chip();
     let text = "wtf is this and then some more";
 
     let ibox = build_input_box(text, text.len(), 40, None, None, &chips);
     let rows = row_texts(&ibox);
-    assert_eq!(rows.len(), 4);
-    assert_eq!(rows[1], format!(" ❯ {}wtf is ", cells_text(&chips)));
-    assert_eq!(rows[2], "   this and then some more");
-    let tail = "this and then some more".chars().count();
-    assert_eq!((ibox.cur_row, ibox.cur_col), (2, tail));
+    let body: String = rows[1..]
+        .iter()
+        .map(|r| r.chars().skip(3).collect::<String>())
+        .collect();
+    assert_eq!(body, format!("{text}{}", cells_text(&chips)));
+    assert!(rows[1..].iter().all(|r| r.chars().count() <= 40));
+    assert_eq!((ibox.cur_row, ibox.cur_col), (1, 30));
 }
 
 #[test]
@@ -241,8 +236,6 @@ fn chips_wider_than_the_line_wrap_onto_their_own_rows_without_losing_a_cell() {
         assert_eq!(body, cells_text(&chips), "w {w}");
         assert!(body_rows.iter().all(|r| r.chars().count() <= w), "w {w}");
         assert!(body_rows[1..].iter().all(|r| r.starts_with("   ")), "w {w}");
-        let (cur_row, cur_col) = (ibox.cur_row, ibox.cur_col);
-        assert_eq!(cur_row, rows.len() - 2, "w {w}");
-        assert_eq!(cur_col, rows[cur_row].chars().count() - 3, "w {w}");
+        assert_eq!((ibox.cur_row, ibox.cur_col), (1, 0), "w {w}");
     }
 }

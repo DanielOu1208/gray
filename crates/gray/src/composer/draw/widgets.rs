@@ -204,23 +204,23 @@ pub(crate) fn build_input_box(
     let mut cur_row = 0usize;
     let mut cur_col = 0usize;
 
+    let line_count = text.split('\n').count();
     for (i, raw_line) in text.split('\n').enumerate() {
         let mut cells: Vec<InputCell> = Vec::new();
-        if i == 0 {
-            cells.extend_from_slice(chips);
-        }
-        let lead = cells.len();
-        if i == 0 && text.is_empty() {
+        if i == 0 && text.is_empty() && chips.is_empty() {
             if let Some(hint) = ghost {
                 cells.extend(hint.chars().map(|c| (c, ghost_style)));
             }
         } else {
             cells.extend(raw_line.chars().map(|c| (c, draft_style)));
-            restyle_attachment_markers(&mut cells[lead..]);
+            restyle_attachment_markers(&mut cells);
+        }
+        if i + 1 == line_count {
+            cells.extend_from_slice(chips);
         }
 
         let chars: Vec<char> = cells.iter().map(|c| c.0).collect();
-        let at_here = (i == cur_line).then_some(lead + cur_char);
+        let at_here = (i == cur_line).then_some(cur_char);
         let (rows, at) = wrap_line(&chars, content_w, at_here);
         let first_row = box_lines.len();
         for (r, &(s, e)) in rows.iter().enumerate() {
