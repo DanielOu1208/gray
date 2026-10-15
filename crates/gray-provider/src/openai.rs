@@ -31,6 +31,12 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 const DEFAULT_STREAM_STALL: Duration = Duration::from_secs(300);
 
+const RETRY_STREAM_STALL: Duration = Duration::from_secs(75);
+
+const STREAM_STALL_MEMORY_SECS: i64 = 15 * 60;
+
+static LAST_STREAM_STALL_SECS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
 #[derive(Clone)]
 pub struct OpenAiProvider {
     base_url: Url,
@@ -1911,6 +1917,11 @@ impl Stream for StallGuard {
             Poll::Pending => {
                 if self.timer.as_mut().poll(cx).is_ready() {
                     self.fired = true;
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    LAST_STREAM_STALL_SECS.store(now, std::sync::atomic::Ordering::Relaxed);
                     return Poll::Ready(Some(Err(SseReadError::Stalled(self.cap))));
                 }
                 Poll::Pending
@@ -1919,13 +1930,26 @@ impl Stream for StallGuard {
     }
 }
 
-fn stream_stall_cap() -> Duration {
-    std::env::var("GRAY_PROVIDER_STALL_SECS")
+fn env_secs(name: &str) -> Option<Duration> {
+    std::env::var(name)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|v| *v > 0)
         .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_STREAM_STALL)
+}
+
+fn stream_stall_cap() -> Duration {
+    let base = env_secs("GRAY_PROVIDER_STALL_SECS").unwrap_or(DEFAULT_STREAM_STALL);
+    let last = LAST_STREAM_STALL_SECS.load(std::sync::atomic::Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if last > 0 && now.saturating_sub(last) < STREAM_STALL_MEMORY_SECS {
+        base.min(env_secs("GRAY_PROVIDER_RETRY_STALL_SECS").unwrap_or(RETRY_STREAM_STALL))
+    } else {
+        base
+    }
 }
 
 fn stall_guard(inner: BoxedEventStream, cap: Duration) -> BoxedEventStream {

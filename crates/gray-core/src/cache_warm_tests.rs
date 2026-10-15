@@ -24,24 +24,24 @@ fn policy(prices: Option<Prices>) -> CacheWarmPolicy {
 
 #[test]
 fn savings_follow_pi_and_clear_the_floor_only_for_big_prompts() {
-    let big = expected_savings(&sonnet(), 100_000, 1);
+    let big = expected_savings(&sonnet(), 100_000, 1, 1.0);
     assert!((big - (0.375 - 0.03 - 0.03 - 15e-6)).abs() < 1e-9, "{big}");
     assert!(big >= MIN_EXPECTED_SAVINGS);
-    assert!(expected_savings(&sonnet(), 10_000, 1) < MIN_EXPECTED_SAVINGS);
+    assert!(expected_savings(&sonnet(), 10_000, 1, 1.0) < MIN_EXPECTED_SAVINGS);
 
     let plain = Prices {
         cache_write: 0.0,
         ..sonnet()
     };
-    assert!((expected_savings(&plain, 100_000, 1) - (0.3 - 0.03 - 0.03 - 15e-6)).abs() < 1e-9);
+    assert!((expected_savings(&plain, 100_000, 1, 1.0) - (0.3 - 0.03 - 0.03 - 15e-6)).abs() < 1e-9);
 
-    let capped = expected_savings(&sonnet(), 100_000, 2048);
+    let capped = expected_savings(&sonnet(), 100_000, 2048, 1.0);
     assert!(
         (capped - (0.375 - 0.03 - 0.03 - 2048.0 * 15e-6)).abs() < 1e-9,
         "{capped}"
     );
     assert!(capped >= MIN_EXPECTED_SAVINGS);
-    assert!(expected_savings(&sonnet(), 100_000, 32_000) < 0.0);
+    assert!(expected_savings(&sonnet(), 100_000, 32_000, 1.0) < 0.0);
 }
 
 struct Fake {
@@ -184,9 +184,9 @@ async fn unknown_prices_warm_a_big_prompt_the_provider_caches() {
 
 #[test]
 fn the_token_floor_backs_up_the_dollar_floor() {
-    assert!(worth_refreshing(None, 25_000, 1, true));
-    assert!(!worth_refreshing(None, 25_000, 1, false));
-    assert!(!worth_refreshing(None, 5_000, 1, true));
+    assert!(worth_refreshing(None, 25_000, 1, true, 1.0));
+    assert!(!worth_refreshing(None, 25_000, 1, false, 1.0));
+    assert!(!worth_refreshing(None, 5_000, 1, true, 1.0));
 
     let free = Prices {
         input: 0.0,
@@ -194,7 +194,7 @@ fn the_token_floor_backs_up_the_dollar_floor() {
         cache_read: 0.0,
         cache_write: 0.0,
     };
-    assert!(worth_refreshing(Some(&free), 25_000, 1, true));
+    assert!(worth_refreshing(Some(&free), 25_000, 1, true, 1.0));
 
     let cheap = Prices {
         input: 0.27e-6,
@@ -202,16 +202,16 @@ fn the_token_floor_backs_up_the_dollar_floor() {
         cache_read: 0.07e-6,
         cache_write: 0.0,
     };
-    assert!(expected_savings(&cheap, 25_000, 1) < MIN_EXPECTED_SAVINGS);
-    assert!(worth_refreshing(Some(&cheap), 25_000, 1, false));
-    assert!(!worth_refreshing(Some(&cheap), 10_000, 1, true));
+    assert!(expected_savings(&cheap, 25_000, 1, 1.0) < MIN_EXPECTED_SAVINGS);
+    assert!(worth_refreshing(Some(&cheap), 25_000, 1, false, 1.0));
+    assert!(!worth_refreshing(Some(&cheap), 10_000, 1, true, 1.0));
 
     let flat = Prices {
         cache_read: 0.27e-6,
         ..cheap
     };
-    assert!(!worth_refreshing(Some(&flat), 100_000, 1, true));
-    assert!(!worth_refreshing(Some(&sonnet()), 0, 1, true));
+    assert!(!worth_refreshing(Some(&flat), 100_000, 1, true, 1.0));
+    assert!(!worth_refreshing(Some(&sonnet()), 0, 1, true, 1.0));
 }
 
 #[tokio::test(start_paused = true)]
@@ -248,7 +248,98 @@ async fn a_late_timer_skips_the_refresh() {
         })),
         sent,
         Arc::new(Mutex::new(Usage::default())),
+        warm_phase(),
     )
     .await;
     assert!(seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn idle_phase_demands_a_bigger_prize() {
+    let savings = expected_savings(&sonnet(), 100_000, 1, IDLE_CONTINUATION_PROBABILITY);
+    assert!(savings < MIN_EXPECTED_SAVINGS, "{savings}");
+    assert!(!worth_refreshing(
+        Some(&sonnet()),
+        10_000,
+        1,
+        true,
+        IDLE_CONTINUATION_PROBABILITY
+    ));
+
+    let big = expected_savings(&sonnet(), 500_000, 1, IDLE_CONTINUATION_PROBABILITY);
+    assert!(big >= MIN_EXPECTED_SAVINGS, "{big}");
+    assert!(worth_refreshing(
+        Some(&sonnet()),
+        500_000,
+        1,
+        true,
+        IDLE_CONTINUATION_PROBABILITY
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_settled_turn_keeps_warming_at_idle_odds() {
+    let mut first = Usage::new(500_000, 20);
+    first.cache_read_input_tokens = 400_000;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let provider = Fake {
+        scripts: Mutex::new(VecDeque::from(vec![vec![
+            StreamEvent::text_delta("done"),
+            StreamEvent::message_complete(Some(StopReason::EndTurn), Some(first)),
+        ]])),
+        seen: seen.clone(),
+        warm_cap: 1,
+    };
+    let mut agent = Agent::new(Box::new(provider), Arc::new(Slow(Duration::ZERO)))
+        .with_cache_warm(Some(policy(Some(sonnet()))));
+    agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .unwrap();
+
+    tokio::time::advance(Duration::from_secs(280)).await;
+    tokio::task::yield_now().await;
+    let warms = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| *m == Some(1))
+        .count();
+    assert_eq!(warms, 1, "idle refresh at 270s: {seen:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_warming_stops_at_the_thirty_minute_horizon() {
+    let mut first = Usage::new(500_000, 20);
+    first.cache_read_input_tokens = 400_000;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let provider = Fake {
+        scripts: Mutex::new(VecDeque::from(vec![vec![
+            StreamEvent::text_delta("done"),
+            StreamEvent::message_complete(Some(StopReason::EndTurn), Some(first)),
+        ]])),
+        seen: seen.clone(),
+        warm_cap: 1,
+    };
+    let mut agent = Agent::new(Box::new(provider), Arc::new(Slow(Duration::ZERO)))
+        .with_cache_warm(Some(policy(Some(sonnet()))));
+    agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .unwrap();
+
+    tokio::time::advance(Duration::from_secs(2000)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(2000)).await;
+    tokio::task::yield_now().await;
+    let warms = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| *m == Some(1))
+        .count();
+    assert!(
+        warms <= 6,
+        "idle horizon caps refreshes near 1800s/270s, got {warms}"
+    );
 }

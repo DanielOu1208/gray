@@ -18,7 +18,15 @@ const MAX_CONTINUATIONS: u8 = 2;
 
 const MAX_LEAK_NUDGES: u8 = 3;
 
+const MAX_PROGRESS_NUDGES: u8 = 2;
+
 const MAX_TURN_RETRIES: u8 = 8;
+
+const MAX_STREAM_STALL_RETRIES: u8 = 2;
+
+fn silent_stall(e: &ProviderError) -> bool {
+    matches!(e.class(), ProviderError::Stream(m) if m.contains("stream stalled"))
+}
 
 const MAX_TURN_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
@@ -57,6 +65,22 @@ fn quota_flavored(e: &ProviderError) -> bool {
     QUOTA_WINDOW_HINTS.iter().any(|h| lower.contains(h))
 }
 
+const ROUTING_FLAVOR_HINTS: [&str; 5] = [
+    "not a chat model",
+    "does not exist",
+    "no such model",
+    "model not found",
+    "unsupported model",
+];
+
+fn routing_flavored(e: &ProviderError) -> bool {
+    let ProviderError::BadRequest(msg) = e.class() else {
+        return false;
+    };
+    let lower = msg.to_lowercase();
+    ROUTING_FLAVOR_HINTS.iter().any(|h| lower.contains(h))
+}
+
 fn reset_hint_from_text(msg: &str) -> Option<std::time::Duration> {
     let lower = msg.to_lowercase();
     let rest = &lower[lower.find("resets in ~")? + "resets in ~".len()..];
@@ -81,15 +105,28 @@ fn provider_reset_hint(e: &ProviderError) -> Option<std::time::Duration> {
     reset_hint_from_text(&e.to_string())
 }
 
+fn turn_retry_detail(e: &ProviderError, attempt: u8) -> String {
+    let mut detail = format!("{e} · retry {attempt}/{MAX_TURN_RETRIES}");
+    if attempt >= 2 && silent_stall(e) {
+        detail.push_str(
+            " — provider is holding the request but sending nothing; try /model to another route",
+        );
+    }
+    detail.chars().take(300).collect()
+}
+
 fn turn_retry_wait(e: &ProviderError, attempt: u8) -> Option<std::time::Duration> {
     if attempt >= MAX_TURN_RETRIES {
+        return None;
+    }
+    if silent_stall(e) && attempt >= MAX_STREAM_STALL_RETRIES {
         return None;
     }
     let hint = provider_reset_hint(e);
     if hint.is_some_and(|h| h > MAX_TURN_RETRY_WAIT) {
         return None;
     }
-    if !e.retryable() && !quota_flavored(e) {
+    if !e.retryable() && !quota_flavored(e) && !routing_flavored(e) {
         return None;
     }
     let backoff = turn_retry_delay().saturating_mul(1u32 << attempt.min(10));
@@ -175,6 +212,9 @@ impl Agent {
     }
 
     async fn emit_turn_end(&self, usage: &Usage) {
+        if let Some(warm) = &self.warm_run {
+            warm.settle();
+        }
         for hook in &self.hooks {
             hook.turn_end(usage).await;
         }
@@ -325,6 +365,8 @@ impl Agent {
 
         let mut leak_nudges: u8 = 0;
 
+        let mut progress_nudges: u8 = 0;
+
         let mut hook_context = String::new();
         if let Some(hook) = self.checkpoint.clone() {
             hook(&self.messages, self.history_revision()).await;
@@ -469,29 +511,36 @@ impl Agent {
                 }
             }
 
-            let warm_req = self.cache_warm.is_some().then(|| req.clone());
             let request_sent = tokio::time::Instant::now();
 
-            let warm_spent = std::sync::Arc::new(std::sync::Mutex::new(Usage::default()));
-
-            let warm_hint =
-                std::sync::Arc::new(std::sync::Mutex::new(crate::cache_warm::WarmHint {
-                    prompt_tokens: self.estimate_tokens(),
-                    cache_reported: self.warm_cache_reported,
-                }));
-            let warm_guard = match (&self.cache_warm, warm_req) {
-                (Some(policy), Some(req)) => Some(crate::cache_warm::WarmGuard(tokio::spawn(
-                    crate::cache_warm::keep_warm(
-                        self.provider.clone(),
-                        req,
-                        policy.clone(),
-                        warm_hint.clone(),
-                        request_sent,
-                        warm_spent.clone(),
-                    ),
-                ))),
-                _ => None,
-            };
+            if let Ok(mut hint) = self.warm_hint.lock() {
+                hint.prompt_tokens = self.estimate_tokens();
+                hint.cache_reported = self.warm_cache_reported;
+            }
+            if self.cache_warm.is_some() {
+                if let Some(prev) = self.warm_run.take() {
+                    if let Ok(spent) = prev.spent.lock() {
+                        billed.accumulate(&spent);
+                    }
+                }
+                let warm_spent = std::sync::Arc::new(std::sync::Mutex::new(Usage::default()));
+                let phase = crate::cache_warm::warm_phase();
+                self.warm_run = Some(crate::cache_warm::ActiveWarm {
+                    guard: crate::cache_warm::WarmGuard(tokio::spawn(
+                        crate::cache_warm::keep_warm(
+                            self.provider.clone(),
+                            req.clone(),
+                            self.cache_warm.clone().unwrap(),
+                            self.warm_hint.clone(),
+                            request_sent,
+                            warm_spent.clone(),
+                            phase.clone(),
+                        ),
+                    )),
+                    phase,
+                    spent: warm_spent,
+                });
+            }
 
             let mut text_parts: Vec<String> = Vec::new();
             let mut thinking_text = String::new();
@@ -666,7 +715,7 @@ impl Agent {
                                 );
                                 emit!(AgentEvent::stream_error(
                                     format!("Retrying turn... {turn_retries}/{MAX_TURN_RETRIES}"),
-                                    e.to_string().chars().take(200).collect::<String>()
+                                    turn_retry_detail(&e, turn_retries)
                                 ));
                                 if !delay.is_zero() {
                                     tokio::time::sleep(delay).await;
@@ -775,6 +824,7 @@ impl Agent {
             }
             let text = text_parts.concat();
             let text_is_empty = text.is_empty();
+            let text_calls = parse_text_tool_calls(&text);
 
             let leaked_markup = matches!(stop_reason, StopReason::EndTurn | StopReason::ToolUse)
                 && (leaked_call_markup(&text) || text_strip.leaked());
@@ -800,6 +850,19 @@ impl Agent {
                     args: call.parsed_args(),
                 });
             }
+            if !content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            {
+                for (i, (name, args)) in text_calls.into_iter().enumerate() {
+                    log::info!(target: "gray_agent", "executing tool call emitted as text markup: {name}");
+                    content.push(ContentBlock::ToolUse {
+                        id: format!("gray_text_{}_{i}", self.messages.len()),
+                        name,
+                        args,
+                    });
+                }
+            }
             let assistant = Message {
                 role: Role::Assistant,
                 injected: false,
@@ -813,7 +876,7 @@ impl Agent {
                     + usage.cached_tokens
                     + usage.cache_write_input_tokens
                     > 0;
-            if let (true, Ok(mut hint)) = (usage.input_tokens > 0, warm_hint.lock()) {
+            if let (true, Ok(mut hint)) = (usage.input_tokens > 0, self.warm_hint.lock()) {
                 hint.prompt_tokens = usage.input_tokens;
                 hint.cache_reported = self.warm_cache_reported;
             }
@@ -882,14 +945,33 @@ impl Agent {
                     emit!(AgentEvent::MessageBoundary);
                     continue 'turn;
                 }
+
+                if self.must_act
+                    && progress_nudges < MAX_PROGRESS_NUDGES
+                    && !self
+                        .messages
+                        .iter()
+                        .flat_map(|m| m.content.iter())
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                {
+                    progress_nudges += 1;
+                    log::info!(target: "gray_agent", "headless run produced no tool calls; nudging {progress_nudges}/{MAX_PROGRESS_NUDGES}");
+                    self.messages.push(Message::user_injected(
+                        "no tool calls have run yet — if this task requires action, issue a real tool call now",
+                    ));
+                    emit!(AgentEvent::MessageBoundary);
+                    continue 'turn;
+                }
                 let hit = if total_usage.input_tokens > 0 {
                     total_usage.cached_tokens as f64 / total_usage.input_tokens as f64 * 100.0
                 } else {
                     0.0
                 };
 
-                if let Ok(spent) = warm_spent.lock() {
-                    billed.accumulate(&spent);
+                if let Some(warm) = &self.warm_run {
+                    if let Ok(spent) = warm.spent.lock() {
+                        billed.accumulate(&spent);
+                    }
                 }
                 log::info!(target: "gray_agent", "agent run end: session={} stop={stop_reason:?}, usage in={} out={} cached={} hit={:.0}%, {} messages", ctx.session_id.as_deref().unwrap_or("-"), total_usage.input_tokens, total_usage.output_tokens, total_usage.cached_tokens, hit, self.messages.len());
                 emit!(AgentEvent::turn_end(stop_reason, billed));
@@ -1189,11 +1271,6 @@ impl Agent {
                 });
             }
 
-            drop(warm_guard);
-            if let Ok(spent) = warm_spent.lock() {
-                billed.accumulate(&spent);
-            }
-
             let poll_round = !self.messages[round_start..].is_empty()
                 && self.messages[round_start..].iter().all(|m| {
                     !m.content.is_empty()
@@ -1234,6 +1311,118 @@ fn productive_call(name: &str, args: &serde_json::Value) -> bool {
     !matches!(cmd, "true" | ":" | "echo" | "printf")
         && !cmd.starts_with("echo ")
         && !cmd.starts_with("printf ")
+}
+
+/// Extract tool calls a model emitted as text markup instead of structured
+/// tool_use — e.g. `<function_call>{"name":"bash","arguments":{..}}`,
+/// `<tool_call>{..}</tool_call>`, `<function=name>{..}`. Returns (name, args).
+fn parse_text_tool_calls(text: &str) -> Vec<(String, serde_json::Value)> {
+    const TAGS: &[&str] = &["<function_call>", "<tool_call>", "<tool_use>"];
+    let mut out: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        let mut next: Option<(usize, usize)> = None;
+        for tag in TAGS {
+            if let Some(rel) = text[cursor..].find(tag) {
+                let at = cursor + rel;
+                if next.is_none_or(|(s, _)| at < s) {
+                    next = Some((at, at + tag.len()));
+                }
+            }
+        }
+        let func_eq = text[cursor..].find("<function=").map(|rel| cursor + rel);
+        let mut name_override: Option<String> = None;
+        let mut body = next.map(|(_, e)| e).unwrap_or(usize::MAX);
+        if let Some(at) = func_eq
+            && at < body
+        {
+            let name_start = at + "<function=".len();
+            let name_end = text[name_start..]
+                .find(|c| c == '>' || c == '{')
+                .map(|i| name_start + i)
+                .unwrap_or(text.len());
+            name_override = Some(text[name_start..name_end].trim().to_string());
+            body = name_end;
+        }
+        if body == usize::MAX {
+            break;
+        }
+        let Some(brace) = text[body..].find('{').map(|i| body + i) else {
+            break;
+        };
+        let Some(js) = json_slice(text, brace) else {
+            break;
+        };
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(js) {
+            match name_override {
+                Some(n) if !n.is_empty() => out.push((n, v)),
+                _ => {
+                    if let Some(call) = call_from_json(v) {
+                        out.push(call);
+                    }
+                }
+            }
+        }
+        cursor = brace + js.len();
+    }
+    out
+}
+
+fn call_from_json(v: serde_json::Value) -> Option<(String, serde_json::Value)> {
+    let name = v
+        .get("name")
+        .or_else(|| v.get("function").and_then(|f| f.get("name")))
+        .and_then(|n| n.as_str())?
+        .to_string();
+    if name.trim().is_empty() {
+        return None;
+    }
+    let args = ["arguments", "args", "parameters", "input"]
+        .iter()
+        .find_map(|k| {
+            v.get(*k)
+                .or_else(|| v.get("function").and_then(|f| f.get(*k)))
+        })
+        .cloned()
+        .map(|a| match a {
+            serde_json::Value::String(s) => {
+                serde_json::from_str(&s).unwrap_or(serde_json::Value::String(s))
+            }
+            other => other,
+        })
+        .unwrap_or_else(|| serde_json::json!({}));
+    Some((name, args))
+}
+
+fn json_slice(text: &str, start: usize) -> Option<&str> {
+    debug_assert_eq!(text.as_bytes()[start], b'{');
+    let mut depth = 0u32;
+    let mut in_str = false;
+    let mut esc = false;
+    for (i, b) in text.as_bytes().iter().enumerate().skip(start) {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if *b == b'\\' {
+                esc = true;
+            } else if *b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match *b {
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn leaked_call_markup(text: &str) -> bool {
@@ -1479,6 +1668,67 @@ mod turn_retry_tests {
             },
         );
         assert!(turn_retry_wait(&e, 0).is_none());
+    }
+
+    #[test]
+    fn parses_function_call_markup() {
+        let text = "Let me look.\n<function_call>\n{\"name\": \"bash\", \"arguments\": {\"command\": \"ls /app\"}}\n";
+        let calls = parse_text_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "bash");
+        assert_eq!(calls[0].1["command"], "ls /app");
+    }
+
+    #[test]
+    fn parses_function_eq_dialect() {
+        let calls = parse_text_tool_calls("<function=bash>{\"command\": \"pwd\"}</function>");
+        assert_eq!(calls[0].0, "bash");
+        assert_eq!(calls[0].1["command"], "pwd");
+    }
+
+    #[test]
+    fn parses_nested_function_args() {
+        let calls = parse_text_tool_calls(
+            "<tool_call>{\"function\": {\"name\": \"read\", \"arguments\": \"{\\\"path\\\": \\\"/a\\\"}\"}}</tool_call>",
+        );
+        assert_eq!(calls[0].0, "read");
+        assert_eq!(calls[0].1["path"], "/a");
+    }
+
+    #[test]
+    fn ignores_prose_with_braces() {
+        assert!(parse_text_tool_calls("the fix is {\"a\": 1} simple").is_empty());
+        assert!(parse_text_tool_calls("no markup here").is_empty());
+    }
+
+    #[test]
+    fn routing_flavored_bad_request_retries() {
+        let e = ProviderError::BadRequest("status 400: model 'x' is not a chat model".into());
+        assert!(turn_retry_wait(&e, 0).is_some());
+        assert!(turn_retry_wait(&ProviderError::BadRequest("bad input".into()), 0).is_none());
+    }
+
+    #[test]
+    fn silent_stall_retry_detail_carries_attempt_and_hint() {
+        let e = ProviderError::Stream("stream stalled: no output for 300s".into());
+        let first = turn_retry_detail(&e, 1);
+        assert!(first.contains("retry 1/8"));
+        assert!(!first.contains("/model"));
+        let second = turn_retry_detail(&e, 2);
+        assert!(second.contains("retry 2/8"));
+        assert!(second.contains("/model"));
+        let other = ProviderError::RateLimited("429".into());
+        assert!(!turn_retry_detail(&other, 3).contains("/model"));
+    }
+
+    #[test]
+    fn silent_stalls_give_up_before_other_retryable_errors() {
+        let stall = ProviderError::Stream("stream stalled: no output for 300s".into());
+        assert!(turn_retry_wait(&stall, 0).is_some());
+        assert!(turn_retry_wait(&stall, MAX_STREAM_STALL_RETRIES - 1).is_some());
+        assert!(turn_retry_wait(&stall, MAX_STREAM_STALL_RETRIES).is_none());
+        let other = ProviderError::RateLimited("429".into());
+        assert!(turn_retry_wait(&other, MAX_STREAM_STALL_RETRIES + 3).is_some());
     }
 
     #[test]

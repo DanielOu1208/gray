@@ -458,6 +458,10 @@ pub struct Agent {
 
     pub(crate) cache_warm: Option<crate::cache_warm::CacheWarmPolicy>,
 
+    pub(crate) warm_run: Option<crate::cache_warm::ActiveWarm>,
+
+    pub(crate) warm_hint: std::sync::Arc<std::sync::Mutex<crate::cache_warm::WarmHint>>,
+
     pub(crate) prefix_guard: crate::prefix_guard::PrefixGuard,
 
     pub(crate) warm_cache_reported: bool,
@@ -465,6 +469,7 @@ pub struct Agent {
     pub(crate) prefix_rewrite_ok: bool,
 
     pub(crate) lean_prompt: bool,
+    pub(crate) must_act: bool,
 }
 
 struct SharedProvider(Arc<dyn Provider>);
@@ -512,10 +517,15 @@ impl Agent {
             contaminated: std::collections::BTreeSet::new(),
             masked_prefix: 0,
             cache_warm: None,
+            warm_run: None,
+            warm_hint: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::cache_warm::WarmHint::default(),
+            )),
             prefix_guard: crate::prefix_guard::PrefixGuard::default(),
             warm_cache_reported: false,
             prefix_rewrite_ok: true,
             lean_prompt: false,
+            must_act: false,
         }
     }
 
@@ -552,6 +562,10 @@ impl Agent {
         self.lean_prompt = lean;
     }
 
+    pub fn set_must_act(&mut self, must: bool) {
+        self.must_act = must;
+    }
+
     pub fn set_steer(&mut self, hook: SteerHook) {
         self.steer = Some(hook);
     }
@@ -586,6 +600,7 @@ impl Agent {
         self.masked_prefix = 0;
         self.prefix_guard.expect_change("history rewrite");
         self.history_revision = self.history_revision.wrapping_add(1);
+        self.warm_run = None;
         if let Some(hook) = &self.history_rewrite_hook {
             hook();
         }

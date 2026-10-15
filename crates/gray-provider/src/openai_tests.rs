@@ -2999,3 +2999,26 @@ async fn hung_sse_response_surfaces_retryable_stall() {
         "failed at stall cap, not instantly or after hanging: {elapsed:?}"
     );
 }
+
+#[test]
+fn a_recent_stall_shrinks_the_cap_for_the_next_stream() {
+    let _lock = STALL_ENV.lock().unwrap();
+    unsafe {
+        std::env::remove_var("GRAY_PROVIDER_STALL_SECS");
+        std::env::remove_var("GRAY_PROVIDER_RETRY_STALL_SECS");
+    }
+    LAST_STREAM_STALL_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(stream_stall_cap(), DEFAULT_STREAM_STALL);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    LAST_STREAM_STALL_SECS.store(now, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(stream_stall_cap(), RETRY_STREAM_STALL);
+    LAST_STREAM_STALL_SECS.store(
+        now - STREAM_STALL_MEMORY_SECS - 1,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    assert_eq!(stream_stall_cap(), DEFAULT_STREAM_STALL);
+    LAST_STREAM_STALL_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
