@@ -100,7 +100,10 @@ pub(crate) fn wrap_line(chars: &[char], content_w: usize, cursor: Option<usize>)
             .position(|&(_, end)| c <= end)
             .unwrap_or(rows.len() - 1);
         let (s, e) = rows[row];
-        (row, crate::text_width::chars_width(&chars[s..c.clamp(s, e)]))
+        (
+            row,
+            crate::text_width::chars_width(&chars[s..c.clamp(s, e)]),
+        )
     });
     (rows, at)
 }
@@ -185,7 +188,6 @@ pub(crate) fn restyle_attachment_markers(cells: &mut [InputCell]) {
     }
 }
 
-
 pub(crate) fn build_input_box(
     text: &str,
     cursor: usize,
@@ -248,9 +250,8 @@ pub(crate) fn build_input_box(
                     cells.extend(chip_cells(&[(kind, name.as_str())], pill, label, gap));
                     continue;
                 }
-                let in_marker = m < markers.len()
-                    && byte_i > markers[m].0.start
-                    && byte_i < markers[m].0.end;
+                let in_marker =
+                    m < markers.len() && byte_i > markers[m].0.start && byte_i < markers[m].0.end;
                 vis_of_char.push(cells.len());
                 if !in_marker {
                     cells.push((ch, draft_style));
@@ -263,8 +264,8 @@ pub(crate) fn build_input_box(
         }
 
         let chars: Vec<char> = cells.iter().map(|c| c.0).collect();
-        let at_here = (i == cur_line)
-            .then(|| vis_of_char.get(cur_char).copied().unwrap_or(cells.len()));
+        let at_here =
+            (i == cur_line).then(|| vis_of_char.get(cur_char).copied().unwrap_or(cells.len()));
         let (rows, at) = wrap_line(&chars, content_w, at_here);
         let first_row = box_lines.len();
         for (r, &(s, e)) in rows.iter().enumerate() {

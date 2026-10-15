@@ -494,7 +494,7 @@ fn prose_and_card_glyphs_share_the_gutter_column() {
     let card = format_tool_box_lines(Line::from("● Ran cargo fmt"), &[], 80);
     assert_eq!(first_glyph(&card[1]), GUTTER);
     let prompt = format_user_prompt_lines("rebuilt?", &[], 80);
-    assert_eq!(first_glyph(&prompt[1]), GUTTER);
+    assert_eq!(first_glyph(&prompt[0]), GUTTER);
 
     let long = format_user_prompt_lines(&"word ".repeat(40), &[], 40);
     assert_eq!(first_glyph(&long[2]), GUTTER + 2);

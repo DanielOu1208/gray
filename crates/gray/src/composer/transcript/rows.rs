@@ -370,14 +370,12 @@ pub(crate) fn format_user_prompt_lines(
     let sanitized = crate::tui::sanitize_user_text(text);
     let prompt_color = crate::theme::theme().text_soft;
     let text_primary = crate::theme::theme().text_body;
-    let dim_color = crate::theme::theme().text_muted;
     let bg_style = Style::default().bg(crate::theme::theme().surface_bg);
 
     let margin_row = || -> Line<'static> {
         Line::from(Span::styled(" ".repeat(width.max(1)), bg_style)).style(bg_style)
     };
     let mut lines = Vec::new();
-    lines.push(margin_row());
 
     let hang = " ".repeat(GUTTER + 2);
     let arrow_span = Span::styled(
@@ -422,23 +420,76 @@ pub(crate) fn format_user_prompt_lines(
             }
         }
     }
-    if !attached.is_empty() {
-        let names = attached
-            .iter()
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        lines.push(
-            Line::from(vec![
-                Span::raw(hang.clone()),
-                Span::styled(
-                    format!("↳ attached: {names}"),
-                    Style::default().fg(dim_color),
-                ),
-            ])
-            .style(bg_style),
-        );
+    for path in attached {
+        if let Some(rows) = image_preview_lines(path, max_w) {
+            lines.extend(rows);
+        }
     }
-    lines.push(margin_row());
+    if lines.len() > 1 || !attached.is_empty() {
+        lines.insert(0, margin_row());
+        lines.push(margin_row());
+    }
     lines
+}
+
+pub(crate) fn viewed_image_lines(
+    name: &str,
+    args: Option<&serde_json::Value>,
+    cwd: &std::path::Path,
+    max_w: usize,
+) -> Option<Vec<Line<'static>>> {
+    if !matches!(name, "view" | "read") {
+        return None;
+    }
+    let raw = args?.get("path").and_then(|v| v.as_str())?;
+    let path = std::path::Path::new(raw);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let is_image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+        )
+    });
+    is_image
+        .then(|| image_preview_lines(&path, max_w))
+        .flatten()
+}
+
+fn image_preview_lines(path: &std::path::Path, max_w: usize) -> Option<Vec<Line<'static>>> {
+    let img = image::open(path).ok()?;
+    let cols = max_w.clamp(8, 48) as u32;
+    let thumb = img.thumbnail(cols, 48).to_rgba8();
+    let (tw, th) = thumb.dimensions();
+    if tw == 0 || th == 0 {
+        return None;
+    }
+    let surface = crate::theme::theme().surface_bg;
+    let to_color = |px: &image::Rgba<u8>| -> ratatui::style::Color {
+        if px[3] < 128 {
+            surface
+        } else {
+            ratatui::style::Color::Rgb(px[0], px[1], px[2])
+        }
+    };
+    let hang = " ".repeat(GUTTER + 2);
+    let mut lines = Vec::new();
+    let mut y = 0u32;
+    while y < th {
+        let mut spans = vec![Span::styled(hang.clone(), Style::default().bg(surface))];
+        for x in 0..tw {
+            let top = thumb.get_pixel(x, y);
+            let bottom = thumb.get_pixel(x, (y + 1).min(th - 1));
+            spans.push(Span::styled(
+                "\u{2580}",
+                Style::default().fg(to_color(top)).bg(to_color(bottom)),
+            ));
+        }
+        lines.push(Line::from(spans));
+        y += 2;
+    }
+    Some(lines)
 }

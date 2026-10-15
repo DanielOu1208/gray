@@ -56,11 +56,11 @@ fn backdrop_dims_card_box_and_inserts_gap_before_input() {
     let rows = buffer_rows(terminal.backend(), 40, 15);
 
     assert!(
-        rows[1].contains("/model"),
+        rows[0].contains("/model"),
         "card contains command: {rows:?}"
     );
 
-    let card_bg = terminal.backend().buffer()[(0, 1)].bg;
+    let card_bg = terminal.backend().buffer()[(0, 0)].bg;
     assert_eq!(
         card_bg,
         ratatui::style::Color::Rgb(8, 8, 8),
@@ -68,12 +68,12 @@ fn backdrop_dims_card_box_and_inserts_gap_before_input() {
     );
 
     assert!(
-        rows[3].trim().is_empty(),
+        rows[1].trim().is_empty(),
         "gap row between sent text and input box: {rows:?}"
     );
 
     assert!(
-        rows[5].contains("❯"),
+        rows[3].contains("❯"),
         "input box arrow follows gap row: {rows:?}"
     );
 }

@@ -208,28 +208,12 @@ pub(super) fn card_header_spans(
     ]
 }
 
-pub(super) fn notice_card(
-    verb: &str,
-    detail: &str,
-    failed: bool,
-) -> (
-    ratatui::text::Line<'static>,
-    Vec<ratatui::text::Line<'static>>,
-) {
-    use ratatui::style::Style;
-    use ratatui::text::{Line, Span};
-    let dim = Style::default().fg(crate::theme::theme().tool_dim);
-    let header = Line::from(card_header_spans(verb, String::new(), failed));
-    let body = detail
-        .lines()
-        .map(|row| Line::from(Span::styled(format!("  {row}"), dim)))
-        .collect();
-    (header, body)
-}
-
 pub(super) fn push_notice(t: &mut crate::composer::Tui, verb: &str, detail: &str, failed: bool) {
-    let (header, body) = notice_card(verb, detail, failed);
-    t.push_tool_box(header, body);
+    if failed {
+        t.push_error(&format!("{verb}: {detail}"));
+    } else {
+        t.push_action(verb, (!detail.is_empty()).then_some(detail));
+    }
 }
 
 pub(super) fn job_card_lines(
@@ -401,26 +385,3 @@ async fn wait_then_wake(
 #[path = "cron_tests.rs"]
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod notice_card_tests {
-    use super::notice_card;
-
-    fn text(line: &ratatui::text::Line<'_>) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
-    #[test]
-    fn notice_is_a_bullet_header_with_one_dim_row() {
-        let (header, body) = notice_card("Nothing to compact", "conversation is empty", false);
-        assert_eq!(text(&header), "\u{2b22} Nothing to compact");
-        assert_eq!(body.len(), 1);
-        assert_eq!(text(&body[0]), "  conversation is empty");
-    }
-
-    #[test]
-    fn multi_line_detail_is_one_body_row_each() {
-        let (_, body) = notice_card("Context update failed", "a\nb", true);
-        assert_eq!(body.iter().map(text).collect::<Vec<_>>(), ["  a", "  b"]);
-    }
-}

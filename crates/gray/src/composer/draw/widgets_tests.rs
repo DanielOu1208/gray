@@ -248,4 +248,3 @@ fn chips_wider_than_the_line_wrap_onto_their_own_rows_without_losing_a_cell() {
         assert_eq!((ibox.cur_row, ibox.cur_col), (1, 0), "w {w}");
     }
 }
-

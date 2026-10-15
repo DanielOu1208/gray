@@ -650,13 +650,23 @@ pub(crate) fn dispatch_agent_event(
                     .map(|(n, a)| (if n.is_empty() { "tool".to_string() } else { n }, a))
                     .unwrap_or_else(|| ("tool".to_string(), None));
                 {
-                    let lines = crate::tool_fmt::format_tool_result_lines_with_context(
+                    let mut lines = crate::tool_fmt::format_tool_result_lines_with_context(
                         &name,
                         args.as_ref(),
                         output,
                         *is_error,
                         Some(cwd),
                     );
+                    if !*is_error {
+                        if let Some(rows) = crate::composer::transcript::rows::viewed_image_lines(
+                            &name,
+                            args.as_ref(),
+                            cwd,
+                            t.width(),
+                        ) {
+                            lines.extend(rows);
+                        }
+                    }
 
                     t.atomic(|t| {
                         t.remove_live_tool(id);

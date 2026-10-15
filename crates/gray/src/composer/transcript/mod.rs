@@ -15,7 +15,7 @@ use super::Tui;
 mod boxes;
 mod cards;
 mod margins;
-mod rows;
+pub(crate) mod rows;
 
 pub(crate) use crate::tui::strip_ansi;
 pub(crate) use boxes::render_markdown_lines;
