@@ -420,15 +420,18 @@ pub(crate) fn format_user_prompt_lines(
             }
         }
     }
+    let mut previews = false;
     for path in attached {
         if let Some(rows) = image_preview_lines(path, max_w) {
+            if !previews && !lines.is_empty() {
+                lines.push(margin_row());
+            }
+            previews = true;
             lines.extend(rows);
         }
     }
-    if lines.len() > 1 || !attached.is_empty() {
-        lines.insert(0, margin_row());
-        lines.push(margin_row());
-    }
+    lines.insert(0, margin_row());
+    lines.push(margin_row());
     lines
 }
 
