@@ -130,8 +130,10 @@ struct HotScope {
 
 const TICK_SECS: u32 = 60;
 
+#[cfg(target_os = "linux")]
 const FULL_SWEEP_SECS: u32 = 30 * 60;
 
+#[cfg(target_os = "linux")]
 const HOT_RETAIN: Duration = Duration::from_secs(2 * 3600);
 
 const HOT_MAX: usize = 64;
@@ -1101,6 +1103,7 @@ fn relist_changed(shared: &Arc<Shared>, why: &str, flags: u32) {
     ));
 }
 
+#[cfg(target_os = "linux")]
 fn tick_reconcile(shared: &Arc<Shared>) {
     let t = Instant::now();
     let now = crate::query::now_secs();
