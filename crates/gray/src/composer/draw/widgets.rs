@@ -107,7 +107,7 @@ fn draft_cursor(text: &str, cursor: usize) -> (usize, usize) {
     (0, 0)
 }
 
-fn styled_runs(cells: &[InputCell]) -> Vec<Span<'static>> {
+pub(crate) fn styled_runs(cells: &[InputCell]) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut run = String::new();
     let mut style: Option<Style> = None;
@@ -126,7 +126,7 @@ fn styled_runs(cells: &[InputCell]) -> Vec<Span<'static>> {
     spans
 }
 
-fn restyle_attachment_markers(cells: &mut [InputCell]) {
+pub(crate) fn restyle_attachment_markers(cells: &mut [InputCell]) {
     let t = crate::theme::theme();
     let pill = Style::default().fg(t.text_bright).bg(t.input_bg);
     let label = Style::default().fg(t.text_muted).bg(t.surface_bg);

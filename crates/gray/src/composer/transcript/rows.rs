@@ -397,7 +397,12 @@ pub(crate) fn format_user_prompt_lines(
         if raw_line.is_empty() {
             lines.push(Line::from(vec![prefix]).style(bg_style));
         } else {
-            let chars: Vec<char> = raw_line.chars().collect();
+            let mut cells: Vec<crate::composer::draw::widgets::InputCell> = raw_line
+                .chars()
+                .map(|c| (c, Style::default().fg(text_primary)))
+                .collect();
+            crate::composer::draw::widgets::restyle_attachment_markers(&mut cells);
+            let chars: Vec<char> = cells.iter().map(|c| c.0).collect();
             let mut start = 0usize;
             let mut first_row = true;
             while start < chars.len() {
@@ -408,16 +413,11 @@ pub(crate) fn format_user_prompt_lines(
                     Span::raw(hang.clone())
                 };
                 first_row = false;
-                lines.push(
-                    Line::from(vec![
-                        row_prefix,
-                        Span::styled(
-                            chars[start..end].iter().collect::<String>(),
-                            Style::default().fg(text_primary),
-                        ),
-                    ])
-                    .style(bg_style),
-                );
+                let mut spans = vec![row_prefix];
+                spans.extend(crate::composer::draw::widgets::styled_runs(
+                    &cells[start..end],
+                ));
+                lines.push(Line::from(spans).style(bg_style));
                 start = end;
             }
         }

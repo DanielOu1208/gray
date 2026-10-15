@@ -544,3 +544,15 @@ fn the_backdrop_keeps_the_live_margins() {
     assert_eq!(texts[a + 1], "", "one gap between a and b");
     assert_eq!(texts[a + 2], "b");
 }
+
+#[test]
+fn user_prompt_renders_attachment_markers_as_chips() {
+    let lines = format_user_prompt_lines("look [image: shot.png] here", &[], 60);
+    let text: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+        .collect();
+    assert!(!text.contains("[image:"), "{text}");
+    assert!(text.contains(" IMAGE "), "{text}");
+    assert!(text.contains("shot.png"), "{text}");
+}

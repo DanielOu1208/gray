@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Paragraph};
 use super::{MIN_VIEWPORT_H, PANEL_ROWS, Tui};
 use crate::text_width::display_width;
 
-mod widgets;
+pub(crate) mod widgets;
 
 pub(crate) use widgets::{
     HomeRows, InputCell, build_input_box, chip_cells, home_band_h, needs_seam,
