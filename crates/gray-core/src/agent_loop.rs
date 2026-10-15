@@ -9,7 +9,7 @@ use crate::error::CoreError;
 use crate::event::{
     AgentEvent, CompactReason, StopReason, StreamEvent, Usage, append_thinking_chunk,
 };
-use crate::message::{ChatRequest, ContentBlock, Message, Role};
+use crate::message::{ChatRequest, ContentBlock, Message, Role, ThoughtSignature};
 
 const MAX_EMPTY_RETRIES: u8 = 2;
 
@@ -501,6 +501,7 @@ impl Agent {
                             id,
                             name,
                             arguments_delta,
+                            thought_signature,
                         })) => {
                             const MAX_TOOL_CALL_INDEX: usize = 4096;
                             if index > MAX_TOOL_CALL_INDEX {
@@ -513,6 +514,20 @@ impl Agent {
                                 pending.push(PendingToolCall::default());
                             }
                             let slot = &mut pending[index];
+
+                            if let Some(signature) = thought_signature {
+                                if slot
+                                    .thought_signature
+                                    .as_ref()
+                                    .is_some_and(|s| s != &signature)
+                                {
+                                    self.emit_turn_end(&billed).await;
+                                    return Err(CoreError::Provider(format!(
+                                        "provider changed thought signature for tool-call index {index}"
+                                    )));
+                                }
+                                slot.thought_signature = Some(signature);
+                            }
 
                             if let Some(new_id) = id
                                 && !new_id.trim().is_empty()
@@ -733,6 +748,12 @@ impl Agent {
                     id,
                     name,
                     args: call.parsed_args(),
+                    thought_signature: call.thought_signature.clone().map(|signature| {
+                        ThoughtSignature {
+                            signature,
+                            model: self.provider.model_id().to_string(),
+                        }
+                    }),
                 });
             }
             let assistant = Message {
@@ -757,7 +778,7 @@ impl Agent {
                 .content
                 .iter()
                 .filter_map(|block| match block {
-                    ContentBlock::ToolUse { id, name, args } => {
+                    ContentBlock::ToolUse { id, name, args, .. } => {
                         Some((id.clone(), name.clone(), args.clone()))
                     }
                     _ => None,

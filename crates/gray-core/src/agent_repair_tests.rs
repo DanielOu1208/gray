@@ -75,6 +75,7 @@ fn unanswered_tool_calls_get_a_synthetic_result() {
                     id: "c1".into(),
                     name: "lookup".into(),
                     args: serde_json::json!({}),
+                    thought_signature: None,
                 },
             ],
         },
@@ -112,6 +113,7 @@ fn a_turn_that_already_answered_is_left_untouched() {
                 id: "c1".into(),
                 name: "lookup".into(),
                 args: serde_json::json!({}),
+                thought_signature: None,
             }],
         },
         Message {
@@ -172,6 +174,7 @@ fn synthetic_results_do_not_hide_earlier_turns() {
                     id: "c2".into(),
                     name: "lookup".into(),
                     args: serde_json::json!({}),
+                    thought_signature: None,
                 },
             ],
         },

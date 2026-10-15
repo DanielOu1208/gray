@@ -1117,6 +1117,7 @@ fn tool_error_flag_survives_chat_wire_encoding() {
                     id: "c1".to_string(),
                     name: "sh".to_string(),
                     args: serde_json::json!({}),
+                    thought_signature: None,
                 },
                 ContentBlock::ToolResult {
                     id: "c1".to_string(),
@@ -1202,6 +1203,7 @@ fn tool_error_flag_survives_responses_wire_encoding() {
                     id: "c1".to_string(),
                     name: "sh".to_string(),
                     args: serde_json::json!({}),
+                    thought_signature: None,
                 },
                 ContentBlock::ToolResult {
                     id: "c1".to_string(),
@@ -1505,11 +1507,13 @@ fn chat_tool_images_follow_all_tool_results() {
                         id: "a".into(),
                         name: "read".into(),
                         args: serde_json::json!({}),
+                        thought_signature: None,
                     },
                     ContentBlock::ToolUse {
                         id: "b".into(),
                         name: "bash".into(),
                         args: serde_json::json!({}),
+                        thought_signature: None,
                     },
                 ],
             },
