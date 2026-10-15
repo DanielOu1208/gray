@@ -190,7 +190,7 @@ impl Tool for BashTool {
             ps_report.as_deref(),
         ) {
             Ok(s) => s,
-            Err(e) => return fail(format!("failed to spawn `sh -c`: {e}")),
+            Err(e) => return fail(format!("failed to spawn shell: {e}")),
         };
         #[cfg(not(windows))]
         let guard = crate::shell::kill::GroupGuard::new(spawned.pgid);
@@ -1230,7 +1230,6 @@ async fn settle_command(
         start,
         first,
         pipe_stages,
-        &ctx.cwd,
     ))
 }
 
@@ -1426,7 +1425,6 @@ fn finish_inline(
     start: Instant,
     first_line: Option<String>,
     pipe_stages: Option<Vec<i32>>,
-    cwd: &std::path::Path,
 ) -> ToolOutput {
     let elapsed = start.elapsed();
     let report = exit_report(status, command, pipe_stages.as_deref());
@@ -1487,123 +1485,7 @@ fn finish_inline(
         }
         out.push_str(&format!("\nRead more: {command}"));
     }
-    if let Some(hint) = missing_command_hint(&out) {
-        out.push('\n');
-        out.push_str(&hint);
-    }
-    if let Some(hint) = missing_path_hint(&out, cwd) {
-        out.push('\n');
-        out.push_str(&hint);
-    }
     ToolOutput::ok(out)
-}
-
-fn missing_path_hint(text: &str, cwd: &std::path::Path) -> Option<String> {
-    const MARK: &str = "No such file or directory";
-    let line = text.lines().find(|l| l.contains(MARK))?;
-    let left = &line[..line.find(MARK)?];
-    let path = left
-        .rsplit_once('\'')
-        .and_then(|(a, _)| a.rsplit_once('\'').map(|(_, p)| p.to_string()))
-        .or_else(|| {
-            left.rsplit(':')
-                .map(str::trim)
-                .find(|t| !t.is_empty())
-                .map(str::to_string)
-        })?;
-    let path = path.trim_matches('\'').trim_matches('"');
-    if path.is_empty() || path.len() > 512 {
-        return None;
-    }
-    let (dir, base) = match std::path::Path::new(path).parent() {
-        Some(p) if !p.as_os_str().is_empty() => (
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                cwd.join(p)
-            },
-            std::path::Path::new(path)
-                .file_name()
-                .map(|b| b.to_string_lossy().to_string())?,
-        ),
-        _ => (cwd.to_path_buf(), path.to_string()),
-    };
-    let mut best: Option<(String, f64)> = None;
-    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let s = strsim::jaro_winkler(&base, &name);
-        if s >= 0.85 && best.as_ref().is_none_or(|(_, b)| s > *b) {
-            best = Some((name, s));
-        }
-    }
-    let (name, _) = best?;
-    let suggested = match std::path::Path::new(path).parent() {
-        Some(p) if !p.as_os_str().is_empty() => format!("{}/{name}", p.display()),
-        _ => name,
-    };
-    Some(format!("`{path}` not found · did you mean `{suggested}`?"))
-}
-
-fn missing_command_hint(text: &str) -> Option<String> {
-    let line = text.lines().find(|l| {
-        let low = l.to_ascii_lowercase();
-        (low.contains("command not found") || low.contains(": not found"))
-            && (low.starts_with("sh:")
-                || low.starts_with("bash:")
-                || low.starts_with("dash:")
-                || low.starts_with("zsh:")
-                || low.contains(": command not found"))
-    })?;
-    let name = not_found_subject(line).unwrap_or_else(|| "that command".to_string());
-    let equivalent = equivalent_for(&name).unwrap_or("`grep`, `sed`, `awk`, `python3`");
-    Some(format!(
-        "`{name}` is not installed here · use {equivalent} or confirm with `command -v {name}`"
-    ))
-}
-
-const EQUIVALENTS: &[(&str, &str)] = &[
-    ("rg", "`grep -r` / `grep -rn`"),
-    ("xxd", "`od -c` (bytes) or `od -An -tx1` (hex)"),
-    ("hexdump", "`od -c` / `od -An -tx1`"),
-    ("jq", "`python3 -m json.tool` or `python3 -c`"),
-    ("realpath", "`readlink -f`"),
-    ("time", "`date +%s.%N` before/after the command"),
-];
-
-fn equivalent_for(name: &str) -> Option<&'static str> {
-    EQUIVALENTS
-        .iter()
-        .find(|(bin, _)| *bin == name)
-        .map(|(_, equivalent)| *equivalent)
-}
-
-fn not_found_subject(line: &str) -> Option<String> {
-    let low = line.to_ascii_lowercase();
-    let idx = low.find("not found")?;
-
-    if let Some(tok) = line[idx + "not found".len()..]
-        .trim_start_matches([':', ' '])
-        .split_whitespace()
-        .next()
-        .filter(|t| !t.is_empty())
-    {
-        return Some(clean_tool_name(tok));
-    }
-
-    let before = line[..idx].trim_end();
-    let before = before.strip_suffix("command").unwrap_or(before);
-    before
-        .rsplit(':')
-        .map(str::trim)
-        .find(|t| !t.is_empty())
-        .map(clean_tool_name)
-        .filter(|t| !t.is_empty())
-}
-
-fn clean_tool_name(tok: &str) -> String {
-    let tok = tok.replace("\\n", " ").replace("\n", " ");
-    tok.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+')))
-        .to_string()
 }
 
 fn small_log_on_disk(log_path: &std::path::Path, summary: &PumpSummary) -> bool {

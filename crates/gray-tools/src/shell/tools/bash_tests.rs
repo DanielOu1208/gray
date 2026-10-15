@@ -108,16 +108,7 @@ fn truncated_log_has_executable_bounded_recovery() {
             .args(["-c", "exit 0"])
             .status()
             .unwrap();
-        let result = finish_inline(
-            "probe",
-            &path,
-            status,
-            &summary,
-            Instant::now(),
-            None,
-            None,
-            dir.path(),
-        );
+        let result = finish_inline("probe", &path, status, &summary, Instant::now(), None, None);
         let command = result
             .content
             .lines()
@@ -156,109 +147,6 @@ fn truncated_log_has_executable_bounded_recovery() {
             );
         }
     }
-}
-
-#[tokio::test]
-async fn missing_command_gets_an_actionable_hint() {
-    let session = sess("not-found");
-    let ctx = ctx_for(&session);
-    let r = BashTool::default()
-        .execute(
-            &ctx,
-            json!({"command": "gray-definitely-not-a-tool --help"}),
-        )
-        .await;
-    assert!(
-        r.content
-            .contains("`gray-definitely-not-a-tool` is not installed here"),
-        "hint names the tool: {}",
-        r.content
-    );
-    assert!(
-        r.content.contains("command -v gray-definitely-not-a-tool"),
-        "hint says how to confirm: {}",
-        r.content
-    );
-}
-
-#[tokio::test]
-async fn ordinary_failures_get_no_not_found_hint() {
-    let session = sess("no-hint");
-    let ctx = ctx_for(&session);
-    let r = BashTool::default()
-        .execute(&ctx, json!({"command": "grep -q nomatch /etc/hostname"}))
-        .await;
-    assert!(
-        !r.content.contains("is not installed here"),
-        "ordinary non-zero exit stays clean: {}",
-        r.content
-    );
-}
-
-#[test]
-fn not_found_subject_reads_every_shell_wording() {
-    for (line, want) in [
-        ("bash: line 1: rg: command not found", "rg"),
-        ("sh: 1: xxd: not found", "xxd"),
-        ("zsh: command not found: goyacc", "goyacc"),
-        ("-bash: ruff: command not found", "ruff"),
-    ] {
-        assert_eq!(not_found_subject(line).as_deref(), Some(want), "{line}");
-    }
-    assert!(missing_command_hint("exit 0\nall good").is_none());
-    assert!(missing_command_hint("curl: (22) 404 not found").is_none());
-}
-
-#[test]
-fn known_missing_binaries_get_their_real_substitute() {
-    let rg = missing_command_hint("bash: line 1: rg: command not found").unwrap();
-    assert!(rg.contains("`grep -r`"), "{rg}");
-    let xxd = missing_command_hint("sh: 1: xxd: not found").unwrap();
-    assert!(xxd.contains("`od -c`"), "{xxd}");
-    let unknown = missing_command_hint("bash: line 1: goyacc: command not found").unwrap();
-    assert!(
-        unknown.contains("`grep`, `sed`, `awk`, `python3`"),
-        "{unknown}"
-    );
-    assert!(unknown.contains("command -v goyacc"), "{unknown}");
-}
-
-#[test]
-fn missing_path_gets_a_sibling_suggestion() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("src/repl")).unwrap();
-    std::fs::write(dir.path().join("src/repl/mod.rs"), "x").unwrap();
-    std::fs::write(dir.path().join("README.md"), "x").unwrap();
-
-    let hint = missing_path_hint(
-        "cat: src/repl/mode.rs: No such file or directory",
-        dir.path(),
-    )
-    .unwrap();
-    assert!(hint.contains("src/repl/mod.rs"), "{hint}");
-
-    let hint = missing_path_hint(
-        &format!(
-            "ls: cannot access '{}': No such file or directory",
-            dir.path().join("READM.md").display()
-        ),
-        dir.path(),
-    )
-    .unwrap();
-    assert!(hint.contains("README.md"), "{hint}");
-
-    let hint =
-        missing_path_hint("bash: cd: src/repp: No such file or directory", dir.path()).unwrap();
-    assert!(hint.contains("src/repl"), "{hint}");
-
-    assert!(missing_path_hint("exit 0\nall good", dir.path()).is_none());
-    assert!(
-        missing_path_hint(
-            "cat: totallyalien.zzz: No such file or directory",
-            dir.path()
-        )
-        .is_none()
-    );
 }
 
 fn png_bytes() -> Vec<u8> {

@@ -259,6 +259,13 @@ async fn run() -> anyhow::Result<()> {
         .or(cli.session.as_deref());
 
     if let Some(prompt) = cli.print.as_deref() {
+        let piped;
+        let prompt = if prompt == "-" {
+            piped = std::io::read_to_string(std::io::stdin())?;
+            piped.as_str()
+        } else {
+            prompt
+        };
         let result = if cli.json {
             gray::print::run_print_mode_json(
                 &config,
