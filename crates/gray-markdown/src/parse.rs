@@ -409,6 +409,7 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
                     }
                     if self.table_state.is_none() {
                         self.scan_inline_html_entities(&range);
+                        self.expand_tabs(&range);
                     }
                 }
             }
@@ -971,6 +972,28 @@ impl<'a, 'b, 'syn> MarkdownParser<'a, 'b, 'syn> {
             }
         } else {
             self.push_highlight(Some(self.ms.inline_code_inner), range);
+        }
+    }
+
+    fn expand_tabs(&mut self, range: &Range<usize>) {
+        let Some(slice) = self.text.get(range.clone()) else {
+            return;
+        };
+        if !slice.contains('\t') {
+            return;
+        }
+        for (i, b) in slice.bytes().enumerate() {
+            if b != b'\t' {
+                continue;
+            }
+            let abs = range.start + i;
+            let line_start = self.text[..abs].rfind('\n').map_or(0, |p| p + 1);
+            let col = unicode_display_width(&self.text[line_start..abs]);
+            self.buffers.transforms.push(Transform {
+                range: abs..abs + 1,
+                to: " ".repeat(8 - col % 8),
+                force: false,
+            });
         }
     }
 
