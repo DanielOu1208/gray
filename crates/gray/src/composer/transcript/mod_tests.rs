@@ -556,3 +556,37 @@ fn user_prompt_renders_attachment_markers_as_chips() {
     assert!(text.contains(" IMAGE "), "{text}");
     assert!(text.contains("shot.png"), "{text}");
 }
+
+#[test]
+fn viewed_image_lines_preview_read_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let img = dir.path().join("slide.png");
+    ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([255, 0, 0, 255]))
+        .save(&img)
+        .expect("write png");
+    let args = serde_json::json!({"path": "slide.png"});
+    let rows = super::rows::viewed_image_lines("read", Some(&args), dir.path(), 40);
+    assert!(rows.is_some(), "read on an image should preview");
+}
+
+#[test]
+fn viewed_image_lines_preview_bash_cat() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let img = dir.path().join("slide.png");
+    ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([0, 255, 0, 255]))
+        .save(&img)
+        .expect("write png");
+    let cmd = format!("cat {}", img.display());
+    let args = serde_json::json!({"command": cmd});
+    let rows = super::rows::viewed_image_lines("bash", Some(&args), dir.path(), 40);
+    assert!(rows.is_some(), "cat image.png should preview");
+}
+
+#[test]
+fn viewed_image_lines_skip_non_image_bash() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let args = serde_json::json!({"command": "cat notes.txt"});
+    assert!(super::rows::viewed_image_lines("bash", Some(&args), dir.path(), 40).is_none());
+    let args = serde_json::json!({"command": "cat x.png | head"});
+    assert!(super::rows::viewed_image_lines("bash", Some(&args), dir.path(), 40).is_none());
+}

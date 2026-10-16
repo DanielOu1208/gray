@@ -441,25 +441,52 @@ pub(crate) fn viewed_image_lines(
     cwd: &std::path::Path,
     max_w: usize,
 ) -> Option<Vec<Line<'static>>> {
-    if !matches!(name, "view" | "read") {
-        return None;
-    }
-    let raw = args?.get("path").and_then(|v| v.as_str())?;
-    let path = std::path::Path::new(raw);
-    let path = if path.is_absolute() {
-        path.to_path_buf()
+    let args = args?;
+    const MAX_PREVIEWS: usize = 4;
+    let collected: Vec<String> = if matches!(name, "view" | "read") {
+        args.get("path")
+            .and_then(|v| v.as_str())
+            .into_iter()
+            .chain(
+                args.get("paths")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str()),
+            )
+            .map(String::from)
+            .collect()
+    } else if matches!(name, "bash" | "shell") {
+        args.get("command")
+            .and_then(|v| v.as_str())
+            .and_then(gray_tools::shell::label::read_only)
+            .filter(|r| r.look == gray_tools::shell::label::Look::Viewed)
+            .map(|r| r.targets)
+            .unwrap_or_default()
     } else {
-        cwd.join(path)
+        return None;
     };
-    let is_image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        matches!(
-            e.to_ascii_lowercase().as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
-        )
-    });
-    is_image
-        .then(|| image_preview_lines(&path, max_w))
-        .flatten()
+    let raw_paths = collected.into_iter().take(MAX_PREVIEWS);
+    let mut lines = Vec::new();
+    for raw in raw_paths {
+        let path = std::path::Path::new(&raw);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        let is_image = gray_tools::images::is_image_extension(&path);
+        if !is_image {
+            continue;
+        }
+        if let Some(rows) = image_preview_lines(&path, max_w) {
+            if !lines.is_empty() {
+                lines.push(Line::default());
+            }
+            lines.extend(rows);
+        }
+    }
+    (!lines.is_empty()).then_some(lines)
 }
 
 fn image_preview_lines(path: &std::path::Path, max_w: usize) -> Option<Vec<Line<'static>>> {
