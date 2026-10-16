@@ -65,7 +65,7 @@ pub(crate) async fn run_compaction_call(
 
     let system = agent.system_text();
     agent
-        .complete_with_history(
+        .complete_isolated(
             (!system.is_empty()).then_some(system),
             messages,
             agent.tool_defs().to_vec(),

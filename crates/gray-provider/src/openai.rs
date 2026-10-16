@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::{self, BoxStream, Stream, StreamExt};
-use gray_core::agent::{Provider, ProviderError};
+use gray_core::agent::{Provider, ProviderError, current_isolated_stream};
 use gray_core::credential::{CredentialLease, CredentialSource};
 use gray_core::event::{StopReason, StreamEvent, Usage};
 use gray_core::message::{
@@ -1216,7 +1216,7 @@ fn map_chat_to_responses(
         input,
         tools,
         stream: true,
-        prompt_cache_key: session_id.map(str::to_string),
+        prompt_cache_key: session_id.filter(|s| !s.is_empty()).map(str::to_string),
         store: false,
         reasoning,
         include,
@@ -1523,7 +1523,11 @@ fn classify_http_error_inner(
     ];
     let max_tokens_qualified = lower.contains("max_tokens")
         && (lower.contains("context") || lower.contains("too long") || lower.contains("exceeded"));
-    if CONTEXT_OVERFLOW_HINTS.iter().any(|h| lower.contains(h)) || max_tokens_qualified {
+    if !gray_core::overflow::is_non_overflow_message(snippet)
+        && (CONTEXT_OVERFLOW_HINTS.iter().any(|h| lower.contains(h))
+            || max_tokens_qualified
+            || gray_core::overflow::is_context_overflow_message(snippet))
+    {
         return ProviderError::ContextOverflow(format!(
             "context exhausted — start /new or compact ({msg})"
         ));
@@ -2531,21 +2535,25 @@ impl OpenAiProvider {
         request: ChatRequest,
         profile: OpenAiProviderProfile,
         credential_source: Arc<dyn CredentialSource>,
+        session_id: Option<String>,
+        cache_off: bool,
     ) -> BoxStream<'static, Result<StreamEvent, ProviderError>> {
         let mut body = map_chat_to_responses(
             request,
             &self.model,
-            self.session_id.as_deref(),
+            session_id.as_deref(),
             self.reasoning_effort.as_deref(),
         );
-        apply_dynamic_policy(&mut body, &profile.request, self.session_id.as_deref());
+        apply_dynamic_policy(&mut body, &profile.request, session_id.as_deref());
+        if cache_off {
+            body.prompt_cache_key = None;
+        }
 
         let profile_url = match responses_url(&profile.base_url) {
             Ok(url) => url,
             Err(error) => return stream::once(async move { Err(error) }).boxed(),
         };
         let client = self.http.clone();
-        let session_id = self.session_id.clone();
         let started = stream::once(async move {
             credential_source
                 .acquire()
@@ -3860,6 +3868,9 @@ impl Provider for OpenAiProvider {
     }
 
     fn stream(&self, req: ChatRequest) -> BoxStream<'static, Result<StreamEvent, ProviderError>> {
+        let iso = current_isolated_stream().unwrap_or_default();
+        let session_id = iso.session_id.or_else(|| self.session_id.clone());
+        let cache_off = iso.cache_off;
         if let (Some(profile), Some(credential_source)) =
             (self.profile.clone(), self.credential_source.clone())
         {
@@ -3871,19 +3882,22 @@ impl Provider for OpenAiProvider {
                 })
                 .boxed();
             }
-            return self.dynamic_stream(req, profile, credential_source);
+            return self.dynamic_stream(req, profile, credential_source, session_id, cache_off);
         }
         if self.caps.prefer_responses {
             let url = match responses_url(&self.base_url) {
                 Ok(u) => u,
                 Err(e) => return stream::once(async move { Err(e) }).boxed(),
             };
-            let body = map_chat_to_responses(
+            let mut body = map_chat_to_responses(
                 req,
                 &self.model,
-                self.session_id.as_deref(),
+                session_id.as_deref(),
                 self.reasoning_effort.as_deref(),
             );
+            if cache_off {
+                body.prompt_cache_key = None;
+            }
             log::debug!(target: "gray_provider", "using Responses API for model {}", self.model);
             let init_state = StreamState::ResponsesInit {
                 client: self.http.clone(),
@@ -3908,7 +3922,11 @@ impl Provider for OpenAiProvider {
             Err(e) => return stream::once(async move { Err(e) }).boxed(),
         };
 
-        body.prompt_cache_key = self.session_id.clone().filter(|s| !s.is_empty());
+        body.prompt_cache_key = if cache_off {
+            None
+        } else {
+            session_id.clone().filter(|s| !s.is_empty())
+        };
         body.temperature = self.temperature;
         body.top_p = self.top_p;
         if self.caps.cap_field == CapField::MaxCompletionTokens {
@@ -3919,7 +3937,7 @@ impl Provider for OpenAiProvider {
             url,
             api_key: self.api_key.clone(),
             body,
-            session_id: self.session_id.clone(),
+            session_id: session_id.clone(),
             attempt: 1,
             retry_after: None,
         };

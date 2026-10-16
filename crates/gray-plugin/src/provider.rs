@@ -37,9 +37,9 @@ pub struct ProviderAuthorizationDecl {
     pub secret_name: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct ProviderRequestPolicyDecl {
-    #[serde(default)]
     pub prompt_cache_key: bool,
 
     #[serde(default, skip_serializing_if = "is_false")]
@@ -59,6 +59,22 @@ pub struct ProviderRequestPolicyDecl {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_ttl_secs: Option<u64>,
+}
+
+impl Default for ProviderRequestPolicyDecl {
+    fn default() -> Self {
+        Self {
+            prompt_cache_key: true,
+            warm_replay: false,
+            store: false,
+            include_reasoning_encrypted: false,
+            previous_response_id: false,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            text_verbosity: None,
+            cache_ttl_secs: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

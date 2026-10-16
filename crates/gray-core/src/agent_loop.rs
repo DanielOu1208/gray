@@ -367,6 +367,8 @@ impl Agent {
 
         let mut progress_nudges: u8 = 0;
 
+        let mut overflow_recovery_attempted = false;
+
         let mut hook_context = String::new();
         if let Some(hook) = self.checkpoint.clone() {
             hook(&self.messages, self.history_revision()).await;
@@ -879,6 +881,38 @@ impl Agent {
             if let (true, Ok(mut hint)) = (usage.input_tokens > 0, self.warm_hint.lock()) {
                 hint.prompt_tokens = usage.input_tokens;
                 hint.cache_reported = self.warm_cache_reported;
+            }
+
+            let overflow_retry =
+                stop_reason == StopReason::MaxTokens && !overflow_recovery_attempted;
+            if self
+                .context_window
+                .is_some_and(|w| crate::overflow::is_silent_overflow(&usage, stop_reason, w))
+                && (overflow_retry || stop_reason == StopReason::EndTurn)
+            {
+                if overflow_retry
+                    && self
+                        .messages
+                        .last()
+                        .is_some_and(|m| m.role == Role::Assistant)
+                {
+                    self.messages.pop();
+                }
+                let before = (self.estimate_tokens(), self.messages.len());
+                if let Ok(true) = self.try_compact_budgeted().await {
+                    emit!(AgentEvent::compacted(
+                        before.0,
+                        self.estimate_tokens(),
+                        before.1,
+                        self.messages.len(),
+                        CompactReason::Overflow
+                    ));
+                    jobs_note_due = true;
+                    if overflow_retry {
+                        overflow_recovery_attempted = true;
+                        continue 'turn;
+                    }
+                }
             }
 
             let tool_uses: Vec<(String, String, serde_json::Value)> = assistant

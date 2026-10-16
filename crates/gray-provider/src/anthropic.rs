@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use eventsource_stream::Eventsource;
 use futures::stream::{self, BoxStream, StreamExt};
-use gray_core::agent::{Provider, ProviderError};
+use gray_core::agent::{Provider, ProviderError, current_isolated_stream};
 use gray_core::event::{StopReason, StreamEvent, Usage};
 use gray_core::message::{ChatRequest, ContentBlock, IMAGE_OMITTED, Role, resolve_media};
 use reqwest::Url;
@@ -124,6 +124,7 @@ pub(crate) fn map_request(
     temperature: Option<f32>,
     top_p: Option<f32>,
 ) -> Result<Value, ProviderError> {
+    let cache_off = current_isolated_stream().is_some_and(|i| i.cache_off);
     let max_tokens = req.max_tokens.unwrap_or_else(|| default_max_tokens(model));
 
     let budget = derived_budget(reasoning_effort, max_tokens);
@@ -224,7 +225,8 @@ pub(crate) fn map_request(
         );
     }
 
-    if let Some((_, blocks)) = messages.last_mut()
+    if !cache_off
+        && let Some((_, blocks)) = messages.last_mut()
         && let Some(block) = blocks.iter_mut().rev().find(|b| {
             !matches!(
                 b.get("type").and_then(Value::as_str),
@@ -241,7 +243,7 @@ pub(crate) fn map_request(
             |t| json!({"name": t.name, "description": t.description, "input_schema": t.parameters}),
         )
         .collect();
-    if let Some(last) = tools.last_mut() {
+    if !cache_off && let Some(last) = tools.last_mut() {
         last["cache_control"] = ephemeral();
     }
 
@@ -258,7 +260,11 @@ pub(crate) fn map_request(
             .collect::<Vec<_>>(),
     });
     if let Some(system) = req.system.filter(|s| !s.is_empty()) {
-        body["system"] = json!([{"type": "text", "text": system, "cache_control": ephemeral()}]);
+        body["system"] = if cache_off {
+            json!([{"type": "text", "text": system}])
+        } else {
+            json!([{"type": "text", "text": system, "cache_control": ephemeral()}])
+        };
     }
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
