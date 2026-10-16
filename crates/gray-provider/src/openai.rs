@@ -9,7 +9,9 @@ use futures::stream::{self, BoxStream, Stream, StreamExt};
 use gray_core::agent::{Provider, ProviderError};
 use gray_core::credential::{CredentialLease, CredentialSource};
 use gray_core::event::{StopReason, StreamEvent, Usage};
-use gray_core::message::{ChatRequest, ContentBlock, Role, resolve_media};
+use gray_core::message::{
+    ChatRequest, ContentBlock, IMAGE_OMITTED, Role, TOOL_IMAGE_OMITTED, resolve_media,
+};
 use reqwest::Url;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
@@ -352,6 +354,11 @@ fn is_deepseek_model(model: &str) -> bool {
     model.to_lowercase().contains("deepseek")
 }
 
+fn is_text_only_model(id: &str) -> bool {
+    let leaf = id.rsplit('/').next().unwrap_or(id);
+    leaf == "swe" || leaf.starts_with("swe-") || (id.contains("deepseek") && !id.contains("vision"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum CapField {
     #[default]
@@ -364,6 +371,8 @@ pub(crate) struct ModelCaps {
     pub anthropic_cache: bool,
 
     pub replay_reasoning_content: bool,
+
+    pub accepts_images: bool,
 
     pub accepts_video: bool,
 
@@ -385,6 +394,7 @@ impl ModelCaps {
         Self {
             anthropic_cache: is_anthropic_model(model),
             replay_reasoning_content: is_deepseek_model(model),
+            accepts_images: !is_text_only_model(&id),
             accepts_video: id.contains("gemini") || id.contains("gemma"),
             chat_audio_all: id.contains("gemini"),
             chat_audio_wav_mp3: id.contains("audio"),
@@ -408,6 +418,9 @@ impl ModelCaps {
     }
 
     pub(crate) fn chat_accepts(&self, media_type: &str) -> bool {
+        if media_type.starts_with("image/") {
+            return self.accepts_images;
+        }
         if media_type.starts_with("video/") {
             return self.accepts_video;
         }
@@ -421,6 +434,7 @@ impl ModelCaps {
     pub(crate) fn responses_accepts(&self, media_type: &str) -> bool {
         match media_type {
             "application/pdf" => self.responses_pdf,
+            mt if mt.starts_with("image/") => self.accepts_images,
             mt if mt.starts_with("video/") => self.accepts_video,
             _ => false,
         }
@@ -663,7 +677,19 @@ fn map_chat_request(
                 let mut media_parts = Vec::new();
                 let mut tool_results = Vec::new();
 
-                let content = resolve_media(msg.content, |mt| caps.chat_accepts(mt));
+                let tool_images = msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+                let content = resolve_media(
+                    msg.content,
+                    |mt| caps.chat_accepts(mt),
+                    if tool_images {
+                        TOOL_IMAGE_OMITTED
+                    } else {
+                        IMAGE_OMITTED
+                    },
+                );
                 for block in content {
                     match block {
                         ContentBlock::Text { text } => {
@@ -1013,9 +1039,19 @@ fn map_chat_to_responses(
                     _ => "user",
                 };
                 let mut text_parts: Vec<String> = Vec::new();
-                let content = resolve_media(msg.content, |mt| {
-                    ModelCaps::for_model(model).responses_accepts(mt)
-                });
+                let tool_images = msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+                let content = resolve_media(
+                    msg.content,
+                    |mt| ModelCaps::for_model(model).responses_accepts(mt),
+                    if tool_images {
+                        TOOL_IMAGE_OMITTED
+                    } else {
+                        IMAGE_OMITTED
+                    },
+                );
                 for block in content {
                     match block {
                         ContentBlock::Text { text } => {

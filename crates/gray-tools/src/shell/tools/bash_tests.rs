@@ -399,17 +399,22 @@ async fn cat_through_execute_shows_vision() {
 }
 
 #[test]
-fn unattached_media_note_covers_every_shape_the_claim_refuses() {
+fn media_dump_refusal_covers_every_shape_the_claim_refuses() {
+    let cwd = Path::new("/nonexistent-gray-test-9f2a");
     for cmd in [
         "cd /tmp && cat a.png",
         "cat a.png | wc -c",
         "cat a.png && wc -c",
         "x && cat a.png",
         "cat *.png",
+        "xxd a.png | head",
+        "base64 a.png",
+        "head -c 200 a.png",
+        "cat -n a.png",
     ] {
-        let note = unattached_media_note(cmd).unwrap_or_else(|| panic!("note missing: {cmd}"));
-        assert!(note.contains("NOT attached"), "{cmd}: {note}");
-        assert!(note.contains("cat "), "{cmd}: {note}");
+        let note = media_dump_refusal(cmd, cwd).unwrap_or_else(|| panic!("note missing: {cmd}"));
+        assert!(note.contains("refused"), "{cmd}: {note}");
+        assert!(note.contains(".png"), "{cmd}: {note}");
     }
 
     for cmd in [
@@ -417,17 +422,19 @@ fn unattached_media_note_covers_every_shape_the_claim_refuses() {
         "cat a.png",
         "cat missing.png",
         "cat notes.txt",
+        "cat a.png > copy.png",
+        "cat a.png >> copy.png",
         "ls -la",
     ] {
-        assert!(unattached_media_note(cmd).is_none(), "spurious: {cmd}");
+        assert!(media_dump_refusal(cmd, cwd).is_none(), "spurious: {cmd}");
     }
 
-    let note = unattached_media_note("cd /tmp && cat a.png").unwrap();
+    let note = media_dump_refusal("cd /tmp && cat a.png", cwd).unwrap();
     assert!(note.contains("cat a.png"), "{note}");
 }
 
 #[tokio::test]
-async fn compound_cat_says_the_image_was_not_attached() {
+async fn compound_cat_is_refused_instead_of_dumping_bytes() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shot.png"), png_bytes()).unwrap();
     let ctx = ToolContext {
@@ -441,9 +448,9 @@ async fn compound_cat_says_the_image_was_not_attached() {
             json!({"command": "cd /nonexistent-9f2a && cat shot.png"}),
         )
         .await;
-    assert!(!out.is_error, "{}", out.content);
+    assert!(out.is_error, "{}", out.content);
     assert!(out.images.is_empty());
-    assert!(out.content.contains("NOT attached"), "{}", out.content);
+    assert!(out.content.contains("refused"), "{}", out.content);
 }
 
 #[tokio::test]

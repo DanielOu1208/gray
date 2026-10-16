@@ -10,8 +10,9 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
 use crate::shell::contract::{
-    DEFAULT_TIMEOUT_SECS, INLINE_BUDGET_BYTES, MAX_TIMEOUT_SECS, MEM_HEAD_BYTES, MEM_TAIL_BYTES,
-    PUMP_DRAIN_TIMEOUT, PumpSummary, SLEEP_SLACK_SECS, VIEW_BUDGET_LINES, View,
+    DEFAULT_TIMEOUT_SECS, DETACHED_DRAIN_TIMEOUT, INLINE_BUDGET_BYTES, MAX_TIMEOUT_SECS,
+    MEM_HEAD_BYTES, MEM_TAIL_BYTES, PUMP_DRAIN_TIMEOUT, PumpSummary, SLEEP_SLACK_SECS,
+    VIEW_BUDGET_LINES, View,
 };
 use crate::shell::exit::exit_report;
 use crate::shell::fence::fence;
@@ -147,6 +148,9 @@ impl Tool for BashTool {
         if let Some(out) = image_command(&command, &cwd) {
             return out;
         }
+        if let Some(msg) = media_dump_refusal(&command, &cwd) {
+            return fail(msg);
+        }
         if let Some(out) = search_command(&command, &cwd, &ctx.cancel).await {
             return out;
         }
@@ -173,8 +177,6 @@ impl Tool for BashTool {
         let log_path = log_path(ctx);
         let logged = log_path.clone();
         let start = Instant::now();
-
-        let unattached = unattached_media_note(&command);
 
         let cwd_report =
             std::env::temp_dir().join(format!("gray-cwd-{}.txt", uuid::Uuid::new_v4()));
@@ -217,10 +219,6 @@ impl Tool for BashTool {
             && let Ok(meta) = std::fs::metadata(&logged)
         {
             read_dedup::record(ledger, read, meta.len());
-        }
-        if let Some(note) = unattached {
-            out.content.push('\n');
-            out.content.push_str(&note);
         }
         if let Some(footer) = self.jobs.footer(ctx, &running_before) {
             out.content.push('\n');
@@ -893,25 +891,44 @@ fn peel_wrapper<'a>(head: &str, rest: &'a [String]) -> Option<&'a [String]> {
     if r.is_empty() { None } else { Some(r) }
 }
 
-fn unattached_media_note(command: &str) -> Option<String> {
+const BYTE_DUMP_HEADS: &[&str] = &["cat", "head", "tail", "base64", "xxd", "od", "hexdump"];
+
+fn media_dump_refusal(command: &str, cwd: &Path) -> Option<String> {
     let ws: Vec<&str> = command.split_whitespace().collect();
-    let cat_at = ws.iter().position(|t| *t == "cat")?;
-    let arg = *ws.get(cat_at + 1)?;
-    if !crate::images::is_viewable_extension(Path::new(arg)) {
+    if ws.iter().any(|t| {
+        matches!(*t, ">" | ">>" | "&>" | "&>>")
+            || t.starts_with('>')
+            || t.starts_with("1>")
+            || t.starts_with("&>")
+    }) {
         return None;
     }
-    let bare = cat_at == 0 && ws.len() == 2 && !shell_meta(arg);
-    (!bare).then(|| {
-        let rerun = if shell_meta(arg) {
-            "cat /path/to.jpg".to_string()
-        } else {
-            format!("cat {arg}")
-        };
-        format!(
-            "note: `cat` on a media file ran as a plain shell command here, so the \
-             media was NOT attached to this turn. Use the whole command instead: {rerun}"
-        )
-    })
+    for (i, t) in ws.iter().enumerate() {
+        if !BYTE_DUMP_HEADS.contains(t) {
+            continue;
+        }
+        for arg in &ws[i + 1..] {
+            if arg.starts_with('-') {
+                continue;
+            }
+            if !crate::images::is_viewable_extension(Path::new(arg)) {
+                continue;
+            }
+            let bare_missing = *t == "cat"
+                && i == 0
+                && ws.len() == 2
+                && !shell_meta(arg)
+                && resolve_bare_path(cwd, arg).is_none();
+            if !bare_missing {
+                return Some(format!(
+                    "refused: `{t} {arg}` would dump raw media bytes into context. \
+                     Attach the file instead — a bare `cat {arg}` shows it to the model; \
+                     if this model has no image input, use the `modlens` skill."
+                ));
+            }
+        }
+    }
+    None
 }
 
 fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
@@ -1083,6 +1100,7 @@ async fn settle_command(
     #[cfg(not(windows))] mut guard: crate::shell::kill::GroupGuard,
     pump: tokio::task::JoinHandle<crate::shell::contract::PumpSummary>,
     handoff: bool,
+    track_group: bool,
     ps_report: Option<&std::path::Path>,
 ) -> Settled {
     #[cfg(not(windows))]
@@ -1124,6 +1142,8 @@ async fn settle_command(
         }));
     }
     #[cfg(unix)]
+    let mut detached_group = false;
+    #[cfg(unix)]
     if matches!(cause, Cause::Exit) && crate::shell::kill::group_alive(target) {
         if handoff {
             tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1135,7 +1155,7 @@ async fn settle_command(
                     pump,
                 }));
             }
-        } else {
+        } else if track_group {
             loop {
                 let cancelled = tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(500)) => false,
@@ -1148,8 +1168,12 @@ async fn settle_command(
                     break;
                 }
             }
+        } else {
+            detached_group = true;
         }
     }
+    #[cfg(not(unix))]
+    let detached_group = false;
 
     let first_line: Option<String> = match cause {
         Cause::Exit => None,
@@ -1200,15 +1224,31 @@ async fn settle_command(
     guard.disarm();
     let status = exited.expect("every cause resolves a status");
     let pipe_stages = read_pipestatus(ps_report);
-    let (summary, drain_truncated) = match drain_pump(pump, log_path).await {
+    let drain_timeout = if detached_group {
+        DETACHED_DRAIN_TIMEOUT
+    } else {
+        PUMP_DRAIN_TIMEOUT
+    };
+    let (summary, drain_truncated) = match drain_pump(pump, log_path, drain_timeout).await {
         Ok(v) => v,
         Err(e) => return Settled::Done(fail(format!("output pump failed: {e}"))),
     };
     let mut first = first_line;
+    #[cfg(unix)]
+    if detached_group {
+        let note = format!(
+            "process group {0} still running after the command exited; it is not tracked \u{b7} stop: `kill -- -{0}`",
+            spawned.pgid
+        );
+        first = Some(match first {
+            Some(f) => format!("{f} ({note})"),
+            None => note,
+        });
+    }
     if drain_truncated {
         let note = format!(
             "output truncated: pump drain timed out after {}s",
-            PUMP_DRAIN_TIMEOUT.as_secs()
+            drain_timeout.as_secs()
         );
         first = Some(match first {
             Some(f) => format!("{f} ({note})"),
@@ -1272,6 +1312,7 @@ async fn run_command(
         guard,
         pump,
         adopt.is_some(),
+        false,
         ps_report.as_deref(),
     )
     .await
@@ -1311,6 +1352,7 @@ async fn run_command(
                     guard,
                     pump,
                     false,
+                    true,
                     ps_report.as_deref(),
                 )
                 .await
@@ -1369,8 +1411,9 @@ async fn abort_pump(pump: JoinHandle<PumpSummary>) {
 async fn drain_pump(
     mut pump: JoinHandle<PumpSummary>,
     log_path: &std::path::Path,
+    timeout: Duration,
 ) -> Result<(PumpSummary, bool), tokio::task::JoinError> {
-    match tokio::time::timeout(PUMP_DRAIN_TIMEOUT, &mut pump).await {
+    match tokio::time::timeout(timeout, &mut pump).await {
         Ok(res) => res.map(|s| (s, false)),
         Err(_) => {
             pump.abort();

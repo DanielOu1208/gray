@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### Fixed
+- **Pasted images no longer vanish for text-only models.** Models that
+  can't take image input (swe-*, non-vision deepseek) used to get a
+  silent `[image]` wire part the relay dropped; image blocks are now
+  resolved to the same placeholder pi uses — `(image omitted: model
+  does not support images)` for attachments, `(tool image omitted:
+  model does not support images)` after tool results — and image
+  payloads stop re-entering the request prefix every turn.
+- **`cat`/`xxd`/`base64` on a media file is refused instead of dumping
+  raw bytes into context.** The previous behavior ran the command and
+  appended a "NOT attached" note after the damage; the command now
+  fails fast with a hint pointing at `cat <file>` (vision attach) and
+  the `modlens` skill (text-only models). Bare `cat file.png` still
+  attaches the image as before.
 - **Self-detached commands now register as background jobs.** A command
   that exits while its process group keeps running (`nohup ... &`,
   `cmd &`) used to report a clean exit and leave the group invisible:

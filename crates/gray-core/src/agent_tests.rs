@@ -2334,23 +2334,35 @@ fn tool_output_media_goes_native_or_as_its_fallback() {
         }],
     };
     let blocks = out.message_blocks("c");
-    let native = resolve_media(blocks.clone(), |mt| mt == "video/mp4");
+    let native = resolve_media(
+        blocks.clone(),
+        |mt| mt == "video/mp4",
+        crate::message::IMAGE_OMITTED,
+    );
     assert_eq!(native.len(), 2);
     assert!(matches!(&native[1], ContentBlock::Media { data, .. } if data == "VID"));
-    let sheet = resolve_media(blocks, |_| false);
+    let sheet = resolve_media(
+        blocks,
+        |mt| mt == "image/jpeg",
+        crate::message::IMAGE_OMITTED,
+    );
     assert_eq!(sheet.len(), 3);
     assert!(matches!(&sheet[1], ContentBlock::Text { text } if text.contains("contact sheet")));
     assert!(matches!(&sheet[2], ContentBlock::Image { data, .. } if data == "SHEET"));
 
-    let bare = resolve_media(vec![ContentBlock::media("audio/wav", "A", vec![])], |_| {
-        false
-    });
+    let bare = resolve_media(
+        vec![ContentBlock::media("audio/wav", "A", vec![])],
+        |_| false,
+        crate::message::IMAGE_OMITTED,
+    );
     assert!(matches!(&bare[0], ContentBlock::Text { text } if text.contains("audio/wav")));
 
     let big = "A".repeat(crate::message::MAX_NATIVE_MEDIA_BYTES / 3 * 4 + 8);
-    let over = resolve_media(vec![ContentBlock::media("video/mp4", big, vec![])], |_| {
-        true
-    });
+    let over = resolve_media(
+        vec![ContentBlock::media("video/mp4", big, vec![])],
+        |_| true,
+        crate::message::IMAGE_OMITTED,
+    );
     assert!(matches!(&over[0], ContentBlock::Text { .. }));
 }
 

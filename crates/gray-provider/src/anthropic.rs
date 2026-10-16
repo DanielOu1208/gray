@@ -5,7 +5,7 @@ use eventsource_stream::Eventsource;
 use futures::stream::{self, BoxStream, StreamExt};
 use gray_core::agent::{Provider, ProviderError};
 use gray_core::event::{StopReason, StreamEvent, Usage};
-use gray_core::message::{ChatRequest, ContentBlock, Role, resolve_media};
+use gray_core::message::{ChatRequest, ContentBlock, IMAGE_OMITTED, Role, resolve_media};
 use reqwest::Url;
 use serde_json::{Value, json};
 
@@ -132,7 +132,11 @@ pub(crate) fn map_request(
     for msg in req.messages {
         let mut blocks = Vec::new();
 
-        let content = resolve_media(msg.content, |mt| mt == "application/pdf");
+        let content = resolve_media(
+            msg.content,
+            |mt| mt == "application/pdf" || mt.starts_with("image/"),
+            IMAGE_OMITTED,
+        );
         for block in content {
             match block {
                 ContentBlock::Text { text } => {
