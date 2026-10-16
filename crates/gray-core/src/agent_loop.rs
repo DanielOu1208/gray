@@ -593,6 +593,46 @@ impl Agent {
                         return Err(CoreError::Provider("turn event limit exceeded".into()));
                     }
                     match next_event {
+                        None => {
+                            let e = ProviderError::Stream(
+                                "provider stream ended without completion".into(),
+                            );
+                            if !ctx.cancel.is_cancelled()
+                                && let Some(delay) = turn_retry_wait(&e, turn_retries)
+                            {
+                                turn_retries += 1;
+                                log::warn!(
+                                    target: "gray_agent",
+                                    "provider stream dropped; whole-turn retry {turn_retries}/{MAX_TURN_RETRIES} in {delay:?}: {e}"
+                                );
+                                emit!(AgentEvent::stream_error(
+                                    format!("Retrying turn... {turn_retries}/{MAX_TURN_RETRIES}"),
+                                    turn_retry_detail(&e, turn_retries)
+                                ));
+                                if !delay.is_zero() {
+                                    tokio::time::sleep(delay).await;
+                                }
+                                if ctx.cancel.is_cancelled() {
+                                    self.emit_turn_end(&billed).await;
+                                    return Err(CoreError::Cancelled);
+                                }
+                                continue 'turn;
+                            }
+                            drain_held!();
+                            if !text_parts.is_empty() {
+                                salvage_partial_text(
+                                    &mut self.messages,
+                                    thinking_text.clone(),
+                                    text_parts.concat(),
+                                    &pending_reasoning,
+                                    self.provider.model_id(),
+                                );
+
+                                self.contaminated.insert(self.messages.len() - 1);
+                            }
+                            self.emit_turn_end(&billed).await;
+                            return Err(CoreError::from(e));
+                        }
                         Some(Ok(StreamEvent::TextDelta { delta })) => {
                             let delta = text_strip.push(&delta);
                             if !delta.is_empty() {
@@ -706,14 +746,13 @@ impl Agent {
                             emit!(AgentEvent::stream_error(message.clone(), details.clone()));
                         }
                         Some(Err(e)) => {
-                            if text_parts.is_empty()
-                                && !ctx.cancel.is_cancelled()
+                            if !ctx.cancel.is_cancelled()
                                 && let Some(delay) = turn_retry_wait(&e, turn_retries)
                             {
                                 turn_retries += 1;
                                 log::warn!(
                                     target: "gray_agent",
-                                    "turn failed retryably with nothing streamed; whole-turn retry {turn_retries}/{MAX_TURN_RETRIES} in {delay:?}: {e}"
+                                    "turn failed retryably; whole-turn retry {turn_retries}/{MAX_TURN_RETRIES} in {delay:?}: {e}"
                                 );
                                 emit!(AgentEvent::stream_error(
                                     format!("Retrying turn... {turn_retries}/{MAX_TURN_RETRIES}"),
@@ -766,22 +805,6 @@ impl Agent {
                             let err = CoreError::from(e);
                             self.emit_turn_end(&billed).await;
                             return Err(err);
-                        }
-                        None => {
-                            drain_held!();
-                            if !text_parts.is_empty() {
-                                salvage_partial_text(
-                                    &mut self.messages,
-                                    thinking_text.clone(),
-                                    text_parts.concat(),
-                                    &pending_reasoning,
-                                    self.provider.model_id(),
-                                );
-                            }
-                            self.emit_turn_end(&billed).await;
-                            return Err(CoreError::Provider(
-                                "provider stream ended without completion".into(),
-                            ));
                         }
                     }
                 }

@@ -1138,6 +1138,39 @@ async fn wait_group_gone(pgid: i32) -> bool {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn a_backgrounded_group_survives_the_exit_sweep_inline() {
+    let tool = BashTool::default();
+    let ctx = ctx_for(&sess("exit-sweep-inline"));
+    let (out, pgid, _log, _report) = run_lane(&tool, &ctx, "sleep 30 &", None, false).await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(group_alive(pgid), "the backgrounded sleeper is still up");
+    assert!(
+        !crate::shell::kill::is_tracked(pgid),
+        "a detached group that settled must not sit in the exit-sweep set"
+    );
+    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    assert!(wait_group_gone(pgid).await, "cleanup");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_backgrounded_group_survives_the_exit_sweep_after_a_job_settles() {
+    let tool = BashTool::default();
+    let ctx = ctx_for(&sess("exit-sweep-job"));
+    let (out, pgid, _log, _report) = run_lane(&tool, &ctx, "sleep 30 &", Some(1), true).await;
+    assert!(out.content.starts_with("still running"), "{}", out.content);
+    assert!(group_alive(pgid), "the backgrounded sleeper is still up");
+    wait_for_jobs(&tool, &ctx).await;
+    assert!(
+        !crate::shell::kill::is_tracked(pgid),
+        "a detached group must be untracked once the job settles"
+    );
+    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    assert!(wait_group_gone(pgid).await, "cleanup");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn bare_timeout_kills_and_says_how_to_rerun() {
     let tool = BashTool::default();
     let ctx = ctx_for(&sess("bare-timeout"));

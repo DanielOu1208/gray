@@ -629,7 +629,7 @@ async fn quota_failure_with_long_reset_window_is_terminal() {
 }
 
 #[tokio::test]
-async fn mid_stream_quota_failure_does_not_replay() {
+async fn mid_stream_quota_failure_replays() {
     let provider = FakeProvider::new(vec![end_script()]).with_partial_failures(vec![(
         vec![StreamEvent::text_delta("visible half")],
         ProviderError::Auth("status 429: usage limit reached".into()),
@@ -643,20 +643,63 @@ async fn mid_stream_quota_failure_does_not_replay() {
     agent
         .run(Message::user("go"), ToolContext::default())
         .await
-        .expect_err("quota failure after a visible delta must surface");
+        .expect("a retryable failure after a visible delta must replay, not abort");
     assert_eq!(
         seen.lock().expect("seen lock").len(),
-        1,
-        "no replay after a visible delta"
+        2,
+        "pi retries the whole assistant call even with partial output"
+    );
+    assert!(
+        !agent
+            .messages()
+            .iter()
+            .any(|m| m.text_content().contains("visible half")),
+        "the failed attempt's partial text must not enter history"
     );
 }
 
 #[tokio::test]
-async fn mid_stream_failure_after_visible_delta_does_not_replay() {
+async fn mid_stream_stall_after_visible_delta_replays() {
     let provider = FakeProvider::new(vec![end_script()]).with_partial_failures(vec![(
         vec![StreamEvent::text_delta("visible half")],
-        ProviderError::ServerError("503".into()),
+        ProviderError::Stream("stream stalled: no output for 75s".into()),
     )]);
+    let seen = provider.seen_requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
+    );
+
+    let events = agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .expect("a stalled stream mid-write must retry, not abort the run");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnEnd { .. })),
+        "the retried turn completes: {events:?}"
+    );
+    assert_eq!(
+        seen.lock().expect("seen lock").len(),
+        2,
+        "one replay after the stalled attempt"
+    );
+    assert!(
+        !agent
+            .messages()
+            .iter()
+            .any(|m| m.text_content().contains("visible half")),
+        "the stalled attempt's partial text must not enter history"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_that_ends_without_completion_replays() {
+    let provider = FakeProvider::new(vec![
+        vec![StreamEvent::text_delta("truncated write")],
+        end_script(),
+    ]);
     let seen = provider.seen_requests();
     let mut agent = Agent::new(
         Box::new(provider),
@@ -666,11 +709,11 @@ async fn mid_stream_failure_after_visible_delta_does_not_replay() {
     agent
         .run(Message::user("go"), ToolContext::default())
         .await
-        .expect_err("post-delta failure must surface");
+        .expect("a dropped stream mid-write must retry, not abort the run");
     assert_eq!(
         seen.lock().expect("seen lock").len(),
-        1,
-        "no replay after a visible delta"
+        2,
+        "one replay after the truncated attempt"
     );
 }
 
@@ -2375,7 +2418,10 @@ fn old_session_video_block_still_parses() {
 
 #[tokio::test]
 async fn eof_with_text_and_tool_pending_salvages_visible_text() {
-    let provider = FakeProvider::new(vec![vec![
+    // EOF without completion retries the whole turn (pi auto-retry); the
+    // terminal attempt's partial is the one salvaged into history.
+    let mut scripts = vec![vec![]; 8];
+    scripts.push(vec![
         StreamEvent::text_delta("hello"),
         StreamEvent::tool_call_delta(
             0,
@@ -2383,7 +2429,8 @@ async fn eof_with_text_and_tool_pending_salvages_visible_text() {
             Some(TOOL_NAME.into()),
             r#"{"q":"x"}"#,
         ),
-    ]]);
+    ]);
+    let provider = FakeProvider::new(scripts);
     let mut agent = Agent::new(
         Box::new(provider),
         Arc::new(FakeExecutor::new(ToolOutput::ok("ok"))),
@@ -2662,7 +2709,7 @@ async fn request_prefix_is_byte_stable_across_tool_rounds() {
 async fn mid_stream_error_partial_is_scrubbed_from_the_next_request() {
     let provider = FakeProvider::new(vec![end_script()]).with_partial_failures(vec![(
         vec![StreamEvent::text_delta("half-finished answer")],
-        ProviderError::Stream("connection reset".into()),
+        ProviderError::BadRequest("connection reset".into()),
     )]);
     let seen = provider.seen_requests();
     let mut agent = Agent::new(

@@ -70,6 +70,14 @@ fn gone(target: i32) -> bool {
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn is_tracked(pgid: i32) -> bool {
+    TRACKED_PGIDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&pgid)
+}
+
 #[cfg(unix)]
 pub(crate) fn group_alive(pgid: i32) -> bool {
     pgid > 1
