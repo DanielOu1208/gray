@@ -24,7 +24,21 @@ pub(crate) enum EnterAction {
 
     Toggle,
 
+    Invoke,
+
     Ignore,
+}
+
+pub enum ManagerOutcome {
+    Closed(bool),
+
+    Invoke(String),
+}
+
+impl ManagerOutcome {
+    pub(crate) fn into_changed(self) -> bool {
+        matches!(self, ManagerOutcome::Closed(true))
+    }
 }
 
 pub(crate) fn enter_action(
@@ -44,6 +58,9 @@ pub(crate) fn enter_action(
     if spec.supports_toggle {
         return EnterAction::Toggle;
     }
+    if spec.enter_invokes {
+        return EnterAction::Invoke;
+    }
     EnterAction::Ignore
 }
 
@@ -55,6 +72,7 @@ pub(crate) fn enter_label(
     match enter_action(item, has_setup, spec) {
         EnterAction::Setup => "set up \u{b7} ",
         EnterAction::Toggle => "toggle \u{b7} ",
+        EnterAction::Invoke => "invoke \u{b7} ",
         EnterAction::Ignore => "",
     }
 }
@@ -65,6 +83,8 @@ pub(crate) struct ManagerSpec {
 
     pub error_verb: &'static str,
     pub supports_toggle: bool,
+
+    pub enter_invokes: bool,
 
     pub supports_remove: bool,
 
@@ -78,6 +98,7 @@ const SKILLS_SPEC: ManagerSpec = ManagerSpec {
     empty_hint: "no skills discovered",
     error_verb: "remove failed",
     supports_toggle: false,
+    enter_invokes: true,
     supports_remove: true,
     errors_tab: true,
     keep_stale_on_relist_error: false,
@@ -88,6 +109,7 @@ const PLUGINS_SPEC: ManagerSpec = ManagerSpec {
     empty_hint: "no plugins installed — /plugin install <spec>",
     error_verb: "toggle failed",
     supports_toggle: true,
+    enter_invokes: false,
     supports_remove: true,
     errors_tab: true,
     keep_stale_on_relist_error: true,
@@ -123,7 +145,7 @@ pub(crate) fn format_error_row(entry: &ErrorEntry) -> String {
 pub fn run_skills_modal(
     bg: Option<&BackgroundSnapshot>,
     cwd: &std::path::Path,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<ManagerOutcome> {
     run_install_manager(
         bg,
         None,
@@ -202,6 +224,7 @@ pub fn run_plugins_modal(bg: Option<&BackgroundSnapshot>) -> anyhow::Result<bool
         crate::plugin_cli::remove_managed,
         crate::plugin_cli::set_managed_enabled,
     )
+    .map(ManagerOutcome::into_changed)
 }
 
 pub(crate) fn run_install_manager(
@@ -211,7 +234,7 @@ pub(crate) fn run_install_manager(
     load: impl Fn() -> Option<Vec<ManagerItem>>,
     remove: impl Fn(&str) -> anyhow::Result<()>,
     set_enabled: impl Fn(&str, bool) -> anyhow::Result<()>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<ManagerOutcome> {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read};
     use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
     use ratatui::layout::Rect;
@@ -246,7 +269,7 @@ pub(crate) fn run_install_manager(
         .cloned()
         .unwrap_or_else(BackgroundSnapshot::default_initial);
 
-    let result = (|| -> anyhow::Result<bool> {
+    let result = (|| -> anyhow::Result<ManagerOutcome> {
         loop {
             terminal.draw(|frame| {
                 let area = frame.area();
@@ -515,7 +538,9 @@ pub(crate) fn run_install_manager(
                     modifiers,
                     kind: KeyEventKind::Press,
                     ..
-                }) if modifiers.contains(KeyModifiers::CONTROL) => return Ok(changed),
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(ManagerOutcome::Closed(changed));
+                }
                 Event::Key(KeyEvent {
                     code,
                     modifiers,
@@ -559,7 +584,7 @@ pub(crate) fn run_install_manager(
                         .saturating_sub(1);
                         sel = (sel + 1).min(max);
                     }
-                    KeyCode::Esc => return Ok(changed),
+                    KeyCode::Esc => return Ok(ManagerOutcome::Closed(changed)),
                     KeyCode::Enter | KeyCode::Char(' ') => {
                         pending_remove = None;
                         match enter_action(items.get(sel), setup.is_some(), spec) {
@@ -605,6 +630,12 @@ pub(crate) fn run_install_manager(
                                     }
                                 }
                                 sel = sel.min(items.len().saturating_sub(1));
+                            }
+                            EnterAction::Invoke => {
+                                if tab == Tab::Installed {
+                                    let name = items[sel].name.clone();
+                                    return Ok(ManagerOutcome::Invoke(name));
+                                }
                             }
                             EnterAction::Ignore => {}
                         }

@@ -227,50 +227,59 @@ pub(crate) fn expand_skill_command(
         return cmd;
     };
     let discovered = crate::skills::discover_skills(cwd);
-    let Some(rest) = payload else {
-        if tui.is_some() {
-            let bg = tui.as_ref().map(|s| s.lock().expect("tui lock").snapshot());
-            match with_modal_sync(tui, || crate::setup::run_skills_modal(bg.as_ref(), cwd)) {
-                Ok(true) => {
-                    if let Some(shared) = tui {
-                        let mut t = shared.lock().expect("tui lock");
-                        t.push_action("Skills updated", None);
-                        t.ensure_gap();
-                        let _ = t.draw();
+    let rest = match payload {
+        Some(rest) => rest,
+        None => {
+            use crate::setup::ManagerOutcome;
+            if tui.is_some() {
+                let bg = tui.as_ref().map(|s| s.lock().expect("tui lock").snapshot());
+                match with_modal_sync(tui, || crate::setup::run_skills_modal(bg.as_ref(), cwd)) {
+                    Ok(ManagerOutcome::Invoke(name)) => name,
+                    Ok(ManagerOutcome::Closed(true)) => {
+                        if let Some(shared) = tui {
+                            let mut t = shared.lock().expect("tui lock");
+                            t.push_action("Skills updated", None);
+                            t.ensure_gap();
+                            let _ = t.draw();
+                        }
+                        return ReplCommand::Empty;
                     }
-                }
-                Ok(false) => {
-                    if let Some(shared) = tui {
-                        let mut t = shared.lock().expect("tui lock");
-                        t.clear_draft();
+                    Ok(ManagerOutcome::Closed(false)) => {
+                        if let Some(shared) = tui {
+                            let mut t = shared.lock().expect("tui lock");
+                            t.clear_draft();
 
-                        t.ensure_gap();
-                        let _ = t.draw();
+                            t.ensure_gap();
+                            let _ = t.draw();
+                        }
+                        return ReplCommand::Empty;
+                    }
+                    Err(e) => {
+                        say(tui, &format!("skills error: {e}"));
+                        return ReplCommand::Empty;
                     }
                 }
-                Err(e) => {
-                    say(tui, &format!("skills error: {e}"));
-                }
-            }
-        } else if discovered.skills.is_empty() {
-            say(tui, "no skills discovered");
-        } else {
-            let auto = crate::setup::skills_auto_enabled();
-            let disabled = crate::setup::disabled_skill_names();
-            if !auto {
-                say(tui, "skills auto-load is off (/skills on to re-enable)");
-            }
-            for s in &discovered.skills {
-                let mut row = crate::skills::format_discovered_skill_row(s);
+            } else if discovered.skills.is_empty() {
+                say(tui, "no skills discovered");
+                return ReplCommand::Empty;
+            } else {
+                let auto = crate::setup::skills_auto_enabled();
+                let disabled = crate::setup::disabled_skill_names();
                 if !auto {
-                    row.push_str(" [auto-off]");
-                } else if disabled.contains(&s.name) {
-                    row.push_str(" [disabled]");
+                    say(tui, "skills auto-load is off (/skills on to re-enable)");
                 }
-                say(tui, &row);
+                for s in &discovered.skills {
+                    let mut row = crate::skills::format_discovered_skill_row(s);
+                    if !auto {
+                        row.push_str(" [auto-off]");
+                    } else if disabled.contains(&s.name) {
+                        row.push_str(" [disabled]");
+                    }
+                    say(tui, &row);
+                }
+                return ReplCommand::Empty;
             }
         }
-        return ReplCommand::Empty;
     };
     if let Some(on) = parse_skills_auto_toggle(&rest) {
         let shadowed = discovered.skills.iter().any(|s| s.name == rest.trim());

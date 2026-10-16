@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gray_core::agent::{BackgroundJob, ToolContext, ToolExecutor};
 
-use crate::setup::{ManagerItem, ManagerSpec, run_install_manager};
+use crate::setup::{ManagerItem, ManagerOutcome, ManagerSpec, run_install_manager};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Wake {
@@ -140,6 +140,7 @@ const JOBS_SPEC: ManagerSpec = ManagerSpec {
     empty_hint: "nothing pending \u{2014} no background jobs or scheduled wakes",
     error_verb: "stop failed",
     supports_toggle: false,
+    enter_invokes: false,
     supports_remove: true,
     errors_tab: false,
     keep_stale_on_relist_error: false,
@@ -202,6 +203,7 @@ pub(crate) fn run_jobs_modal(
         |name| remove(exec.as_ref(), &ctx, home, name),
         |_, _| anyhow::bail!("nothing to toggle here"),
     )
+    .map(ManagerOutcome::into_changed)
 }
 
 pub(crate) fn spawn_footer_poller() {
