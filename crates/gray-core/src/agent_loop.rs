@@ -792,6 +792,13 @@ impl Agent {
             }
             billed.accumulate(&usage);
             usage.log_request("turn", self.session_id.as_deref());
+            let prices = self.cache_warm.as_ref().and_then(|p| (p.prices)());
+            self.cache_stats.observe(
+                &usage,
+                self.provider.model_id(),
+                self.session_id.as_deref(),
+                prices,
+            );
 
             {
                 let fallback_base = self.messages.len();
@@ -891,6 +898,27 @@ impl Agent {
                     _ => None,
                 })
                 .collect();
+
+            if stop_reason == StopReason::MaxTokens && !tool_uses.is_empty() {
+                for (id, name, args) in &tool_uses {
+                    emit!(AgentEvent::tool_call_end(id.clone(), args.clone()));
+                    let content = format!(
+                        "Tool '{name}' was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments."
+                    );
+                    emit!(AgentEvent::tool_result(id.clone(), content.clone(), true));
+                    self.messages.push(Message {
+                        role: Role::User,
+                        injected: false,
+                        content: vec![ContentBlock::ToolResult {
+                            id: id.clone(),
+                            content,
+                            is_error: true,
+                        }],
+                    });
+                }
+                emit!(AgentEvent::MessageBoundary);
+                continue 'turn;
+            }
 
             if stop_reason == StopReason::MaxTokens
                 && !text_is_empty

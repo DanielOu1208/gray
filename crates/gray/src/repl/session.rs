@@ -1065,7 +1065,27 @@ pub(crate) async fn maybe_overflow_compact(
     if !crate::compact::is_context_overflow_error(err) {
         return false;
     }
+    recovery_compact(
+        agent,
+        config,
+        session_state,
+        cwd,
+        tui,
+        initial_count,
+        "after context overflow",
+    )
+    .await
+}
 
+pub(crate) async fn recovery_compact(
+    agent: &mut Agent,
+    config: &Config,
+    session_state: &mut Option<SessionState>,
+    cwd: &Path,
+    tui: Option<&crate::composer::SharedTui>,
+    initial_count: &mut usize,
+    detail: &str,
+) -> bool {
     let compaction_id = format!("overflow-{}", uuid::Uuid::new_v4().as_simple());
     if let Some(shared) = tui {
         shared
@@ -1086,7 +1106,7 @@ pub(crate) async fn maybe_overflow_compact(
             super::status::push_compaction_card(
                 tui,
                 &crate::composer::fmt_elapsed_compact(elapsed.as_secs()),
-                "after context overflow",
+                detail,
             );
 
             persist_compaction_tail(agent, config, session_state, cwd, tui).await;
