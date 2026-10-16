@@ -4,7 +4,13 @@ fn isolated_home(test: &str) -> bool {
     if std::env::var("GRAY_SKILLS_TEST_CHILD").as_deref() == Ok(test) {
         return false;
     }
-    let home = tempfile::tempdir().unwrap();
+    // Ancestor walks (skills dirs, AGENTS.md) must never reach the real
+    // $HOME: put the fake home under /tmp and force the child's tempdirs
+    // there too — a session TMPDIR can point back inside $HOME.
+    let home = tempfile::Builder::new()
+        .prefix("gray-test-home-")
+        .tempdir_in("/tmp")
+        .unwrap_or_else(|_| tempfile::tempdir().unwrap());
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -16,6 +22,7 @@ fn isolated_home(test: &str) -> bool {
         .env("USERPROFILE", home.path())
         .env("GRAY_HOME", home.path().join(".gray"))
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("TMPDIR", "/tmp")
         .status()
         .unwrap();
     assert!(status.success(), "isolated {test} failed");
@@ -23,13 +30,9 @@ fn isolated_home(test: &str) -> bool {
 }
 
 #[test]
-fn strip_frontmatter_removes_yaml_header() {
+fn strip_frontmatter_splits_header_and_body() {
     let content = "---\nname: test\ndescription: A test skill\n---\n\nBody here.\n";
     assert_eq!(strip_frontmatter(content), "Body here.\n");
-}
-
-#[test]
-fn strip_frontmatter_keeps_body_without_frontmatter() {
     assert_eq!(strip_frontmatter("Just content."), "Just content.");
 }
 
@@ -239,18 +242,6 @@ fn strip_rationale_comments_is_identity_without_comments() {
 }
 
 #[test]
-fn project_context_block_none_when_only_blank_lines_survive_the_strip() {
-    let tmp = tempfile::tempdir().unwrap();
-
-    std::fs::write(
-        tmp.path().join("AGENTS.md"),
-        "# r1: only a rationale\n\n# r2: and another\n\n",
-    )
-    .unwrap();
-    assert_eq!(project_context_block(tmp.path()), None);
-}
-
-#[test]
 fn project_context_block_prefers_agents_over_claude_on_same_level() {
     crate::project_trust::assume_trusted_for_test();
     let tmp = tempfile::tempdir().unwrap();
@@ -268,11 +259,25 @@ fn project_context_block_prefers_agents_over_claude_on_same_level() {
 }
 
 #[test]
-fn project_context_block_none_when_absent_or_empty() {
+fn project_context_block_none_when_absent_empty_or_stripped_to_blank() {
+    crate::project_trust::assume_trusted_for_test();
+    if isolated_home("project_context_block_none_when_absent_empty_or_stripped_to_blank") {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
-    assert_eq!(project_context_block(tmp.path()), None);
+    assert_eq!(project_context_block(tmp.path()), None, "no file at all");
     std::fs::write(tmp.path().join("AGENTS.md"), "  \n\n").unwrap();
-    assert_eq!(project_context_block(tmp.path()), None);
+    assert_eq!(project_context_block(tmp.path()), None, "whitespace only");
+    std::fs::write(
+        tmp.path().join("AGENTS.md"),
+        "# r1: only a rationale\n\n# r2: and another\n\n",
+    )
+    .unwrap();
+    assert_eq!(
+        project_context_block(tmp.path()),
+        None,
+        "rationale comments strip to nothing"
+    );
 }
 
 #[test]
@@ -292,6 +297,9 @@ fn project_context_block_truncates_huge_file() {
 #[tokio::test]
 async fn project_context_plugin_is_context_only_and_serves_block() {
     crate::project_trust::assume_trusted_for_test();
+    if isolated_home("project_context_plugin_is_context_only_and_serves_block") {
+        return;
+    }
     use gray_plugin::Plugin;
     let plugin = ProjectContextPlugin;
     assert!(plugin.tools().is_empty(), "must carry no tools");

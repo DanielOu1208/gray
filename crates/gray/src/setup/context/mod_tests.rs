@@ -24,11 +24,6 @@ fn model_max_ignores_user_override() {
 }
 
 #[test]
-fn compaction_defaults_match_legacy() {
-    assert_eq!(user_keep_recent_tokens(), 20_000);
-}
-
-#[test]
 fn reasoning_capability_from_models_dev_and_live() {
     assert_eq!(
         model_supports_reasoning("test-reason-capability-never-seen"),

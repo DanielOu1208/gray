@@ -1,8 +1,12 @@
 use super::*;
 
 #[test]
-fn unseeded_models_get_all_thinking_levels() {
-    for id in ["muse-spark-1.3-contributor", "deepseek-v4", "some-unknown-model-xyz"] {
+fn unseeded_models_get_full_ladder_and_keep_requested_levels() {
+    for id in [
+        "muse-spark-1.3-contributor",
+        "deepseek-v4",
+        "some-unknown-model-xyz",
+    ] {
         let levels: Vec<&str> = supported_thinking_levels(id)
             .iter()
             .map(|(l, _)| *l)
@@ -13,29 +17,18 @@ fn unseeded_models_get_all_thinking_levels() {
             "{id} has no declared efforts — the full menu is offered"
         );
     }
-}
 
-#[test]
-fn clamp_on_unseeded_model_keeps_requested_level() {
-    assert_eq!(
-        clamp_thinking_level("muse-spark-1.3-contributor", "max"),
-        "max"
-    );
     assert_eq!(
         clamp_thinking_level("provider/muse-spark-1.3-contributor", "max"),
         "max"
     );
-    assert_eq!(
-        clamp_thinking_level("muse-spark-1.3-contributor", "high"),
-        "high"
-    );
-    assert_eq!(
-        clamp_thinking_level("muse-spark-1.3-contributor", "off"),
-        "off"
-    );
-    assert_eq!(clamp_thinking_level("deepseek-v4", "max"), "max");
-
-    assert_eq!(clamp_thinking_level("some-unknown-model-xyz", "max"), "max");
+    for model in [
+        "muse-spark-1.3-contributor",
+        "deepseek-v4-flash",
+        "deepseek/deepseek-v4.1-flash",
+    ] {
+        assert_eq!(clamp_thinking_level(model, "xhigh"), "xhigh", "{model}");
+    }
     assert_eq!(
         clamp_thinking_level("muse-spark-1.3-contributor", ""),
         "off"

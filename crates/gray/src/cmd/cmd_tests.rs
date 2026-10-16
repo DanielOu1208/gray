@@ -98,7 +98,10 @@ fn composite_rec() -> store::PendingDoc {
 fn list_shape_matches_contract() {
     let list = registry::list_json();
     let commands = list["commands"].as_array().expect("commands array");
-    assert_eq!(commands.len(), crate::repl::REGISTRY.len());
+    assert!(
+        commands.len() >= crate::repl::REGISTRY.len(),
+        "every builtin command must be served; installed plugins may add more"
+    );
     let by_name = |n: &str| commands.iter().find(|c| c["name"] == n).expect(n);
     let model = by_name("models");
     assert_eq!(model["surface"], "interactive");
