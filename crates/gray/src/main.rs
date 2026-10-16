@@ -335,7 +335,6 @@ fn exit_after_print(result: anyhow::Result<()>) -> ! {
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     log::logger().flush();
-    gray_tools::shell::kill::kill_tracked_groups();
     std::process::exit(code);
 }
 

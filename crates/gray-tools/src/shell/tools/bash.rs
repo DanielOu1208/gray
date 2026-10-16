@@ -1243,9 +1243,7 @@ async fn settle_command(
     #[cfg(windows)]
     drop(spawned.job);
     #[cfg(unix)]
-    if !detached_group {
-        crate::shell::kill::untrack_group(spawned.pgid);
-    }
+    crate::shell::kill::untrack_group(spawned.pgid);
     #[cfg(not(windows))]
     guard.disarm();
     let status = exited.expect("every cause resolves a status");
