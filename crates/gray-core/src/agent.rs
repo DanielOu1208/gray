@@ -212,6 +212,27 @@ pub(crate) async fn scope_tool_output<T>(
     TOOL_OUTPUT.scope(sink, fut).await
 }
 
+#[derive(Clone, Default)]
+pub struct IsolatedStream {
+    pub session_id: Option<String>,
+    pub cache_off: bool,
+}
+
+tokio::task_local! {
+    static ISOLATED_STREAM: IsolatedStream;
+}
+
+pub fn current_isolated_stream() -> Option<IsolatedStream> {
+    ISOLATED_STREAM.try_with(Clone::clone).ok()
+}
+
+pub(crate) async fn scope_isolated_stream<T>(
+    iso: IsolatedStream,
+    fut: impl std::future::Future<Output = T>,
+) -> T {
+    ISOLATED_STREAM.scope(iso, fut).await
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn def(&self) -> crate::message::ToolDef;
@@ -821,6 +842,29 @@ impl Agent {
             max_tokens: None,
         };
         drain_reply_text(self.provider.stream(req), self.session_id.as_deref()).await
+    }
+
+    pub(crate) async fn complete_isolated(
+        &self,
+        system: Option<&str>,
+        messages: Vec<Message>,
+        tools: Vec<ToolDef>,
+    ) -> Result<String, CoreError> {
+        let req = ChatRequest {
+            system: system.map(|s| s.to_string()),
+            messages,
+            tools,
+            max_tokens: None,
+        };
+        let iso = IsolatedStream {
+            session_id: Some(uuid::Uuid::new_v4().to_string()),
+            cache_off: true,
+        };
+        let session = self.session_id.clone();
+        scope_isolated_stream(iso, async {
+            drain_reply_text(self.provider.stream(req), session.as_deref()).await
+        })
+        .await
     }
 }
 

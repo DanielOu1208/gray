@@ -10,6 +10,7 @@ pub mod error;
 pub mod event;
 pub mod input;
 pub mod message;
+pub mod overflow;
 pub mod parallel;
 pub mod paths;
 pub mod prefix_guard;
