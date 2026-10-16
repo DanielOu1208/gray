@@ -1869,14 +1869,15 @@ fn stall_guard(inner: BoxedEventStream, cap: Duration) -> BoxedEventStream {
 }
 
 fn sse_event_stream(response: reqwest::Response) -> BoxedEventStream {
-    stall_guard(
-        response
-            .bytes_stream()
-            .eventsource()
-            .map(|item| item.map_err(SseReadError::Upstream))
-            .boxed(),
-        stream_stall_cap(),
-    )
+    response
+        .bytes_stream()
+        .eventsource()
+        .map(|item| item.map_err(SseReadError::Upstream))
+        .boxed()
+}
+
+fn guarded_sse_event_stream(response: reqwest::Response) -> BoxedEventStream {
+    stall_guard(sse_event_stream(response), stream_stall_cap())
 }
 
 #[derive(Default)]
@@ -2265,6 +2266,9 @@ async fn dynamic_step(
                 .await
                 {
                     Ok(response) => {
+                        // No stall guard: plugin relays are turn-settled — silence
+                        // until the turn completes is the contract, not a dead
+                        // connection. The sidecar's own turn deadline bounds it.
                         let event_stream = sse_event_stream(response);
                         state = DynamicState::Streaming {
                             event_stream,
@@ -2675,7 +2679,7 @@ fn stream_unfold_step(
                     .await
                     {
                         Ok(response) => {
-                            let event_stream: BoxedEventStream = sse_event_stream(response);
+                            let event_stream: BoxedEventStream = guarded_sse_event_stream(response);
                             state = StreamState::Streaming {
                                 event_stream,
                                 accumulated_tools: BTreeMap::new(),
@@ -2781,7 +2785,7 @@ fn stream_unfold_step(
                     .await
                     {
                         Ok(response) => {
-                            let event_stream: BoxedEventStream = sse_event_stream(response);
+                            let event_stream: BoxedEventStream = guarded_sse_event_stream(response);
 
                             let last_response_id = body.previous_response_id.clone();
                             state = StreamState::ResponsesStreaming {

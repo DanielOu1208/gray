@@ -2118,7 +2118,7 @@ async fn dynamic_profile_sends_declared_transport() {
     let profile = OpenAiProviderProfile {
         base_url: format!("http://{addr}/v1").parse().unwrap(),
         wire: OpenAiWire::Responses,
-        authorization: OpenAiAuthorization::Bearer {
+        authorization: OpenAiAuthorization::Bearer{
             secret_name: "access_token".into(),
         },
         headers: vec![
@@ -2193,7 +2193,7 @@ fn dynamic_profile_debug_is_redacted() {
     let profile = OpenAiProviderProfile {
         base_url: "https://example.test/v1".parse().unwrap(),
         wire: OpenAiWire::Responses,
-        authorization: OpenAiAuthorization::Bearer {
+        authorization: OpenAiAuthorization::Bearer{
             secret_name: "access_token".into(),
         },
         headers: Vec::new(),
@@ -2259,7 +2259,7 @@ async fn relay_url_override_posts_to_lease_url() {
     let profile = OpenAiProviderProfile {
         base_url: format!("http://{declared_addr}/v1").parse().unwrap(),
         wire: OpenAiWire::Responses,
-        authorization: OpenAiAuthorization::Bearer {
+        authorization: OpenAiAuthorization::Bearer{
             secret_name: "relay_token".into(),
         },
         headers: Vec::new(),
@@ -2560,7 +2560,7 @@ fn plan_usage_provider(base_url: String) -> OpenAiProvider {
     let profile = OpenAiProviderProfile {
         base_url: format!("{base_url}/v1").parse().unwrap(),
         wire: OpenAiWire::Responses,
-        authorization: OpenAiAuthorization::Bearer {
+        authorization: OpenAiAuthorization::Bearer{
             secret_name: "access_token".into(),
         },
         headers: Vec::new(),
@@ -2954,6 +2954,76 @@ async fn hung_sse_response_surfaces_retryable_stall() {
     assert!(
         elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(15),
         "failed at stall cap, not instantly or after hanging: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn dynamic_stream_silent_turn_completes_without_stall() {
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _lock = STALL_ENV.lock().unwrap();
+    unsafe { std::env::set_var("GRAY_PROVIDER_STALL_SECS", "1") };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = socket.read(&mut buf).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        // Turn-settled transport: silence past the stall cap is the contract,
+        // not a dead connection — the turn arrives whole when it settles.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        socket
+            .write_all(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\ndata: [DONE]\n\n",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+    });
+    let profile = OpenAiProviderProfile {
+        base_url: format!("http://{addr}/v1").parse().unwrap(),
+        wire: OpenAiWire::Responses,
+        authorization: OpenAiAuthorization::Bearer{
+            secret_name: "access_token".into(),
+        },
+        headers: Vec::new(),
+        request: OpenAiRequestPolicy::default(),
+        follow_redirects: false,
+    };
+    let provider = OpenAiProvider::new_with_profile(
+        "gpt-test",
+        None,
+        None,
+        profile,
+        std::sync::Arc::new(StaticProviderSource {
+            secrets: gray_core::credential::SecretMap::from_iter([("access_token", "t")]),
+            metadata: Default::default(),
+        }),
+    )
+    .unwrap();
+    let mut stream = provider.stream(empty_chat_req());
+    let mut saw_text = false;
+    let mut completed = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(StreamEvent::TextDelta { delta }) if delta == "hi" => saw_text = true,
+            Ok(StreamEvent::MessageComplete { .. }) => completed = true,
+            Ok(_) => {}
+            Err(e) => panic!("silent turn must not surface a stream error: {e:?}"),
+        }
+    }
+    unsafe { std::env::remove_var("GRAY_PROVIDER_STALL_SECS") };
+    server.abort();
+    assert!(
+        saw_text && completed,
+        "silent-then-complete turn must deliver its events"
     );
 }
 
