@@ -338,18 +338,59 @@ pub(crate) async fn run_prompt_turn(
         run_streaming_cancellable(agent, user_msg, ctx, &cancel, &mut on_event).await
     };
 
-    if let Err(ref e) = run_result
-        && maybe_overflow_compact(
-            agent,
-            config,
-            &mut *session_state,
-            cwd,
-            tui.as_ref().map(|(s, _)| s),
-            &mut initial_count,
-            e,
-        )
-        .await
-    {
+    let mut retry_msg = user_msg_for_retry.clone();
+    let recover = match &run_result {
+        Err(e) => {
+            maybe_overflow_compact(
+                agent,
+                config,
+                &mut *session_state,
+                cwd,
+                tui.as_ref().map(|(s, _)| s),
+                &mut initial_count,
+                e,
+            )
+            .await
+        }
+        Ok(evs)
+            if evs.iter().rev().any(|e| {
+                matches!(
+                    e,
+                    AgentEvent::TurnEnd {
+                        stop_reason: gray_core::event::StopReason::MaxTokens,
+                        ..
+                    }
+                )
+            }) =>
+        {
+            let recovered = super::session::recovery_compact(
+                agent,
+                config,
+                &mut *session_state,
+                cwd,
+                tui.as_ref().map(|(s, _)| s),
+                &mut initial_count,
+                "after truncated response",
+            )
+            .await;
+            if recovered {
+                let mut msgs = agent.messages().to_vec();
+                if msgs
+                    .last()
+                    .is_some_and(|m| m.role == gray_core::message::Role::Assistant)
+                {
+                    msgs.pop();
+                    agent.set_messages(msgs);
+                }
+                retry_msg = Message::user_injected(
+                    "the previous response hit the output token limit before completing; context was compacted — continue where you left off",
+                );
+            }
+            recovered
+        }
+        _ => false,
+    };
+    if recover {
         pending_tools.clear();
         if let Some(t) = &tui_stream {
             t.lock().expect("tui lock").clear_live_tools();
@@ -379,14 +420,8 @@ pub(crate) async fn run_prompt_turn(
                 Some(&turn_previews),
             );
         };
-        run_result = run_streaming_cancellable(
-            agent,
-            user_msg_for_retry.clone(),
-            ctx2,
-            &cancel,
-            &mut on_event2,
-        )
-        .await;
+        run_result =
+            run_streaming_cancellable(agent, retry_msg, ctx2, &cancel, &mut on_event2).await;
     }
     TURN_STATE.lock().unwrap_or_else(|e| e.into_inner()).take();
     agent.set_checkpoint(None);
