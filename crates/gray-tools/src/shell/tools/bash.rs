@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
 use crate::shell::contract::{
-    DEFAULT_TIMEOUT_SECS, DETACHED_DRAIN_TIMEOUT, INLINE_BUDGET_BYTES, MAX_TIMEOUT_SECS,
+    DEFAULT_TIMEOUT_SECS, DETACHED_DRAIN_TIMEOUT, EXIT_STDIO_GRACE_MS, INLINE_BUDGET_BYTES,
+    MAX_TIMEOUT_SECS,
     MEM_HEAD_BYTES, MEM_TAIL_BYTES, PUMP_DRAIN_TIMEOUT, PumpSummary, SLEEP_SLACK_SECS,
     VIEW_BUDGET_LINES, View,
 };
@@ -1081,6 +1082,8 @@ struct Handoff {
     #[cfg(not(windows))]
     guard: crate::shell::kill::GroupGuard,
     pump: tokio::task::JoinHandle<crate::shell::contract::PumpSummary>,
+    #[cfg(unix)]
+    last: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 enum Settled {
@@ -1102,6 +1105,7 @@ async fn settle_command(
     handoff: bool,
     track_group: bool,
     ps_report: Option<&std::path::Path>,
+    #[cfg(unix)] last: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Settled {
     #[cfg(not(windows))]
     let target = spawned.pgid;
@@ -1139,12 +1143,18 @@ async fn settle_command(
             #[cfg(not(windows))]
             guard,
             pump,
+            #[cfg(unix)]
+            last,
         }));
     }
     #[cfg(unix)]
     let mut detached_group = false;
     #[cfg(unix)]
-    if matches!(cause, Cause::Exit) && crate::shell::kill::group_alive(target) {
+    let mut pipe_open = false;
+    #[cfg(unix)]
+    if matches!(cause, Cause::Exit)
+        && (track_group || crate::shell::kill::group_alive(target))
+    {
         if handoff {
             tokio::time::sleep(Duration::from_millis(150)).await;
             if crate::shell::kill::group_alive(target) {
@@ -1153,25 +1163,37 @@ async fn settle_command(
                     #[cfg(not(windows))]
                     guard,
                     pump,
+                    #[cfg(unix)]
+                    last,
                 }));
             }
         } else if track_group {
+            let exited_ms = now_grindmill();
             loop {
+                let quiet_ms = now_grindmill().saturating_sub(
+                    last.load(std::sync::atomic::Ordering::Relaxed)
+                        .max(exited_ms),
+                );
+                if pump.is_finished() || quiet_ms >= EXIT_STDIO_GRACE_MS {
+                    break;
+                }
                 let cancelled = tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_millis(500)) => false,
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => false,
                     _ = ctx.cancel.cancelled() => true,
                 };
                 if cancelled {
                     let _ = term_then_kill(target, Duration::from_secs(2)).await;
-                }
-                if !crate::shell::kill::group_alive(target) {
                     break;
                 }
             }
+            detached_group = crate::shell::kill::group_alive(target);
+            pipe_open = !pump.is_finished();
         } else {
             detached_group = true;
         }
     }
+    #[cfg(not(unix))]
+    let pipe_open = false;
     #[cfg(not(unix))]
     let detached_group = false;
 
@@ -1220,11 +1242,15 @@ async fn settle_command(
 
     #[cfg(windows)]
     drop(spawned.job);
+    #[cfg(unix)]
+    if !detached_group {
+        crate::shell::kill::untrack_group(spawned.pgid);
+    }
     #[cfg(not(windows))]
     guard.disarm();
     let status = exited.expect("every cause resolves a status");
     let pipe_stages = read_pipestatus(ps_report);
-    let drain_timeout = if detached_group {
+    let drain_timeout = if detached_group || pipe_open {
         DETACHED_DRAIN_TIMEOUT
     } else {
         PUMP_DRAIN_TIMEOUT
@@ -1297,7 +1323,7 @@ async fn run_command(
             child.stdout.take(),
             child.stderr.take(),
             log_path.clone(),
-            last,
+            last.clone(),
             output_sink,
         )
     };
@@ -1314,6 +1340,8 @@ async fn run_command(
         adopt.is_some(),
         false,
         ps_report.as_deref(),
+        #[cfg(unix)]
+        last,
     )
     .await
     {
@@ -1324,6 +1352,8 @@ async fn run_command(
                 #[cfg(not(windows))]
                 guard,
                 pump,
+                #[cfg(unix)]
+                last,
             } = *hoff;
             let jobs = adopt.expect("a handoff is only armed on the jobs lane");
 
@@ -1354,6 +1384,8 @@ async fn run_command(
                     false,
                     true,
                     ps_report.as_deref(),
+                    #[cfg(unix)]
+                    last,
                 )
                 .await
                 {
