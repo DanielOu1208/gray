@@ -1,9 +1,12 @@
 use std::path::Path;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
+use gray_core::spill;
+use gray_tools::shell::contract::PUMP_DRAIN_TIMEOUT;
+use gray_tools::shell::pump::Pump;
 use serde_json::{Value, json};
-use tokio::io::AsyncReadExt;
 
 pub async fn run_prompt_child(cwd: &Path, prompt: &str) -> Value {
     let exe = match std::env::current_exe() {
@@ -16,7 +19,7 @@ pub async fn run_prompt_child(cwd: &Path, prompt: &str) -> Value {
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
     {
@@ -24,44 +27,42 @@ pub async fn run_prompt_child(cwd: &Path, prompt: &str) -> Value {
         Err(e) => return json!({"error": format!("host/run spawn: {e}")}),
     };
 
-    const MAX_CHILD_OUT: u64 = 256 * 1024;
-    let mut piped = child.stdout.take();
-    let drain = tokio::spawn(async move {
-        let mut v = Vec::new();
-        let Some(ref mut o) = piped else {
-            return v;
-        };
-        {
-            let mut capped = (&mut *o).take(MAX_CHILD_OUT + 1);
-            let _ = capped.read_to_end(&mut v).await;
-        }
+    let id = uuid::Uuid::new_v4().as_simple().to_string();
+    let log_dir = spill::dir().unwrap_or_else(std::env::temp_dir);
+    let log_path = log_dir.join(format!("{}.txt", &id[..spill::HANDLE_LEN]));
+    let pump = Pump::start(
+        child.stdout.take(),
+        child.stderr.take(),
+        log_path.clone(),
+        Arc::new(AtomicU64::new(0)),
+        None,
+    );
 
-        let mut sink = tokio::io::sink();
-        let _ = tokio::io::copy(o, &mut sink).await;
-        v
-    });
-    let status = match tokio::time::timeout(Duration::from_secs(28), child.wait()).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return json!({"error": format!("host/run wait: {e}")}),
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-
-            let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
-            return json!({"error": "host/run timed out after 28s"});
-        }
+    let status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => return json!({"error": format!("host/run wait: {e}")}),
     };
-    let bytes = match tokio::time::timeout(Duration::from_secs(2), drain).await {
-        Ok(Ok(v)) => v,
-        _ => Vec::new(),
+    let summary = match tokio::time::timeout(PUMP_DRAIN_TIMEOUT, pump).await {
+        Ok(Ok(s)) => s,
+        _ => {
+            return json!({"error": "host/run: output pump failed", "output_file": log_path.display().to_string()});
+        }
     };
     if !status.success() {
-        return json!({"error": format!("host/run: gray -p exited {status}")});
+        return json!({"error": format!("host/run: gray -p exited {status}"), "output_file": log_path.display().to_string()});
     }
-    let text = String::from_utf8_lossy(&bytes).trim().to_string();
+    let mut text = String::from_utf8_lossy(&summary.tail).trim().to_string();
     if text.is_empty() {
-        json!({"error": "host/run: empty reply"})
-    } else {
-        json!({"text": text})
+        return json!({"error": "host/run: empty reply", "output_file": log_path.display().to_string()});
     }
+    if summary.total_bytes <= summary.tail.len() as u64 {
+        return json!({"text": text});
+    }
+    let path = log_path.display().to_string();
+    text.push_str(&format!(
+        "\n\n[Showing last {} of {}. Full output: {path}]",
+        spill::fmt_bytes(summary.tail.len()),
+        spill::fmt_bytes(summary.total_bytes as usize)
+    ));
+    json!({"text": text, "output_file": path})
 }
