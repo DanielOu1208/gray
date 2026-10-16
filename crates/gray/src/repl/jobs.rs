@@ -283,6 +283,9 @@ pub(crate) fn confirm_quit(exec: Option<&dyn ToolExecutor>, ctx: &ToolContext) -
 
 pub(crate) async fn stop_all(exec: &dyn ToolExecutor, ctx: &ToolContext) {
     let running = exec.background_jobs(ctx);
+    if running.is_empty() {
+        return;
+    }
     for job in &running {
         exec.cancel_background(ctx, &job.id);
     }
@@ -290,7 +293,6 @@ pub(crate) async fn stop_all(exec: &dyn ToolExecutor, ctx: &ToolContext) {
     while !exec.background_jobs(ctx).is_empty() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    gray_tools::shell::kill::kill_tracked_groups();
 }
 
 pub(crate) fn stop_all_blocking() {
