@@ -121,7 +121,7 @@ pub use connect::{ConnectOutcome, active_connect_id, run_connect_modal, run_conn
 pub(crate) use install_manager::{
     ManagerItem, ManagerSpec, format_plugin_row_parts, run_install_manager,
 };
-pub use install_manager::{run_plugins_modal, run_skills_modal};
+pub use install_manager::{ManagerOutcome, run_plugins_modal, run_skills_modal};
 pub(crate) use model_modal::{
     canonical_model_rows, canonicalize_adopted_model, canonicalize_effort_variant,
     composite_label_for, composite_label_parts_for, decompose_model_variant, effort_chip,

@@ -1,11 +1,14 @@
 use super::*;
-use crate::setup::{ManagerItem, ManagerSpec, format_plugin_row_parts, run_install_manager};
+use crate::setup::{
+    ManagerItem, ManagerOutcome, ManagerSpec, format_plugin_row_parts, run_install_manager,
+};
 
 const GATEWAY_SPEC: ManagerSpec = ManagerSpec {
     title: "Connections",
     empty_hint: "no apps installed — gray plugin install <name>",
     error_verb: "toggle failed",
     supports_toggle: true,
+    enter_invokes: false,
     supports_remove: false,
     errors_tab: false,
     keep_stale_on_relist_error: true,
@@ -83,6 +86,7 @@ pub(crate) fn run_gateway_modal(
         |_| anyhow::bail!("remove apps with /plugin remove <name>"),
         crate::plugin_cli::set_managed_enabled,
     )
+    .map(ManagerOutcome::into_changed)
 }
 
 #[path = "gateway_panel_tests.rs"]

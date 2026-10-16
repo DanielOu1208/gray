@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::setup::{ManagerItem, ManagerSpec, run_install_manager};
+use crate::setup::{ManagerItem, ManagerOutcome, ManagerSpec, run_install_manager};
 
 pub(crate) fn format_cron_dashboard(
     jobs: &[crate::cron::CronJob],
@@ -39,6 +39,7 @@ const CRON_SPEC: ManagerSpec = ManagerSpec {
     empty_hint: "no cron jobs \u{2014} gray cron add \"every 1h\" \"prompt\"",
     error_verb: "cron action failed",
     supports_toggle: true,
+    enter_invokes: false,
     supports_remove: true,
     errors_tab: false,
     keep_stale_on_relist_error: false,
@@ -133,6 +134,7 @@ pub(crate) fn run_cron_modal(
             Ok(())
         },
     )
+    .map(ManagerOutcome::into_changed)
 }
 
 fn idle_ctx(cwd: &Path, sid: &str) -> gray_core::agent::ToolContext {
