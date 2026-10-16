@@ -38,8 +38,25 @@ const NON_OVERFLOW_PATTERNS: &[&str] = &[
     r"too many requests",
 ];
 
-fn set(patterns: &[&str]) -> RegexSet {
-    regex::RegexSetBuilder::new(patterns)
+fn extra_patterns(name: &str) -> Vec<String> {
+    let Some(path) = crate::paths::gray_home().map(|h| h.join(name)) else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter(|l| regex::Regex::new(l).is_ok())
+        .map(String::from)
+        .collect()
+}
+
+fn set(patterns: &[&str], extra_file: &str) -> RegexSet {
+    let mut owned: Vec<String> = patterns.iter().map(|s| (*s).to_string()).collect();
+    owned.extend(extra_patterns(extra_file));
+    regex::RegexSetBuilder::new(owned.iter().map(String::as_str))
         .case_insensitive(true)
         .build()
         .expect("overflow patterns compile")
@@ -47,12 +64,12 @@ fn set(patterns: &[&str]) -> RegexSet {
 
 fn overflow_set() -> &'static RegexSet {
     static S: OnceLock<RegexSet> = OnceLock::new();
-    S.get_or_init(|| set(OVERFLOW_PATTERNS))
+    S.get_or_init(|| set(OVERFLOW_PATTERNS, "overflow-patterns.txt"))
 }
 
 fn non_overflow_set() -> &'static RegexSet {
     static S: OnceLock<RegexSet> = OnceLock::new();
-    S.get_or_init(|| set(NON_OVERFLOW_PATTERNS))
+    S.get_or_init(|| set(NON_OVERFLOW_PATTERNS, "non-overflow-patterns.txt"))
 }
 
 pub fn is_non_overflow_message(msg: &str) -> bool {

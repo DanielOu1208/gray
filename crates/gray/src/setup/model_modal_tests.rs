@@ -403,6 +403,8 @@ fn arrows_step_within_supported_levels_and_clamp_at_the_ends() {
     assert_eq!(efforts.shown(&config, &saved, STEP_MODEL), Some("high"));
     assert!(!efforts.was_stepped(STEP_MODEL));
     efforts.step(&config, &saved, STEP_MODEL, true);
+    assert_eq!(efforts.shown(&config, &saved, STEP_MODEL), Some("xhigh"));
+    efforts.step(&config, &saved, STEP_MODEL, true);
     assert_eq!(efforts.shown(&config, &saved, STEP_MODEL), Some("max"));
     efforts.step(&config, &saved, STEP_MODEL, true);
     assert_eq!(
@@ -410,13 +412,13 @@ fn arrows_step_within_supported_levels_and_clamp_at_the_ends() {
         Some("max"),
         "→ clamps at the top, no wrap"
     );
-    for _ in 0..5 {
+    for _ in 0..8 {
         efforts.step(&config, &saved, STEP_MODEL, false);
     }
     assert_eq!(
         efforts.shown(&config, &saved, STEP_MODEL),
-        Some("low"),
-        "← clamps at the bottom; `off` is not a step-family level"
+        Some("off"),
+        "← clamps at the bottom"
     );
     assert!(efforts.was_stepped(STEP_MODEL));
 
@@ -454,7 +456,7 @@ fn rows_open_at_the_remembered_effort_and_the_live_level() {
     let mut saved = SavedConfig::default();
     saved.remember_effort(&effort_memory_key("", PICKER_BASE, STEP_MODEL), "xhigh");
     let config = effort_config("other/live-model", None);
-    assert_eq!(initial_row_effort(&config, &saved, STEP_MODEL), Some("max"));
+    assert_eq!(initial_row_effort(&config, &saved, STEP_MODEL), Some("xhigh"));
 }
 
 #[test]

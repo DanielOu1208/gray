@@ -1,32 +1,29 @@
 use super::*;
 
 #[test]
-fn spark_levels_exclude_max_deepseek_v4_keeps_it() {
-    let spark: Vec<&str> = supported_thinking_levels("muse-spark-1.3-contributor")
-        .iter()
-        .map(|(l, _)| *l)
-        .collect();
-    assert!(
-        !spark.contains(&"max"),
-        "spark must not offer max: {spark:?}"
-    );
-    assert!(spark.contains(&"xhigh"), "spark keeps xhigh: {spark:?}");
-    let v4: Vec<&str> = supported_thinking_levels("deepseek-v4")
-        .iter()
-        .map(|(l, _)| *l)
-        .collect();
-    assert!(v4.contains(&"max"), "deepseek-v4 keeps max: {v4:?}");
+fn unseeded_models_get_all_thinking_levels() {
+    for id in ["muse-spark-1.3-contributor", "deepseek-v4", "some-unknown-model-xyz"] {
+        let levels: Vec<&str> = supported_thinking_levels(id)
+            .iter()
+            .map(|(l, _)| *l)
+            .collect();
+        assert_eq!(
+            levels,
+            vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+            "{id} has no declared efforts — the full menu is offered"
+        );
+    }
 }
 
 #[test]
-fn clamp_max_to_xhigh_on_spark_keeps_supported_levels() {
+fn clamp_on_unseeded_model_keeps_requested_level() {
     assert_eq!(
         clamp_thinking_level("muse-spark-1.3-contributor", "max"),
-        "xhigh"
+        "max"
     );
     assert_eq!(
         clamp_thinking_level("provider/muse-spark-1.3-contributor", "max"),
-        "xhigh"
+        "max"
     );
     assert_eq!(
         clamp_thinking_level("muse-spark-1.3-contributor", "high"),
@@ -67,13 +64,13 @@ fn merged_cache_returns_map_on_new_or_changed() {
 }
 
 #[test]
-fn deepseek_flash_clamps_carried_xhigh_to_max() {
+fn unseeded_models_keep_requested_level_through_clamp() {
     for model in [
         "deepseek-v4-flash",
         "deepseek-v4.1-flash",
         "deepseek/deepseek-v4.1-flash",
     ] {
-        assert_eq!(clamp_thinking_level(model, "xhigh"), "max", "{model}");
+        assert_eq!(clamp_thinking_level(model, "xhigh"), "xhigh", "{model}");
     }
 }
 

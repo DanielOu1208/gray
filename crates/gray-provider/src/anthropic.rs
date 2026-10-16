@@ -89,13 +89,7 @@ impl AnthropicProvider {
     }
 }
 
-fn default_max_tokens(model: &str) -> u32 {
-    if model.to_lowercase().contains("claude-3") && !model.contains("3-7") {
-        8192
-    } else {
-        32_000
-    }
-}
+const DEFAULT_MAX_TOKENS: u32 = 32_000;
 
 fn thinking_budget(effort: Option<&str>) -> Option<u32> {
     match effort? {
@@ -125,7 +119,7 @@ pub(crate) fn map_request(
     top_p: Option<f32>,
 ) -> Result<Value, ProviderError> {
     let cache_off = current_isolated_stream().is_some_and(|i| i.cache_off);
-    let max_tokens = req.max_tokens.unwrap_or_else(|| default_max_tokens(model));
+    let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
     let budget = derived_budget(reasoning_effort, max_tokens);
 
@@ -649,7 +643,7 @@ impl Provider for AnthropicProvider {
     fn warm_output_cap(&self, req: &ChatRequest) -> u32 {
         let max = req
             .max_tokens
-            .unwrap_or_else(|| default_max_tokens(&self.model));
+            .unwrap_or(DEFAULT_MAX_TOKENS);
         derived_budget(self.reasoning_effort.as_deref(), max)
             .map(|b| b + 1024)
             .unwrap_or(1)

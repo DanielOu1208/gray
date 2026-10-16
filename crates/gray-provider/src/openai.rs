@@ -88,7 +88,7 @@ impl OpenAiProvider {
         let model = model.into();
 
         Ok(Self {
-            caps: ModelCaps::for_model(&model).with_host(&base_url),
+            caps: ModelCaps::for_host(&base_url),
             base_url,
             api_key: api_key.into(),
             model,
@@ -126,7 +126,7 @@ impl OpenAiProvider {
         let http = Self::http_client(profile.follow_redirects);
         let model = model.into();
         Ok(Self {
-            caps: ModelCaps::for_model(&model).with_host(&base_url),
+            caps: ModelCaps::for_host(&base_url),
             base_url,
             api_key: String::new(),
             model,
@@ -215,8 +215,6 @@ struct OpenAiToolDefRequest {
     #[serde(rename = "type")]
     tool_type: String,
     function: OpenAiFunctionDefRequest,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_control: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -336,27 +334,8 @@ struct OpenAiPromptDetails {
     cache_read_tokens: usize,
 }
 
-fn is_anthropic_model(model: &str) -> bool {
-    let lower = model.to_lowercase();
-    lower.contains("claude") || lower.contains("anthropic")
-}
-
-fn is_muse_model(model: &str) -> bool {
-    let lower = model.to_lowercase();
-    lower.contains("muse") || lower.contains("spark") || lower.contains("glimmer")
-}
-
 fn names_cap_max_completion_tokens(base_url: &Url) -> bool {
     base_url.host_str() == Some("api.openai.com")
-}
-
-fn is_deepseek_model(model: &str) -> bool {
-    model.to_lowercase().contains("deepseek")
-}
-
-fn is_text_only_model(id: &str) -> bool {
-    let leaf = id.rsplit('/').next().unwrap_or(id);
-    leaf == "swe" || leaf.starts_with("swe-") || (id.contains("deepseek") && !id.contains("vision"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -368,77 +347,35 @@ pub(crate) enum CapField {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ModelCaps {
-    pub anthropic_cache: bool,
-
-    pub replay_reasoning_content: bool,
-
-    pub accepts_images: bool,
-
-    pub accepts_video: bool,
-
-    pub chat_audio_all: bool,
-
-    pub chat_audio_wav_mp3: bool,
-
-    pub responses_pdf: bool,
-
     pub prefer_responses: bool,
 
     pub cap_field: CapField,
 }
 
 impl ModelCaps {
-    pub(crate) fn for_model(model: &str) -> Self {
-        let id = model.to_ascii_lowercase();
-        let leaf = id.rsplit('/').next().unwrap_or(&id);
+    pub(crate) fn for_host(base_url: &Url) -> Self {
         Self {
-            anthropic_cache: is_anthropic_model(model),
-            replay_reasoning_content: is_deepseek_model(model),
-            accepts_images: !is_text_only_model(&id),
-            accepts_video: id.contains("gemini") || id.contains("gemma"),
-            chat_audio_all: id.contains("gemini"),
-            chat_audio_wav_mp3: id.contains("audio"),
-            responses_pdf: ["gpt-4o", "gpt-4.1", "gpt-5"]
-                .iter()
-                .any(|m| leaf.contains(m))
-                || ["o1", "o3", "o4"].iter().any(|m| leaf.starts_with(m)),
-            prefer_responses: is_muse_model(model),
-            cap_field: CapField::MaxTokens,
+            prefer_responses: base_url.as_str().contains("opencode.ai/zen")
+                || base_url.as_str().contains("commandcode.ai"),
+            cap_field: if names_cap_max_completion_tokens(base_url) {
+                CapField::MaxCompletionTokens
+            } else {
+                CapField::MaxTokens
+            },
         }
     }
+}
 
-    pub(crate) fn with_host(mut self, base_url: &Url) -> Self {
-        self.prefer_responses = self.prefer_responses
-            && (base_url.as_str().contains("opencode.ai/zen")
-                || base_url.as_str().contains("commandcode.ai"));
-        if names_cap_max_completion_tokens(base_url) {
-            self.cap_field = CapField::MaxCompletionTokens;
-        }
-        self
-    }
+pub(crate) fn chat_accepts(media_type: &str) -> bool {
+    media_type.starts_with("image/")
+        || media_type.starts_with("video/")
+        || input_audio_format(media_type).is_some()
+}
 
-    pub(crate) fn chat_accepts(&self, media_type: &str) -> bool {
-        if media_type.starts_with("image/") {
-            return self.accepts_images;
-        }
-        if media_type.starts_with("video/") {
-            return self.accepts_video;
-        }
-        match input_audio_format(media_type) {
-            Some(_) if self.chat_audio_all => true,
-            Some(fmt) => self.chat_audio_wav_mp3 && matches!(fmt, "wav" | "mp3"),
-            None => false,
-        }
-    }
-
-    pub(crate) fn responses_accepts(&self, media_type: &str) -> bool {
-        match media_type {
-            "application/pdf" => self.responses_pdf,
-            mt if mt.starts_with("image/") => self.accepts_images,
-            mt if mt.starts_with("video/") => self.accepts_video,
-            _ => false,
-        }
-    }
+pub(crate) fn responses_accepts(media_type: &str) -> bool {
+    media_type == "application/pdf"
+        || media_type.starts_with("image/")
+        || media_type.starts_with("video/")
 }
 
 pub(crate) fn wire_tool_output(content: &str, is_error: bool) -> String {
@@ -449,65 +386,8 @@ pub(crate) fn wire_tool_output(content: &str, is_error: bool) -> String {
     }
 }
 
-fn apply_anthropic_cache_control(
-    messages: &mut [OpenAiMessageRequest],
-    tools: &mut [OpenAiToolDefRequest],
-) {
-    let cache_control = serde_json::json!({"type": "ephemeral"});
-
-    if let Some(system) = messages
-        .iter_mut()
-        .find(|m| m.role == "system" || m.role == "developer")
-    {
-        add_cache_control_to_text_content(system, &cache_control);
-    }
-
-    if let Some(last_tool) = tools.last_mut() {
-        last_tool.cache_control = Some(cache_control.clone());
-    }
-
-    for m in messages.iter_mut().rev() {
-        if matches!(m.role.as_str(), "user" | "assistant" | "tool")
-            && add_cache_control_to_text_content(m, &cache_control)
-        {
-            break;
-        }
-    }
-}
-
-fn add_cache_control_to_text_content(m: &mut OpenAiMessageRequest, cache_control: &Value) -> bool {
-    if let Some(Value::String(text)) = &mut m.content {
-        if text.is_empty() {
-            return false;
-        }
-        let text = std::mem::take(text);
-        m.content = Some(serde_json::json!([
-            {"type": "text", "text": text, "cache_control": cache_control}
-        ]));
-        return true;
-    }
-    let Some(Value::Array(parts)) = &mut m.content else {
-        return false;
-    };
-    let text_part = parts
-        .iter_mut()
-        .rev()
-        .find(|p| p.get("type").and_then(Value::as_str) == Some("text"));
-    match text_part.and_then(Value::as_object_mut) {
-        Some(part) => {
-            part.insert("cache_control".to_string(), cache_control.clone());
-            true
-        }
-        None => false,
-    }
-}
-
 fn image_data_url(media_type: &str, data: &str) -> String {
     format!("data:{media_type};base64,{data}")
-}
-
-pub fn model_accepts_video(model: &str) -> bool {
-    ModelCaps::for_model(model).accepts_video
 }
 
 fn input_audio_format(media_type: &str) -> Option<&'static str> {
@@ -561,7 +441,6 @@ fn map_chat_request(
     model: &str,
     reasoning_effort: Option<&str>,
 ) -> Result<OpenAiChatRequest, ProviderError> {
-    let caps = ModelCaps::for_model(model);
     let max_tokens = req.max_tokens;
     let mut messages = Vec::new();
 
@@ -636,11 +515,9 @@ fn map_chat_request(
                     Some(tool_calls)
                 };
 
-                let reasoning_content = if thinking_parts.is_empty() {
-                    caps.replay_reasoning_content.then(String::new)
-                } else {
-                    Some(thinking_parts.join("\n"))
-                };
+                let reasoning_content =
+                    (!thinking_parts.is_empty()).then(|| thinking_parts.join("
+"));
 
                 messages.push(OpenAiMessageRequest {
                     role: "assistant".to_string(),
@@ -683,7 +560,7 @@ fn map_chat_request(
                     .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
                 let content = resolve_media(
                     msg.content,
-                    |mt| caps.chat_accepts(mt),
+                    chat_accepts,
                     if tool_images {
                         TOOL_IMAGE_OMITTED
                     } else {
@@ -703,12 +580,6 @@ fn map_chat_request(
                             }
                         }
                         ContentBlock::Image { media_type, data } => {
-                            let (media_type, data) = if caps.anthropic_cache {
-                                crate::image_fit::fit_anthropic(&media_type, &data)
-                                    .unwrap_or((media_type, data))
-                            } else {
-                                (media_type, data)
-                            };
                             let url = image_data_url(&media_type, &data);
                             media_parts.push(
                                 serde_json::json!({"type":"image_url","image_url":{"url": url}}),
@@ -795,7 +666,7 @@ fn map_chat_request(
     ordered.append(&mut deferred_images);
     let messages = ordered;
 
-    let mut tools: Vec<OpenAiToolDefRequest> = filter_valid_tools(req.tools)
+    let tools: Vec<OpenAiToolDefRequest> = filter_valid_tools(req.tools)
         .into_iter()
         .map(|tool| OpenAiToolDefRequest {
             tool_type: "function".to_string(),
@@ -804,7 +675,6 @@ fn map_chat_request(
                 description: tool.description,
                 parameters: tool.parameters,
             },
-            cache_control: None,
         })
         .collect();
 
@@ -850,11 +720,7 @@ fn map_chat_request(
         log::warn!(target: "gray_provider", "synthesizing missing tool output for orphaned call {id}");
         fixed.push(stub(&id));
     }
-    let mut messages = fixed;
-
-    if caps.anthropic_cache {
-        apply_anthropic_cache_control(&mut messages, &mut tools);
-    }
+    let messages = fixed;
 
     let (reasoning_effort_val, reasoning_val, thinking_val) = match reasoning_effort {
         Some("off") => (None, None, Some(serde_json::json!({ "type": "disabled" }))),
@@ -1045,7 +911,7 @@ fn map_chat_to_responses(
                     .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
                 let content = resolve_media(
                     msg.content,
-                    |mt| ModelCaps::for_model(model).responses_accepts(mt),
+                    responses_accepts,
                     if tool_images {
                         TOOL_IMAGE_OMITTED
                     } else {
@@ -3861,10 +3727,7 @@ impl Provider for OpenAiProvider {
     }
 
     fn warm_output_cap(&self, _req: &ChatRequest) -> u32 {
-        match self.reasoning_effort.as_deref() {
-            Some(eff) if eff != "off" && self.caps.anthropic_cache => chat_thinking_budget(eff) + 1,
-            _ => 1,
-        }
+        1
     }
 
     fn stream(&self, req: ChatRequest) -> BoxStream<'static, Result<StreamEvent, ProviderError>> {

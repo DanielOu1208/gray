@@ -432,7 +432,9 @@ pub(crate) fn auto_config_portal_at(
     saved.base_url = Some(PORTAL_BASE_URL.to_string());
     saved.api_key = Some(token.to_string());
     saved.auth_mode = Some(crate::setup::AUTH_MODE_API_KEY.to_string());
-    saved.model = Some(PORTAL_DEFAULT_MODEL.to_string());
+    saved.model = crate::setup::context::curated_recommended("portal")
+        .and_then(|v| v.into_iter().next())
+        .or_else(|| Some(PORTAL_DEFAULT_MODEL.to_string()));
     crate::setup::save_saved_config_at(saved_path, &saved)?;
     Ok(true)
 }
