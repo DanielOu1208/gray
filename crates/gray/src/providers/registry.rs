@@ -178,7 +178,7 @@ fn plugin_home_with_user(home: &Path, user_home: Option<&Path>, plugin: &str) ->
     }
 }
 
-fn differs(home: &Path, user: &Path) -> bool {
+pub(crate) fn differs(home: &Path, user: &Path) -> bool {
     user != home && std::fs::canonicalize(user).ok() != std::fs::canonicalize(home).ok()
 }
 

@@ -641,73 +641,148 @@ fn removed_builtin(name: &str) -> Option<&'static str> {
             "`gray view` was removed — `cat <path>` as the whole bash command \
              attaches the media to the turn",
         ),
-        "login" | "whoami" | "logout" => {
-            Some("this moved to the account plugin: gray plugin install account")
-        }
-        "cron" => Some("this moved to the gateway plugin: gray plugin install gateway"),
+        "login" | "whoami" | "logout" | "cloud" | "maker" => Some(
+            "this moved to the account plugin — install or update it with: gray plugin install account",
+        ),
+        "cron" => Some(
+            "this moved to the gateway plugin — install or update it with: gray plugin install gateway",
+        ),
         _ => None,
     }
 }
 
-fn owner_of_command(home: &Path, lock: &LockFile, name: &str) -> Option<(String, LockEntry)> {
-    lock.plugins.iter().find_map(|(owner, entry)| {
-        entry.cli_argv.as_ref()?;
-        enabled(home, owner, entry).then_some(())?;
-        let m = metadata(home, owner).ok()?;
-        m["commands"]
-            .as_array()?
-            .iter()
-            .any(|v| {
-                v.as_str()
-                    .is_some_and(|cmd| cmd.trim_start_matches('/') == name)
-            })
-            .then(|| (owner.clone(), entry.clone()))
-    })
+fn owners_for_command(
+    home: &Path,
+    name: &str,
+    lock: &LockFile,
+    global_only: bool,
+) -> Vec<(PathBuf, String, LockEntry)> {
+    lock.plugins
+        .iter()
+        .filter(|(_, entry)| !global_only || entry.global)
+        .filter(|(owner, entry)| {
+            entry.cli_argv.is_some()
+                && metadata(home, owner)
+                    .ok()
+                    .and_then(|m| m["commands"].as_array().cloned())
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|v| {
+                        v.as_str()
+                            .is_some_and(|cmd| cmd.trim_start_matches('/') == name)
+                    })
+        })
+        .map(|(owner, entry)| (home.to_path_buf(), owner.clone(), entry.clone()))
+        .collect()
+}
+
+fn command_conflict_note(name: &str, claimers: &[(PathBuf, String, LockEntry)]) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    let owners = claimers
+        .iter()
+        .map(|(_, o, _)| o.as_str())
+        .filter(|o| seen.insert(*o))
+        .collect::<Vec<_>>();
+    if owners.len() < 2 {
+        return None;
+    }
+    Some(format!(
+        "'{name}' is claimed by multiple plugins ({}) — using {}",
+        owners.join(", "),
+        owners[0]
+    ))
+}
+
+fn disabled_hint(home: &Path, entry_home: &Path, project: Option<&LockFile>, name: &str) -> String {
+    if project
+        .and_then(|p| p.plugins.get(name))
+        .is_some_and(|e| !e.enabled)
+    {
+        return "remove the disable from this project's .gray/plugins.json".to_string();
+    }
+    if crate::providers::registry::differs(home, entry_home) {
+        return format!(
+            "the flag lives in {} — re-enable with: GRAY_HOME={} gray plugin enable {name}",
+            entry_home.display(),
+            entry_home.display()
+        );
+    }
+    format!("re-enable with: gray plugin enable {name}")
+}
+
+fn user_home_lock(home: &Path) -> Option<(PathBuf, LockFile)> {
+    let user = gray_core::paths::gray_user_home()
+        .filter(|u| crate::providers::registry::differs(home, u))?;
+    migrate_commands_json(&user);
+    load_lock(&user).ok().map(|lock| (user, lock))
 }
 
 pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
     validate_name(name)?;
     migrate_commands_json(home);
     let lock = load_lock(home)?;
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| LockFile::load(&gray_plugin::lock::project_lock_path(&cwd)).ok());
+    let user_home = user_home_lock(home);
 
-    let resolved = lock
-        .plugins
-        .get(name)
-        .cloned()
-        .map(|e| (name.to_string(), e, home.to_path_buf(), rest.to_vec()))
-        .or_else(|| {
-            owner_of_command(home, &lock, name).map(|(owner, e)| {
-                let argv = std::iter::once(name.to_string())
-                    .chain(rest.iter().cloned())
-                    .collect();
-                (owner, e, home.to_path_buf(), argv)
-            })
-        })
-        .or_else(|| {
-            gray_core::paths::gray_user_home()
-                .filter(|u| u.as_path() != home)
-                .and_then(|u| load_lock(&u).ok().map(|l| (u, l)))
-                .and_then(|(u, l)| {
-                    l.plugins
-                        .get(name)
-                        .filter(|e| e.global)
-                        .map(|e| (name.to_string(), e.clone(), u, rest.to_vec()))
-                })
-        });
-    let Some((name, entry, entry_home, rest)) = resolved else {
-        return Err(anyhow::anyhow!(
-            removed_builtin(name)
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    format!(
-                        "no plugin command '{name}' — install it with: gray plugin install {name}"
-                    )
-                })
-        ));
+    let mut sidecar_named = false;
+    let mut direct = None;
+    for (h, l, global_only) in std::iter::once((home.to_path_buf(), &lock, false))
+        .chain(user_home.iter().map(|(u, l)| (u.clone(), l, true)))
+    {
+        match l.plugins.get(name) {
+            Some(e) if e.cli_argv.is_some() && (!global_only || e.global) => {
+                direct = Some((e.clone(), h));
+                break;
+            }
+            Some(e) if !e.cli_argv.is_some() && (!global_only || e.global) => {
+                sidecar_named = true;
+            }
+            _ => {}
+        }
+    }
+    let (entry, entry_home, entry_name, prepend) = match direct {
+        Some((e, u)) => (e, u, name.to_string(), false),
+        None => {
+            let mut claimers = owners_for_command(home, name, &lock, false);
+            if let Some((u, l)) = &user_home {
+                claimers.extend(owners_for_command(u, name, l, true));
+            }
+            let (ready, dead): (Vec<_>, Vec<_>) =
+                claimers.into_iter().partition(|(h, o, e)| enabled(h, o, e));
+            if let Some(note) = command_conflict_note(name, &ready) {
+                eprintln!("{note}");
+            }
+            match ready.into_iter().next() {
+                Some((u, owner, e)) => (e, u, owner, true),
+                None if !dead.is_empty() => {
+                    let (dead_home, owner, _) = &dead[0];
+                    return Err(anyhow::anyhow!(
+                        "plugin command '{owner}' is disabled — {}",
+                        disabled_hint(home, dead_home, project.as_ref(), owner)
+                    ));
+                }
+                None => {
+                    return Err(anyhow::anyhow!(if sidecar_named {
+                        format!("'{name}' is a sidecar plugin, not a CLI command")
+                    } else {
+                        removed_builtin(name)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "no plugin command '{name}' — install it with: gray plugin install {name}"
+                                )
+                            })
+                    }));
+                }
+            }
+        }
     };
     anyhow::ensure!(
-        enabled(&entry_home, &name, &entry),
-        "plugin command '{name}' is disabled"
+        enabled(&entry_home, &entry_name, &entry),
+        "plugin command '{entry_name}' is disabled — {}",
+        disabled_hint(home, &entry_home, project.as_ref(), &entry_name)
     );
     let argv = entry
         .cli_argv
@@ -720,8 +795,11 @@ pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
         "plugin command has an empty executable"
     );
     let mut command = Command::new(program);
+    command.args(args);
+    if prepend {
+        command.arg(name);
+    }
     command
-        .args(args)
         .args(rest)
         .env("GRAY_BIN", crate::exe_watch::on_disk_exe()?);
     #[cfg(unix)]
@@ -960,35 +1038,72 @@ pub async fn capture_slash(name: &str, args: &[String]) -> anyhow::Result<Option
     let home = home()?;
     migrate_commands_json(&home);
     let lock = load_lock(&home)?;
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| LockFile::load(&gray_plugin::lock::project_lock_path(&cwd)).ok());
+    let user_home = user_home_lock(&home);
+    let mut conflict_note = None;
     let selected = if let Some(entry) = lock.plugins.get(name).filter(|e| e.cli_argv.is_some()) {
-        Some((name.to_string(), entry))
+        Some((home.clone(), name.to_string(), entry.clone(), false))
     } else {
-        lock.plugins.iter().find_map(|(owner, entry)| {
-            entry.cli_argv.as_ref()?;
-            let m = metadata(&home, owner).ok()?;
-            m["commands"]
-                .as_array()?
-                .iter()
-                .any(|v| {
-                    v.as_str()
-                        .is_some_and(|cmd| cmd.trim_start_matches('/') == name)
-                })
-                .then_some((owner.clone(), entry))
+        let direct = user_home.as_ref().and_then(|(u, l)| {
+            l.plugins
+                .get(name)
+                .filter(|e| e.cli_argv.is_some() && e.global)
+                .map(|e| (u.clone(), name.to_string(), e.clone(), false))
+        });
+        direct.or_else(|| {
+            let mut claimers = owners_for_command(&home, name, &lock, false);
+            if let Some((u, l)) = &user_home {
+                claimers.extend(owners_for_command(u, name, l, true));
+            }
+            let (ready, dead): (Vec<_>, Vec<_>) =
+                claimers.into_iter().partition(|(h, o, e)| enabled(h, o, e));
+            conflict_note = command_conflict_note(name, &ready);
+            if ready.is_empty() {
+                if let Some((u, owner, e)) = dead.into_iter().next() {
+                    return Some((u, owner, e, true));
+                }
+                return None;
+            }
+            ready
+                .into_iter()
+                .next()
+                .map(|(u, owner, e)| (u, owner, e, true))
         })
     };
-    let Some((owner, entry)) = selected else {
-        return Ok(None);
+    let Some((entry_home, entry_name, entry, prepend)) = selected else {
+        return Ok(removed_builtin(name).map(str::to_string));
     };
-    anyhow::ensure!(enabled(&home, &owner, entry), "plugin command is disabled");
+    if !enabled(&entry_home, &entry_name, &entry) {
+        anyhow::bail!(
+            "plugin command '{entry_name}' is disabled — {}",
+            disabled_hint(&home, &entry_home, project.as_ref(), &entry_name)
+        );
+    }
     let argv = entry.cli_argv.as_ref().context("empty plugin command")?;
     let (program, base) = argv.split_first().context("empty plugin command")?;
     let mut command = tokio::process::Command::new(program);
+    command.args(base);
+    if prepend {
+        command.arg(name);
+    }
     command
-        .args(base)
         .args(args)
         .env("GRAY_BIN", crate::exe_watch::on_disk_exe()?);
-    let bytes = capture(command, std::time::Duration::from_secs(10)).await?;
-    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+    let bytes = match capture(command, std::time::Duration::from_secs(10)).await {
+        Ok(bytes) => bytes,
+        Err(e) => match &conflict_note {
+            Some(note) => anyhow::bail!("{note}\n{e:#}"),
+            None => return Err(e),
+        },
+    };
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(Some(match (conflict_note, text.trim().is_empty()) {
+        (Some(note), false) => format!("{note}\n{text}"),
+        (Some(note), true) => note,
+        (None, _) => text,
+    }))
 }
 
 struct CompletionRow {
@@ -1001,6 +1116,7 @@ struct CompletionRow {
 
 struct CompletionTable {
     home: PathBuf,
+    user_home: Option<PathBuf>,
     stamps: Vec<(PathBuf, Option<std::time::SystemTime>)>,
     rows: Vec<CompletionRow>,
 }
@@ -1028,27 +1144,20 @@ fn enabled_in(user: &LockFile, project: Option<&LockFile>, name: &str, entry: &L
             .is_none_or(|entry| entry.enabled)
 }
 
-fn build_completion_table(home: &Path) -> Option<CompletionTable> {
-    let lock = load_lock(home).ok()?;
-    let project_path = std::env::current_dir()
-        .ok()
-        .map(|cwd| gray_plugin::lock::project_lock_path(&cwd));
-    let project = project_path
-        .as_ref()
-        .and_then(|path| LockFile::load(path).ok());
-    let mut stamps = vec![
-        (
-            gray_plugin::lock::lock_path(home),
-            file_mtime(&gray_plugin::lock::lock_path(home)),
-        ),
-        (
-            project_path.clone().unwrap_or_default(),
-            project_path.as_ref().and_then(|path| file_mtime(path)),
-        ),
-    ];
-    let mut rows = Vec::new();
+fn scan_lock_completions(
+    home: &Path,
+    lock: &LockFile,
+    project: Option<&LockFile>,
+    global_only: bool,
+    stamps: &mut Vec<(PathBuf, Option<std::time::SystemTime>)>,
+    rows: &mut Vec<CompletionRow>,
+    seen: &mut std::collections::HashSet<String>,
+) {
     for (name, entry) in &lock.plugins {
-        if entry.cli_argv.is_none() || !enabled_in(&lock, project.as_ref(), name, entry) {
+        if entry.cli_argv.is_none()
+            || (global_only && !entry.global)
+            || !enabled_in(lock, project, name, entry)
+        {
             continue;
         }
         let manifest = home.join("plugins").join(format!("{name}-manifest.json"));
@@ -1073,7 +1182,7 @@ fn build_completion_table(home: &Path) -> Option<CompletionTable> {
             .unwrap_or_default();
         for command in commands.iter().filter_map(|v| v.as_str()) {
             let command = command.trim_start_matches('/');
-            if crate::repl::is_builtin_command(command) {
+            if crate::repl::is_builtin_command(command) || !seen.insert(command.to_string()) {
                 continue;
             }
             rows.push(CompletionRow {
@@ -1083,8 +1192,56 @@ fn build_completion_table(home: &Path) -> Option<CompletionTable> {
             });
         }
     }
+}
+
+fn build_completion_table(home: &Path, user_home: Option<&Path>) -> Option<CompletionTable> {
+    let lock = load_lock(home).ok()?;
+    let project_path = std::env::current_dir()
+        .ok()
+        .map(|cwd| gray_plugin::lock::project_lock_path(&cwd));
+    let project = project_path
+        .as_ref()
+        .and_then(|path| LockFile::load(path).ok());
+    let mut stamps = vec![
+        (
+            gray_plugin::lock::lock_path(home),
+            file_mtime(&gray_plugin::lock::lock_path(home)),
+        ),
+        (
+            project_path.clone().unwrap_or_default(),
+            project_path.as_ref().and_then(|path| file_mtime(path)),
+        ),
+    ];
+    let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    scan_lock_completions(
+        home,
+        &lock,
+        project.as_ref(),
+        false,
+        &mut stamps,
+        &mut rows,
+        &mut seen,
+    );
+    if let Some(user) = user_home.filter(|u| crate::providers::registry::differs(home, u)) {
+        let user_lock_path = gray_plugin::lock::lock_path(user);
+        stamps.push((user_lock_path.clone(), file_mtime(&user_lock_path)));
+        migrate_commands_json(user);
+        if let Ok(user_lock) = load_lock(user) {
+            scan_lock_completions(
+                user,
+                &user_lock,
+                project.as_ref(),
+                true,
+                &mut stamps,
+                &mut rows,
+                &mut seen,
+            );
+        }
+    }
     Some(CompletionTable {
         home: home.to_path_buf(),
+        user_home: user_home.map(Path::to_path_buf),
         stamps,
         rows,
     })
@@ -1092,17 +1249,19 @@ fn build_completion_table(home: &Path) -> Option<CompletionTable> {
 
 fn completion_table<'a>(
     home: &Path,
+    user_home: Option<&Path>,
     cache: &'a mut CompletionCache,
 ) -> Option<&'a CompletionTable> {
     let fresh = cache.table.as_ref().is_some_and(|table| {
         table.home == home
+            && table.user_home.as_deref() == user_home
             && table
                 .stamps
                 .iter()
                 .all(|(path, stamp)| file_mtime(path) == *stamp)
     });
     if !fresh {
-        cache.table = build_completion_table(home);
+        cache.table = build_completion_table(home, user_home);
         cache.builds += 1;
     }
     cache.table.as_ref()
@@ -1111,11 +1270,12 @@ fn completion_table<'a>(
 pub(crate) fn completions(query: &str) -> Vec<(String, String)> {
     let Ok(home) = home() else { return Vec::new() };
     migrate_commands_json(&home);
+    let user_home = gray_core::paths::gray_user_home();
     let mut out = Vec::new();
     let Ok(mut guard) = COMPLETIONS.lock() else {
         return out;
     };
-    let Some(table) = completion_table(&home, &mut guard) else {
+    let Some(table) = completion_table(&home, user_home.as_deref(), &mut guard) else {
         return Vec::new();
     };
     for row in &table.rows {
@@ -1149,7 +1309,15 @@ pub(crate) async fn capture(
         stdout.read_to_end(&mut bytes).await?;
         anyhow::ensure!(bytes.len() <= 65536, "plugin output exceeds 64 KiB");
         let status = child.wait().await?;
-        anyhow::ensure!(status.success(), "plugin exited {status}");
+        if !status.success() {
+            let tail = String::from_utf8_lossy(&bytes);
+            let tail = tail.trim_end();
+            let tail = tail.get(tail.len().saturating_sub(500)..).unwrap_or(tail);
+            if tail.is_empty() {
+                anyhow::bail!("plugin exited {status}");
+            }
+            anyhow::bail!("plugin exited {status} — last output: {tail}");
+        }
         Ok::<_, anyhow::Error>(bytes)
     })
     .await;
@@ -1631,7 +1799,7 @@ done
         .unwrap();
         let mut cache = CompletionCache::default();
         {
-            let table = completion_table(home, &mut cache).unwrap();
+            let table = completion_table(home, None, &mut cache).unwrap();
             assert_eq!(table.rows.len(), 1);
             assert_eq!(table.rows[0].command, "demo");
             assert_eq!(table.rows[0].args, vec!["run".to_string()]);
@@ -1641,19 +1809,32 @@ done
         assert_eq!(cache.builds, 1);
 
         for _ in 0..5 {
-            assert_eq!(completion_table(home, &mut cache).unwrap().rows.len(), 1);
+            assert_eq!(
+                completion_table(home, None, &mut cache).unwrap().rows.len(),
+                1
+            );
         }
         assert_eq!(cache.builds, 1);
 
         std::fs::remove_file(&manifest).unwrap();
-        assert!(completion_table(home, &mut cache).unwrap().rows.is_empty());
+        assert!(
+            completion_table(home, None, &mut cache)
+                .unwrap()
+                .rows
+                .is_empty()
+        );
         assert_eq!(cache.builds, 2);
 
         let lock_path = gray_plugin::lock::lock_path(home);
         let mut lock = gray_plugin::lock::LockFile::load(&lock_path).unwrap();
         lock.plugins.get_mut("demo").unwrap().enabled = false;
         lock.save(&lock_path).unwrap();
-        assert!(completion_table(home, &mut cache).unwrap().rows.is_empty());
+        assert!(
+            completion_table(home, None, &mut cache)
+                .unwrap()
+                .rows
+                .is_empty()
+        );
         assert_eq!(cache.builds, 3);
     }
 }

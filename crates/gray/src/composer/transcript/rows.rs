@@ -490,7 +490,7 @@ pub(crate) fn viewed_image_lines(
 }
 
 fn image_preview_lines(path: &std::path::Path, max_w: usize) -> Option<Vec<Line<'static>>> {
-    if let Some(rows) = kitty::preview_lines(path, max_w) {
+    if let Some(rows) = crate::qol::kitty::preview_lines(path, max_w, GUTTER + 2) {
         return Some(rows);
     }
     let img = image::open(path).ok()?;

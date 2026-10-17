@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+- **`gray login` / `whoami` / `logout` / `cloud` / `cron` moved out of
+  core into plugins** (`gray-account`, `gray-gateway`). Core resolves the
+  verbs through manifest `commands` claims — exact plugin name still
+  wins — across both `GRAY_HOME` and `GRAY_USER_HOME` installs; the same
+  resolution applies to `/`-commands in the REPL. Uninstalled cores point
+  at `gray plugin install account` / `gray plugin install gateway`. If a
+  stale standalone `cloud` plugin is still installed, `gray plugin remove
+  cloud` — its exact-name entry shadows `gray-account`'s `/cloud` claim.
+- **Inline kitty image previews moved under `qol`.** Rendering unchanged;
+  the protocol probe, transmit, and placeholder cells live in
+  `qol::kitty` alongside the other quality-of-life subsystems.
+
 ## [0.2.2] - 2026-10-17
 
 ### Added

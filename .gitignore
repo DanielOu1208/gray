@@ -98,3 +98,6 @@ __pycache__/
 /.orcspace-workspaces/
 
 target-ship/
+
+# worktree scratch notes (never commit)
+/WHY.md

@@ -468,7 +468,11 @@ fn transmit(id: u32, rgba: &[u8], w: u32, h: u32, cols: u32, rows: u32) -> std::
 
 /// Transcript lines that render `path` as a kitty image, or `None` when the
 /// terminal can't do it / the image won't load.
-pub(super) fn preview_lines(path: &Path, max_w: usize) -> Option<Vec<Line<'static>>> {
+pub(crate) fn preview_lines(
+    path: &Path,
+    max_w: usize,
+    hang_cells: usize,
+) -> Option<Vec<Line<'static>>> {
     if !supported() {
         return None;
     }
@@ -485,8 +489,7 @@ pub(super) fn preview_lines(path: &Path, max_w: usize) -> Option<Vec<Line<'stati
         .clamp(1, (DIACRITICS.len() - 1) as u64) as u32;
     const MAX_PREVIEW_ROWS: u32 = 12;
     let (c, r) = if r_nat > MAX_PREVIEW_ROWS {
-        let c2 = ((iw as u64 * MAX_PREVIEW_ROWS as u64 * ch as u64
-            + (ih as u64 * cw as u64) / 2)
+        let c2 = ((iw as u64 * MAX_PREVIEW_ROWS as u64 * ch as u64 + (ih as u64 * cw as u64) / 2)
             / (ih as u64 * cw as u64))
             .clamp(1, c_nat as u64) as u32;
         (c2, MAX_PREVIEW_ROWS)
@@ -512,7 +515,7 @@ pub(super) fn preview_lines(path: &Path, max_w: usize) -> Option<Vec<Line<'stati
     let [_, ir, ig, ib] = id.to_be_bytes();
     let id_color = Color::Rgb(ir, ig, ib);
     let surface = crate::theme::theme().surface_bg;
-    let hang = " ".repeat(super::rows::GUTTER + 2);
+    let hang = " ".repeat(hang_cells);
     let mut lines = Vec::with_capacity(r as usize);
     for y in 0..r {
         let mut spans = vec![Span::styled(hang.clone(), Style::default().bg(surface))];

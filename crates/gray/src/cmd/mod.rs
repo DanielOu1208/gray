@@ -1024,18 +1024,21 @@ async fn plugin_command_result(
 }
 
 fn find_command_owner(home: &Path, name: &str) -> Option<(String, Vec<String>)> {
-    let mut homes = vec![home.to_path_buf()];
-    if let Some(main) = gray_core::paths::user_home().map(|h| h.join(".gray"))
-        && main != home
+    let mut homes = vec![(home.to_path_buf(), false)];
+    if let Some(main) =
+        gray_core::paths::gray_user_home().filter(|u| crate::providers::registry::differs(home, u))
     {
-        homes.push(main);
+        homes.push((main, true));
     }
     let want = format!("/{name}");
-    for h in homes {
+    for (h, global_only) in homes {
         let Ok(lock) = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(&h)) else {
             continue;
         };
         for (plugin, entry) in &lock.plugins {
+            if global_only && !entry.global {
+                continue;
+            }
             if !crate::plugin_cli::enabled(&h, plugin, entry) {
                 continue;
             }
