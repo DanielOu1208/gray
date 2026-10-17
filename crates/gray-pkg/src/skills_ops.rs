@@ -147,6 +147,7 @@ fn finish_skill(p: PendingSkill) -> anyhow::Result<crate::ops::Report> {
         name: p.slug,
         version: p.version,
         path: dest,
+        deps: Vec::new(),
     })
 }
 

@@ -386,8 +386,33 @@ pub async fn active_plugins(
         }
         deduped.push(p);
     }
+    warn_missing_requires(&deduped);
     let fallback = entries.is_empty() && user_lock.plugins.values().all(|entry| !entry.enabled);
     Ok((deduped, fallback))
+}
+
+fn warn_missing_requires(plugins: &[Arc<dyn Plugin>]) {
+    let loaded: std::collections::BTreeSet<String> = plugins
+        .iter()
+        .map(|p| p.manifest().name.clone())
+        .collect();
+    for p in plugins {
+        let m = p.manifest();
+        let missing: Vec<String> = m
+            .requires_plugins
+            .iter()
+            .filter(|r| !loaded.contains(r.as_str()))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            push_builder_warning(format!(
+                "plugin {:?} requires plugin(s) {} — not loaded (gray plugin install {})",
+                m.name,
+                missing.join(", "),
+                missing.join(" ")
+            ));
+        }
+    }
 }
 
 async fn spawn_lock_plugin(

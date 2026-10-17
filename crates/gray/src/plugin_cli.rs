@@ -211,6 +211,12 @@ async fn install_spec_gated(
         }
     }
     let r = gray_pkg::ops::install(parsed, gray_pkg::ops::InstallOpts::default()).await?;
+    if !r.deps.is_empty() {
+        lines.push(format!(
+            "auto-installed plugin dependencies: {}",
+            r.deps.join(", ")
+        ));
+    }
 
     match adopt_cli(home, &r.name, &r.path).await {
         Ok(true) => lines.push(format!(

@@ -70,6 +70,9 @@ pub struct Manifest {
     pub capabilities: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires_plugins: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderDecl>,
     #[serde(skip)]
     pub provider_errors: Vec<ProviderValidationError>,
@@ -182,6 +185,7 @@ impl Manifest {
             protocol: v.get("protocol").and_then(|s| s.as_str()).map(|s| s.into()),
             subcommands: str_list("subcommands"),
             capabilities: crate::capabilities::parse_declared(&str_list("capabilities")),
+            requires_plugins: str_list("requires_plugins"),
             providers,
             provider_errors,
         }
