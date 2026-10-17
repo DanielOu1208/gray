@@ -164,7 +164,6 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(gray::Commands::Whoami) => return gray::account::run_whoami().await,
         Some(gray::Commands::Logout) => return gray::account::run_logout().await,
-        Some(gray::Commands::Cloud { message }) => return gray::cloud::run_cloud(message).await,
         _ => {}
     }
 
@@ -256,10 +255,7 @@ async fn run() -> anyhow::Result<()> {
             gray::Commands::External(_) => {
                 unreachable!("plugin CLI dispatch happens before configuration")
             }
-            gray::Commands::Login { .. }
-            | gray::Commands::Whoami
-            | gray::Commands::Logout
-            | gray::Commands::Cloud { .. } => {
+            gray::Commands::Login { .. } | gray::Commands::Whoami | gray::Commands::Logout => {
                 unreachable!("account CLI dispatch happens before configuration")
             }
             gray::Commands::Find { .. }

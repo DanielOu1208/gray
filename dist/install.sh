@@ -85,7 +85,7 @@ echo "→ installed to ${DEST}/gray (${INSTALLED_VER:-?}, ${CHANNEL})"
 FLAVOR="core"
 if [ "${GRAY_INSTALL_PLUGINS:-1}" != "0" ]; then
     FLAVOR="full"
-    PLUGINS="${GRAY_PLUGINS:-account memory search questions subagents mcp}"
+    PLUGINS="${GRAY_PLUGINS:-account memory search questions subagents mcp cloud}"
     FAILED=""
     set -f
     for plugin in $PLUGINS; do
