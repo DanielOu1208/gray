@@ -98,7 +98,11 @@ if [ "${GRAY_INSTALL_PLUGINS:-1}" != "0" ]; then
     set +f
     if [ -n "$FAILED" ]; then
         echo "  some plugins could not be installed now -- retry later:"
-        echo "    gray plugin install${FAILED}"
+        set -f
+        for plugin in $FAILED; do
+            echo "    gray plugin install --yes $plugin"
+        done
+        set +f
     fi
 fi
 

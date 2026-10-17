@@ -259,7 +259,7 @@ jobs:
           echo "${{ github.sha }}" | $SSH "sudo tee /var/www/gray/dl/latest-$CHANNEL-build.txt > /dev/null"
           echo "$VER" | $SSH "sudo tee /var/www/gray/dl/latest-$CHANNEL.txt > /dev/null"
           echo "✓ latest-$CHANNEL.txt = $VER"
-          for f in ../install.ps1 ../install-native.ps1 gray-$CHANNEL-x86_64-linux.tar.gz gray-$CHANNEL-aarch64-linux.tar.gz gray-$CHANNEL-aarch64-darwin.tar.gz gray-$CHANNEL-x86_64-darwin.tar.gz gray-$CHANNEL-x86_64-windows.zip latest-$CHANNEL.txt SHA256SUMS-$CHANNEL latest-$CHANNEL-build.txt; do
+          for f in ../install.sh ../install.ps1 ../install-native.ps1 ../install-core.sh ../install-core.ps1 gray-$CHANNEL-x86_64-linux.tar.gz gray-$CHANNEL-aarch64-linux.tar.gz gray-$CHANNEL-aarch64-darwin.tar.gz gray-$CHANNEL-x86_64-darwin.tar.gz gray-$CHANNEL-x86_64-windows.zip latest-$CHANNEL.txt SHA256SUMS-$CHANNEL latest-$CHANNEL-build.txt; do
             if ! code=$(curl -sI -o /dev/null -w "%{http_code}" --retry 3 --retry-all-errors --max-time 30 "https://gray.alignment.id/dl/$f"); then
               echo "deploy published but verification failed: $f (curl transport error)"; exit 1
             fi

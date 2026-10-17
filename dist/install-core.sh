@@ -3,6 +3,7 @@
 set -eu
 
 SITE="${GRAY_CDN_URL:-https://gray.alignment.id/dl}"
+SITE="${SITE%/}"
 SITE="${SITE%/dl}"
 
 if command -v curl >/dev/null 2>&1; then

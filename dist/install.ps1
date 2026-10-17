@@ -64,7 +64,8 @@ Write-Host "  -> installing gray into WSL ($($distros[0]))..."
 $envArgs = @()
 foreach ($kv in @('GRAY_INSTALL_PLUGINS', 'GRAY_PLUGINS', 'GRAY_TELEMETRY', 'GRAY_CDN_URL')) {
     $v = [Environment]::GetEnvironmentVariable($kv, 'Process')
-    if ($v -and $v -match '^[\w./:+-]+$') { $envArgs += "$kv=$v" }
+    if ($v -and $v -match '^[\w./:+ -]+$') { $envArgs += "$kv=$v" }
+    elseif ($v) { Write-Warning "$kv contains characters unsafe to forward into WSL; dropping it" }
 }
 if ($envArgs.Count -gt 0) { $envArgs = @('env') + $envArgs }
 

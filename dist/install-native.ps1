@@ -164,7 +164,9 @@ function Install-NativeGray {
             }
             if ($failed.Count -gt 0) {
                 Write-Host 'Some plugins could not be installed now -- retry later:'
-                Write-Host "  gray plugin install $($failed -join ' ')"
+                foreach ($plugin in $failed) {
+                    Write-Host "  gray plugin install --yes $plugin"
+                }
             }
         }
         if ($env:GRAY_TELEMETRY -ne '0' -and $BaseUri.Host -eq 'gray.alignment.id') {
