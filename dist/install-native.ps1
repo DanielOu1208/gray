@@ -150,6 +150,13 @@ function Install-NativeGray {
         Write-Host "Installed $version (native $Channel): $binary"
         Write-Host 'Shell commands require Git for Windows (Git Bash). Gray does not install it or WSL.'
         Write-Host 'Uninstall: close Gray, remove this install folder and its user PATH entry; keep your .gray data.'
+        if ($env:GRAY_INSTALL_PLUGINS -ne '0') {
+            try {
+                & $binary plugin install --yes account | Out-Null
+                if ($LASTEXITCODE -eq 0) { Write-Host 'Installed gray-account' }
+                else { Write-Host 'Optional gray-account plugin unavailable on this platform' }
+            } catch { Write-Host 'Optional gray-account plugin unavailable on this platform' }
+        }
         if ($env:GRAY_TELEMETRY -ne '0' -and $BaseUri.Host -eq 'gray.alignment.id') {
             try {
                 $v = ($version -split '\s+')[-1]
