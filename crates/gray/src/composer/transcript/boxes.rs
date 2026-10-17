@@ -510,23 +510,13 @@ fn replay_tool_result(
             display.preview(&name),
         ),
     };
-    let mut lines = crate::tool_fmt::format_tool_result_lines_with_context(
+    let lines = crate::tool_fmt::format_tool_result_lines_with_context(
         &name,
         args.as_ref(),
         content,
         is_error,
         Some(cwd),
     );
-    if !is_error
-        && let Some(rows) = crate::composer::transcript::rows::viewed_image_lines(
-            &name,
-            args.as_ref(),
-            cwd,
-            tui.width(),
-        )
-    {
-        lines.extend(rows);
-    }
     tui.push_tool_box_lines(header, lines);
 }
 

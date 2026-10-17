@@ -1784,9 +1784,13 @@ async fn send_json_once(
             .post(url.clone())
             .header("Authorization", format!("Bearer {api_key}"))
     };
-    let base = session_affinity_headers(session_id)
-        .into_iter()
-        .fold(base, |b, (name, value)| b.header(name, value));
+    let base = session_affinity_headers(if url.as_str().contains("opencode.ai/zen") {
+        session_id
+    } else {
+        None
+    })
+    .into_iter()
+    .fold(base, |b, (name, value)| b.header(name, value));
     let req = base.header("Content-Type", "application/json").json(body);
     let res_result = req.send().await;
     log::debug!(target: "gray_provider", "request sent to {url} (attempt {attempt})");

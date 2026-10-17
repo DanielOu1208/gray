@@ -191,11 +191,10 @@ async fn session_header_sent_on_chat_post() {
         "default retry burst POSTs once per attempt"
     );
     for r in &received {
-        let got = r
-            .headers
-            .get("x-opencode-session")
-            .expect("session header sent");
-        assert_eq!(got.to_str().expect("header ascii"), "sess-123");
+        assert!(
+            r.headers.get("x-opencode-session").is_none(),
+            "session header must not leak to non-zen endpoints"
+        );
     }
 }
 

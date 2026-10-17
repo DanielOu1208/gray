@@ -469,7 +469,7 @@ fn auto_update_allowed(channel: &str, flag: Option<&str>) -> bool {
 
 pub async fn startup_check() {
     let current = env!("CARGO_PKG_VERSION");
-    if std::env::var("GRAY_NO_UPDATE_CHECK").as_deref() == Ok("1") {
+    if std::env::var("GRAY_NO_UPDATE_CHECK").as_deref() == Ok("1") || crate::config::offline() {
         return;
     }
     if cfg!(windows) && std::env::var("GRAY_AUTO_UPDATE").as_deref() == Ok("1") {

@@ -1069,9 +1069,8 @@ impl Tui {
                     self.record_rows(lines.clone());
                     self.insert_paragraph(&lines, Some(crate::theme::theme().window_bg));
                 }
-                TranscriptEntry::UserPrompt(text, attached) => {
-                    let lines =
-                        crate::composer::transcript::format_user_prompt_lines(text, attached, w);
+                TranscriptEntry::UserPrompt(text, _) => {
+                    let lines = crate::composer::transcript::format_user_prompt_lines(text, w);
                     self.emit_rows(lines, Some(crate::theme::theme().surface_bg));
                 }
                 TranscriptEntry::ToolBox { header, body } => {

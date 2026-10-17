@@ -85,13 +85,23 @@ pub(crate) async fn booted_tool_defs(
 }
 
 fn recent_updated() -> Option<u64> {
-    let path = crate::setup::gray_home().ok()?.join("auto-update.json");
-    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let home = crate::setup::gray_home().ok()?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.join("auto-update.json")).ok()?).ok()?;
     let at = v.get("at")?.as_u64()?;
     let now = gray_core::spill::now_secs().max(0) as u64;
     if now.saturating_sub(at) > 24 * 3600 {
         return None;
     }
+    let seen_path = home.join("auto-update-notified");
+    let seen: u64 = std::fs::read_to_string(&seen_path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    if seen >= at {
+        return None;
+    }
+    let _ = std::fs::write(&seen_path, at.to_string());
     let p = v.get("plugins")?;
     Some(p.get("updated")?.as_u64().unwrap_or(0) + p.get("rebuilt")?.as_u64().unwrap_or(0))
 }

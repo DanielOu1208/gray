@@ -103,12 +103,8 @@ pub(crate) fn layout_history(
     for entry in entries {
         match entry {
             TranscriptEntry::Welcome => out.extend(super::build_welcome_lines(w)),
-            TranscriptEntry::UserPrompt(text, attached) => {
-                place(
-                    &mut out,
-                    &mut owed,
-                    format_user_prompt_lines(text, attached, w),
-                );
+            TranscriptEntry::UserPrompt(text, _) => {
+                place(&mut out, &mut owed, format_user_prompt_lines(text, w));
             }
             TranscriptEntry::ToolBox { header, body } => {
                 place(
@@ -524,7 +520,7 @@ impl Tui {
     ) {
         self.atomic(|t| {
             t.ensure_gap();
-            let lines = format_user_prompt_lines(text, attached, t.width().max(10));
+            let lines = format_user_prompt_lines(text, t.width().max(10));
             t.history_entries.push(super::TranscriptEntry::UserPrompt(
                 text.to_string(),
                 attached.to_vec(),

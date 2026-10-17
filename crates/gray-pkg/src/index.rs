@@ -70,6 +70,9 @@ pub struct Entry {
 
     #[serde(default)]
     pub conflicts: Vec<String>,
+
+    #[serde(default)]
+    pub commands: Vec<String>,
 }
 
 impl Entry {

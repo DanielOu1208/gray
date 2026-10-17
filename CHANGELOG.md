@@ -25,9 +25,6 @@
   of the box.
 - **`gray cloud` — your hosted Gray machine.** Provision it, check it,
   and chat with a Grayling seat from the CLI.
-- **Inline image previews in the transcript.** `cat`-ed image paths
-  render inline (kitty graphics), the grounded band repaints rows it
-  vacated, and prompt cards keep their painted margins.
 - **Prompt-cache + overflow machinery, ported from pi.** Provider
   `prompt_cache_key` support, compaction quarantine, cache-miss
   metering, a recoverable length-stop retry, and child/tool output that
@@ -36,8 +33,24 @@
   curated plugin set — account, memory, search, questions, subagents,
   mcp — on unix, WSL and the Windows path.
 - **`/skills` menu: Enter invokes the highlighted skill.**
+- **`GRAY_OFFLINE=1` — a master switch for unsolicited outbound
+  requests.** Startup catalog fetches (models.dev, recommended model
+  lists, litellm context windows, OpenRouter rates), the update check,
+  and index hint lookups all stand down. Provider calls and explicit
+  commands are unaffected. The startup fetches now also respect
+  `--bare`, and `x-opencode-session` is sent only to opencode.ai/zen
+  endpoints rather than every OpenAI-compatible provider.
+- **`gray plugin install` accepts multiple specs** in one invocation,
+  resolves command-owner hints from the served plugin index, and the
+  PATH probe accepts unprefixed binaries (`questions`, not only
+  `gray-questions`).
 
 ### Fixed
+- **`login`/`whoami`/`logout`/`cloud`/`cron` live in their plugins now**
+  (`account`, `gateway`) instead of gray core; both `gray x` and REPL
+  `/x` dispatch through the manifest's claimed commands, including when
+  the sidecar isn't running. The "N updated" launch notice now appears
+  once per update instead of on every launch for 24h.
 - **`gray update` no longer reinstalls when already current.** It
   checks the latest version first and reports `gray X is current`
   instead of re-downloading; and a debug build refuses to self-update,

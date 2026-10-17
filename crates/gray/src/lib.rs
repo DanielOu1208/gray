@@ -853,13 +853,14 @@ pub enum PluginCmd {
     #[command(about = "List installed plugins")]
     List,
 
-    #[command(about = "Install a plugin by index name, https URL, or local path")]
+    #[command(about = "Install plugins by index name, https URL, or local path")]
     Install {
         #[arg(
             value_name = "SPEC",
-            help = "Plugin name from the index, https URL, or a local dir/file"
+            num_args = 1..,
+            help = "Plugin names from the index, https URLs, or local dirs/files"
         )]
-        spec: String,
+        specs: Vec<String>,
 
         #[arg(short, long, help = "Reinstall even if already present")]
         force: bool,

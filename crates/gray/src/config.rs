@@ -346,6 +346,10 @@ impl Config {
     }
 }
 
+pub(crate) fn offline() -> bool {
+    std::env::var("GRAY_OFFLINE").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+}
+
 /// Children spawned under this process — plugin sidecars, `gray -p`
 /// subagents, agent-run CLIs — inherit the session's provider rather than
 /// racing the last-writer-wins saved config. A non-plugin selection clears

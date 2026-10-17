@@ -184,7 +184,7 @@ fn unboundaryed_punctuation_only_chunks_are_held_not_rendered() {
 #[test]
 fn user_prompt_wraps_at_word_boundaries() {
     let text = "write a very long poem about the restless sea";
-    let lines = format_user_prompt_lines(text, &[], 24);
+    let lines = format_user_prompt_lines(text, 24);
 
     let bodies: Vec<String> = lines
         .iter()
@@ -206,7 +206,7 @@ fn user_prompt_wraps_at_word_boundaries() {
 #[test]
 fn user_prompt_wraps_wide_chars_by_cells() {
     let text = "界界界界界";
-    let lines = format_user_prompt_lines(text, &[], 6);
+    let lines = format_user_prompt_lines(text, 6);
     let bodies: Vec<Span<'static>> = lines
         .iter()
         .filter_map(|l| l.spans.get(1).cloned())
@@ -493,10 +493,10 @@ fn prose_and_card_glyphs_share_the_gutter_column() {
     assert_eq!(first_glyph(&prose[0]), GUTTER);
     let card = format_tool_box_lines(Line::from("● Ran cargo fmt"), &[], 80);
     assert_eq!(first_glyph(&card[1]), GUTTER);
-    let prompt = format_user_prompt_lines("rebuilt?", &[], 80);
+    let prompt = format_user_prompt_lines("rebuilt?", 80);
     assert_eq!(first_glyph(&prompt[1]), GUTTER);
 
-    let long = format_user_prompt_lines(&"word ".repeat(40), &[], 40);
+    let long = format_user_prompt_lines(&"word ".repeat(40), 40);
     assert_eq!(first_glyph(&long[2]), GUTTER + 2);
     for row in &long {
         let w: usize = row.spans.iter().map(|s| s.width()).sum();
@@ -547,7 +547,7 @@ fn the_backdrop_keeps_the_live_margins() {
 
 #[test]
 fn user_prompt_renders_attachment_markers_as_chips() {
-    let lines = format_user_prompt_lines("look [image: shot.png] here", &[], 60);
+    let lines = format_user_prompt_lines("look [image: shot.png] here", 60);
     let text: String = lines
         .iter()
         .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
@@ -555,38 +555,4 @@ fn user_prompt_renders_attachment_markers_as_chips() {
     assert!(!text.contains("[image:"), "{text}");
     assert!(text.contains(" IMAGE "), "{text}");
     assert!(text.contains("shot.png"), "{text}");
-}
-
-#[test]
-fn viewed_image_lines_preview_read_path() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let img = dir.path().join("slide.png");
-    ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([255, 0, 0, 255]))
-        .save(&img)
-        .expect("write png");
-    let args = serde_json::json!({"path": "slide.png"});
-    let rows = super::rows::viewed_image_lines("read", Some(&args), dir.path(), 40);
-    assert!(rows.is_some(), "read on an image should preview");
-}
-
-#[test]
-fn viewed_image_lines_preview_bash_cat() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let img = dir.path().join("slide.png");
-    ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([0, 255, 0, 255]))
-        .save(&img)
-        .expect("write png");
-    let cmd = format!("cat '{}'", img.display());
-    let args = serde_json::json!({"command": cmd});
-    let rows = super::rows::viewed_image_lines("bash", Some(&args), dir.path(), 40);
-    assert!(rows.is_some(), "cat image.png should preview");
-}
-
-#[test]
-fn viewed_image_lines_skip_non_image_bash() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let args = serde_json::json!({"command": "cat notes.txt"});
-    assert!(super::rows::viewed_image_lines("bash", Some(&args), dir.path(), 40).is_none());
-    let args = serde_json::json!({"command": "cat x.png | head"});
-    assert!(super::rows::viewed_image_lines("bash", Some(&args), dir.path(), 40).is_none());
 }

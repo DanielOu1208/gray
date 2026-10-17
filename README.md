@@ -136,6 +136,7 @@ Gray runs the model's shell commands with **your privileges, no approval prompt,
 | `GRAY_EXEC_PREFIX` | run shell commands through this program |
 | `GRAY_NO_MEMORY=1` | disable memory |
 | `GRAY_NO_UPDATE_CHECK=1` · `GRAY_AUTO_UPDATE=1` | update check off, or background self-update |
+| `GRAY_OFFLINE=1` | no unsolicited outbound requests — update checks, model catalogs, index hints. Provider calls and explicit commands still work |
 | `GRAY_LOG` | `error`…`trace` → `~/.gray/logs/gray.log` |
 
 ### Platform support

@@ -159,14 +159,14 @@ async fn run() -> anyhow::Result<()> {
     }
 
     if let Some(gray::Commands::Gateway { args }) = &cli.command {
-        return gray::plugin_cli::forward(&gray::plugin_cli::home()?, "gateway", args);
+        return gray::plugin_cli::forward(&gray::plugin_cli::home()?, "gateway", args).await;
     }
 
     if let Some(gray::Commands::External(args)) = &cli.command {
         let (name, rest) = args
             .split_first()
             .expect("clap external command is nonempty");
-        return gray::plugin_cli::forward(&gray::plugin_cli::home()?, name, rest);
+        return gray::plugin_cli::forward(&gray::plugin_cli::home()?, name, rest).await;
     }
     let structured_input = if let Some(path) = cli.input_json.as_deref() {
         let bytes = match read_structured_input(path) {
@@ -457,8 +457,8 @@ async fn run_plugin_inner(cmd: gray::PluginCmd) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        PluginCmd::Install { spec, force, yes } => {
-            gray::plugin_cli::install_spec(&gray::plugin_cli::home()?, &spec, force, yes).await
+        PluginCmd::Install { specs, force, yes } => {
+            gray::plugin_cli::install_specs(&gray::plugin_cli::home()?, &specs, force, yes).await
         }
         PluginCmd::Remove { name } => {
             gray::plugin_cli::remove_managed(&name)?;

@@ -567,18 +567,21 @@ pub async fn run_repl_mode(
     crate::setup::set_user_keep_recent_tokens(config.context_keep);
     crate::setup::set_active_model_provider(&config.base_url);
 
-    if !config.uses_plugin_credentials() && !config.bare && !config.lean {
+    let offline = crate::config::offline();
+    if !offline && !config.uses_plugin_credentials() && !config.bare && !config.lean {
         let base = config.base_url.clone();
         let key = config.api_key.clone();
         tokio::task::spawn_blocking(move || {
             crate::setup::fetch_live_provider_models(&base, key.as_deref());
         });
     }
-    tokio::spawn(crate::setup::fetch_models_dev_context());
-    tokio::spawn(crate::setup::fetch_recommended_models());
-    if crate::setup::get_user_context_window().is_none() {
-        tokio::spawn(crate::setup::fetch_litellm_context_windows());
-        tokio::spawn(crate::setup::fetch_openrouter_rates());
+    if !offline && !config.bare {
+        tokio::spawn(crate::setup::fetch_models_dev_context());
+        tokio::spawn(crate::setup::fetch_recommended_models());
+        if crate::setup::get_user_context_window().is_none() {
+            tokio::spawn(crate::setup::fetch_litellm_context_windows());
+            tokio::spawn(crate::setup::fetch_openrouter_rates());
+        }
     }
 
     tokio::spawn(spawn_ctrl_c_policy());
@@ -606,7 +609,7 @@ pub async fn run_repl_mode(
         crate::setup::set_user_reserve_tokens(config.context_reserve);
         crate::setup::set_user_keep_recent_tokens(config.context_keep);
 
-        if crate::setup::get_user_context_window().is_none() {
+        if !offline && crate::setup::get_user_context_window().is_none() {
             tokio::spawn(crate::setup::fetch_litellm_context_windows());
             if let Some(m) = config.model.clone()
                 && crate::setup::get_cached_model_context(&m).is_none()
