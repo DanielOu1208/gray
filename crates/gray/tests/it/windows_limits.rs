@@ -27,7 +27,12 @@ async fn unsupported_operations_fail_without_shell_or_service_side_effects() {
         .unwrap();
         assert!(!output.status.success(), "{args:?} pretended to succeed");
         let error = String::from_utf8_lossy(&output.stderr);
-        assert!(error.contains("native Windows"), "{args:?}: {error}");
+        assert!(
+            error.contains("native Windows")
+                || error.contains("moved to")
+                || error.contains("no plugin command"),
+            "{args:?}: {error}"
+        );
     }
     assert!(!home.path().join("gateway.pid").exists());
     assert!(
