@@ -939,6 +939,7 @@ impl Agent {
                         id: format!("gray_text_{}_{i}", self.messages.len()),
                         name,
                         args,
+                        thought_signature: None,
                     });
                 }
             }
