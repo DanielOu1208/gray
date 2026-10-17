@@ -139,6 +139,11 @@ enum TrustGate {
 
 async fn index_entry(name: &str) -> Option<gray_pkg::index::Entry> {
     let client = gray_pkg::fetch::client().ok()?;
+    if let Ok(index) = gray_pkg::index::fetch_hub_index(&client).await
+        && let Ok(entry) = gray_pkg::index::lookup(&index, name)
+    {
+        return Some(entry.clone());
+    }
     let index = gray_pkg::index::fetch_index(&client).await.ok()?;
     gray_pkg::index::lookup(&index, name).ok().cloned()
 }

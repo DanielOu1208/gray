@@ -61,10 +61,17 @@ if (-not $distros) {
 
 Write-Host "  -> installing gray into WSL ($($distros[0]))..."
 
-& wsl.exe -e sh -c "curl -fsSL https://gray.alignment.id/install.sh | sh"
+$envArgs = @()
+foreach ($kv in @('GRAY_INSTALL_PLUGINS', 'GRAY_PLUGINS', 'GRAY_TELEMETRY', 'GRAY_CDN_URL')) {
+    $v = [Environment]::GetEnvironmentVariable($kv, 'Process')
+    if ($v -and $v -match '^[\w./:+-]+$') { $envArgs += "$kv=$v" }
+}
+if ($envArgs.Count -gt 0) { $envArgs = @('env') + $envArgs }
+
+& wsl.exe -e @envArgs sh -c "curl -fsSL https://gray.alignment.id/install.sh | sh"
 if ($LASTEXITCODE -ne 0) {
 
-    & wsl.exe -e sh -c "sudo apt-get update -qq && sudo apt-get install -y -qq curl >/dev/null && curl -fsSL https://gray.alignment.id/install.sh | sh"
+    & wsl.exe -e @envArgs sh -c "sudo apt-get update -qq && sudo apt-get install -y -qq curl >/dev/null && curl -fsSL https://gray.alignment.id/install.sh | sh"
 }
 
 Write-Host ""

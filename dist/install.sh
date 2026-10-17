@@ -67,8 +67,8 @@ elif [ "$SYSTEM" = "1" ] || [ "$(id -u)" = "0" ]; then
     DEST="/usr/local/bin"
 else
     DEST="$HOME/.local/bin"
-    mkdir -p "$DEST"
 fi
+mkdir -p "$DEST"
 
 mv "${TMP}/gray" "${DEST}/gray"
 chmod +x "${DEST}/gray"
@@ -87,6 +87,7 @@ if [ "${GRAY_INSTALL_PLUGINS:-1}" != "0" ]; then
     FLAVOR="full"
     PLUGINS="${GRAY_PLUGINS:-account memory search questions subagents mcp}"
     FAILED=""
+    set -f
     for plugin in $PLUGINS; do
         if "${DEST}/gray" plugin install --yes "$plugin" >/dev/null 2>&1; then
             echo "→ installed gray-${plugin}"
@@ -94,8 +95,9 @@ if [ "${GRAY_INSTALL_PLUGINS:-1}" != "0" ]; then
             FAILED="${FAILED} ${plugin}"
         fi
     done
+    set +f
     if [ -n "$FAILED" ]; then
-        echo "  some plugins could not be installed now — retry later:"
+        echo "  some plugins could not be installed now -- retry later:"
         echo "    gray plugin install${FAILED}"
     fi
 fi

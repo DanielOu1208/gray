@@ -153,7 +153,7 @@ function Install-NativeGray {
         $flavor = 'core'
         if ($env:GRAY_INSTALL_PLUGINS -ne '0') {
             $flavor = 'full'
-            $plugins = if ($env:GRAY_PLUGINS) { $env:GRAY_PLUGINS -split '\s+' } else { @('account', 'memory', 'search', 'questions', 'subagents', 'mcp') }
+            $plugins = if ($env:GRAY_PLUGINS) { $env:GRAY_PLUGINS -split '\s+' | Where-Object { $_ } } else { @('account', 'memory', 'search', 'questions', 'subagents', 'mcp') }
             $failed = @()
             foreach ($plugin in $plugins) {
                 try {
@@ -163,7 +163,7 @@ function Install-NativeGray {
                 } catch { $failed += $plugin }
             }
             if ($failed.Count -gt 0) {
-                Write-Host 'Some plugins could not be installed now — retry later:'
+                Write-Host 'Some plugins could not be installed now -- retry later:'
                 Write-Host "  gray plugin install $($failed -join ' ')"
             }
         }
