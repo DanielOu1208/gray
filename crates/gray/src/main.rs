@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use gray::Cli;
 use gray::config::Config;
 use gray::print::run_print_mode_with_session;
@@ -61,6 +61,15 @@ async fn run() -> anyhow::Result<()> {
     if cli.skill {
         print!("{}", include_str!("../gray-skill.md"));
         return Ok(());
+    }
+
+    if cli.command.is_some() && (cli.print.is_some() || cli.input_json.is_some() || cli.json) {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::UnknownArgument,
+                "-p/--input-json/--json don't combine with a subcommand or plugin command",
+            )
+            .exit();
     }
 
     if let Some(gray::Commands::Spill { cmd }) = &cli.command {

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::SystemTime;
 
 use gray_core::message::{ContentBlock, Role};
@@ -121,18 +121,11 @@ async fn list_live(root: &Path, json: bool) -> anyhow::Result<()> {
 
 async fn read_session(root: &Path, id: &str, last: usize, json: bool) -> anyhow::Result<()> {
     let store = JsonlSessionStore::new(root);
-    let sid = SessionId::new(id.to_string());
-    let path: PathBuf = root.join(format!("{id}.jsonl"));
-    if id.is_empty()
-        || !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        usage(format!("invalid session id {id:?}"));
-    }
-    if !path.is_file() {
-        usage(format!("no session {id:?} in {}", root.display()));
-    }
+    let id = match store.resolve_unique_prefix(id) {
+        Ok(id) => id,
+        Err(msg) => usage(msg),
+    };
+    let sid = SessionId::new(id.clone());
     let live = store.open_lock_held(&sid).await;
     let pid = live.then(|| store.open_holder_pid(&sid)).flatten();
     let (meta, entries) = store.load(&sid).await?;

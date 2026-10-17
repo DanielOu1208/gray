@@ -367,19 +367,25 @@ async fn install_index(
 ) -> anyhow::Result<Report> {
     validate_install_key(name)?;
 
-    let index = match crate::index::fetch_hub_index(client).await {
-        Ok(index) => index,
-        Err(_) => crate::index::fetch_index(client).await?,
+    let hub_hit = match crate::index::fetch_hub_index(client).await {
+        Ok(index) => index.plugins.get(name).cloned(),
+        Err(_) => None,
     };
-    let entry = crate::index::lookup(&index, name)?;
+    let entry = match hub_hit {
+        Some(entry) => entry,
+        None => {
+            let index = crate::index::fetch_index(client).await?;
+            crate::index::lookup(&index, name)?.clone()
+        }
+    };
     match entry.kind.as_str() {
         "" | "plugin" => {}
-        "skill" => return crate::skills_ops::install_hub_entry(client, name, entry).await,
+        "skill" => return crate::skills_ops::install_hub_entry(client, name, &entry).await,
         other => {
-            anyhow::bail!("hub package '{name}' is kind '{other}' — not installable yet")
+            anyhow::bail!("package '{name}' is kind '{other}' — not installable yet")
         }
     }
-    if !supported_index_entry(entry) {
+    if !supported_index_entry(&entry) {
         anyhow::bail!(
             "unsupported ecosystem '{}' source type '{}' for {name} (installable: gray-native tarballs)",
             entry.ecosystem,
@@ -583,7 +589,8 @@ async fn update_inner(target: &str, check: bool) -> anyhow::Result<Vec<UpdateRow
         vec![target.to_string()]
     };
     let client = crate::fetch::client()?;
-    let mut index: Option<crate::index::Index> = None;
+    let mut hub: Option<crate::index::Index> = None;
+    let mut comm: Option<crate::index::Index> = None;
     let mut out = Vec::new();
     for name in &names {
         let installed = &lock.plugins[name];
@@ -591,17 +598,25 @@ async fn update_inner(target: &str, check: bool) -> anyhow::Result<Vec<UpdateRow
             out.push(registered_exe_row(name, installed, check).await);
             continue;
         }
-        if index.is_none() {
-            index = Some(crate::index::fetch_index(&client).await?);
+        if hub.is_none() && comm.is_none() {
+            hub = crate::index::fetch_hub_index(&client).await.ok();
         }
-        let entry = match crate::index::lookup(index.as_ref().unwrap(), name) {
-            Ok(e) => e,
-            Err(_) => {
-                out.push(UpdateRow::new(
-                    name,
-                    UpdateAction::Skipped("not in index".into()),
-                ));
-                continue;
+        let entry = match hub.as_ref().and_then(|i| i.plugins.get(name)) {
+            Some(e) => e,
+            None => {
+                if comm.is_none() {
+                    comm = Some(crate::index::fetch_index(&client).await?);
+                }
+                match comm.as_ref().unwrap().plugins.get(name) {
+                    Some(e) => e,
+                    None => {
+                        out.push(UpdateRow::new(
+                            name,
+                            UpdateAction::Skipped("not in index".into()),
+                        ));
+                        continue;
+                    }
+                }
             }
         };
         if installed.ecosystem != entry.ecosystem || !supported_index_entry(entry) {

@@ -147,13 +147,15 @@ async fn plugin_resolves(name: &str) -> bool {
         return false;
     };
     let hit = async {
-        match gray_pkg::index::fetch_hub_index(&client).await {
-            Ok(i) => gray_pkg::index::lookup(&i, name).is_ok(),
-            Err(_) => match gray_pkg::index::fetch_index(&client).await {
-                Ok(i) => gray_pkg::index::lookup(&i, name).is_ok(),
-                Err(_) => false,
-            },
-        }
+        let (hub, comm) = tokio::join!(
+            gray_pkg::index::fetch_hub_index(&client),
+            gray_pkg::index::fetch_index(&client)
+        );
+        hub.map(|i| gray_pkg::index::lookup(&i, name).is_ok())
+            .unwrap_or(false)
+            || comm
+                .map(|i| gray_pkg::index::lookup(&i, name).is_ok())
+                .unwrap_or(false)
     };
     tokio::time::timeout(std::time::Duration::from_secs(3), hit)
         .await

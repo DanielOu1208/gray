@@ -49,13 +49,14 @@ fn read_lists_only_locked_sessions_as_live() {
         .truncate(true)
         .open(sessions.join("live-session.open"))
         .unwrap();
-    write!(
-        &live_open,
+    let holder = format!(
         "{{\"pid\":{},\"started_ms\":1791951059067}}\n",
         std::process::id()
-    )
-    .unwrap();
+    );
+    write!(&live_open, "{holder}").unwrap();
     live_open.try_lock().unwrap();
+    #[cfg(windows)]
+    std::fs::write(sessions.join("live-session.open-holder"), holder).unwrap();
 
     let out = run(&["read", "--live"], dir.path());
     assert!(

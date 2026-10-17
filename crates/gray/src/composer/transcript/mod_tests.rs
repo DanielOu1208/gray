@@ -576,7 +576,7 @@ fn viewed_image_lines_preview_bash_cat() {
     ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([0, 255, 0, 255]))
         .save(&img)
         .expect("write png");
-    let cmd = format!("cat {}", img.display());
+    let cmd = format!("cat '{}'", img.display());
     let args = serde_json::json!({"command": cmd});
     let rows = super::rows::viewed_image_lines("bash", Some(&args), dir.path(), 40);
     assert!(rows.is_some(), "cat image.png should preview");

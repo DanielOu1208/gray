@@ -304,3 +304,6 @@ jobs:
             gray-beta-x86_64-windows.zip.sha256
             dist/install-native.ps1
             dist/install.ps1
+            dist/install-core.ps1
+            dist/install-core.sh
+            dist/install.sh

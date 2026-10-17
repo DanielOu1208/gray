@@ -334,12 +334,11 @@ pub async fn run_cli(
 ) -> anyhow::Result<()> {
     let home = owner_home()?;
     let root = home.join("sessions");
-    if cron_serve::session_inbox(&home, session).is_none() {
-        usage(format!("invalid session id {session:?}"));
-    }
-    if !root.join(format!("{session}.jsonl")).is_file() {
-        usage(format!("no session {session:?} in {}", root.display()));
-    }
+    let store = JsonlSessionStore::new(&root);
+    let session = match store.resolve_unique_prefix(session) {
+        Ok(id) => id,
+        Err(msg) => usage(msg),
+    };
     if text.trim().is_empty() && attach.is_empty() {
         usage("nothing to send: give text or --attach".to_string());
     }
@@ -349,10 +348,8 @@ pub async fn run_cli(
             .unwrap_or_else(default_label)
             .as_str(),
     );
-    let live = JsonlSessionStore::new(&root)
-        .open_lock_held(&SessionId::new(session))
-        .await;
-    let id = enqueue(&home, session, &from, text, &attachments)?;
+    let live = store.open_lock_held(&SessionId::new(session.clone())).await;
+    let id = enqueue(&home, &session, &from, text, &attachments)?;
     let mut state = if live { STATE_QUEUED } else { STATE_NOT_LIVE }.to_string();
     if let Some(secs) = wait {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);

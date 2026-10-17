@@ -1,27 +1,38 @@
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum AgentCmd {
+    #[command(about = "Send the main agent a message and wait for its reply")]
     Send {
-        #[arg(required = true, trailing_var_arg = true)]
+        #[arg(required = true, trailing_var_arg = true, value_name = "TEXT")]
         text: Vec<String>,
 
-        #[arg(long, default_value_t = 900)]
+        #[arg(
+            long,
+            default_value_t = 900,
+            value_name = "SECS",
+            help = "Seconds to wait for a reply (0 = don't wait)"
+        )]
         wait: u64,
     },
 
+    #[command(about = "Trigger a turn without a user message (fires on wake)")]
     Wake {
-        #[arg(required = true, trailing_var_arg = true)]
+        #[arg(required = true, trailing_var_arg = true, value_name = "TEXT")]
         text: Vec<String>,
     },
 
+    #[command(about = "Show recent gateway activity")]
     Activity {
-        #[arg(short = 'n', long, default_value_t = 30)]
+        #[arg(short = 'n', long, default_value_t = 30, help = "Number of rows")]
         lines: usize,
     },
 
+    #[command(about = "Pause wake/trigger turns (messages still run)")]
     Pause,
 
+    #[command(about = "Resume wake/trigger turns")]
     Resume,
 
+    #[command(about = "Pull and ack pending outbox messages")]
     Inbox,
 }
 
