@@ -194,10 +194,6 @@ pub fn model_supports_reasoning(model_id: &str) -> Option<bool> {
 }
 
 pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
-    let active = active_provider_base_url();
-    if active.contains("commandcode.ai") && is_mimo_v26_pro(model_id) {
-        return Some(vec!["off", "low", "medium", "high", "xhigh", "max"]);
-    }
     if let Some(cached) = model_efforts(model_id) {
         let levels = super::super::THINKING_LEVELS;
         let want: Vec<&'static str> = cached
@@ -213,9 +209,8 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
         }
     }
 
-    let id = model_id.to_lowercase();
-
     if is_loopback_base(&active_provider_base_url()) {
+        let id = model_id.to_lowercase();
         let leaf = id.rsplit('/').next().unwrap_or(id.as_str());
         let core = leaf
             .strip_suffix("-fast")
@@ -226,123 +221,7 @@ pub fn supported_efforts(model_id: &str) -> Option<Vec<&'static str>> {
             return Some(vec![]);
         }
     }
-
-    if id.contains("deep-research") {
-        return Some(vec!["medium"]);
-    }
-    if id.contains("gpt")
-        || id.starts_with("o1")
-        || id.starts_with("o3")
-        || id.starts_with("o4")
-        || id.contains("deep-research")
-    {
-        if id.contains("-chat") {
-            return Some(vec!["medium"]);
-        }
-
-        if id.contains("pro") {
-            if ["5.1", "5.2", "5.3", "5.4", "5.5", "5.6"]
-                .iter()
-                .any(|v| id.contains(v))
-            {
-                return Some(vec!["medium", "high", "xhigh"]);
-            }
-            return Some(vec!["high"]);
-        }
-
-        if id.contains("codex") {
-            if id.contains("codex-max")
-                || ["5.2", "5.3", "5.4", "5.5", "5.6"]
-                    .iter()
-                    .any(|v| id.contains(v))
-            {
-                let mut efforts = vec!["low", "medium", "high", "xhigh"];
-                if !id.contains("codex-max") && !id.contains("5.2") {
-                    efforts.insert(0, "off");
-                }
-                return Some(efforts);
-            }
-            return Some(vec!["low", "medium", "high"]);
-        }
-
-        if id.contains("5.6") {
-            return Some(vec!["off", "low", "medium", "high", "xhigh", "max"]);
-        }
-
-        if ["5.2", "5.3", "5.4", "5.5"].iter().any(|v| id.contains(v)) {
-            return Some(vec!["off", "low", "medium", "high", "xhigh"]);
-        }
-        if id.contains("5.1") {
-            return Some(vec!["off", "low", "medium", "high"]);
-        }
-
-        if id.contains("gpt-5") {
-            return Some(vec!["off", "minimal", "low", "medium", "high"]);
-        }
-
-        return Some(vec!["off", "low", "medium", "high", "xhigh"]);
-    }
-
-    if id.contains("claude") || id.contains("anthropic") {
-        if id.contains("4.7")
-            || id.contains("4-7")
-            || id.contains("4.8")
-            || id.contains("4-8")
-            || id.contains("sonnet-5")
-            || id.contains("sonnet_5")
-            || id.contains("opus-5")
-            || id.contains("opus_5")
-            || id.contains("fable")
-            || id.contains("mythos")
-        {
-            return Some(vec!["low", "medium", "high", "xhigh", "max"]);
-        }
-        return Some(vec!["low", "medium", "high", "max"]);
-    }
-
-    if id.contains("gemini") || id.contains("gemma") {
-        if id.contains("pro-image") || id.contains("pro_image") {
-            return Some(vec!["high"]);
-        }
-        if id.contains("flash-image") || id.contains("flash_image") {
-            return Some(vec!["minimal", "high"]);
-        }
-        if id.contains("gemini-3") || id.contains("gemini_3") {
-            return Some(vec!["minimal", "low", "medium", "high"]);
-        }
-        return Some(vec!["low", "high"]);
-    }
-
-    if id.contains("grok") || id.contains("xai") {
-        if id.contains("4.6") || id.contains("4-6") {
-            return Some(vec!["low", "medium", "high", "xhigh"]);
-        }
-        if id.contains("mini") {
-            return Some(vec!["low", "high"]);
-        }
-        return Some(vec!["low", "medium", "high"]);
-    }
-
-    if id.contains("kimi") || id.contains("k2p") || id.contains("moonshot") {
-        return Some(vec!["low", "medium", "high", "xhigh", "max"]);
-    }
-    if id.contains("deepseek") && id.contains("reasoner") {
-        return Some(vec!["low", "medium", "high"]);
-    }
-
-    if id.contains("deepseek-v4") || id.contains("deepseek_v4") {
-        return Some(vec!["low", "medium", "high", "max"]);
-    }
-
-    if id.contains("muse") || id.contains("spark") || id.contains("glimmer") {
-        return Some(vec!["minimal", "low", "medium", "high", "xhigh"]);
-    }
     None
-}
-
-fn is_mimo_v26_pro(model_id: &str) -> bool {
-    let id = model_id.to_lowercase();
-    id.contains("mimo") && (id.contains("v2.6-pro") || id.contains("v2.6_pro"))
 }
 
 pub fn supported_thinking_levels(model_id: &str) -> Vec<(&'static str, &'static str)> {
