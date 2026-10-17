@@ -13,8 +13,8 @@ use crate::text_width::display_width;
 use super::Tui;
 
 mod boxes;
-mod kitty;
 mod cards;
+mod kitty;
 mod margins;
 pub(crate) mod rows;
 

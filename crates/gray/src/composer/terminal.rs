@@ -118,11 +118,7 @@ where
         // A band flush with the screen bottom stays flush: shrinking re-pins
         // it instead of leaving the band floating on its old top.
         let grounded = !old.is_empty() && old.bottom() >= screen_size.height;
-        area.y = if grounded {
-            bottom
-        } else {
-            area.y.min(bottom)
-        };
+        area.y = if grounded { bottom } else { area.y.min(bottom) };
         let wanted_bottom = old.y.saturating_add(area.height);
         if wanted_bottom > screen_size.height && !screen_shrank {
             let overflow = wanted_bottom - screen_size.height;
@@ -133,10 +129,8 @@ where
         // the transcript's tail stays flush with the band's new top — the dead
         // space lands at the top of the screen, not between transcript and
         // band or below the band.
-        let slid = grounded
-            && !screen_shrank
-            && area.y > old.y
-            && self.scrollback == Scrollback::Regions;
+        let slid =
+            grounded && !screen_shrank && area.y > old.y && self.scrollback == Scrollback::Regions;
         if slid {
             self.scroll_region_down(area.y, area.y - old.y)?;
         }

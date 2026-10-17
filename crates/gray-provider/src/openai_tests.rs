@@ -2129,7 +2129,7 @@ async fn dynamic_profile_sends_declared_transport() {
     let profile = OpenAiProviderProfile {
         base_url: format!("http://{addr}/v1").parse().unwrap(),
         wire: OpenAiWire::Responses,
-        authorization: OpenAiAuthorization::Bearer{
+        authorization: OpenAiAuthorization::Bearer {
             secret_name: "access_token".into(),
         },
         headers: vec![
@@ -2204,7 +2204,7 @@ fn dynamic_profile_debug_is_redacted() {
     let profile = OpenAiProviderProfile {
         base_url: "https://example.test/v1".parse().unwrap(),
         wire: OpenAiWire::Responses,
-        authorization: OpenAiAuthorization::Bearer{
+        authorization: OpenAiAuthorization::Bearer {
             secret_name: "access_token".into(),
         },
         headers: Vec::new(),
@@ -2270,7 +2270,7 @@ async fn relay_url_override_posts_to_lease_url() {
     let profile = OpenAiProviderProfile {
         base_url: format!("http://{declared_addr}/v1").parse().unwrap(),
         wire: OpenAiWire::Responses,
-        authorization: OpenAiAuthorization::Bearer{
+        authorization: OpenAiAuthorization::Bearer {
             secret_name: "relay_token".into(),
         },
         headers: Vec::new(),
@@ -2571,7 +2571,7 @@ fn plan_usage_provider(base_url: String) -> OpenAiProvider {
     let profile = OpenAiProviderProfile {
         base_url: format!("{base_url}/v1").parse().unwrap(),
         wire: OpenAiWire::Responses,
-        authorization: OpenAiAuthorization::Bearer{
+        authorization: OpenAiAuthorization::Bearer {
             secret_name: "access_token".into(),
         },
         headers: Vec::new(),
@@ -3001,7 +3001,7 @@ async fn dynamic_stream_silent_turn_completes_without_stall() {
     let profile = OpenAiProviderProfile {
         base_url: format!("http://{addr}/v1").parse().unwrap(),
         wire: OpenAiWire::Responses,
-        authorization: OpenAiAuthorization::Bearer{
+        authorization: OpenAiAuthorization::Bearer {
             secret_name: "access_token".into(),
         },
         headers: Vec::new(),

@@ -296,7 +296,10 @@ fn the_band_sits_under_a_short_transcript() {
 fn a_grounded_band_regrounds_when_it_shrinks() {
     let (mut term, tape) = term(10, 0, Scrollback::Regions);
     let history: Vec<String> = rows(0..20);
-    insert(&mut term, &history.iter().map(String::as_str).collect::<Vec<_>>());
+    insert(
+        &mut term,
+        &history.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
     band(&mut term, 4);
     assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
 

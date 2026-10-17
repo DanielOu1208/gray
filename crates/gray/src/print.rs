@@ -1020,10 +1020,7 @@ async fn run_print_inner(
     if std::env::var_os("GRAY_BENCH_NUDGES").is_some() {
         agent.set_bench_nudges(true);
         if let Ok(v) = std::env::var("GRAY_THRASH_NUDGE_AT") {
-            let mut marks: Vec<u32> = v
-                .split(',')
-                .filter_map(|s| s.trim().parse().ok())
-                .collect();
+            let mut marks: Vec<u32> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
             marks.sort_unstable();
             marks.dedup();
             agent.set_bench_thrash_marks(marks);

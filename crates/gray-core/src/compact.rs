@@ -391,9 +391,7 @@ fn fit_group_to_budget(group: &[Message], budget: usize) -> Option<Vec<Message>>
                 encrypted_content,
                 item_id,
                 ..
-            } => {
-                !text.is_empty() || encrypted_content.is_some() || item_id.is_some()
-            }
+            } => !text.is_empty() || encrypted_content.is_some() || item_id.is_some(),
             ContentBlock::Image { data, .. } | ContentBlock::Media { data, .. } => !data.is_empty(),
             _ => true,
         });

@@ -643,9 +643,7 @@ impl Provider for AnthropicProvider {
     }
 
     fn warm_output_cap(&self, req: &ChatRequest) -> u32 {
-        let max = req
-            .max_tokens
-            .unwrap_or(DEFAULT_MAX_TOKENS);
+        let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         derived_budget(self.reasoning_effort.as_deref(), max)
             .map(|b| b + 1024)
             .unwrap_or(1)

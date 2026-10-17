@@ -3394,11 +3394,7 @@ async fn bench_nudges_appends_a_budget_line_to_requests_not_history() {
 
 #[tokio::test]
 async fn bench_nudges_finish_gate_asks_for_verification_once() {
-    let provider = FakeProvider::new(vec![
-        tool_script("call_1"),
-        end_script(),
-        end_script(),
-    ]);
+    let provider = FakeProvider::new(vec![tool_script("call_1"), end_script(), end_script()]);
     let seen = provider.seen_requests();
     let mut agent = Agent::new(
         Box::new(provider),

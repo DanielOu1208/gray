@@ -11,9 +11,8 @@ use tokio::task::JoinHandle;
 
 use crate::shell::contract::{
     DEFAULT_TIMEOUT_SECS, DETACHED_DRAIN_TIMEOUT, EXIT_STDIO_GRACE_MS, INLINE_BUDGET_BYTES,
-    MAX_TIMEOUT_SECS,
-    MEM_HEAD_BYTES, MEM_TAIL_BYTES, PUMP_DRAIN_TIMEOUT, PumpSummary, SLEEP_SLACK_SECS,
-    VIEW_BUDGET_LINES, View,
+    MAX_TIMEOUT_SECS, MEM_HEAD_BYTES, MEM_TAIL_BYTES, PUMP_DRAIN_TIMEOUT, PumpSummary,
+    SLEEP_SLACK_SECS, VIEW_BUDGET_LINES, View,
 };
 use crate::shell::exit::exit_report;
 use crate::shell::fence::fence;
@@ -1152,9 +1151,7 @@ async fn settle_command(
     #[cfg(unix)]
     let mut pipe_open = false;
     #[cfg(unix)]
-    if matches!(cause, Cause::Exit)
-        && (track_group || crate::shell::kill::group_alive(target))
-    {
+    if matches!(cause, Cause::Exit) && (track_group || crate::shell::kill::group_alive(target)) {
         if handoff {
             tokio::time::sleep(Duration::from_millis(150)).await;
             if crate::shell::kill::group_alive(target) {

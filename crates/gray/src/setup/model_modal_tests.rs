@@ -51,7 +51,10 @@ fn direct_model_id_rejects_with_a_browse_hint() {
     assert!(err.contains("/model"), "{err}");
 
     let err = validate_direct_model_id("   ", &models()).unwrap_err();
-    assert!(err.contains("/model"), "empty input is usage, not a silent default: {err}");
+    assert!(
+        err.contains("/model"),
+        "empty input is usage, not a silent default: {err}"
+    );
 }
 
 fn mock_models_server(body: &'static str) -> u16 {
@@ -438,7 +441,10 @@ fn rows_open_at_the_remembered_effort_and_the_live_level() {
     let mut saved = SavedConfig::default();
     saved.remember_effort(&effort_memory_key("", PICKER_BASE, STEP_MODEL), "xhigh");
     let config = effort_config("other/live-model", None);
-    assert_eq!(initial_row_effort(&config, &saved, STEP_MODEL), Some("xhigh"));
+    assert_eq!(
+        initial_row_effort(&config, &saved, STEP_MODEL),
+        Some("xhigh")
+    );
 }
 
 #[test]

@@ -52,34 +52,52 @@ fn reasoning_capability_from_models_dev_and_live() {
         .iter()
         .map(|(l, _)| *l)
         .collect();
-    assert_eq!(grok, vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(
+        grok,
+        vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
     let claude: Vec<&str> = supported_thinking_levels("anthropic/claude-opus-4-6")
         .iter()
         .map(|(l, _)| *l)
         .collect();
-    assert_eq!(claude, vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(
+        claude,
+        vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
 
     let opus47: Vec<&str> = supported_thinking_levels("anthropic/claude-opus-4-7")
         .iter()
         .map(|(l, _)| *l)
         .collect();
-    assert_eq!(opus47, vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(
+        opus47,
+        vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
     let gpt56: Vec<&str> = supported_thinking_levels("openai/gpt-5.6-sol")
         .iter()
         .map(|(l, _)| *l)
         .collect();
-    assert_eq!(gpt56, vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(
+        gpt56,
+        vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
     let gemini: Vec<&str> = supported_thinking_levels("google/gemini-3.6-flash")
         .iter()
         .map(|(l, _)| *l)
         .collect();
-    assert_eq!(gemini, vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(
+        gemini,
+        vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
 
     let spark: Vec<&str> = supported_thinking_levels("testprov/muse-spark-9.9-contributor")
         .iter()
         .map(|(l, _)| *l)
         .collect();
-    assert_eq!(spark, vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(
+        spark,
+        vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
 
     let v3: serde_json::Value = serde_json::json!({
         "testpoisa": {"models": {
@@ -152,7 +170,10 @@ fn reasoning_capability_from_models_dev_and_live() {
         .iter()
         .map(|(l, _)| *l)
         .collect();
-    assert_eq!(gpt6, vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(
+        gpt6,
+        vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
 
     let v2: serde_json::Value = serde_json::json!({
         "testprov": {"models": {
@@ -200,7 +221,10 @@ fn models_dev_effort_cache_limits_thinking_levels() {
         .map(|(l, _)| *l)
         .collect();
     assert_eq!(levels, vec!["off", "high"]);
-    assert_eq!(clamp_thinking_level("xiaomi/mimo-v2.6-pro", "xhigh"), "high");
+    assert_eq!(
+        clamp_thinking_level("xiaomi/mimo-v2.6-pro", "xhigh"),
+        "high"
+    );
     assert_eq!(clamp_thinking_level("xiaomi/mimo-v2.6-pro", "high"), "high");
     assert_eq!(clamp_thinking_level("xiaomi/mimo-v2.6-pro", "max"), "high");
 
@@ -374,7 +398,10 @@ fn effort_in_id_models_offer_no_knob() {
         .iter()
         .map(|(l, _)| *l)
         .collect();
-    assert_eq!(codex, vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(
+        codex,
+        vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
     set_active_model_provider("");
 }
 
