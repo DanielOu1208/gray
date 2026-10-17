@@ -10,6 +10,8 @@ fn base_url() -> String {
 }
 pub const CHANNEL: &str = env!("GRAY_CHANNEL");
 
+const WINDOWS_UNSUPPORTED: &str = "self-update is not supported on native Windows: close Gray and rerun install-native.ps1 with the verified preview ZIP and checksum";
+
 fn parse_version(v: &str) -> Option<(u64, u64, u64, Option<String>)> {
     let v = v.trim();
     let (core, pre) = match v.split_once('-') {
@@ -143,10 +145,7 @@ fn run_pinned_installer(pin: &str, base: &str) -> anyhow::Result<()> {
 }
 
 fn run_installer() -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !cfg!(windows),
-        "self-update is not supported on native Windows: close Gray and rerun install-native.ps1 with the verified preview ZIP and checksum"
-    );
+    anyhow::ensure!(!cfg!(windows), WINDOWS_UNSUPPORTED);
 
     if let Some(pin) = installer_pin() {
         return run_pinned_installer(&pin, &base_url());
@@ -389,6 +388,7 @@ fn warn_on_divergence() {
 }
 
 pub async fn update_now() -> anyhow::Result<()> {
+    anyhow::ensure!(!cfg!(windows), WINDOWS_UNSUPPORTED);
     match latest_version().await {
         Ok(latest)
             if !latest.is_empty()
@@ -417,18 +417,12 @@ pub async fn update_now() -> anyhow::Result<()> {
 }
 
 pub(crate) fn install_unlocked() -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !cfg!(windows),
-        "self-update is not supported on native Windows: close Gray and rerun install-native.ps1 with the verified preview ZIP and checksum"
-    );
+    anyhow::ensure!(!cfg!(windows), WINDOWS_UNSUPPORTED);
     run_installer()
 }
 
 pub(crate) fn install() -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !cfg!(windows),
-        "self-update is not supported on native Windows: close Gray and rerun install-native.ps1 with the verified preview ZIP and checksum"
-    );
+    anyhow::ensure!(!cfg!(windows), WINDOWS_UNSUPPORTED);
     anyhow::ensure!(
         !cfg!(debug_assertions),
         "this is a debug build — self-update would overwrite the installed gray with the release build; use scripts/install-local.sh instead"
