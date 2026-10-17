@@ -590,13 +590,9 @@ fn a_busy_turn_does_not_tear_the_transcript() {
 
     let screen = Screen::replay(&tape, W, 24);
     let got = screen.transcript(20);
-    let content_start = got.iter().position(|r| !r.is_empty()).unwrap_or(got.len());
-    for (i, row) in got[content_start..].iter().enumerate() {
-        assert!(
-            !row.is_empty(),
-            "torn transcript: blank row at index {}",
-            content_start + i
-        );
+    for want in &expected {
+        let n = got.iter().filter(|g| *g == want).count();
+        assert_eq!(n, 1, "ghosted transcript row {want:?} appears {n} times");
     }
     let mut it = got.iter().peekable();
     for want in &expected {
