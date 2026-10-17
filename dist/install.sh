@@ -82,11 +82,21 @@ fi
 INSTALLED_VER=$("${DEST}/gray" --version 2>/dev/null || true)
 echo "→ installed to ${DEST}/gray (${INSTALLED_VER:-?}, ${CHANNEL})"
 
+FLAVOR="core"
 if [ "${GRAY_INSTALL_PLUGINS:-1}" != "0" ]; then
-    if "${DEST}/gray" plugin install --yes account >/dev/null 2>&1; then
-        echo "→ installed gray-account"
-    else
-        echo "  optional gray-account plugin unavailable on this platform"
+    FLAVOR="full"
+    PLUGINS="${GRAY_PLUGINS:-account memory search questions subagents mcp}"
+    FAILED=""
+    for plugin in $PLUGINS; do
+        if "${DEST}/gray" plugin install --yes "$plugin" >/dev/null 2>&1; then
+            echo "→ installed gray-${plugin}"
+        else
+            FAILED="${FAILED} ${plugin}"
+        fi
+    done
+    if [ -n "$FAILED" ]; then
+        echo "  some plugins could not be installed now — retry later:"
+        echo "    gray plugin install${FAILED}"
     fi
 fi
 
@@ -94,11 +104,11 @@ if [ "${GRAY_TELEMETRY:-1}" != "0" ] && [ -z "${GRAY_CDN_URL:-}" ]; then
     VER="${INSTALLED_VER##* }"
     if have_cmd curl; then
         ( curl -fsS -m 3 -X POST -H "Content-Type: application/json" \
-            -d "{\"os\":\"${OS}\",\"arch\":\"${ARCH}\",\"channel\":\"${CHANNEL}\",\"version\":\"${VER}\"}" \
+            -d "{\"os\":\"${OS}\",\"arch\":\"${ARCH}\",\"channel\":\"${CHANNEL}\",\"version\":\"${VER}\",\"flavor\":\"${FLAVOR}\"}" \
             https://gray.alignment.id/api/telemetry/install >/dev/null 2>&1 || : ) &
     elif have_cmd wget; then
         ( wget -q -T 3 -O /dev/null --post-data \
-            "{\"os\":\"${OS}\",\"arch\":\"${ARCH}\",\"channel\":\"${CHANNEL}\",\"version\":\"${VER}\"}" \
+            "{\"os\":\"${OS}\",\"arch\":\"${ARCH}\",\"channel\":\"${CHANNEL}\",\"version\":\"${VER}\",\"flavor\":\"${FLAVOR}\"}" \
             --header="Content-Type: application/json" \
             https://gray.alignment.id/api/telemetry/install 2>/dev/null || : ) &
     fi

@@ -150,18 +150,28 @@ function Install-NativeGray {
         Write-Host "Installed $version (native $Channel): $binary"
         Write-Host 'Shell commands require Git for Windows (Git Bash). Gray does not install it or WSL.'
         Write-Host 'Uninstall: close Gray, remove this install folder and its user PATH entry; keep your .gray data.'
+        $flavor = 'core'
         if ($env:GRAY_INSTALL_PLUGINS -ne '0') {
-            try {
-                & $binary plugin install --yes account | Out-Null
-                if ($LASTEXITCODE -eq 0) { Write-Host 'Installed gray-account' }
-                else { Write-Host 'Optional gray-account plugin unavailable on this platform' }
-            } catch { Write-Host 'Optional gray-account plugin unavailable on this platform' }
+            $flavor = 'full'
+            $plugins = if ($env:GRAY_PLUGINS) { $env:GRAY_PLUGINS -split '\s+' } else { @('account', 'memory', 'search', 'questions', 'subagents', 'mcp') }
+            $failed = @()
+            foreach ($plugin in $plugins) {
+                try {
+                    & $binary plugin install --yes $plugin | Out-Null
+                    if ($LASTEXITCODE -eq 0) { Write-Host "Installed gray-$plugin" }
+                    else { $failed += $plugin }
+                } catch { $failed += $plugin }
+            }
+            if ($failed.Count -gt 0) {
+                Write-Host 'Some plugins could not be installed now — retry later:'
+                Write-Host "  gray plugin install $($failed -join ' ')"
+            }
         }
         if ($env:GRAY_TELEMETRY -ne '0' -and $BaseUri.Host -eq 'gray.alignment.id') {
             try {
                 $v = ($version -split '\s+')[-1]
                 $a = if ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') { 'x86_64' } else { $env:PROCESSOR_ARCHITECTURE.ToLower() }
-                $body = @{ os = 'windows'; arch = $a; channel = $Channel; version = $v } | ConvertTo-Json -Compress
+                $body = @{ os = 'windows'; arch = $a; channel = $Channel; version = $v; flavor = $flavor } | ConvertTo-Json -Compress
                 $null = Invoke-RestMethod -Method Post -Uri 'https://gray.alignment.id/api/telemetry/install' -TimeoutSec 4 -ContentType 'application/json' -Body $body
             } catch {}
         }
