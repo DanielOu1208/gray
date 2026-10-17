@@ -202,6 +202,20 @@ struct OpenAiToolCallRequest {
     #[serde(rename = "type")]
     call_type: String,
     function: OpenAiFunctionCallRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extra_content: Option<OpenAiToolCallExtraContent>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAiToolCallExtraContent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    google: Option<OpenAiGoogleToolCallContent>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAiGoogleToolCallContent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -266,6 +280,8 @@ struct OpenAiToolCallChunk {
     id: Option<String>,
     #[serde(default)]
     function: Option<OpenAiFunctionChunk>,
+    #[serde(default)]
+    extra_content: Option<OpenAiToolCallExtraContent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -480,7 +496,12 @@ fn map_chat_request(
                                 thinking_parts.push(text);
                             }
                         }
-                        ContentBlock::ToolUse { id, name, args } => {
+                        ContentBlock::ToolUse {
+                            id,
+                            name,
+                            args,
+                            thought_signature,
+                        } => {
                             if !is_valid_tool_name(&name, &id) {
                                 continue;
                             }
@@ -491,6 +512,13 @@ fn map_chat_request(
                                     name,
                                     arguments: args.to_string(),
                                 },
+                                extra_content: thought_signature.filter(|s| s.model == model).map(
+                                    |s| OpenAiToolCallExtraContent {
+                                        google: Some(OpenAiGoogleToolCallContent {
+                                            thought_signature: Some(s.signature),
+                                        }),
+                                    },
+                                ),
                             });
                         }
                         ContentBlock::ToolResult {
@@ -611,7 +639,7 @@ fn map_chat_request(
                         } => {
                             tool_results.push((id, wire_tool_output(&content, is_error)));
                         }
-                        ContentBlock::ToolUse { id, name, args } => {
+                        ContentBlock::ToolUse { id, name, args, .. } => {
                             tool_results.push((id, format!("{name}: {args}")));
                         }
 
@@ -971,7 +999,7 @@ fn map_chat_to_responses(
                             let output = wire_tool_output(&content, is_error);
                             input.push(serde_json::json!({"type":"function_call_output","call_id": id, "output": output}));
                         }
-                        ContentBlock::ToolUse { id, name, args } => {
+                        ContentBlock::ToolUse { id, name, args, .. } => {
                             if !is_valid_tool_name(&name, &id) {
                                 continue;
                             }
@@ -1026,7 +1054,7 @@ fn map_chat_to_responses(
                             reasoning_items.push(item);
                         }
                         ContentBlock::Thinking { .. } => {}
-                        ContentBlock::ToolUse { id, name, args } => {
+                        ContentBlock::ToolUse { id, name, args, .. } => {
                             tool_uses.push((id, name, args))
                         }
                         ContentBlock::ToolResult {
@@ -2538,7 +2566,7 @@ enum StreamState {
     },
     Streaming {
         event_stream: BoxedEventStream,
-        accumulated_tools: BTreeMap<usize, (String, String, String)>,
+        accumulated_tools: BTreeMap<usize, AccumulatedToolCall>,
         last_finish_reason: Option<StopReason>,
         last_usage: Option<Usage>,
         pending_events: VecDeque<StreamEvent>,
@@ -2601,23 +2629,32 @@ fn normalize_tool_args(args: &str, index: usize) -> Result<String, ProviderError
     )))
 }
 
+#[derive(Default)]
+struct AccumulatedToolCall {
+    id: String,
+    name: String,
+    args: String,
+    thought_signature: Option<String>,
+}
+
 fn emit_tool_calls_and_completion(
-    accumulated_tools: &mut BTreeMap<usize, (String, String, String)>,
+    accumulated_tools: &mut BTreeMap<usize, AccumulatedToolCall>,
     stop_reason: Option<StopReason>,
     usage: Option<Usage>,
     pending_events: &mut VecDeque<StreamEvent>,
 ) -> Result<(), ProviderError> {
-    for (index, (id, name, args)) in std::mem::take(accumulated_tools) {
-        if name.is_empty() && args.trim().is_empty() {
+    for (index, call) in std::mem::take(accumulated_tools) {
+        if call.name.is_empty() && call.args.trim().is_empty() {
             log::debug!(target: "gray_provider", "skipping ghost tool-call fragment at index {index} (no name, no args)");
             continue;
         }
-        let args_fixed = normalize_tool_args(&args, index)?;
+        let args_fixed = normalize_tool_args(&call.args, index)?;
         pending_events.push_back(StreamEvent::ToolCallDelta {
             index,
-            id: if id.is_empty() { None } else { Some(id) },
-            name: if name.is_empty() { None } else { Some(name) },
+            id: (!call.id.is_empty()).then_some(call.id),
+            name: (!call.name.is_empty()).then_some(call.name),
             arguments_delta: args_fixed,
+            thought_signature: call.thought_signature,
         });
     }
 
@@ -2651,6 +2688,7 @@ fn emit_responses_tool_calls_and_completion(
             },
             name: if name.is_empty() { None } else { Some(name) },
             arguments_delta: args_fixed,
+            thought_signature: None,
         });
     }
     let stop_reason = if pending_events
@@ -3037,7 +3075,13 @@ fn stream_unfold_step(
 
                                             if let Some(tool_calls) = choice.delta.tool_calls {
                                                 for tc in tool_calls {
+                                                    let signature = tc
+                                                        .extra_content
+                                                        .and_then(|extra| extra.google)
+                                                        .and_then(|google| google.thought_signature)
+                                                        .filter(|s| !s.is_empty());
                                                     let carries_anything = tc.id.is_some()
+                                                        || signature.is_some()
                                                         || tc.function.as_ref().is_some_and(|f| {
                                                             f.name.is_some()
                                                                 || f.arguments.is_some()
@@ -3047,22 +3091,34 @@ fn stream_unfold_step(
                                                     }
                                                     let entry = accumulated_tools
                                                         .entry(tc.index)
-                                                        .or_insert_with(|| {
-                                                            (
-                                                                String::new(),
-                                                                String::new(),
-                                                                String::new(),
-                                                            )
-                                                        });
+                                                        .or_default();
+                                                    if let Some(signature) = signature {
+                                                        if entry
+                                                            .thought_signature
+                                                            .as_ref()
+                                                            .is_some_and(|s| s != &signature)
+                                                        {
+                                                            return Some((
+                                                                Err(ProviderError::Stream(
+                                                                    format!(
+                                                                        "provider changed thought signature for tool-call index {}",
+                                                                        tc.index
+                                                                    ),
+                                                                )),
+                                                                StreamState::Done,
+                                                            ));
+                                                        }
+                                                        entry.thought_signature = Some(signature);
+                                                    }
                                                     if let Some(id) = tc.id {
-                                                        entry.0.push_str(&id);
+                                                        entry.id.push_str(&id);
                                                     }
                                                     if let Some(func) = tc.function {
                                                         if let Some(name) = func.name {
-                                                            entry.1.push_str(&name);
+                                                            entry.name.push_str(&name);
                                                         }
                                                         if let Some(args) = func.arguments {
-                                                            entry.2.push_str(&args);
+                                                            entry.args.push_str(&args);
                                                         }
                                                     }
                                                 }
@@ -3162,8 +3218,8 @@ fn stream_unfold_step(
                         }
                         None => {
                             if last_finish_reason.is_none() {
-                                let complete = accumulated_tools.values().all(|(_, _, args)| {
-                                    let trimmed = args.trim();
+                                let complete = accumulated_tools.values().all(|call| {
+                                    let trimmed = call.args.trim();
                                     !trimmed.is_empty()
                                         && serde_json::from_str::<Value>(trimmed).is_ok()
                                 });
@@ -3890,3 +3946,7 @@ impl Provider for OpenAiProvider {
 #[path = "openai_tests.rs"]
 #[cfg(test)]
 mod tests;
+
+#[path = "openai_signature_tests.rs"]
+#[cfg(test)]
+mod signature_tests;
