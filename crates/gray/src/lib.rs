@@ -1,8 +1,10 @@
+pub mod account;
 pub mod ask;
 pub mod auth;
 pub mod auto_title;
 pub mod auto_update;
 pub mod cache;
+pub mod cloud;
 pub mod cmd;
 pub mod compact;
 pub mod composer;
@@ -431,7 +433,8 @@ pub struct Cli {
     #[arg(long, requires = "one_shot_input")]
     pub json: bool,
 
-    #[arg(long, requires = "json", value_parser = clap::value_parser!(u32).range(1..))]
+    /// Cap on model requests; 0 = unlimited (default 32 when omitted)
+    #[arg(long, requires = "json", value_parser = clap::value_parser!(u32))]
     pub max_requests: Option<u32>,
 
     #[arg(long, requires = "json")]
@@ -605,6 +608,27 @@ pub enum Commands {
 
         #[arg(long)]
         revoke: bool,
+    },
+
+    #[command(about = "Log in to gray.alignment.id with a one-time enrollment code")]
+    Login {
+        /// The code the site minted; prompted for when omitted.
+        #[arg(value_name = "CODE")]
+        code: Option<String>,
+    },
+
+    #[command(about = "Show the gray.alignment.id account the stored token belongs to")]
+    Whoami,
+
+    #[command(about = "Revoke the stored registry token and forget it locally")]
+    Logout,
+
+    #[command(
+        about = "Your hosted Gray machine on Gray Cloud — provision it, check it, chat with it"
+    )]
+    Cloud {
+        #[arg(value_name = "MESSAGE", num_args = 0..)]
+        message: Vec<String>,
     },
 
     #[command(visible_alias = "upgrade")]

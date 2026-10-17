@@ -47,6 +47,7 @@ fn manager_specs_differ_only_where_expected() {
     assert_eq!(skills.empty_hint, "no skills discovered");
     assert_eq!(skills.error_verb, "remove failed");
     assert!(!skills.supports_toggle);
+    assert!(skills.enter_invokes);
     assert!(skills.supports_remove);
     assert!(skills.errors_tab);
     assert!(!skills.keep_stale_on_relist_error);
@@ -59,6 +60,7 @@ fn manager_specs_differ_only_where_expected() {
     );
     assert_eq!(plugins.error_verb, "toggle failed");
     assert!(plugins.supports_toggle);
+    assert!(!plugins.enter_invokes);
     assert!(plugins.supports_remove);
     assert!(plugins.errors_tab);
     assert!(plugins.keep_stale_on_relist_error);
@@ -161,6 +163,7 @@ fn toggle_spec() -> ManagerSpec {
         empty_hint: "none",
         error_verb: "toggle failed",
         supports_toggle: true,
+        enter_invokes: false,
         supports_remove: false,
         errors_tab: false,
         keep_stale_on_relist_error: true,
@@ -211,6 +214,24 @@ fn enter_ignores_rows_that_never_carried_an_action() {
         enter_action(Some(&setup_row(false)), false, &remove_only),
         EnterAction::Ignore
     ));
+}
+
+#[test]
+fn enter_invokes_skill_rows() {
+    let spec = &super::SKILLS_SPEC;
+    let item = ManagerItem {
+        name: "demo".to_string(),
+        row: "demo — Do demo things".to_string(),
+        lit: true,
+        enabled: true,
+        read_only: false,
+        needs_setup: false,
+    };
+    assert!(matches!(
+        enter_action(Some(&item), false, spec),
+        EnterAction::Invoke
+    ));
+    assert_eq!(enter_label(Some(&item), false, spec), "invoke \u{b7} ");
 }
 
 #[test]

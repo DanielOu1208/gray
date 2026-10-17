@@ -16,6 +16,10 @@ pub const INLINE_BUDGET_BYTES: usize = MEM_HEAD_BYTES + MEM_TAIL_BYTES;
 
 pub const PUMP_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+pub const DETACHED_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub const EXIT_STDIO_GRACE_MS: u64 = 100;
+
 #[derive(Clone, Debug)]
 pub struct ExitReport {
     pub effective: i32,

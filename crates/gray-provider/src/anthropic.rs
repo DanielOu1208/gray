@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use eventsource_stream::Eventsource;
 use futures::stream::{self, BoxStream, StreamExt};
-use gray_core::agent::{Provider, ProviderError};
+use gray_core::agent::{Provider, ProviderError, current_isolated_stream};
 use gray_core::event::{StopReason, StreamEvent, Usage};
-use gray_core::message::{ChatRequest, ContentBlock, Role, resolve_media};
+use gray_core::message::{ChatRequest, ContentBlock, IMAGE_OMITTED, Role, resolve_media};
 use reqwest::Url;
 use serde_json::{Value, json};
 
@@ -89,13 +89,7 @@ impl AnthropicProvider {
     }
 }
 
-fn default_max_tokens(model: &str) -> u32 {
-    if model.to_lowercase().contains("claude-3") && !model.contains("3-7") {
-        8192
-    } else {
-        32_000
-    }
-}
+const DEFAULT_MAX_TOKENS: u32 = 32_000;
 
 fn thinking_budget(effort: Option<&str>) -> Option<u32> {
     match effort? {
@@ -124,7 +118,8 @@ pub(crate) fn map_request(
     temperature: Option<f32>,
     top_p: Option<f32>,
 ) -> Result<Value, ProviderError> {
-    let max_tokens = req.max_tokens.unwrap_or_else(|| default_max_tokens(model));
+    let cache_off = current_isolated_stream().is_some_and(|i| i.cache_off);
+    let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
     let budget = derived_budget(reasoning_effort, max_tokens);
 
@@ -132,7 +127,11 @@ pub(crate) fn map_request(
     for msg in req.messages {
         let mut blocks = Vec::new();
 
-        let content = resolve_media(msg.content, |mt| mt == "application/pdf");
+        let content = resolve_media(
+            msg.content,
+            |mt| mt == "application/pdf" || mt.starts_with("image/"),
+            IMAGE_OMITTED,
+        );
         for block in content {
             match block {
                 ContentBlock::Text { text } => {
@@ -220,7 +219,8 @@ pub(crate) fn map_request(
         );
     }
 
-    if let Some((_, blocks)) = messages.last_mut()
+    if !cache_off
+        && let Some((_, blocks)) = messages.last_mut()
         && let Some(block) = blocks.iter_mut().rev().find(|b| {
             !matches!(
                 b.get("type").and_then(Value::as_str),
@@ -237,7 +237,7 @@ pub(crate) fn map_request(
             |t| json!({"name": t.name, "description": t.description, "input_schema": t.parameters}),
         )
         .collect();
-    if let Some(last) = tools.last_mut() {
+    if !cache_off && let Some(last) = tools.last_mut() {
         last["cache_control"] = ephemeral();
     }
 
@@ -254,7 +254,11 @@ pub(crate) fn map_request(
             .collect::<Vec<_>>(),
     });
     if let Some(system) = req.system.filter(|s| !s.is_empty()) {
-        body["system"] = json!([{"type": "text", "text": system, "cache_control": ephemeral()}]);
+        body["system"] = if cache_off {
+            json!([{"type": "text", "text": system}])
+        } else {
+            json!([{"type": "text", "text": system, "cache_control": ephemeral()}])
+        };
     }
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
@@ -639,9 +643,7 @@ impl Provider for AnthropicProvider {
     }
 
     fn warm_output_cap(&self, req: &ChatRequest) -> u32 {
-        let max = req
-            .max_tokens
-            .unwrap_or_else(|| default_max_tokens(&self.model));
+        let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         derived_budget(self.reasoning_effort.as_deref(), max)
             .map(|b| b + 1024)
             .unwrap_or(1)

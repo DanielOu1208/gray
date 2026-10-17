@@ -9,9 +9,12 @@ use gray_core::message::ToolDef;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
+#[cfg(unix)]
+use crate::shell::contract::EXIT_STDIO_GRACE_MS;
 use crate::shell::contract::{
-    DEFAULT_TIMEOUT_SECS, INLINE_BUDGET_BYTES, MAX_TIMEOUT_SECS, MEM_HEAD_BYTES, MEM_TAIL_BYTES,
-    PUMP_DRAIN_TIMEOUT, PumpSummary, SLEEP_SLACK_SECS, VIEW_BUDGET_LINES, View,
+    DEFAULT_TIMEOUT_SECS, DETACHED_DRAIN_TIMEOUT, INLINE_BUDGET_BYTES, MAX_TIMEOUT_SECS,
+    MEM_HEAD_BYTES, MEM_TAIL_BYTES, PUMP_DRAIN_TIMEOUT, PumpSummary, SLEEP_SLACK_SECS,
+    VIEW_BUDGET_LINES, View,
 };
 use crate::shell::exit::exit_report;
 use crate::shell::fence::fence;
@@ -147,6 +150,9 @@ impl Tool for BashTool {
         if let Some(out) = image_command(&command, &cwd) {
             return out;
         }
+        if let Some(msg) = media_dump_refusal(&command, &cwd) {
+            return fail(msg);
+        }
         if let Some(out) = search_command(&command, &cwd, &ctx.cancel).await {
             return out;
         }
@@ -174,8 +180,6 @@ impl Tool for BashTool {
         let logged = log_path.clone();
         let start = Instant::now();
 
-        let unattached = unattached_media_note(&command);
-
         let cwd_report =
             std::env::temp_dir().join(format!("gray-cwd-{}.txt", uuid::Uuid::new_v4()));
         let capture_ps =
@@ -190,7 +194,7 @@ impl Tool for BashTool {
             ps_report.as_deref(),
         ) {
             Ok(s) => s,
-            Err(e) => return fail(format!("failed to spawn `sh -c`: {e}")),
+            Err(e) => return fail(format!("failed to spawn shell: {e}")),
         };
         #[cfg(not(windows))]
         let guard = crate::shell::kill::GroupGuard::new(spawned.pgid);
@@ -217,10 +221,6 @@ impl Tool for BashTool {
             && let Ok(meta) = std::fs::metadata(&logged)
         {
             read_dedup::record(ledger, read, meta.len());
-        }
-        if let Some(note) = unattached {
-            out.content.push('\n');
-            out.content.push_str(&note);
         }
         if let Some(footer) = self.jobs.footer(ctx, &running_before) {
             out.content.push('\n');
@@ -261,7 +261,8 @@ fn tool_def(jobs: bool) -> ToolDef {
              (read-only ones run concurrently). It blocks until the command exits or `timeout` passes; then it is \
              NOT killed but keeps running as a background job, and you get its log and a stop command. \
              To wait for it, end your turn: a finished job wakes you, no polling needed. Peek with \
-             `tail <log>`. If a command sleeps, pass a `timeout` longer than the sleep. For a hard \
+             `tail <log>`. A command that exits while leaving its process group alive (`nohup ... &`, \
+             `cmd &`) is registered as a background job the same way. If a command sleeps, pass a `timeout` longer than the sleep. For a hard \
              limit, write `timeout N cmd` yourself. {VIEW}{CRON}"
         ),
         json!({
@@ -892,25 +893,44 @@ fn peel_wrapper<'a>(head: &str, rest: &'a [String]) -> Option<&'a [String]> {
     if r.is_empty() { None } else { Some(r) }
 }
 
-fn unattached_media_note(command: &str) -> Option<String> {
+const BYTE_DUMP_HEADS: &[&str] = &["cat", "head", "tail", "base64", "xxd", "od", "hexdump"];
+
+fn media_dump_refusal(command: &str, cwd: &Path) -> Option<String> {
     let ws: Vec<&str> = command.split_whitespace().collect();
-    let cat_at = ws.iter().position(|t| *t == "cat")?;
-    let arg = *ws.get(cat_at + 1)?;
-    if !crate::images::is_viewable_extension(Path::new(arg)) {
+    if ws.iter().any(|t| {
+        matches!(*t, ">" | ">>" | "&>" | "&>>")
+            || t.starts_with('>')
+            || t.starts_with("1>")
+            || t.starts_with("&>")
+    }) {
         return None;
     }
-    let bare = cat_at == 0 && ws.len() == 2 && !shell_meta(arg);
-    (!bare).then(|| {
-        let rerun = if shell_meta(arg) {
-            "cat /path/to.jpg".to_string()
-        } else {
-            format!("cat {arg}")
-        };
-        format!(
-            "note: `cat` on a media file ran as a plain shell command here, so the \
-             media was NOT attached to this turn. Use the whole command instead: {rerun}"
-        )
-    })
+    for (i, t) in ws.iter().enumerate() {
+        if !BYTE_DUMP_HEADS.contains(t) {
+            continue;
+        }
+        for arg in &ws[i + 1..] {
+            if arg.starts_with('-') {
+                continue;
+            }
+            if !crate::images::is_viewable_extension(Path::new(arg)) {
+                continue;
+            }
+            let bare_missing = *t == "cat"
+                && i == 0
+                && ws.len() == 2
+                && !shell_meta(arg)
+                && resolve_bare_path(cwd, arg).is_none();
+            if !bare_missing {
+                return Some(format!(
+                    "refused: `{t} {arg}` would dump raw media bytes into context. \
+                     Attach the file instead — a bare `cat {arg}` shows it to the model; \
+                     if this model has no image input, use the `modlens` skill."
+                ));
+            }
+        }
+    }
+    None
 }
 
 fn image_command(command: &str, cwd: &Path) -> Option<ToolOutput> {
@@ -1063,6 +1083,8 @@ struct Handoff {
     #[cfg(not(windows))]
     guard: crate::shell::kill::GroupGuard,
     pump: tokio::task::JoinHandle<crate::shell::contract::PumpSummary>,
+    #[cfg(unix)]
+    last: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 enum Settled {
@@ -1082,8 +1104,12 @@ async fn settle_command(
     #[cfg(not(windows))] mut guard: crate::shell::kill::GroupGuard,
     pump: tokio::task::JoinHandle<crate::shell::contract::PumpSummary>,
     handoff: bool,
+    track_group: bool,
     ps_report: Option<&std::path::Path>,
+    #[cfg(unix)] last: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Settled {
+    #[cfg(windows)]
+    let _ = track_group;
     #[cfg(not(windows))]
     let target = spawned.pgid;
     #[cfg(windows)]
@@ -1120,8 +1146,57 @@ async fn settle_command(
             #[cfg(not(windows))]
             guard,
             pump,
+            #[cfg(unix)]
+            last,
         }));
     }
+    #[cfg(unix)]
+    let mut detached_group = false;
+    #[cfg(unix)]
+    let mut pipe_open = false;
+    #[cfg(unix)]
+    if matches!(cause, Cause::Exit) && (track_group || crate::shell::kill::group_alive(target)) {
+        if handoff {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            if crate::shell::kill::group_alive(target) {
+                return Settled::Stalled(Box::new(Handoff {
+                    spawned,
+                    #[cfg(not(windows))]
+                    guard,
+                    pump,
+                    #[cfg(unix)]
+                    last,
+                }));
+            }
+        } else if track_group {
+            let exited_ms = now_grindmill();
+            loop {
+                let quiet_ms = now_grindmill().saturating_sub(
+                    last.load(std::sync::atomic::Ordering::Relaxed)
+                        .max(exited_ms),
+                );
+                if pump.is_finished() || quiet_ms >= EXIT_STDIO_GRACE_MS {
+                    break;
+                }
+                let cancelled = tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => false,
+                    _ = ctx.cancel.cancelled() => true,
+                };
+                if cancelled {
+                    let _ = term_then_kill(target, Duration::from_secs(2)).await;
+                    break;
+                }
+            }
+            detached_group = crate::shell::kill::group_alive(target);
+            pipe_open = !pump.is_finished();
+        } else {
+            detached_group = true;
+        }
+    }
+    #[cfg(not(unix))]
+    let pipe_open = false;
+    #[cfg(not(unix))]
+    let detached_group = false;
 
     let first_line: Option<String> = match cause {
         Cause::Exit => None,
@@ -1168,19 +1243,37 @@ async fn settle_command(
 
     #[cfg(windows)]
     drop(spawned.job);
+    #[cfg(unix)]
+    crate::shell::kill::untrack_group(spawned.pgid);
     #[cfg(not(windows))]
     guard.disarm();
     let status = exited.expect("every cause resolves a status");
     let pipe_stages = read_pipestatus(ps_report);
-    let (summary, drain_truncated) = match drain_pump(pump, log_path).await {
+    let drain_timeout = if detached_group || pipe_open {
+        DETACHED_DRAIN_TIMEOUT
+    } else {
+        PUMP_DRAIN_TIMEOUT
+    };
+    let (summary, drain_truncated) = match drain_pump(pump, log_path, drain_timeout).await {
         Ok(v) => v,
         Err(e) => return Settled::Done(fail(format!("output pump failed: {e}"))),
     };
     let mut first = first_line;
+    #[cfg(unix)]
+    if detached_group {
+        let note = format!(
+            "process group {0} still running after the command exited; it is not tracked \u{b7} stop: `kill -- -{0}`",
+            spawned.pgid
+        );
+        first = Some(match first {
+            Some(f) => format!("{f} ({note})"),
+            None => note,
+        });
+    }
     if drain_truncated {
         let note = format!(
             "output truncated: pump drain timed out after {}s",
-            PUMP_DRAIN_TIMEOUT.as_secs()
+            drain_timeout.as_secs()
         );
         first = Some(match first {
             Some(f) => format!("{f} ({note})"),
@@ -1202,7 +1295,6 @@ async fn settle_command(
         start,
         first,
         pipe_stages,
-        &ctx.cwd,
     ))
 }
 
@@ -1230,7 +1322,7 @@ async fn run_command(
             child.stdout.take(),
             child.stderr.take(),
             log_path.clone(),
-            last,
+            last.clone(),
             output_sink,
         )
     };
@@ -1245,7 +1337,10 @@ async fn run_command(
         guard,
         pump,
         adopt.is_some(),
+        false,
         ps_report.as_deref(),
+        #[cfg(unix)]
+        last,
     )
     .await
     {
@@ -1256,6 +1351,8 @@ async fn run_command(
                 #[cfg(not(windows))]
                 guard,
                 pump,
+                #[cfg(unix)]
+                last,
             } = *hoff;
             let jobs = adopt.expect("a handoff is only armed on the jobs lane");
 
@@ -1284,7 +1381,10 @@ async fn run_command(
                     guard,
                     pump,
                     false,
+                    true,
                     ps_report.as_deref(),
+                    #[cfg(unix)]
+                    last,
                 )
                 .await
                 {
@@ -1342,8 +1442,9 @@ async fn abort_pump(pump: JoinHandle<PumpSummary>) {
 async fn drain_pump(
     mut pump: JoinHandle<PumpSummary>,
     log_path: &std::path::Path,
+    timeout: Duration,
 ) -> Result<(PumpSummary, bool), tokio::task::JoinError> {
-    match tokio::time::timeout(PUMP_DRAIN_TIMEOUT, &mut pump).await {
+    match tokio::time::timeout(timeout, &mut pump).await {
         Ok(res) => res.map(|s| (s, false)),
         Err(_) => {
             pump.abort();
@@ -1398,7 +1499,6 @@ fn finish_inline(
     start: Instant,
     first_line: Option<String>,
     pipe_stages: Option<Vec<i32>>,
-    cwd: &std::path::Path,
 ) -> ToolOutput {
     let elapsed = start.elapsed();
     let report = exit_report(status, command, pipe_stages.as_deref());
@@ -1459,123 +1559,7 @@ fn finish_inline(
         }
         out.push_str(&format!("\nRead more: {command}"));
     }
-    if let Some(hint) = missing_command_hint(&out) {
-        out.push('\n');
-        out.push_str(&hint);
-    }
-    if let Some(hint) = missing_path_hint(&out, cwd) {
-        out.push('\n');
-        out.push_str(&hint);
-    }
     ToolOutput::ok(out)
-}
-
-fn missing_path_hint(text: &str, cwd: &std::path::Path) -> Option<String> {
-    const MARK: &str = "No such file or directory";
-    let line = text.lines().find(|l| l.contains(MARK))?;
-    let left = &line[..line.find(MARK)?];
-    let path = left
-        .rsplit_once('\'')
-        .and_then(|(a, _)| a.rsplit_once('\'').map(|(_, p)| p.to_string()))
-        .or_else(|| {
-            left.rsplit(':')
-                .map(str::trim)
-                .find(|t| !t.is_empty())
-                .map(str::to_string)
-        })?;
-    let path = path.trim_matches('\'').trim_matches('"');
-    if path.is_empty() || path.len() > 512 {
-        return None;
-    }
-    let (dir, base) = match std::path::Path::new(path).parent() {
-        Some(p) if !p.as_os_str().is_empty() => (
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                cwd.join(p)
-            },
-            std::path::Path::new(path)
-                .file_name()
-                .map(|b| b.to_string_lossy().to_string())?,
-        ),
-        _ => (cwd.to_path_buf(), path.to_string()),
-    };
-    let mut best: Option<(String, f64)> = None;
-    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let s = strsim::jaro_winkler(&base, &name);
-        if s >= 0.85 && best.as_ref().is_none_or(|(_, b)| s > *b) {
-            best = Some((name, s));
-        }
-    }
-    let (name, _) = best?;
-    let suggested = match std::path::Path::new(path).parent() {
-        Some(p) if !p.as_os_str().is_empty() => format!("{}/{name}", p.display()),
-        _ => name,
-    };
-    Some(format!("`{path}` not found · did you mean `{suggested}`?"))
-}
-
-fn missing_command_hint(text: &str) -> Option<String> {
-    let line = text.lines().find(|l| {
-        let low = l.to_ascii_lowercase();
-        (low.contains("command not found") || low.contains(": not found"))
-            && (low.starts_with("sh:")
-                || low.starts_with("bash:")
-                || low.starts_with("dash:")
-                || low.starts_with("zsh:")
-                || low.contains(": command not found"))
-    })?;
-    let name = not_found_subject(line).unwrap_or_else(|| "that command".to_string());
-    let equivalent = equivalent_for(&name).unwrap_or("`grep`, `sed`, `awk`, `python3`");
-    Some(format!(
-        "`{name}` is not installed here · use {equivalent} or confirm with `command -v {name}`"
-    ))
-}
-
-const EQUIVALENTS: &[(&str, &str)] = &[
-    ("rg", "`grep -r` / `grep -rn`"),
-    ("xxd", "`od -c` (bytes) or `od -An -tx1` (hex)"),
-    ("hexdump", "`od -c` / `od -An -tx1`"),
-    ("jq", "`python3 -m json.tool` or `python3 -c`"),
-    ("realpath", "`readlink -f`"),
-    ("time", "`date +%s.%N` before/after the command"),
-];
-
-fn equivalent_for(name: &str) -> Option<&'static str> {
-    EQUIVALENTS
-        .iter()
-        .find(|(bin, _)| *bin == name)
-        .map(|(_, equivalent)| *equivalent)
-}
-
-fn not_found_subject(line: &str) -> Option<String> {
-    let low = line.to_ascii_lowercase();
-    let idx = low.find("not found")?;
-
-    if let Some(tok) = line[idx + "not found".len()..]
-        .trim_start_matches([':', ' '])
-        .split_whitespace()
-        .next()
-        .filter(|t| !t.is_empty())
-    {
-        return Some(clean_tool_name(tok));
-    }
-
-    let before = line[..idx].trim_end();
-    let before = before.strip_suffix("command").unwrap_or(before);
-    before
-        .rsplit(':')
-        .map(str::trim)
-        .find(|t| !t.is_empty())
-        .map(clean_tool_name)
-        .filter(|t| !t.is_empty())
-}
-
-fn clean_tool_name(tok: &str) -> String {
-    let tok = tok.replace("\\n", " ").replace("\n", " ");
-    tok.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+')))
-        .to_string()
 }
 
 fn small_log_on_disk(log_path: &std::path::Path, summary: &PumpSummary) -> bool {

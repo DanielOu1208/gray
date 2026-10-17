@@ -117,7 +117,12 @@ fn search_dirs_walk_to_the_git_root_then_user_dirs() {
 
 #[test]
 fn no_repo_means_only_the_cwd_is_project() {
-    let root = tempfile::tempdir().unwrap();
+    // Under /tmp so a session TMPDIR inside a repo/dotfiles home can't
+    // hand us ancestors with a .git root to walk to.
+    let root = tempfile::Builder::new()
+        .prefix("gray-test-")
+        .tempdir_in("/tmp")
+        .unwrap_or_else(|_| tempfile::tempdir().unwrap());
     let sub = root.path().join("a");
     std::fs::create_dir_all(&sub).unwrap();
     let dirs = search_dirs(&sub, None, None);

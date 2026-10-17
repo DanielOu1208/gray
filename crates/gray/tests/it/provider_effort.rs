@@ -2,7 +2,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 #[test]
-fn fresh_session_normalizes_saved_deepseek_effort_before_display() {
+fn fresh_session_keeps_saved_effort_when_caps_unknown() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
         home.path().join("config.json"),
@@ -43,11 +43,8 @@ fn fresh_session_normalizes_saved_deepseek_effort_before_display() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.contains("Thinking effort clamped from xhigh to max"),
-        "{stdout}"
-    );
+    assert!(!stdout.contains("Thinking effort clamped"), "{stdout}");
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(home.path().join("config.json")).unwrap()).unwrap();
-    assert_eq!(saved["thinking_effort"], "max");
+    assert_eq!(saved["thinking_effort"], "xhigh");
 }

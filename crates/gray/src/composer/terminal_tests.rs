@@ -293,6 +293,28 @@ fn the_band_sits_under_a_short_transcript() {
 }
 
 #[test]
+fn a_grounded_band_regrounds_when_it_shrinks() {
+    let (mut term, tape) = term(10, 0, Scrollback::Regions);
+    let history: Vec<String> = rows(0..20);
+    insert(
+        &mut term,
+        &history.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    band(&mut term, 4);
+    assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
+
+    // A modal/popup grows the band, then closes — the band must re-pin
+    // to the screen bottom instead of floating where the shrink left it.
+    band(&mut term, 8);
+    assert_eq!(term.viewport_area, Rect::new(0, 2, W, 8));
+    band(&mut term, 4);
+    assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
+
+    let lines = Screen::replay(&tape, W, 10).lines();
+    assert_eq!(lines[6..10], band_rows(4)[..]);
+}
+
+#[test]
 fn the_banner_lands_on_the_cursor_row_and_the_band_follows_it() {
     let (mut term, tape) = term(16, 5, Scrollback::Regions);
     insert(&mut term, &["logo", "version"]);
@@ -403,23 +425,25 @@ fn a_shrink_leaves_its_rows_under_the_footer_for_the_next_insert() {
     insert(&mut term, &["r0", "r1", "r2", "r3"]);
     band(&mut term, 6);
     band(&mut term, 4);
-    assert_eq!(term.viewport_area, Rect::new(0, 4, W, 4));
+    // the band re-grounds, and the transcript slides down with it
+    assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
     let lines = Screen::replay(&tape, W, 10).lines();
-    assert_eq!(lines[3], "r3", "no blank row between transcript and band");
-    assert_eq!(lines[4..8], band_rows(4)[..]);
-    assert!(lines[8..].iter().all(String::is_empty));
+    assert_eq!(lines[5], "r3", "no blank row between transcript and band");
+    assert_eq!(lines[6..], band_rows(4)[..]);
+    assert!(lines[..2].iter().all(String::is_empty));
 
     insert(&mut term, &["r4"]);
     band(&mut term, 4);
-    assert_eq!(term.viewport_area, Rect::new(0, 5, W, 4));
-    assert!(Screen::replay(&tape, W, 10).scrollback.is_empty());
+    assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
 
     insert(&mut term, &["r5", "r6"]);
     band(&mut term, 4);
     assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
     let screen = Screen::replay(&tape, W, 10);
-    assert_eq!(screen.scrollback, ["r0"]);
-    assert_eq!(screen.transcript(6), rows(0..7));
+    assert_eq!(screen.scrollback, ["", "", "r0"]);
+    let mut transcript = vec![String::new(), String::new()];
+    transcript.extend(rows(0..7));
+    assert_eq!(screen.transcript(6), transcript);
 }
 
 #[test]
@@ -493,7 +517,7 @@ fn a_frame_on_a_shrunken_screen_does_not_scroll_history() {
 }
 
 #[test]
-fn a_popup_on_a_full_screen_keeps_the_band_top() {
+fn a_popup_on_a_full_screen_regrounds_the_band() {
     let (mut term, tape) = term(10, 0, Scrollback::Regions);
     let transcript = rows(0..6);
     let refs: Vec<&str> = transcript.iter().map(String::as_str).collect();
@@ -501,8 +525,98 @@ fn a_popup_on_a_full_screen_keeps_the_band_top() {
     band(&mut term, 4);
     band(&mut term, 6);
     band(&mut term, 4);
-    assert_eq!(term.viewport_area, Rect::new(0, 4, W, 4));
+    assert_eq!(term.viewport_area, Rect::new(0, 6, W, 4));
     let screen = Screen::replay(&tape, W, 10);
     assert_eq!(screen.scrollback, rows(0..2));
-    assert!(screen.lines()[8..].iter().all(String::is_empty));
+    assert!(screen.lines()[..2].iter().all(String::is_empty));
+    assert_eq!(screen.lines()[2..6], rows(2..6)[..]);
+    assert_eq!(screen.lines()[6..], band_rows(4)[..]);
+}
+
+#[test]
+fn a_busy_turn_does_not_tear_the_transcript() {
+    use ratatui::text::Line;
+
+    fn band_fill(term: &mut Term, height: u16, transcript: &[String]) {
+        let screen = term.last_known_screen_size;
+        let slid = term.set_viewport_height(height, screen).unwrap();
+        if slid > 0 {
+            let top = usize::from(term.viewport_area.y);
+            let old_top = top - slid as usize;
+            let len = transcript.len();
+            if len > old_top {
+                let fill: Vec<Line> = transcript[len.saturating_sub(top)..len - old_top]
+                    .iter()
+                    .map(|s| Line::from(s.clone()))
+                    .collect();
+                let y = slid.saturating_sub(fill.len() as u16);
+                term.paint_lines_at(y, &fill).unwrap();
+            }
+        }
+        term.draw(|frame| {
+            let area = frame.area();
+            for i in 0..area.height {
+                let label = if i + 2 == area.height {
+                    "\u{276f}".to_string()
+                } else {
+                    format!("band{i}")
+                };
+                frame
+                    .buffer
+                    .set_string(area.x, area.y + i, label, Style::default());
+            }
+        })
+        .unwrap();
+    }
+
+    let (mut term, tape) = term(24, 0, Scrollback::Regions);
+
+    let seed = rows(0..30);
+    let refs: Vec<&str> = seed.iter().map(String::as_str).collect();
+    insert(&mut term, &refs);
+    let mut expected: Vec<String> = seed.clone();
+    let mut n = 30usize;
+    band_fill(&mut term, 4, &expected);
+    assert_eq!(term.viewport_area, Rect::new(0, 20, W, 4));
+
+    let step = |term: &mut Term, expected: &mut Vec<String>, n: &mut usize| {
+        let chunk = rows(*n..*n + 2);
+        let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+        insert(term, &refs);
+        expected.extend(chunk);
+        *n += 2;
+        band_fill(term, 7, expected);
+        band_fill(term, 4, expected);
+    };
+
+    for _ in 0..6 {
+        step(&mut term, &mut expected, &mut n);
+    }
+
+    let img: Vec<String> = (0..27).map(|i| format!("img{i:02}")).collect();
+    let refs: Vec<&str> = img.iter().map(String::as_str).collect();
+    insert(&mut term, &refs);
+    expected.extend(img.clone());
+    band_fill(&mut term, 4, &expected);
+
+    for _ in 0..6 {
+        step(&mut term, &mut expected, &mut n);
+    }
+
+    let screen = Screen::replay(&tape, W, 24);
+    let got = screen.transcript(20);
+    for (i, row) in got.iter().enumerate() {
+        assert!(!row.is_empty(), "torn transcript: blank row at index {i}");
+    }
+    let mut it = got.iter().peekable();
+    for want in &expected {
+        while it.peek().is_some_and(|g| *g != want) {
+            it.next();
+        }
+        assert!(
+            it.next().is_some_and(|g| g == want),
+            "expected row {want:?} missing from transcript"
+        );
+    }
+    assert_eq!(screen.lines()[20..], band_rows(4)[..]);
 }

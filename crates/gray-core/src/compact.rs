@@ -65,7 +65,7 @@ pub(crate) async fn run_compaction_call(
 
     let system = agent.system_text();
     agent
-        .complete_with_history(
+        .complete_isolated(
             (!system.is_empty()).then_some(system),
             messages,
             agent.tool_defs().to_vec(),
@@ -73,7 +73,7 @@ pub(crate) async fn run_compaction_call(
         .await
 }
 
-pub(crate) const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
+pub(crate) const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 20_000;
 
 pub(crate) const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
 
@@ -163,6 +163,11 @@ pub(crate) fn build_retained_with_session(
             stub_large_tool_results(&mut stubbed_group, session_id);
             &stubbed_group
         } else {
+            let cap = remaining.min(MAX_RETAINED_AGENT_MESSAGE_TOKENS as usize);
+            if let Some(truncated) = truncate_group_to_budget(group, cap, session_id) {
+                remaining = remaining.saturating_sub(group_tokens(&truncated).max(1));
+                kept_reversed.push(truncated);
+            }
             continue;
         };
         let cost = group_tokens(group).max(1);
@@ -334,6 +339,9 @@ fn fit_group_to_budget(group: &[Message], budget: usize) -> Option<Vec<Message>>
             ContentBlock::Text { .. } | ContentBlock::Image { .. } | ContentBlock::Media { .. } => {
                 0
             }
+            ContentBlock::Thinking {
+                encrypted_content, ..
+            } => encrypted_content.as_deref().map_or(0, |e| e.len() / 4),
             _ => block_tokens(b),
         })
         .sum();
@@ -358,7 +366,7 @@ fn fit_group_to_budget(group: &[Message], budget: usize) -> Option<Vec<Message>>
                         data.clear();
                     }
                 }
-                ContentBlock::Text { text } => {
+                ContentBlock::Text { text } | ContentBlock::Thinking { text, .. } => {
                     if text.is_empty() {
                         continue;
                     }
@@ -378,6 +386,12 @@ fn fit_group_to_budget(group: &[Message], budget: usize) -> Option<Vec<Message>>
         }
         msg.content.retain(|b| match b {
             ContentBlock::Text { text } => !text.is_empty(),
+            ContentBlock::Thinking {
+                text,
+                encrypted_content,
+                item_id,
+                ..
+            } => !text.is_empty() || encrypted_content.is_some() || item_id.is_some(),
             ContentBlock::Image { data, .. } | ContentBlock::Media { data, .. } => !data.is_empty(),
             _ => true,
         });

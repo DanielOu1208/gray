@@ -650,13 +650,23 @@ pub(crate) fn dispatch_agent_event(
                     .map(|(n, a)| (if n.is_empty() { "tool".to_string() } else { n }, a))
                     .unwrap_or_else(|| ("tool".to_string(), None));
                 {
-                    let lines = crate::tool_fmt::format_tool_result_lines_with_context(
+                    let mut lines = crate::tool_fmt::format_tool_result_lines_with_context(
                         &name,
                         args.as_ref(),
                         output,
                         *is_error,
                         Some(cwd),
                     );
+                    if !*is_error
+                        && let Some(rows) = crate::composer::transcript::rows::viewed_image_lines(
+                            &name,
+                            args.as_ref(),
+                            cwd,
+                            t.width(),
+                        )
+                    {
+                        lines.extend(rows);
+                    }
 
                     t.atomic(|t| {
                         t.remove_live_tool(id);
@@ -1055,7 +1065,27 @@ pub(crate) async fn maybe_overflow_compact(
     if !crate::compact::is_context_overflow_error(err) {
         return false;
     }
+    recovery_compact(
+        agent,
+        config,
+        session_state,
+        cwd,
+        tui,
+        initial_count,
+        "after context overflow",
+    )
+    .await
+}
 
+pub(crate) async fn recovery_compact(
+    agent: &mut Agent,
+    config: &Config,
+    session_state: &mut Option<SessionState>,
+    cwd: &Path,
+    tui: Option<&crate::composer::SharedTui>,
+    initial_count: &mut usize,
+    detail: &str,
+) -> bool {
     let compaction_id = format!("overflow-{}", uuid::Uuid::new_v4().as_simple());
     if let Some(shared) = tui {
         shared
@@ -1076,7 +1106,7 @@ pub(crate) async fn maybe_overflow_compact(
             super::status::push_compaction_card(
                 tui,
                 &crate::composer::fmt_elapsed_compact(elapsed.as_secs()),
-                "after context overflow",
+                detail,
             );
 
             persist_compaction_tail(agent, config, session_state, cwd, tui).await;

@@ -629,7 +629,7 @@ async fn quota_failure_with_long_reset_window_is_terminal() {
 }
 
 #[tokio::test]
-async fn mid_stream_quota_failure_does_not_replay() {
+async fn mid_stream_quota_failure_replays() {
     let provider = FakeProvider::new(vec![end_script()]).with_partial_failures(vec![(
         vec![StreamEvent::text_delta("visible half")],
         ProviderError::Auth("status 429: usage limit reached".into()),
@@ -643,20 +643,63 @@ async fn mid_stream_quota_failure_does_not_replay() {
     agent
         .run(Message::user("go"), ToolContext::default())
         .await
-        .expect_err("quota failure after a visible delta must surface");
+        .expect("a retryable failure after a visible delta must replay, not abort");
     assert_eq!(
         seen.lock().expect("seen lock").len(),
-        1,
-        "no replay after a visible delta"
+        2,
+        "pi retries the whole assistant call even with partial output"
+    );
+    assert!(
+        !agent
+            .messages()
+            .iter()
+            .any(|m| m.text_content().contains("visible half")),
+        "the failed attempt's partial text must not enter history"
     );
 }
 
 #[tokio::test]
-async fn mid_stream_failure_after_visible_delta_does_not_replay() {
+async fn mid_stream_stall_after_visible_delta_replays() {
     let provider = FakeProvider::new(vec![end_script()]).with_partial_failures(vec![(
         vec![StreamEvent::text_delta("visible half")],
-        ProviderError::ServerError("503".into()),
+        ProviderError::Stream("stream stalled: no output for 75s".into()),
     )]);
+    let seen = provider.seen_requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok("unused"))),
+    );
+
+    let events = agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .expect("a stalled stream mid-write must retry, not abort the run");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnEnd { .. })),
+        "the retried turn completes: {events:?}"
+    );
+    assert_eq!(
+        seen.lock().expect("seen lock").len(),
+        2,
+        "one replay after the stalled attempt"
+    );
+    assert!(
+        !agent
+            .messages()
+            .iter()
+            .any(|m| m.text_content().contains("visible half")),
+        "the stalled attempt's partial text must not enter history"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_that_ends_without_completion_replays() {
+    let provider = FakeProvider::new(vec![
+        vec![StreamEvent::text_delta("truncated write")],
+        end_script(),
+    ]);
     let seen = provider.seen_requests();
     let mut agent = Agent::new(
         Box::new(provider),
@@ -666,11 +709,11 @@ async fn mid_stream_failure_after_visible_delta_does_not_replay() {
     agent
         .run(Message::user("go"), ToolContext::default())
         .await
-        .expect_err("post-delta failure must surface");
+        .expect("a dropped stream mid-write must retry, not abort the run");
     assert_eq!(
         seen.lock().expect("seen lock").len(),
-        1,
-        "no replay after a visible delta"
+        2,
+        "one replay after the truncated attempt"
     );
 }
 
@@ -2334,23 +2377,35 @@ fn tool_output_media_goes_native_or_as_its_fallback() {
         }],
     };
     let blocks = out.message_blocks("c");
-    let native = resolve_media(blocks.clone(), |mt| mt == "video/mp4");
+    let native = resolve_media(
+        blocks.clone(),
+        |mt| mt == "video/mp4",
+        crate::message::IMAGE_OMITTED,
+    );
     assert_eq!(native.len(), 2);
     assert!(matches!(&native[1], ContentBlock::Media { data, .. } if data == "VID"));
-    let sheet = resolve_media(blocks, |_| false);
+    let sheet = resolve_media(
+        blocks,
+        |mt| mt == "image/jpeg",
+        crate::message::IMAGE_OMITTED,
+    );
     assert_eq!(sheet.len(), 3);
     assert!(matches!(&sheet[1], ContentBlock::Text { text } if text.contains("contact sheet")));
     assert!(matches!(&sheet[2], ContentBlock::Image { data, .. } if data == "SHEET"));
 
-    let bare = resolve_media(vec![ContentBlock::media("audio/wav", "A", vec![])], |_| {
-        false
-    });
+    let bare = resolve_media(
+        vec![ContentBlock::media("audio/wav", "A", vec![])],
+        |_| false,
+        crate::message::IMAGE_OMITTED,
+    );
     assert!(matches!(&bare[0], ContentBlock::Text { text } if text.contains("audio/wav")));
 
     let big = "A".repeat(crate::message::MAX_NATIVE_MEDIA_BYTES / 3 * 4 + 8);
-    let over = resolve_media(vec![ContentBlock::media("video/mp4", big, vec![])], |_| {
-        true
-    });
+    let over = resolve_media(
+        vec![ContentBlock::media("video/mp4", big, vec![])],
+        |_| true,
+        crate::message::IMAGE_OMITTED,
+    );
     assert!(matches!(&over[0], ContentBlock::Text { .. }));
 }
 
@@ -2363,7 +2418,10 @@ fn old_session_video_block_still_parses() {
 
 #[tokio::test]
 async fn eof_with_text_and_tool_pending_salvages_visible_text() {
-    let provider = FakeProvider::new(vec![vec![
+    // EOF without completion retries the whole turn (pi auto-retry); the
+    // terminal attempt's partial is the one salvaged into history.
+    let mut scripts = vec![vec![]; 8];
+    scripts.push(vec![
         StreamEvent::text_delta("hello"),
         StreamEvent::tool_call_delta(
             0,
@@ -2371,7 +2429,8 @@ async fn eof_with_text_and_tool_pending_salvages_visible_text() {
             Some(TOOL_NAME.into()),
             r#"{"q":"x"}"#,
         ),
-    ]]);
+    ]);
+    let provider = FakeProvider::new(scripts);
     let mut agent = Agent::new(
         Box::new(provider),
         Arc::new(FakeExecutor::new(ToolOutput::ok("ok"))),
@@ -2650,7 +2709,7 @@ async fn request_prefix_is_byte_stable_across_tool_rounds() {
 async fn mid_stream_error_partial_is_scrubbed_from_the_next_request() {
     let provider = FakeProvider::new(vec![end_script()]).with_partial_failures(vec![(
         vec![StreamEvent::text_delta("half-finished answer")],
-        ProviderError::Stream("connection reset".into()),
+        ProviderError::BadRequest("connection reset".into()),
     )]);
     let seen = provider.seen_requests();
     let mut agent = Agent::new(
@@ -3302,4 +3361,85 @@ async fn tool_after_replacement_lands_in_history() {
         })
         .collect();
     assert_eq!(results, vec!["RAW [hook note]"]);
+}
+
+#[tokio::test]
+async fn bench_nudges_appends_a_budget_line_to_requests_not_history() {
+    let provider = FakeProvider::new(vec![end_script()]);
+    let seen = provider.seen_requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok(""))),
+    );
+    agent.set_bench_nudges(true);
+    agent
+        .run(Message::user("hi"), ToolContext::default())
+        .await
+        .expect("run should succeed");
+
+    let reqs = seen.lock().expect("seen lock");
+    let last = reqs[0].1.last().expect("a final request message");
+    assert!(
+        last.text_content().contains("[harness] request 1"),
+        "expected ephemeral budget line in request, got {last:?}"
+    );
+    assert!(
+        !agent
+            .messages()
+            .iter()
+            .any(|m| m.text_content().contains("[harness]")),
+        "budget line must not persist into history"
+    );
+}
+
+#[tokio::test]
+async fn bench_nudges_finish_gate_asks_for_verification_once() {
+    let provider = FakeProvider::new(vec![tool_script("call_1"), end_script(), end_script()]);
+    let seen = provider.seen_requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok("done"))),
+    )
+    .with_tools(vec![tool_def()]);
+    agent.set_bench_nudges(true);
+    agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .expect("run should succeed");
+
+    assert_eq!(seen.lock().expect("seen lock").len(), 3);
+    let nudges = agent
+        .messages()
+        .iter()
+        .filter(|m| m.text_content().contains("verify the deliverable"))
+        .count();
+    assert_eq!(nudges, 1, "finish gate must nudge exactly once");
+}
+
+#[tokio::test]
+async fn bench_nudges_thrash_mark_adds_converge_hint() {
+    let provider = FakeProvider::new(vec![
+        tool_script("a"),
+        tool_script("b"),
+        end_script(),
+        end_script(),
+    ]);
+    let seen = provider.seen_requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(FakeExecutor::new(ToolOutput::ok("x"))),
+    )
+    .with_tools(vec![tool_def()]);
+    agent.set_bench_nudges(true);
+    agent.set_bench_thrash_marks(vec![2]);
+    agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .expect("run should succeed");
+
+    let reqs = seen.lock().expect("seen lock");
+    let note1 = reqs[0].1.last().expect("note").text_content();
+    let note2 = reqs[1].1.last().expect("note").text_content();
+    assert!(!note1.contains("many requests used"), "early: {note1}");
+    assert!(note2.contains("many requests used"), "mark 2: {note2}");
 }

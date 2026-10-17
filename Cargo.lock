@@ -907,6 +907,7 @@ dependencies = [
  "base64",
  "futures",
  "log",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
@@ -915,6 +916,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "uuid",
  "zeroize",
 ]
 

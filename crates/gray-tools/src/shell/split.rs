@@ -122,12 +122,14 @@ fn split(cmd: &str) -> Vec<String> {
             heredoc = false;
             cur.push(c);
             i += 1;
-        } else if depth == 0 && c == '&' && i + 1 < n && chars[i + 1] == '&' {
-            cur.push_str("&&");
+        } else if depth == 0 && (c == '&' || c == '|') && i + 1 < n && chars[i + 1] == c {
+            segs.clear();
+            cur.clear();
             i += 2;
-        } else if depth == 0 && c == '|' && i + 1 < n && chars[i + 1] == '|' {
-            cur.push_str("||");
-            i += 2;
+        } else if depth == 0 && (c == ';' || c == '\n') {
+            segs.clear();
+            cur.clear();
+            i += 1;
         } else if depth == 0 && c == '|' {
             push_seg(&mut segs, &mut cur);
             if i + 1 < n && chars[i + 1] == '&' {

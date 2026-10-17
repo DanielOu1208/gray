@@ -10,9 +10,31 @@ use crate::message::ChatRequest;
 
 pub const MAX_WARMING_AGE: Duration = Duration::from_secs(60 * 60);
 
+pub const MAX_IDLE_WARMING_AGE: Duration = Duration::from_secs(30 * 60);
+
+pub const IDLE_CONTINUATION_PROBABILITY: f64 = 0.15;
+
 pub const MIN_EXPECTED_SAVINGS: f64 = 0.05;
 
 pub const MIN_WARM_TOKENS: usize = 20_000;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum WarmPhase {
+    Streaming,
+    Idle,
+}
+
+pub(crate) type WarmPhaseCell = Arc<Mutex<WarmPhase>>;
+
+pub(crate) fn warm_phase() -> WarmPhaseCell {
+    Arc::new(Mutex::new(WarmPhase::Streaming))
+}
+
+pub(crate) fn settle_warm_phase(phase: &WarmPhaseCell) {
+    if let Ok(mut p) = phase.lock() {
+        *p = WarmPhase::Idle;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Prices {
@@ -41,7 +63,12 @@ pub fn warming_delay(ttl: Duration) -> Option<Duration> {
     (ttl > Duration::from_secs(10)).then(|| (ttl.mul_f64(0.9)).min(ttl - Duration::from_secs(10)))
 }
 
-pub fn expected_savings(p: &Prices, prompt_tokens: usize, warm_output: u32) -> f64 {
+pub fn expected_savings(
+    p: &Prices,
+    prompt_tokens: usize,
+    warm_output: u32,
+    continuation_probability: f64,
+) -> f64 {
     let n = prompt_tokens as f64;
     let hit = n * p.cache_read;
     let miss = if p.cache_write > 0.0 {
@@ -50,7 +77,7 @@ pub fn expected_savings(p: &Prices, prompt_tokens: usize, warm_output: u32) -> f
         n * p.input
     };
     let warm = hit + f64::from(warm_output) * p.output;
-    (miss - hit).max(0.0) - warm
+    continuation_probability * (miss - hit).max(0.0) - warm
 }
 
 pub fn worth_refreshing(
@@ -58,6 +85,7 @@ pub fn worth_refreshing(
     prompt_tokens: usize,
     warm_output: u32,
     cache_reported: bool,
+    continuation_probability: f64,
 ) -> bool {
     if prompt_tokens == 0 {
         return false;
@@ -65,7 +93,7 @@ pub fn worth_refreshing(
     let big = prompt_tokens >= MIN_WARM_TOKENS;
     match prices.filter(|p| p.input > 0.0 || p.cache_read > 0.0 || p.cache_write > 0.0) {
         Some(p) => {
-            let savings = expected_savings(p, prompt_tokens, warm_output);
+            let savings = expected_savings(p, prompt_tokens, warm_output, continuation_probability);
             savings >= MIN_EXPECTED_SAVINGS || (big && savings > 0.0)
         }
         None => big && cache_reported,
@@ -85,6 +113,7 @@ pub(crate) async fn keep_warm(
     hint: Arc<Mutex<WarmHint>>,
     sent: Instant,
     spent: Arc<Mutex<Usage>>,
+    phase: WarmPhaseCell,
 ) {
     let Some(delay) = warming_delay(policy.ttl) else {
         return;
@@ -94,14 +123,21 @@ pub(crate) async fn keep_warm(
     req.max_tokens = Some(warm_output);
     let mut next = sent + delay;
     loop {
-        if next > sent + MAX_WARMING_AGE {
-            return;
-        }
-
         let deadline = next + (policy.ttl - delay) / 2;
         tokio::time::sleep_until(next).await;
         if Instant::now() > deadline {
             log::debug!(target: "gray_agent", "cache warm: refresh deadline missed");
+            return;
+        }
+
+        let idle = phase.lock().map(|p| *p == WarmPhase::Idle).unwrap_or(true);
+        let horizon = sent
+            + if idle {
+                MAX_IDLE_WARMING_AGE
+            } else {
+                MAX_WARMING_AGE
+            };
+        if Instant::now() > horizon {
             return;
         }
 
@@ -114,6 +150,11 @@ pub(crate) async fn keep_warm(
             prompt_tokens,
             warm_output,
             cache_reported,
+            if idle {
+                IDLE_CONTINUATION_PROBABILITY
+            } else {
+                1.0
+            },
         ) {
             return;
         }
@@ -145,6 +186,21 @@ pub(crate) struct WarmGuard(pub(crate) tokio::task::JoinHandle<()>);
 impl Drop for WarmGuard {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+pub(crate) struct ActiveWarm {
+    #[allow(dead_code)]
+    pub(crate) guard: WarmGuard,
+
+    pub(crate) phase: WarmPhaseCell,
+
+    pub(crate) spent: Arc<Mutex<Usage>>,
+}
+
+impl ActiveWarm {
+    pub(crate) fn settle(&self) {
+        settle_warm_phase(&self.phase);
     }
 }
 

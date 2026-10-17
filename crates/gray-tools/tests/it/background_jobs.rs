@@ -381,3 +381,34 @@ async fn job_ids_are_named_after_the_command() {
 
     assert_eq!(ids, ["sleep", "sleep-2"]);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_leader_that_exits_with_live_detached_children_registers_a_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(dir.path());
+    let reg = Registry::new(vec![Arc::new(BashTool::default())]);
+
+    let out = reg
+        .execute(
+            &ctx,
+            "bash",
+            json!({"command": "sleep 30 >/dev/null 2>&1 & echo spawned"}),
+        )
+        .await;
+    let id = job_id(&out);
+    assert_eq!(id, "sleep");
+    assert!(reg.has_pending_background(&ctx));
+    assert_eq!(
+        reg.background_jobs(&ctx)
+            .into_iter()
+            .map(|j| j.id)
+            .collect::<Vec<_>>(),
+        vec![id.clone()]
+    );
+
+    assert!(reg.cancel_background(&ctx, &id));
+    let got = notices(&reg, &ctx, 1).await;
+    assert!(got[0].contains(&id));
+    assert!(!reg.has_pending_background(&ctx));
+}

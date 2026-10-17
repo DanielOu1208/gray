@@ -322,12 +322,18 @@ impl Message {
 
 pub const MAX_NATIVE_MEDIA_BYTES: usize = 8 * 1024 * 1024;
 
+pub const IMAGE_OMITTED: &str = "(image omitted: model does not support images)";
+
+pub const TOOL_IMAGE_OMITTED: &str = "(tool image omitted: model does not support images)";
+
 pub fn resolve_media(
     blocks: Vec<ContentBlock>,
     accepts: impl Fn(&str) -> bool,
+    image_placeholder: &str,
 ) -> Vec<ContentBlock> {
     let max_b64 = MAX_NATIVE_MEDIA_BYTES.div_ceil(3) * 4;
     let mut out = Vec::with_capacity(blocks.len());
+    let mut image_omitted = false;
     for block in blocks {
         match block {
             ContentBlock::Media {
@@ -336,17 +342,53 @@ pub fn resolve_media(
                 fallback,
             } if !accepts(&media_type) || data.len() > max_b64 => {
                 if fallback.is_empty() {
+                    image_omitted = false;
                     out.push(ContentBlock::text(format!(
                         "({media_type} attachment omitted: this model can't take it)"
                     )));
                 } else {
-                    out.extend(fallback);
+                    for nested in fallback {
+                        push_resolved(
+                            &mut out,
+                            &mut image_omitted,
+                            nested,
+                            &accepts,
+                            image_placeholder,
+                        );
+                    }
                 }
             }
-            other => out.push(other),
+            other => push_resolved(
+                &mut out,
+                &mut image_omitted,
+                other,
+                &accepts,
+                image_placeholder,
+            ),
         }
     }
     out
+}
+
+fn push_resolved(
+    out: &mut Vec<ContentBlock>,
+    image_omitted: &mut bool,
+    block: ContentBlock,
+    accepts: &impl Fn(&str) -> bool,
+    image_placeholder: &str,
+) {
+    match block {
+        ContentBlock::Image { media_type, .. } if !accepts(&media_type) => {
+            if !*image_omitted {
+                out.push(ContentBlock::text(image_placeholder.to_string()));
+                *image_omitted = true;
+            }
+        }
+        other => {
+            *image_omitted = false;
+            out.push(other);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

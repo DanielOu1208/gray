@@ -15,6 +15,45 @@ unsafe fn signal_pid(_target: i32, _sig: i32) -> i32 {
     -1
 }
 
+#[cfg(unix)]
+static TRACKED_PGIDS: std::sync::Mutex<std::collections::BTreeSet<i32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+#[cfg(unix)]
+fn track_group(pgid: i32) {
+    if pgid > 1 {
+        TRACKED_PGIDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(pgid);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn untrack_group(pgid: i32) {
+    TRACKED_PGIDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&pgid);
+}
+
+pub fn kill_tracked_groups() {
+    #[cfg(unix)]
+    {
+        let pgids = {
+            let mut set = TRACKED_PGIDS.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *set)
+        };
+        for pgid in pgids {
+            if group_alive(pgid) {
+                unsafe {
+                    signal_pid(-pgid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(not(windows))]
 #[cfg_attr(not(unix), allow(dead_code))]
 fn gone(target: i32) -> bool {
@@ -29,6 +68,22 @@ fn gone(target: i32) -> bool {
     {
         false
     }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn is_tracked(pgid: i32) -> bool {
+    TRACKED_PGIDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&pgid)
+}
+
+#[cfg(unix)]
+pub(crate) fn group_alive(pgid: i32) -> bool {
+    pgid > 1
+        && pgid != std::process::id() as i32
+        && pgid != unsafe { libc::getpgrp() }
+        && !gone(-pgid)
 }
 
 #[cfg(not(windows))]
@@ -110,6 +165,8 @@ pub(crate) struct GroupGuard {
 #[cfg(not(windows))]
 impl GroupGuard {
     pub(crate) fn new(pgid: i32) -> Self {
+        #[cfg(unix)]
+        track_group(pgid);
         Self { pgid, armed: true }
     }
     pub(crate) fn disarm(&mut self) {
@@ -129,6 +186,7 @@ impl Drop for GroupGuard {
             unsafe {
                 signal_pid(-self.pgid, libc::SIGKILL);
             }
+            untrack_group(self.pgid);
         }
     }
 }

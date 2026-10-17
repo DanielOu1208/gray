@@ -52,6 +52,7 @@ async fn gray_main() -> anyhow::Result<()> {
 
 async fn run() -> anyhow::Result<()> {
     gray::turn_caps::init_process_start();
+    gray::session_store::capture_inherited_session_env();
     gray::logging::init();
     install_panic_hook();
     let _ = crossterm::terminal::disable_raw_mode();
@@ -148,6 +149,16 @@ async fn run() -> anyhow::Result<()> {
         return gray::session_read::run_cli(session.as_deref(), *live, *last, *json).await;
     }
 
+    match &cli.command {
+        Some(gray::Commands::Login { code }) => {
+            return gray::account::run_login(code.as_deref()).await;
+        }
+        Some(gray::Commands::Whoami) => return gray::account::run_whoami().await,
+        Some(gray::Commands::Logout) => return gray::account::run_logout().await,
+        Some(gray::Commands::Cloud { message }) => return gray::cloud::run_cloud(message).await,
+        _ => {}
+    }
+
     if let Some(gray::Commands::External(args)) = &cli.command {
         let (name, rest) = args
             .split_first()
@@ -236,6 +247,12 @@ async fn run() -> anyhow::Result<()> {
             gray::Commands::External(_) => {
                 unreachable!("plugin CLI dispatch happens before configuration")
             }
+            gray::Commands::Login { .. }
+            | gray::Commands::Whoami
+            | gray::Commands::Logout
+            | gray::Commands::Cloud { .. } => {
+                unreachable!("account CLI dispatch happens before configuration")
+            }
             gray::Commands::Find { .. }
             | gray::Commands::Grep { .. }
             | gray::Commands::Spill { .. } => {
@@ -258,6 +275,13 @@ async fn run() -> anyhow::Result<()> {
         .or(cli.session.as_deref());
 
     if let Some(prompt) = cli.print.as_deref() {
+        let piped;
+        let prompt = if prompt == "-" {
+            piped = std::io::read_to_string(std::io::stdin())?;
+            piped.as_str()
+        } else {
+            prompt
+        };
         let result = if cli.json {
             gray::print::run_print_mode_json(
                 &config,

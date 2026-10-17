@@ -57,6 +57,7 @@ fn exit_from_signal(code: i32, clear_band: bool) -> ! {
     use std::io::IsTerminal as _;
 
     jobs::stop_all_blocking();
+    gray_tools::shell::kill::kill_tracked_groups();
     if session::exit_hint_printed() {
         let _ = std::io::stdout().flush();
         std::process::exit(code);

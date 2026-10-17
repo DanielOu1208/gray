@@ -148,9 +148,15 @@ fn atomic_batch_3_calls_retain_without_orphans() {
 }
 
 #[test]
-fn oversized_single_assistant_dropped() {
+fn oversized_single_assistant_truncated_to_cap() {
     let big = Message::assistant("y".repeat(12_000 * 4));
-    assert!(build_retained(std::slice::from_ref(&big), RETAINED_MESSAGE_TOKEN_BUDGET).is_empty());
+    let out = build_retained(std::slice::from_ref(&big), RETAINED_MESSAGE_TOKEN_BUDGET);
+    assert_eq!(out.len(), 1);
+    assert!(out[0].text_content().contains(TRUNCATION_MARKER));
+    assert!(
+        crate::agent_compact::est_tokens(&out) <= MAX_RETAINED_AGENT_MESSAGE_TOKENS as usize,
+        "truncated to the per-group cap"
+    );
 }
 
 #[test]
@@ -174,7 +180,12 @@ fn boundary_truncation_charges_thinking_and_tool_blocks() {
         role: Role::Assistant,
         injected: false,
         content: vec![
-            ContentBlock::thinking("t".repeat(2000)),
+            ContentBlock::Thinking {
+                text: "t".repeat(2000),
+                encrypted_content: Some("e".repeat(3200)),
+                item_id: None,
+                model: None,
+            },
             ContentBlock::text("a".repeat(4000)),
         ],
     };
@@ -370,7 +381,7 @@ async fn compaction_call_drops_tool_use_blocks_from_reply() {
 
 #[test]
 fn budget_walk_newest_first() {
-    let mk = |tag: &str| Message::user(format!("{tag}:{}", "z".repeat(32_000 * 4 - tag.len() - 1)));
+    let mk = |tag: &str| Message::user(format!("{tag}:{}", "z".repeat(10_000 * 4 - tag.len() - 1)));
     let msgs = vec![mk("m1"), mk("m2"), mk("m3")];
     let out = build_retained(&msgs, RETAINED_MESSAGE_TOKEN_BUDGET);
     assert_eq!(out.len(), 2);

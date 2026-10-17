@@ -187,20 +187,7 @@ pub fn spawn_with_prefix(
             cmd.args(&argv[1..]);
             cmd
         }
-        None => {
-            #[cfg(not(windows))]
-            {
-                if ps_report.is_some() {
-                    Command::new("bash")
-                } else {
-                    local_command()?
-                }
-            }
-            #[cfg(windows)]
-            {
-                local_command()?
-            }
-        }
+        None => local_command()?,
     };
     cmd.current_dir(cwd)
         .stdout(std::process::Stdio::piped())
@@ -237,7 +224,7 @@ pub fn spawn_with_prefix(
 fn local_command() -> io::Result<Command> {
     #[cfg(not(windows))]
     {
-        Ok(Command::new("sh"))
+        Ok(Command::new(if bash_available() { "bash" } else { "sh" }))
     }
     #[cfg(windows)]
     {

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::CoreError;
-use crate::event::{StreamEvent, Usage, append_thinking_chunk};
+use crate::event::{StreamEvent, Usage};
 use crate::message::ChatRequest;
 
 #[derive(Debug, thiserror::Error)]
@@ -210,6 +210,27 @@ pub(crate) async fn scope_tool_output<T>(
     fut: impl std::future::Future<Output = T>,
 ) -> T {
     TOOL_OUTPUT.scope(sink, fut).await
+}
+
+#[derive(Clone, Default)]
+pub struct IsolatedStream {
+    pub session_id: Option<String>,
+    pub cache_off: bool,
+}
+
+tokio::task_local! {
+    static ISOLATED_STREAM: IsolatedStream;
+}
+
+pub fn current_isolated_stream() -> Option<IsolatedStream> {
+    ISOLATED_STREAM.try_with(Clone::clone).ok()
+}
+
+pub(crate) async fn scope_isolated_stream<T>(
+    iso: IsolatedStream,
+    fut: impl std::future::Future<Output = T>,
+) -> T {
+    ISOLATED_STREAM.scope(iso, fut).await
 }
 
 #[async_trait]
@@ -458,13 +479,22 @@ pub struct Agent {
 
     pub(crate) cache_warm: Option<crate::cache_warm::CacheWarmPolicy>,
 
+    pub(crate) warm_run: Option<crate::cache_warm::ActiveWarm>,
+
+    pub(crate) warm_hint: std::sync::Arc<std::sync::Mutex<crate::cache_warm::WarmHint>>,
+
     pub(crate) prefix_guard: crate::prefix_guard::PrefixGuard,
 
     pub(crate) warm_cache_reported: bool,
 
+    pub(crate) cache_stats: crate::cache_stats::CacheStats,
+
     pub(crate) prefix_rewrite_ok: bool,
 
     pub(crate) lean_prompt: bool,
+    pub(crate) must_act: bool,
+    pub(crate) bench_nudges: bool,
+    pub(crate) bench_thrash_marks: Vec<u32>,
 }
 
 struct SharedProvider(Arc<dyn Provider>);
@@ -512,10 +542,18 @@ impl Agent {
             contaminated: std::collections::BTreeSet::new(),
             masked_prefix: 0,
             cache_warm: None,
+            warm_run: None,
+            warm_hint: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::cache_warm::WarmHint::default(),
+            )),
             prefix_guard: crate::prefix_guard::PrefixGuard::default(),
             warm_cache_reported: false,
+            cache_stats: crate::cache_stats::CacheStats::default(),
             prefix_rewrite_ok: true,
             lean_prompt: false,
+            must_act: false,
+            bench_nudges: false,
+            bench_thrash_marks: vec![60, 120],
         }
     }
 
@@ -552,6 +590,20 @@ impl Agent {
         self.lean_prompt = lean;
     }
 
+    pub fn set_must_act(&mut self, must: bool) {
+        self.must_act = must;
+    }
+
+    pub fn set_bench_nudges(&mut self, on: bool) {
+        self.bench_nudges = on;
+    }
+
+    pub fn set_bench_thrash_marks(&mut self, marks: Vec<u32>) {
+        if !marks.is_empty() {
+            self.bench_thrash_marks = marks;
+        }
+    }
+
     pub fn set_steer(&mut self, hook: SteerHook) {
         self.steer = Some(hook);
     }
@@ -586,6 +638,7 @@ impl Agent {
         self.masked_prefix = 0;
         self.prefix_guard.expect_change("history rewrite");
         self.history_revision = self.history_revision.wrapping_add(1);
+        self.warm_run = None;
         if let Some(hook) = &self.history_rewrite_hook {
             hook();
         }
@@ -732,6 +785,7 @@ impl Agent {
 
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+        self.cache_stats.reset();
         self.history_rewritten();
     }
 
@@ -803,6 +857,29 @@ impl Agent {
         };
         drain_reply_text(self.provider.stream(req), self.session_id.as_deref()).await
     }
+
+    pub(crate) async fn complete_isolated(
+        &self,
+        system: Option<&str>,
+        messages: Vec<Message>,
+        tools: Vec<ToolDef>,
+    ) -> Result<String, CoreError> {
+        let req = ChatRequest {
+            system: system.map(|s| s.to_string()),
+            messages,
+            tools,
+            max_tokens: None,
+        };
+        let iso = IsolatedStream {
+            session_id: Some(uuid::Uuid::new_v4().to_string()),
+            cache_off: true,
+        };
+        let session = self.session_id.clone();
+        scope_isolated_stream(iso, async {
+            drain_reply_text(self.provider.stream(req), session.as_deref()).await
+        })
+        .await
+    }
 }
 
 async fn drain_reply_text(
@@ -814,9 +891,6 @@ async fn drain_reply_text(
         match event? {
             StreamEvent::TextDelta { delta } => {
                 result.push_str(&delta);
-            }
-            StreamEvent::ThinkingDelta { delta } => {
-                append_thinking_chunk(&mut result, &delta);
             }
             StreamEvent::MessageComplete { usage, .. } => {
                 usage.unwrap_or_default().log_request("compaction", session);

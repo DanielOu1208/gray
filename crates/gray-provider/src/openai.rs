@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -6,10 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::{self, BoxStream, Stream, StreamExt};
-use gray_core::agent::{Provider, ProviderError};
+use gray_core::agent::{Provider, ProviderError, current_isolated_stream};
 use gray_core::credential::{CredentialLease, CredentialSource};
 use gray_core::event::{StopReason, StreamEvent, Usage};
-use gray_core::message::{ChatRequest, ContentBlock, Role, resolve_media};
+use gray_core::message::{
+    ChatRequest, ContentBlock, IMAGE_OMITTED, Role, TOOL_IMAGE_OMITTED, resolve_media,
+};
 use reqwest::Url;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
@@ -30,6 +32,12 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 const DEFAULT_STREAM_STALL: Duration = Duration::from_secs(300);
+
+const RETRY_STREAM_STALL: Duration = Duration::from_secs(75);
+
+const STREAM_STALL_MEMORY_SECS: i64 = 15 * 60;
+
+static LAST_STREAM_STALL_SECS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 #[derive(Clone)]
 pub struct OpenAiProvider {
@@ -80,7 +88,7 @@ impl OpenAiProvider {
         let model = model.into();
 
         Ok(Self {
-            caps: ModelCaps::for_model(&model).with_host(&base_url),
+            caps: ModelCaps::for_host(&base_url),
             base_url,
             api_key: api_key.into(),
             model,
@@ -118,7 +126,7 @@ impl OpenAiProvider {
         let http = Self::http_client(profile.follow_redirects);
         let model = model.into();
         Ok(Self {
-            caps: ModelCaps::for_model(&model).with_host(&base_url),
+            caps: ModelCaps::for_host(&base_url),
             base_url,
             api_key: String::new(),
             model,
@@ -221,8 +229,6 @@ struct OpenAiToolDefRequest {
     #[serde(rename = "type")]
     tool_type: String,
     function: OpenAiFunctionDefRequest,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_control: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -344,22 +350,8 @@ struct OpenAiPromptDetails {
     cache_read_tokens: usize,
 }
 
-fn is_anthropic_model(model: &str) -> bool {
-    let lower = model.to_lowercase();
-    lower.contains("claude") || lower.contains("anthropic")
-}
-
-fn is_muse_model(model: &str) -> bool {
-    let lower = model.to_lowercase();
-    lower.contains("muse") || lower.contains("spark") || lower.contains("glimmer")
-}
-
 fn names_cap_max_completion_tokens(base_url: &Url) -> bool {
     base_url.host_str() == Some("api.openai.com")
-}
-
-fn is_deepseek_model(model: &str) -> bool {
-    model.to_lowercase().contains("deepseek")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -371,70 +363,39 @@ pub(crate) enum CapField {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ModelCaps {
-    pub anthropic_cache: bool,
-
-    pub replay_reasoning_content: bool,
-
-    pub accepts_video: bool,
-
-    pub chat_audio_all: bool,
-
-    pub chat_audio_wav_mp3: bool,
-
-    pub responses_pdf: bool,
-
     pub prefer_responses: bool,
 
     pub cap_field: CapField,
 }
 
 impl ModelCaps {
-    pub(crate) fn for_model(model: &str) -> Self {
-        let id = model.to_ascii_lowercase();
-        let leaf = id.rsplit('/').next().unwrap_or(&id);
+    pub(crate) fn for_host(base_url: &Url) -> Self {
         Self {
-            anthropic_cache: is_anthropic_model(model),
-            replay_reasoning_content: is_deepseek_model(model),
-            accepts_video: id.contains("gemini") || id.contains("gemma"),
-            chat_audio_all: id.contains("gemini"),
-            chat_audio_wav_mp3: id.contains("audio"),
-            responses_pdf: ["gpt-4o", "gpt-4.1", "gpt-5"]
-                .iter()
-                .any(|m| leaf.contains(m))
-                || ["o1", "o3", "o4"].iter().any(|m| leaf.starts_with(m)),
-            prefer_responses: is_muse_model(model),
-            cap_field: CapField::MaxTokens,
+            prefer_responses: base_url.as_str().contains("opencode.ai/zen")
+                || base_url.as_str().contains("commandcode.ai"),
+            cap_field: if names_cap_max_completion_tokens(base_url) {
+                CapField::MaxCompletionTokens
+            } else {
+                CapField::MaxTokens
+            },
         }
     }
+}
 
-    pub(crate) fn with_host(mut self, base_url: &Url) -> Self {
-        self.prefer_responses = self.prefer_responses
-            && (base_url.as_str().contains("opencode.ai/zen")
-                || base_url.as_str().contains("commandcode.ai"));
-        if names_cap_max_completion_tokens(base_url) {
-            self.cap_field = CapField::MaxCompletionTokens;
-        }
-        self
-    }
+fn is_deepseek_model(model: &str) -> bool {
+    model.to_lowercase().contains("deepseek")
+}
 
-    pub(crate) fn chat_accepts(&self, media_type: &str) -> bool {
-        if media_type.starts_with("video/") {
-            return self.accepts_video;
-        }
-        match input_audio_format(media_type) {
-            Some(_) if self.chat_audio_all => true,
-            Some(fmt) => self.chat_audio_wav_mp3 && matches!(fmt, "wav" | "mp3"),
-            None => false,
-        }
-    }
+pub(crate) fn chat_accepts(media_type: &str) -> bool {
+    media_type.starts_with("image/")
+        || media_type.starts_with("video/")
+        || input_audio_format(media_type).is_some()
+}
 
-    pub(crate) fn responses_accepts(&self, media_type: &str) -> bool {
-        match media_type {
-            "application/pdf" => self.responses_pdf,
-            mt if mt.starts_with("video/") => self.accepts_video,
-            _ => false,
-        }
-    }
+pub(crate) fn responses_accepts(media_type: &str) -> bool {
+    media_type == "application/pdf"
+        || media_type.starts_with("image/")
+        || media_type.starts_with("video/")
 }
 
 pub(crate) fn wire_tool_output(content: &str, is_error: bool) -> String {
@@ -445,65 +406,8 @@ pub(crate) fn wire_tool_output(content: &str, is_error: bool) -> String {
     }
 }
 
-fn apply_anthropic_cache_control(
-    messages: &mut [OpenAiMessageRequest],
-    tools: &mut [OpenAiToolDefRequest],
-) {
-    let cache_control = serde_json::json!({"type": "ephemeral"});
-
-    if let Some(system) = messages
-        .iter_mut()
-        .find(|m| m.role == "system" || m.role == "developer")
-    {
-        add_cache_control_to_text_content(system, &cache_control);
-    }
-
-    if let Some(last_tool) = tools.last_mut() {
-        last_tool.cache_control = Some(cache_control.clone());
-    }
-
-    for m in messages.iter_mut().rev() {
-        if matches!(m.role.as_str(), "user" | "assistant" | "tool")
-            && add_cache_control_to_text_content(m, &cache_control)
-        {
-            break;
-        }
-    }
-}
-
-fn add_cache_control_to_text_content(m: &mut OpenAiMessageRequest, cache_control: &Value) -> bool {
-    if let Some(Value::String(text)) = &mut m.content {
-        if text.is_empty() {
-            return false;
-        }
-        let text = std::mem::take(text);
-        m.content = Some(serde_json::json!([
-            {"type": "text", "text": text, "cache_control": cache_control}
-        ]));
-        return true;
-    }
-    let Some(Value::Array(parts)) = &mut m.content else {
-        return false;
-    };
-    let text_part = parts
-        .iter_mut()
-        .rev()
-        .find(|p| p.get("type").and_then(Value::as_str) == Some("text"));
-    match text_part.and_then(Value::as_object_mut) {
-        Some(part) => {
-            part.insert("cache_control".to_string(), cache_control.clone());
-            true
-        }
-        None => false,
-    }
-}
-
 fn image_data_url(media_type: &str, data: &str) -> String {
     format!("data:{media_type};base64,{data}")
-}
-
-pub fn model_accepts_video(model: &str) -> bool {
-    ModelCaps::for_model(model).accepts_video
 }
 
 fn input_audio_format(media_type: &str) -> Option<&'static str> {
@@ -557,7 +461,6 @@ fn map_chat_request(
     model: &str,
     reasoning_effort: Option<&str>,
 ) -> Result<OpenAiChatRequest, ProviderError> {
-    let caps = ModelCaps::for_model(model);
     let max_tokens = req.max_tokens;
     let mut messages = Vec::new();
 
@@ -644,10 +547,10 @@ fn map_chat_request(
                     Some(tool_calls)
                 };
 
-                let reasoning_content = if thinking_parts.is_empty() {
-                    caps.replay_reasoning_content.then(String::new)
-                } else {
+                let reasoning_content = if is_deepseek_model(model) {
                     Some(thinking_parts.join("\n"))
+                } else {
+                    None
                 };
 
                 messages.push(OpenAiMessageRequest {
@@ -685,7 +588,19 @@ fn map_chat_request(
                 let mut media_parts = Vec::new();
                 let mut tool_results = Vec::new();
 
-                let content = resolve_media(msg.content, |mt| caps.chat_accepts(mt));
+                let tool_images = msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+                let content = resolve_media(
+                    msg.content,
+                    chat_accepts,
+                    if tool_images {
+                        TOOL_IMAGE_OMITTED
+                    } else {
+                        IMAGE_OMITTED
+                    },
+                );
                 for block in content {
                     match block {
                         ContentBlock::Text { text } => {
@@ -699,12 +614,6 @@ fn map_chat_request(
                             }
                         }
                         ContentBlock::Image { media_type, data } => {
-                            let (media_type, data) = if caps.anthropic_cache {
-                                crate::image_fit::fit_anthropic(&media_type, &data)
-                                    .unwrap_or((media_type, data))
-                            } else {
-                                (media_type, data)
-                            };
                             let url = image_data_url(&media_type, &data);
                             media_parts.push(
                                 serde_json::json!({"type":"image_url","image_url":{"url": url}}),
@@ -791,7 +700,7 @@ fn map_chat_request(
     ordered.append(&mut deferred_images);
     let messages = ordered;
 
-    let mut tools: Vec<OpenAiToolDefRequest> = filter_valid_tools(req.tools)
+    let tools: Vec<OpenAiToolDefRequest> = filter_valid_tools(req.tools)
         .into_iter()
         .map(|tool| OpenAiToolDefRequest {
             tool_type: "function".to_string(),
@@ -800,7 +709,6 @@ fn map_chat_request(
                 description: tool.description,
                 parameters: tool.parameters,
             },
-            cache_control: None,
         })
         .collect();
 
@@ -846,11 +754,7 @@ fn map_chat_request(
         log::warn!(target: "gray_provider", "synthesizing missing tool output for orphaned call {id}");
         fixed.push(stub(&id));
     }
-    let mut messages = fixed;
-
-    if caps.anthropic_cache {
-        apply_anthropic_cache_control(&mut messages, &mut tools);
-    }
+    let messages = fixed;
 
     let (reasoning_effort_val, reasoning_val, thinking_val) = match reasoning_effort {
         Some("off") => (None, None, Some(serde_json::json!({ "type": "disabled" }))),
@@ -1035,9 +939,19 @@ fn map_chat_to_responses(
                     _ => "user",
                 };
                 let mut text_parts: Vec<String> = Vec::new();
-                let content = resolve_media(msg.content, |mt| {
-                    ModelCaps::for_model(model).responses_accepts(mt)
-                });
+                let tool_images = msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+                let content = resolve_media(
+                    msg.content,
+                    responses_accepts,
+                    if tool_images {
+                        TOOL_IMAGE_OMITTED
+                    } else {
+                        IMAGE_OMITTED
+                    },
+                );
                 for block in content {
                     match block {
                         ContentBlock::Text { text } => {
@@ -1126,6 +1040,19 @@ fn map_chat_to_responses(
                         } if m == model => {
                             reasoning_items.push(serde_json::json!({"type": "reasoning", "id": id, "summary": [], "encrypted_content": ec}));
                         }
+                        ContentBlock::Thinking {
+                            text,
+                            item_id,
+                            model: m,
+                            ..
+                        } if !text.is_empty() && m.as_deref().is_none_or(|mm| mm == model) => {
+                            let mut item = serde_json::json!({"type": "reasoning",
+                                "summary": [{"type": "summary_text", "text": text}]});
+                            if let Some(id) = item_id {
+                                item["id"] = Value::String(id);
+                            }
+                            reasoning_items.push(item);
+                        }
                         ContentBlock::Thinking { .. } => {}
                         ContentBlock::ToolUse { id, name, args, .. } => {
                             tool_uses.push((id, name, args))
@@ -1202,7 +1129,7 @@ fn map_chat_to_responses(
         input,
         tools,
         stream: true,
-        prompt_cache_key: session_id.map(str::to_string),
+        prompt_cache_key: session_id.filter(|s| !s.is_empty()).map(str::to_string),
         store: false,
         reasoning,
         include,
@@ -1265,11 +1192,17 @@ pub(crate) fn strip_chat_reasoning_params(body: &mut OpenAiChatRequest) {
 
 pub(crate) fn responses_has_reasoning(body: &ResponsesRequest) -> bool {
     body.reasoning.is_some()
+        || body
+            .input
+            .iter()
+            .any(|i| i.get("type").and_then(Value::as_str) == Some("reasoning"))
 }
 
 pub(crate) fn strip_responses_reasoning(body: &mut ResponsesRequest) {
     body.reasoning = None;
     body.include = None;
+    body.input
+        .retain(|i| i.get("type").and_then(Value::as_str) != Some("reasoning"));
 }
 
 pub(crate) fn should_retry_without_previous_response(
@@ -1509,7 +1442,11 @@ fn classify_http_error_inner(
     ];
     let max_tokens_qualified = lower.contains("max_tokens")
         && (lower.contains("context") || lower.contains("too long") || lower.contains("exceeded"));
-    if CONTEXT_OVERFLOW_HINTS.iter().any(|h| lower.contains(h)) || max_tokens_qualified {
+    if !gray_core::overflow::is_non_overflow_message(snippet)
+        && (CONTEXT_OVERFLOW_HINTS.iter().any(|h| lower.contains(h))
+            || max_tokens_qualified
+            || gray_core::overflow::is_context_overflow_message(snippet))
+    {
         return ProviderError::ContextOverflow(format!(
             "context exhausted — start /new or compact ({msg})"
         ));
@@ -1939,6 +1876,11 @@ impl Stream for StallGuard {
             Poll::Pending => {
                 if self.timer.as_mut().poll(cx).is_ready() {
                     self.fired = true;
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    LAST_STREAM_STALL_SECS.store(now, std::sync::atomic::Ordering::Relaxed);
                     return Poll::Ready(Some(Err(SseReadError::Stalled(self.cap))));
                 }
                 Poll::Pending
@@ -1947,13 +1889,26 @@ impl Stream for StallGuard {
     }
 }
 
-fn stream_stall_cap() -> Duration {
-    std::env::var("GRAY_PROVIDER_STALL_SECS")
+fn env_secs(name: &str) -> Option<Duration> {
+    std::env::var(name)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|v| *v > 0)
         .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_STREAM_STALL)
+}
+
+fn stream_stall_cap() -> Duration {
+    let base = env_secs("GRAY_PROVIDER_STALL_SECS").unwrap_or(DEFAULT_STREAM_STALL);
+    let last = LAST_STREAM_STALL_SECS.load(std::sync::atomic::Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if last > 0 && now.saturating_sub(last) < STREAM_STALL_MEMORY_SECS {
+        base.min(env_secs("GRAY_PROVIDER_RETRY_STALL_SECS").unwrap_or(RETRY_STREAM_STALL))
+    } else {
+        base
+    }
 }
 
 fn stall_guard(inner: BoxedEventStream, cap: Duration) -> BoxedEventStream {
@@ -1967,14 +1922,15 @@ fn stall_guard(inner: BoxedEventStream, cap: Duration) -> BoxedEventStream {
 }
 
 fn sse_event_stream(response: reqwest::Response) -> BoxedEventStream {
-    stall_guard(
-        response
-            .bytes_stream()
-            .eventsource()
-            .map(|item| item.map_err(SseReadError::Upstream))
-            .boxed(),
-        stream_stall_cap(),
-    )
+    response
+        .bytes_stream()
+        .eventsource()
+        .map(|item| item.map_err(SseReadError::Upstream))
+        .boxed()
+}
+
+fn guarded_sse_event_stream(response: reqwest::Response) -> BoxedEventStream {
+    stall_guard(sse_event_stream(response), stream_stall_cap())
 }
 
 #[derive(Default)]
@@ -2024,6 +1980,7 @@ enum DynamicState {
         last_usage: Option<Usage>,
         completed: bool,
         trail: EventTrail,
+        reasoning_deltas: HashSet<String>,
     },
     Done,
 }
@@ -2143,12 +2100,25 @@ fn map_send_error(error: reqwest::Error) -> ProviderError {
     }
 }
 
+fn reasoning_summary_text(item: &Value) -> String {
+    item.get("summary")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .collect::<String>()
+        })
+        .unwrap_or_default()
+}
+
 fn process_dynamic_event(
     value: Value,
     pending: &mut VecDeque<StreamEvent>,
     tools: &mut BTreeMap<String, DynamicToolCall>,
     next_index: &mut usize,
     last_usage: &mut Option<Usage>,
+    reasoning_deltas: &mut HashSet<String>,
 ) -> Result<bool, ProviderError> {
     let typ = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match typ {
@@ -2160,6 +2130,12 @@ fn process_dynamic_event(
             }
         }
         "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            if typ.ends_with("summary_text.delta")
+                && let Some(id) = value.get("item_id").and_then(|v| v.as_str())
+                && !id.is_empty()
+            {
+                reasoning_deltas.insert(id.to_string());
+            }
             if let Some(delta) = value.get("delta").and_then(|v| v.as_str())
                 && !delta.is_empty()
             {
@@ -2224,6 +2200,10 @@ fn process_dynamic_event(
                     .and_then(|i| i.get("encrypted_content"))
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
+                let summary = item.map(reasoning_summary_text).unwrap_or_default();
+                if !summary.is_empty() && !reasoning_deltas.contains(id) {
+                    pending.push_back(StreamEvent::thinking_delta(summary));
+                }
                 if !id.is_empty() && !encrypted.is_empty() {
                     pending.push_back(StreamEvent::reasoning_item(id, encrypted));
                 }
@@ -2363,6 +2343,9 @@ async fn dynamic_step(
                 .await
                 {
                     Ok(response) => {
+                        // No stall guard: plugin relays are turn-settled — silence
+                        // until the turn completes is the contract, not a dead
+                        // connection. The sidecar's own turn deadline bounds it.
                         let event_stream = sse_event_stream(response);
                         state = DynamicState::Streaming {
                             event_stream,
@@ -2372,6 +2355,7 @@ async fn dynamic_step(
                             last_usage: None,
                             completed: false,
                             trail: EventTrail::default(),
+                            reasoning_deltas: HashSet::new(),
                         };
                     }
                     Err(error) => return Some((Err(error), DynamicState::Done)),
@@ -2385,6 +2369,7 @@ async fn dynamic_step(
                 mut last_usage,
                 mut completed,
                 mut trail,
+                mut reasoning_deltas,
             } => {
                 if completed && pending.is_empty() {
                     return None;
@@ -2420,6 +2405,7 @@ async fn dynamic_step(
                                 last_usage,
                                 completed,
                                 trail,
+                                reasoning_deltas,
                             };
                             continue;
                         }
@@ -2454,6 +2440,7 @@ async fn dynamic_step(
                             &mut tools,
                             &mut next_index,
                             &mut last_usage,
+                            &mut reasoning_deltas,
                         ) {
                             Ok(finished) => completed |= finished,
                             Err(error) => return Some((Err(error), DynamicState::Done)),
@@ -2468,6 +2455,7 @@ async fn dynamic_step(
                                 last_usage,
                                 completed,
                                 trail,
+                                reasoning_deltas,
                             };
                             return Some((Ok(event), state));
                         }
@@ -2482,6 +2470,7 @@ async fn dynamic_step(
                             last_usage,
                             completed,
                             trail,
+                            reasoning_deltas,
                         };
                     }
                 }
@@ -2499,21 +2488,25 @@ impl OpenAiProvider {
         request: ChatRequest,
         profile: OpenAiProviderProfile,
         credential_source: Arc<dyn CredentialSource>,
+        session_id: Option<String>,
+        cache_off: bool,
     ) -> BoxStream<'static, Result<StreamEvent, ProviderError>> {
         let mut body = map_chat_to_responses(
             request,
             &self.model,
-            self.session_id.as_deref(),
+            session_id.as_deref(),
             self.reasoning_effort.as_deref(),
         );
-        apply_dynamic_policy(&mut body, &profile.request, self.session_id.as_deref());
+        apply_dynamic_policy(&mut body, &profile.request, session_id.as_deref());
+        if cache_off {
+            body.prompt_cache_key = None;
+        }
 
         let profile_url = match responses_url(&profile.base_url) {
             Ok(url) => url,
             Err(error) => return stream::once(async move { Err(error) }).boxed(),
         };
         let client = self.http.clone();
-        let session_id = self.session_id.clone();
         let started = stream::once(async move {
             credential_source
                 .acquire()
@@ -2549,6 +2542,7 @@ impl OpenAiProvider {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum StreamState {
     Init {
         client: reqwest::Client,
@@ -2608,6 +2602,7 @@ enum StreamState {
         stream_attempt: usize,
         last_response_id: Option<String>,
         trail: EventTrail,
+        reasoning_deltas: HashSet<String>,
     },
     Done,
 }
@@ -2779,7 +2774,7 @@ fn stream_unfold_step(
                     .await
                     {
                         Ok(response) => {
-                            let event_stream: BoxedEventStream = sse_event_stream(response);
+                            let event_stream: BoxedEventStream = guarded_sse_event_stream(response);
                             state = StreamState::Streaming {
                                 event_stream,
                                 accumulated_tools: BTreeMap::new(),
@@ -2885,7 +2880,7 @@ fn stream_unfold_step(
                     .await
                     {
                         Ok(response) => {
-                            let event_stream: BoxedEventStream = sse_event_stream(response);
+                            let event_stream: BoxedEventStream = guarded_sse_event_stream(response);
 
                             let last_response_id = body.previous_response_id.clone();
                             state = StreamState::ResponsesStreaming {
@@ -2905,6 +2900,7 @@ fn stream_unfold_step(
 
                                 last_text_part: None,
                                 trail: EventTrail::default(),
+                                reasoning_deltas: HashSet::new(),
                             };
                         }
                         Err((err, floor, http_status)) => {
@@ -3341,6 +3337,7 @@ fn stream_unfold_step(
                     stream_attempt,
                     mut last_response_id,
                     mut trail,
+                    mut reasoning_deltas,
                 } => {
                     if let Some(event) = pending_events.pop_front() {
                         return Some((
@@ -3361,6 +3358,7 @@ fn stream_unfold_step(
                                 saw_output_text,
                                 last_text_part,
                                 trail,
+                                reasoning_deltas,
                             },
                         ));
                     }
@@ -3388,6 +3386,7 @@ fn stream_unfold_step(
                                     saw_output_text,
                                     last_text_part,
                                     trail,
+                                    reasoning_deltas,
                                 };
                                 continue;
                             }
@@ -3446,6 +3445,13 @@ fn stream_unfold_step(
                                 }
                                 "response.reasoning_text.delta"
                                 | "response.reasoning_summary_text.delta" => {
+                                    if typ.ends_with("summary_text.delta")
+                                        && let Some(id) =
+                                            value.get("item_id").and_then(|v| v.as_str())
+                                        && !id.is_empty()
+                                    {
+                                        reasoning_deltas.insert(id.to_string());
+                                    }
                                     if let Some(delta) = value.get("delta").and_then(|v| v.as_str())
                                         && !delta.is_empty()
                                     {
@@ -3700,6 +3706,11 @@ fn stream_unfold_step(
                                             .get("encrypted_content")
                                             .and_then(|v| v.as_str())
                                             .unwrap_or_default();
+                                        let summary = reasoning_summary_text(item);
+                                        if !summary.is_empty() && !reasoning_deltas.contains(id) {
+                                            pending_events
+                                                .push_back(StreamEvent::thinking_delta(summary));
+                                        }
                                         if !id.is_empty() && !ec.is_empty() {
                                             pending_events
                                                 .push_back(StreamEvent::reasoning_item(id, ec));
@@ -3743,6 +3754,7 @@ fn stream_unfold_step(
                                 saw_output_text,
                                 last_text_part,
                                 trail,
+                                reasoning_deltas,
                             };
                         }
                         Some(Err(err)) => {
@@ -3810,6 +3822,7 @@ fn stream_unfold_step(
                                     stream_attempt,
                                     last_response_id,
                                     trail,
+                                    reasoning_deltas,
                                 };
                                 continue;
                             }
@@ -3849,13 +3862,13 @@ impl Provider for OpenAiProvider {
     }
 
     fn warm_output_cap(&self, _req: &ChatRequest) -> u32 {
-        match self.reasoning_effort.as_deref() {
-            Some(eff) if eff != "off" && self.caps.anthropic_cache => chat_thinking_budget(eff) + 1,
-            _ => 1,
-        }
+        1
     }
 
     fn stream(&self, req: ChatRequest) -> BoxStream<'static, Result<StreamEvent, ProviderError>> {
+        let iso = current_isolated_stream().unwrap_or_default();
+        let session_id = iso.session_id.or_else(|| self.session_id.clone());
+        let cache_off = iso.cache_off;
         if let (Some(profile), Some(credential_source)) =
             (self.profile.clone(), self.credential_source.clone())
         {
@@ -3867,19 +3880,22 @@ impl Provider for OpenAiProvider {
                 })
                 .boxed();
             }
-            return self.dynamic_stream(req, profile, credential_source);
+            return self.dynamic_stream(req, profile, credential_source, session_id, cache_off);
         }
         if self.caps.prefer_responses {
             let url = match responses_url(&self.base_url) {
                 Ok(u) => u,
                 Err(e) => return stream::once(async move { Err(e) }).boxed(),
             };
-            let body = map_chat_to_responses(
+            let mut body = map_chat_to_responses(
                 req,
                 &self.model,
-                self.session_id.as_deref(),
+                session_id.as_deref(),
                 self.reasoning_effort.as_deref(),
             );
+            if cache_off {
+                body.prompt_cache_key = None;
+            }
             log::debug!(target: "gray_provider", "using Responses API for model {}", self.model);
             let init_state = StreamState::ResponsesInit {
                 client: self.http.clone(),
@@ -3904,7 +3920,11 @@ impl Provider for OpenAiProvider {
             Err(e) => return stream::once(async move { Err(e) }).boxed(),
         };
 
-        body.prompt_cache_key = self.session_id.clone().filter(|s| !s.is_empty());
+        body.prompt_cache_key = if cache_off {
+            None
+        } else {
+            session_id.clone().filter(|s| !s.is_empty())
+        };
         body.temperature = self.temperature;
         body.top_p = self.top_p;
         if self.caps.cap_field == CapField::MaxCompletionTokens {
@@ -3915,7 +3935,7 @@ impl Provider for OpenAiProvider {
             url,
             api_key: self.api_key.clone(),
             body,
-            session_id: self.session_id.clone(),
+            session_id: session_id.clone(),
             attempt: 1,
             retry_after: None,
         };

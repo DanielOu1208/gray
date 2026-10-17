@@ -133,6 +133,7 @@ pub fn is_context_overflow_error(err: &CoreError) -> bool {
             || lower.contains("context window")
             || lower.contains("context length")
             || lower.contains("max_tokens")
+            || gray_core::overflow::is_context_overflow_message(msg)
     } else {
         false
     }

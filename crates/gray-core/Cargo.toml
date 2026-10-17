@@ -17,6 +17,8 @@ base64 = { workspace = true }
 thiserror = { workspace = true }
 zeroize.workspace = true
 log = { workspace = true }
+regex = { workspace = true }
+uuid = { workspace = true }
 
 
 [dev-dependencies]

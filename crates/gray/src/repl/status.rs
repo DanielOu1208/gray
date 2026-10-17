@@ -700,22 +700,6 @@ pub(crate) fn apply_context_arg(config: &mut Config, val: &str) -> (String, bool
     }
 }
 
-pub(super) fn compaction_card(
-    elapsed: &str,
-    detail: &str,
-) -> (
-    ratatui::text::Line<'static>,
-    Vec<ratatui::text::Line<'static>>,
-) {
-    use ratatui::style::Style;
-    use ratatui::text::{Line, Span};
-    let dim = Style::default().fg(crate::theme::theme().tool_dim);
-    let mut spans = super::cron::card_header_spans("Context compacted", String::new(), false);
-    spans.push(Span::styled(format!(" \u{b7} {elapsed}"), dim));
-    let body = vec![Line::from(Span::styled(format!("  {detail}"), dim))];
-    (Line::from(spans), body)
-}
-
 pub(super) fn push_compaction_card(
     tui: Option<&crate::composer::SharedTui>,
     elapsed: &str,
@@ -723,8 +707,10 @@ pub(super) fn push_compaction_card(
 ) {
     match tui {
         Some(shared) => {
-            let (header, body) = compaction_card(elapsed, detail);
-            shared.lock().expect("tui lock").push_tool_box(header, body);
+            shared.lock().expect("tui lock").push_action(
+                "Context compacted",
+                Some(&format!("{elapsed} \u{b7} {detail}")),
+            );
         }
         None => println!("Context compacted · {elapsed} · {detail}\n"),
     }
@@ -736,6 +722,7 @@ pub(crate) async fn handle_compact(
     custom_instructions: Option<String>,
     agent: &mut Option<Agent>,
     session_state: &mut Option<SessionState>,
+    pending_history: &mut std::sync::Arc<Vec<Message>>,
     tui: Option<&crate::composer::SharedTui>,
 ) {
     if agent.is_none() {
@@ -751,6 +738,10 @@ pub(crate) async fn handle_compact(
     let Some(ag) = agent.as_mut() else {
         return;
     };
+
+    if ag.messages().is_empty() && !pending_history.is_empty() {
+        ag.set_messages(super::take_pending_history(pending_history));
+    }
 
     let messages = ag.messages().to_vec();
     if messages.is_empty() {
@@ -830,11 +821,12 @@ pub(crate) async fn handle_compact(
 
             if let Some(shared) = tui {
                 let mut tui = shared.lock().expect("tui lock");
-                let (header, body) = compaction_card(
-                    &elapsed_str,
-                    &format!("{msg_count} messages \u{2192} summary"),
+                tui.push_action(
+                    "Context compacted",
+                    Some(&format!(
+                        "{elapsed_str} \u{b7} {msg_count} messages \u{2192} summary"
+                    )),
                 );
-                tui.push_tool_box(header, body);
                 tui.push_compaction_summary(&summary);
                 tui.ensure_gap();
             } else {
@@ -847,11 +839,11 @@ pub(crate) async fn handle_compact(
                 super::cron::push_notice(
                     &mut shared.lock().expect("tui lock"),
                     "Nothing to compact",
-                    "conversation is empty",
+                    "conversation already fits in context",
                     false,
                 );
             } else {
-                println!("nothing to compact (conversation is empty)");
+                println!("nothing to compact (conversation already fits in context)");
             }
         }
         Err(e) => {
@@ -866,23 +858,5 @@ pub(crate) async fn handle_compact(
                 println!("compaction failed: {e}");
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod compaction_card_tests {
-    use super::compaction_card;
-
-    fn text(line: &ratatui::text::Line<'_>) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
-    #[test]
-    fn compaction_card_is_a_bullet_header_with_one_detail_row() {
-        let (header, body) = compaction_card("9s", "282.7k/256k tokens");
-        assert_eq!(text(&header), "\u{2b22} Context compacted \u{b7} 9s");
-        assert_eq!(body.len(), 1);
-        assert_eq!(text(&body[0]), "  282.7k/256k tokens");
-        assert!(!text(&header).contains('└'));
     }
 }

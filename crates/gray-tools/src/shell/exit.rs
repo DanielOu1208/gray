@@ -78,30 +78,24 @@ pub fn masks_pipeline(command: &str) -> bool {
 
 fn masked_note(command: &str, stages: Option<&[i32]>) -> Option<String> {
     let segs = split_pipeline(command);
-    if segs.len() < 2 {
-        return None;
-    }
-    let earlier_failed = match stages {
-        Some(s) if s.len() == segs.len() => s[..s.len() - 1].iter().any(|c| *c != 0),
-        _ => false,
-    };
-    if !earlier_failed {
+    let stages = stages.filter(|s| segs.len() >= 2 && s.len() == segs.len())?;
+    let sigpipe = 128 + 13;
+    if !stages[..stages.len() - 1]
+        .iter()
+        .any(|c| *c != 0 && *c != sigpipe)
+    {
         return None;
     }
     let last = base_head(&segs[segs.len() - 1]);
-    let first = base_head(&segs[0]);
-    if UNMASKABLE_TAILS.contains(&last) {
-        let note = if segs.len() == 2 {
-            format!("`{last}` masks `{first}`'s exit; rerun `{first}` alone for its status")
-        } else {
-            format!("`{last}` masks earlier stages' exit; rerun without the pipe to check")
-        };
-        return Some(note);
-    }
-    if !TAIL_CMDS.contains(&last) {
+    if !UNMASKABLE_TAILS.contains(&last) && !TAIL_CMDS.contains(&last) {
         return None;
     }
-
+    if segs.len() > 2 {
+        return Some(format!(
+            "`{last}` masks earlier stages' exit; rerun without the pipe to check"
+        ));
+    }
+    let first = base_head(&segs[0]);
     Some(format!(
         "`{last}` masks `{first}`'s exit; rerun `{first}` alone for its status"
     ))

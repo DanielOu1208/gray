@@ -26,3 +26,31 @@ fn wide_table_fits_max_width() {
         );
     }
 }
+
+#[test]
+fn prose_tabs_expand_pretty_only() {
+    let tsv = "Indu B Das\tindubdas\tindu@hyperwise.io\t9\n";
+    let mut buffers = MarkdownBuffers::new();
+    let (out, _) = render_markdown_ratatui_with_buffers_width(
+        tsv,
+        gray_markdown_style(),
+        true,
+        &mut buffers,
+        None,
+        Some(95),
+    );
+    let joined: String = out.lines.iter().map(line_text).collect();
+    assert!(!joined.contains('\t'), "raw tab leaked: {joined:?}");
+    assert!(joined.contains("Indu B Das  "));
+
+    let (raw, _) = render_markdown_ratatui_with_buffers_width(
+        tsv,
+        gray_markdown_style(),
+        false,
+        &mut buffers,
+        None,
+        Some(95),
+    );
+    let joined_raw: String = raw.lines.iter().map(line_text).collect();
+    assert!(joined_raw.contains('\t'));
+}

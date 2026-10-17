@@ -8,47 +8,40 @@ fn models() -> Vec<(String, String)> {
 }
 
 #[test]
-fn bogus_model_id_is_rejected_with_browse_hint() {
-    let err = validate_direct_model_id("bogus-model-xyz-123", &models()).unwrap_err();
-    assert!(err.contains("unknown model"), "{err}");
-    assert!(err.contains("bogus-model-xyz-123"), "{err}");
-    assert!(err.contains("/model"), "{err}");
-}
-
-#[test]
-fn exact_id_is_accepted() {
+fn direct_model_id_normalizes_and_resolves() {
     assert_eq!(
         validate_direct_model_id("zai/glm-5.2", &models()).unwrap(),
         "zai/glm-5.2"
     );
-}
-
-#[test]
-fn input_is_trimmed() {
     assert_eq!(
         validate_direct_model_id("  zai/glm-5.2  ", &models()).unwrap(),
-        "zai/glm-5.2"
+        "zai/glm-5.2",
+        "input is trimmed"
     );
-}
-
-#[test]
-fn case_insensitive_id_canonicalizes() {
     assert_eq!(
         validate_direct_model_id("ZAI/GLM-5.2", &models()).unwrap(),
-        "zai/glm-5.2"
+        "zai/glm-5.2",
+        "case-insensitive ids canonicalize"
     );
-}
-
-#[test]
-fn unique_provider_tail_resolves() {
     assert_eq!(
         validate_direct_model_id("glm-5.2", &models()).unwrap(),
-        "zai/glm-5.2"
+        "zai/glm-5.2",
+        "unique provider tail resolves"
+    );
+    assert_eq!(
+        validate_direct_model_id("my-local-model", &[]).unwrap(),
+        "my-local-model",
+        "empty known list fails open for custom endpoints"
     );
 }
 
 #[test]
-fn ambiguous_tail_is_rejected() {
+fn direct_model_id_rejects_with_a_browse_hint() {
+    let err = validate_direct_model_id("bogus-model-xyz-123", &models()).unwrap_err();
+    assert!(err.contains("unknown model"), "{err}");
+    assert!(err.contains("bogus-model-xyz-123"), "{err}");
+    assert!(err.contains("/model"), "{err}");
+
     let dup = vec![
         ("a/same".to_string(), "A".to_string()),
         ("b/same".to_string(), "B".to_string()),
@@ -56,20 +49,12 @@ fn ambiguous_tail_is_rejected() {
     let err = validate_direct_model_id("same", &dup).unwrap_err();
     assert!(err.contains("ambiguous"), "{err}");
     assert!(err.contains("/model"), "{err}");
-}
 
-#[test]
-fn empty_known_list_fails_open_for_custom_endpoints() {
-    assert_eq!(
-        validate_direct_model_id("my-local-model", &[]).unwrap(),
-        "my-local-model"
-    );
-}
-
-#[test]
-fn empty_input_is_usage_not_silent_default() {
     let err = validate_direct_model_id("   ", &models()).unwrap_err();
-    assert!(err.contains("/model"), "{err}");
+    assert!(
+        err.contains("/model"),
+        "empty input is usage, not a silent default: {err}"
+    );
 }
 
 fn mock_models_server(body: &'static str) -> u16 {
@@ -403,6 +388,8 @@ fn arrows_step_within_supported_levels_and_clamp_at_the_ends() {
     assert_eq!(efforts.shown(&config, &saved, STEP_MODEL), Some("high"));
     assert!(!efforts.was_stepped(STEP_MODEL));
     efforts.step(&config, &saved, STEP_MODEL, true);
+    assert_eq!(efforts.shown(&config, &saved, STEP_MODEL), Some("xhigh"));
+    efforts.step(&config, &saved, STEP_MODEL, true);
     assert_eq!(efforts.shown(&config, &saved, STEP_MODEL), Some("max"));
     efforts.step(&config, &saved, STEP_MODEL, true);
     assert_eq!(
@@ -410,13 +397,13 @@ fn arrows_step_within_supported_levels_and_clamp_at_the_ends() {
         Some("max"),
         "→ clamps at the top, no wrap"
     );
-    for _ in 0..5 {
+    for _ in 0..8 {
         efforts.step(&config, &saved, STEP_MODEL, false);
     }
     assert_eq!(
         efforts.shown(&config, &saved, STEP_MODEL),
-        Some("low"),
-        "← clamps at the bottom; `off` is not a step-family level"
+        Some("off"),
+        "← clamps at the bottom"
     );
     assert!(efforts.was_stepped(STEP_MODEL));
 
@@ -454,7 +441,10 @@ fn rows_open_at_the_remembered_effort_and_the_live_level() {
     let mut saved = SavedConfig::default();
     saved.remember_effort(&effort_memory_key("", PICKER_BASE, STEP_MODEL), "xhigh");
     let config = effort_config("other/live-model", None);
-    assert_eq!(initial_row_effort(&config, &saved, STEP_MODEL), Some("max"));
+    assert_eq!(
+        initial_row_effort(&config, &saved, STEP_MODEL),
+        Some("xhigh")
+    );
 }
 
 #[test]

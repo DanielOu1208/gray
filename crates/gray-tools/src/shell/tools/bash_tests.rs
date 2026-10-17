@@ -108,16 +108,7 @@ fn truncated_log_has_executable_bounded_recovery() {
             .args(["-c", "exit 0"])
             .status()
             .unwrap();
-        let result = finish_inline(
-            "probe",
-            &path,
-            status,
-            &summary,
-            Instant::now(),
-            None,
-            None,
-            dir.path(),
-        );
+        let result = finish_inline("probe", &path, status, &summary, Instant::now(), None, None);
         let command = result
             .content
             .lines()
@@ -156,109 +147,6 @@ fn truncated_log_has_executable_bounded_recovery() {
             );
         }
     }
-}
-
-#[tokio::test]
-async fn missing_command_gets_an_actionable_hint() {
-    let session = sess("not-found");
-    let ctx = ctx_for(&session);
-    let r = BashTool::default()
-        .execute(
-            &ctx,
-            json!({"command": "gray-definitely-not-a-tool --help"}),
-        )
-        .await;
-    assert!(
-        r.content
-            .contains("`gray-definitely-not-a-tool` is not installed here"),
-        "hint names the tool: {}",
-        r.content
-    );
-    assert!(
-        r.content.contains("command -v gray-definitely-not-a-tool"),
-        "hint says how to confirm: {}",
-        r.content
-    );
-}
-
-#[tokio::test]
-async fn ordinary_failures_get_no_not_found_hint() {
-    let session = sess("no-hint");
-    let ctx = ctx_for(&session);
-    let r = BashTool::default()
-        .execute(&ctx, json!({"command": "grep -q nomatch /etc/hostname"}))
-        .await;
-    assert!(
-        !r.content.contains("is not installed here"),
-        "ordinary non-zero exit stays clean: {}",
-        r.content
-    );
-}
-
-#[test]
-fn not_found_subject_reads_every_shell_wording() {
-    for (line, want) in [
-        ("bash: line 1: rg: command not found", "rg"),
-        ("sh: 1: xxd: not found", "xxd"),
-        ("zsh: command not found: goyacc", "goyacc"),
-        ("-bash: ruff: command not found", "ruff"),
-    ] {
-        assert_eq!(not_found_subject(line).as_deref(), Some(want), "{line}");
-    }
-    assert!(missing_command_hint("exit 0\nall good").is_none());
-    assert!(missing_command_hint("curl: (22) 404 not found").is_none());
-}
-
-#[test]
-fn known_missing_binaries_get_their_real_substitute() {
-    let rg = missing_command_hint("bash: line 1: rg: command not found").unwrap();
-    assert!(rg.contains("`grep -r`"), "{rg}");
-    let xxd = missing_command_hint("sh: 1: xxd: not found").unwrap();
-    assert!(xxd.contains("`od -c`"), "{xxd}");
-    let unknown = missing_command_hint("bash: line 1: goyacc: command not found").unwrap();
-    assert!(
-        unknown.contains("`grep`, `sed`, `awk`, `python3`"),
-        "{unknown}"
-    );
-    assert!(unknown.contains("command -v goyacc"), "{unknown}");
-}
-
-#[test]
-fn missing_path_gets_a_sibling_suggestion() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("src/repl")).unwrap();
-    std::fs::write(dir.path().join("src/repl/mod.rs"), "x").unwrap();
-    std::fs::write(dir.path().join("README.md"), "x").unwrap();
-
-    let hint = missing_path_hint(
-        "cat: src/repl/mode.rs: No such file or directory",
-        dir.path(),
-    )
-    .unwrap();
-    assert!(hint.contains("src/repl/mod.rs"), "{hint}");
-
-    let hint = missing_path_hint(
-        &format!(
-            "ls: cannot access '{}': No such file or directory",
-            dir.path().join("READM.md").display()
-        ),
-        dir.path(),
-    )
-    .unwrap();
-    assert!(hint.contains("README.md"), "{hint}");
-
-    let hint =
-        missing_path_hint("bash: cd: src/repp: No such file or directory", dir.path()).unwrap();
-    assert!(hint.contains("src/repl"), "{hint}");
-
-    assert!(missing_path_hint("exit 0\nall good", dir.path()).is_none());
-    assert!(
-        missing_path_hint(
-            "cat: totallyalien.zzz: No such file or directory",
-            dir.path()
-        )
-        .is_none()
-    );
 }
 
 fn png_bytes() -> Vec<u8> {
@@ -511,17 +399,22 @@ async fn cat_through_execute_shows_vision() {
 }
 
 #[test]
-fn unattached_media_note_covers_every_shape_the_claim_refuses() {
+fn media_dump_refusal_covers_every_shape_the_claim_refuses() {
+    let cwd = Path::new("/nonexistent-gray-test-9f2a");
     for cmd in [
         "cd /tmp && cat a.png",
         "cat a.png | wc -c",
         "cat a.png && wc -c",
         "x && cat a.png",
         "cat *.png",
+        "xxd a.png | head",
+        "base64 a.png",
+        "head -c 200 a.png",
+        "cat -n a.png",
     ] {
-        let note = unattached_media_note(cmd).unwrap_or_else(|| panic!("note missing: {cmd}"));
-        assert!(note.contains("NOT attached"), "{cmd}: {note}");
-        assert!(note.contains("cat "), "{cmd}: {note}");
+        let note = media_dump_refusal(cmd, cwd).unwrap_or_else(|| panic!("note missing: {cmd}"));
+        assert!(note.contains("refused"), "{cmd}: {note}");
+        assert!(note.contains(".png"), "{cmd}: {note}");
     }
 
     for cmd in [
@@ -529,17 +422,19 @@ fn unattached_media_note_covers_every_shape_the_claim_refuses() {
         "cat a.png",
         "cat missing.png",
         "cat notes.txt",
+        "cat a.png > copy.png",
+        "cat a.png >> copy.png",
         "ls -la",
     ] {
-        assert!(unattached_media_note(cmd).is_none(), "spurious: {cmd}");
+        assert!(media_dump_refusal(cmd, cwd).is_none(), "spurious: {cmd}");
     }
 
-    let note = unattached_media_note("cd /tmp && cat a.png").unwrap();
+    let note = media_dump_refusal("cd /tmp && cat a.png", cwd).unwrap();
     assert!(note.contains("cat a.png"), "{note}");
 }
 
 #[tokio::test]
-async fn compound_cat_says_the_image_was_not_attached() {
+async fn compound_cat_is_refused_instead_of_dumping_bytes() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("shot.png"), png_bytes()).unwrap();
     let ctx = ToolContext {
@@ -553,9 +448,9 @@ async fn compound_cat_says_the_image_was_not_attached() {
             json!({"command": "cd /nonexistent-9f2a && cat shot.png"}),
         )
         .await;
-    assert!(!out.is_error, "{}", out.content);
+    assert!(out.is_error, "{}", out.content);
     assert!(out.images.is_empty());
-    assert!(out.content.contains("NOT attached"), "{}", out.content);
+    assert!(out.content.contains("refused"), "{}", out.content);
 }
 
 #[tokio::test]
@@ -1239,6 +1134,39 @@ async fn wait_group_gone(pgid: i32) -> bool {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     false
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_backgrounded_group_survives_the_exit_sweep_inline() {
+    let tool = BashTool::default();
+    let ctx = ctx_for(&sess("exit-sweep-inline"));
+    let (out, pgid, _log, _report) = run_lane(&tool, &ctx, "sleep 30 &", None, false).await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(group_alive(pgid), "the backgrounded sleeper is still up");
+    assert!(
+        !crate::shell::kill::is_tracked(pgid),
+        "a detached group that settled must not sit in the exit-sweep set"
+    );
+    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    assert!(wait_group_gone(pgid).await, "cleanup");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_backgrounded_group_survives_the_exit_sweep_after_a_job_settles() {
+    let tool = BashTool::default();
+    let ctx = ctx_for(&sess("exit-sweep-job"));
+    let (out, pgid, _log, _report) = run_lane(&tool, &ctx, "sleep 30 &", Some(1), true).await;
+    assert!(out.content.starts_with("still running"), "{}", out.content);
+    assert!(group_alive(pgid), "the backgrounded sleeper is still up");
+    wait_for_jobs(&tool, &ctx).await;
+    assert!(
+        !crate::shell::kill::is_tracked(pgid),
+        "a detached group must be untracked once the job settles"
+    );
+    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    assert!(wait_group_gone(pgid).await, "cleanup");
 }
 
 #[cfg(unix)]

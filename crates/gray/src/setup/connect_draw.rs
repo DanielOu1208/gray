@@ -90,23 +90,26 @@ fn render_note_or_status(
     note: &str,
     colors: &ConnectColors,
 ) {
-    let span = match status_msg {
-        Some(msg) => Span::styled(
+    let (text, style) = match status_msg {
+        Some(msg) => (
             format!(" \u{2022} {msg}"),
             Style::default()
                 .fg(crate::theme::theme().error)
                 .bg(colors.box_bg),
         ),
-        None => Span::styled(
-            note,
+        None => (
+            note.to_string(),
             Style::default()
                 .fg(crate::theme::theme().text_dim)
                 .bg(colors.box_bg),
         ),
     };
+    let width = inner.width.max(1) as usize;
+    let rows = (text.chars().count().div_ceil(width)).clamp(1, 2) as u16;
     frame.render_widget(
-        Paragraph::new(Line::from(span)),
-        Rect::new(inner.x, inner.y + 5, inner.width, 1),
+        Paragraph::new(Line::from(Span::styled(text, style)))
+            .wrap(ratatui::widgets::Wrap { trim: true }),
+        Rect::new(inner.x, inner.y + 5, inner.width, rows),
     );
 }
 

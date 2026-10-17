@@ -370,14 +370,12 @@ pub(crate) fn format_user_prompt_lines(
     let sanitized = crate::tui::sanitize_user_text(text);
     let prompt_color = crate::theme::theme().text_soft;
     let text_primary = crate::theme::theme().text_body;
-    let dim_color = crate::theme::theme().text_muted;
     let bg_style = Style::default().bg(crate::theme::theme().surface_bg);
 
     let margin_row = || -> Line<'static> {
         Line::from(Span::styled(" ".repeat(width.max(1)), bg_style)).style(bg_style)
     };
     let mut lines = Vec::new();
-    lines.push(margin_row());
 
     let hang = " ".repeat(GUTTER + 2);
     let arrow_span = Span::styled(
@@ -397,7 +395,12 @@ pub(crate) fn format_user_prompt_lines(
         if raw_line.is_empty() {
             lines.push(Line::from(vec![prefix]).style(bg_style));
         } else {
-            let chars: Vec<char> = raw_line.chars().collect();
+            let mut cells: Vec<crate::composer::draw::widgets::InputCell> = raw_line
+                .chars()
+                .map(|c| (c, Style::default().fg(text_primary)))
+                .collect();
+            crate::composer::draw::widgets::restyle_attachment_markers(&mut cells);
+            let chars: Vec<char> = cells.iter().map(|c| c.0).collect();
             let mut start = 0usize;
             let mut first_row = true;
             while start < chars.len() {
@@ -408,37 +411,118 @@ pub(crate) fn format_user_prompt_lines(
                     Span::raw(hang.clone())
                 };
                 first_row = false;
-                lines.push(
-                    Line::from(vec![
-                        row_prefix,
-                        Span::styled(
-                            chars[start..end].iter().collect::<String>(),
-                            Style::default().fg(text_primary),
-                        ),
-                    ])
-                    .style(bg_style),
-                );
+                let mut spans = vec![row_prefix];
+                spans.extend(crate::composer::draw::widgets::styled_runs(
+                    &cells[start..end],
+                ));
+                lines.push(Line::from(spans).style(bg_style));
                 start = end;
             }
         }
     }
-    if !attached.is_empty() {
-        let names = attached
-            .iter()
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        lines.push(
-            Line::from(vec![
-                Span::raw(hang.clone()),
-                Span::styled(
-                    format!("↳ attached: {names}"),
-                    Style::default().fg(dim_color),
-                ),
-            ])
-            .style(bg_style),
-        );
+    let mut previews = false;
+    for path in attached {
+        if let Some(rows) = image_preview_lines(path, max_w) {
+            if !previews && !lines.is_empty() {
+                lines.push(margin_row());
+            }
+            previews = true;
+            lines.extend(rows);
+        }
     }
+    lines.insert(0, margin_row());
     lines.push(margin_row());
     lines
+}
+
+pub(crate) fn viewed_image_lines(
+    name: &str,
+    args: Option<&serde_json::Value>,
+    cwd: &std::path::Path,
+    max_w: usize,
+) -> Option<Vec<Line<'static>>> {
+    let args = args?;
+    const MAX_PREVIEWS: usize = 4;
+    let collected: Vec<String> = if matches!(name, "view" | "read") {
+        args.get("path")
+            .and_then(|v| v.as_str())
+            .into_iter()
+            .chain(
+                args.get("paths")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str()),
+            )
+            .map(String::from)
+            .collect()
+    } else if matches!(name, "bash" | "shell") {
+        args.get("command")
+            .and_then(|v| v.as_str())
+            .and_then(gray_tools::shell::label::read_only)
+            .filter(|r| r.look == gray_tools::shell::label::Look::Viewed)
+            .map(|r| r.targets)
+            .unwrap_or_default()
+    } else {
+        return None;
+    };
+    let raw_paths = collected.into_iter().take(MAX_PREVIEWS);
+    let mut lines = Vec::new();
+    for raw in raw_paths {
+        let path = std::path::Path::new(&raw);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        let is_image = gray_tools::images::is_image_extension(&path);
+        if !is_image {
+            continue;
+        }
+        if let Some(rows) = image_preview_lines(&path, max_w) {
+            if !lines.is_empty() {
+                lines.push(Line::default());
+            }
+            lines.extend(rows);
+        }
+    }
+    (!lines.is_empty()).then_some(lines)
+}
+
+fn image_preview_lines(path: &std::path::Path, max_w: usize) -> Option<Vec<Line<'static>>> {
+    if let Some(rows) = kitty::preview_lines(path, max_w) {
+        return Some(rows);
+    }
+    let img = image::open(path).ok()?;
+    let cols = max_w.clamp(8, 48) as u32;
+    let thumb = img.thumbnail(cols, 48).to_rgba8();
+    let (tw, th) = thumb.dimensions();
+    if tw == 0 || th == 0 {
+        return None;
+    }
+    let surface = crate::theme::theme().surface_bg;
+    let to_color = |px: &image::Rgba<u8>| -> ratatui::style::Color {
+        if px[3] < 128 {
+            surface
+        } else {
+            ratatui::style::Color::Rgb(px[0], px[1], px[2])
+        }
+    };
+    let hang = " ".repeat(GUTTER + 2);
+    let mut lines = Vec::new();
+    let mut y = 0u32;
+    while y < th {
+        let mut spans = vec![Span::styled(hang.clone(), Style::default().bg(surface))];
+        for x in 0..tw {
+            let top = thumb.get_pixel(x, y);
+            let bottom = thumb.get_pixel(x, (y + 1).min(th - 1));
+            spans.push(Span::styled(
+                "\u{2580}",
+                Style::default().fg(to_color(top)).bg(to_color(bottom)),
+            ));
+        }
+        lines.push(Line::from(spans));
+        y += 2;
+    }
+    Some(lines)
 }

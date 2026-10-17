@@ -77,6 +77,9 @@ impl PluginCredentialSource {
                 }
                 _ => CredentialError::Unavailable(identity),
             },
+            ProviderRpcError::Unavailable(message) => {
+                CredentialError::Unavailable(format!("{identity}: {message}"))
+            }
             _ => CredentialError::Unavailable(identity),
         }
     }

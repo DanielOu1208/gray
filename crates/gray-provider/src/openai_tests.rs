@@ -1045,7 +1045,7 @@ fn unknown_resume_id_retries_stripped_once() {
 }
 
 #[test]
-fn deepseek_assistant_messages_always_carry_reasoning_content() {
+fn assistant_messages_carry_reasoning_content_only_when_thinking() {
     use gray_core::message::Message;
     let plain_assistant = || ChatRequest {
         system: None,
@@ -1059,15 +1059,6 @@ fn deepseek_assistant_messages_always_carry_reasoning_content() {
             .and_then(|a| a.last().cloned())
             .expect("assistant msg")
     };
-    let body = map_chat_request(plain_assistant(), "deepseek-reasoner", None).expect("maps");
-    let v = serde_json::to_value(&body).expect("serializes");
-    assert_eq!(
-        last_msg(&v)
-            .get("reasoning_content")
-            .and_then(|r| r.as_str()),
-        Some(""),
-        "deepseek gets the (empty) field: {v}"
-    );
     let body = map_chat_request(plain_assistant(), "test-model", None).expect("maps");
     let v = serde_json::to_value(&body).expect("serializes");
     assert!(
@@ -1093,14 +1084,21 @@ fn deepseek_assistant_messages_always_carry_reasoning_content() {
         tools: Vec::new(),
         max_tokens: None,
     };
-    let body = map_chat_request(thinking_req, "deepseek-chat", None).expect("maps");
+    let body = map_chat_request(thinking_req.clone(), "deepseek-v4", None).expect("maps");
     let v = serde_json::to_value(&body).expect("serializes");
     assert_eq!(
         last_msg(&v)
             .get("reasoning_content")
             .and_then(|r| r.as_str()),
         Some("hmm"),
-        "chain preserved: {v}"
+        "deepseek chain preserved: {v}"
+    );
+
+    let body = map_chat_request(thinking_req, "test-model", None).expect("maps");
+    let v = serde_json::to_value(&body).expect("serializes");
+    assert!(
+        last_msg(&v).get("reasoning_content").is_none(),
+        "non-deepseek drops thinking: {v}"
     );
 }
 
@@ -1798,31 +1796,7 @@ fn cached_turn_req() -> gray_core::message::ChatRequest {
 }
 
 #[test]
-fn anthropic_cache_control_rides_content_parts() {
-    let model = "anthropic/claude-sonnet-4.5";
-    let body = map_chat_request(cached_turn_req(), model, None).expect("maps");
-    let v = serde_json::to_value(&body).expect("serializes");
-    let msgs = v["messages"].as_array().expect("messages");
-    assert!(
-        msgs.iter().all(|m| m.get("cache_control").is_none()),
-        "never on the message object: {v}"
-    );
-    assert_eq!(msgs[0]["role"], "system");
-    assert_eq!(msgs[0]["content"][0]["text"], "sys");
-    assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
-    let last = msgs.last().expect("tool result is last");
-    assert_eq!(last["role"], "tool");
-    assert_eq!(last["content"][0]["cache_control"]["type"], "ephemeral");
-    let marked = msgs
-        .iter()
-        .filter(|m| m.to_string().contains("cache_control"))
-        .count();
-    assert_eq!(marked, 2, "system + last message only: {v}");
-    assert_eq!(v["tools"][0]["cache_control"]["type"], "ephemeral");
-}
-
-#[test]
-fn non_anthropic_models_carry_no_cache_control() {
+fn chat_wire_carries_no_cache_control() {
     let body = map_chat_request(cached_turn_req(), "openai/gpt-5", None).expect("maps");
     let v = serde_json::to_value(&body).expect("serializes");
     assert!(!v.to_string().contains("cache_control"), "{v}");
@@ -2359,24 +2333,6 @@ fn admission_consumed_400_is_terminal_bad_request() {
 }
 
 #[test]
-fn model_accepts_video_is_gemini_only() {
-    use crate::openai::model_accepts_video;
-    assert!(model_accepts_video("gemini-3-pro"));
-    assert!(model_accepts_video("google/gemini-2.5-flash"));
-    assert!(model_accepts_video("gemma-3-27b"));
-
-    for m in [
-        "gpt-5.1",
-        "claude-opus-5",
-        "deepseek-v4",
-        "step-5-preview",
-        "gpt-oss-120b",
-    ] {
-        assert!(!model_accepts_video(m), "{m} must not claim video");
-    }
-}
-
-#[test]
 fn media_goes_native_where_the_wire_takes_it_else_its_fallback() {
     let req = |media: ContentBlock| ChatRequest {
         system: None,
@@ -2422,9 +2378,17 @@ fn media_goes_native_where_the_wire_takes_it_else_its_fallback() {
     );
 
     let parts = chat(video(), "step-5-preview");
-    assert_eq!(parts[0]["text"], "(contact sheet of clip.mp4)");
-    assert_eq!(parts[1]["type"], "image_url");
-    assert_eq!(chat(audio(), "gpt-5.1"), "(no audio)");
+    assert!(
+        parts[0]["video_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:video/mp4;base64,")
+    );
+    let parts = chat(audio(), "gpt-5.1");
+    assert_eq!(
+        parts[0]["input_audio"],
+        serde_json::json!({"data": "V0FW", "format": "wav"})
+    );
 
     assert!(
         chat(pdf(), "gemini-3-pro")
@@ -2445,7 +2409,7 @@ fn media_goes_native_where_the_wire_takes_it_else_its_fallback() {
     );
     let body =
         serde_json::to_value(map_chat_to_responses(req(video()), "gpt-5.1", None, None)).unwrap();
-    assert_eq!(body["input"][0]["content"], "(contact sheet of clip.mp4)");
+    assert_eq!(body["input"][0]["content"][0]["type"], "input_video");
 }
 
 #[test]
@@ -3002,4 +2966,97 @@ async fn hung_sse_response_surfaces_retryable_stall() {
         elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(15),
         "failed at stall cap, not instantly or after hanging: {elapsed:?}"
     );
+}
+
+#[tokio::test]
+async fn dynamic_stream_silent_turn_completes_without_stall() {
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _lock = STALL_ENV.lock().unwrap();
+    unsafe { std::env::set_var("GRAY_PROVIDER_STALL_SECS", "1") };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = socket.read(&mut buf).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        // Turn-settled transport: silence past the stall cap is the contract,
+        // not a dead connection — the turn arrives whole when it settles.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        socket
+            .write_all(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\ndata: [DONE]\n\n",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+    });
+    let profile = OpenAiProviderProfile {
+        base_url: format!("http://{addr}/v1").parse().unwrap(),
+        wire: OpenAiWire::Responses,
+        authorization: OpenAiAuthorization::Bearer {
+            secret_name: "access_token".into(),
+        },
+        headers: Vec::new(),
+        request: OpenAiRequestPolicy::default(),
+        follow_redirects: false,
+    };
+    let provider = OpenAiProvider::new_with_profile(
+        "gpt-test",
+        None,
+        None,
+        profile,
+        std::sync::Arc::new(StaticProviderSource {
+            secrets: gray_core::credential::SecretMap::from_iter([("access_token", "t")]),
+            metadata: Default::default(),
+        }),
+    )
+    .unwrap();
+    let mut stream = provider.stream(empty_chat_req());
+    let mut saw_text = false;
+    let mut completed = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(StreamEvent::TextDelta { delta }) if delta == "hi" => saw_text = true,
+            Ok(StreamEvent::MessageComplete { .. }) => completed = true,
+            Ok(_) => {}
+            Err(e) => panic!("silent turn must not surface a stream error: {e:?}"),
+        }
+    }
+    unsafe { std::env::remove_var("GRAY_PROVIDER_STALL_SECS") };
+    server.abort();
+    assert!(
+        saw_text && completed,
+        "silent-then-complete turn must deliver its events"
+    );
+}
+
+#[test]
+fn a_recent_stall_shrinks_the_cap_for_the_next_stream() {
+    let _lock = STALL_ENV.lock().unwrap();
+    unsafe {
+        std::env::remove_var("GRAY_PROVIDER_STALL_SECS");
+        std::env::remove_var("GRAY_PROVIDER_RETRY_STALL_SECS");
+    }
+    LAST_STREAM_STALL_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(stream_stall_cap(), DEFAULT_STREAM_STALL);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    LAST_STREAM_STALL_SECS.store(now, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(stream_stall_cap(), RETRY_STREAM_STALL);
+    LAST_STREAM_STALL_SECS.store(
+        now - STREAM_STALL_MEMORY_SECS - 1,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    assert_eq!(stream_stall_cap(), DEFAULT_STREAM_STALL);
+    LAST_STREAM_STALL_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
 }

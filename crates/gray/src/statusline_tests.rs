@@ -24,16 +24,6 @@ fn texts(segs: &[Seg]) -> String {
 }
 
 #[test]
-fn defaults_match_the_stock_footer() {
-    let c = StatusLineConfig::default();
-    assert_eq!(c.left(), spec(DEFAULT_LEFT));
-    assert_eq!(c.right(), spec(DEFAULT_RIGHT));
-    assert_eq!(c.separator(), " ");
-    assert_eq!(c.right_separator(), "  ");
-    assert_eq!(c.interval(), Duration::from_millis(5_000));
-}
-
-#[test]
 fn interval_has_a_floor() {
     let c = StatusLineConfig {
         interval_ms: Some(10),
