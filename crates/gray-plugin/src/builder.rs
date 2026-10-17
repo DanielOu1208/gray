@@ -392,10 +392,8 @@ pub async fn active_plugins(
 }
 
 fn warn_missing_requires(plugins: &[Arc<dyn Plugin>]) {
-    let loaded: std::collections::BTreeSet<String> = plugins
-        .iter()
-        .map(|p| p.manifest().name.clone())
-        .collect();
+    let loaded: std::collections::BTreeSet<String> =
+        plugins.iter().map(|p| p.manifest().name.clone()).collect();
     for p in plugins {
         let m = p.manifest();
         let missing: Vec<String> = m

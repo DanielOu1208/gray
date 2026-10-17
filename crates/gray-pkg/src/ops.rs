@@ -723,7 +723,13 @@ async fn update_inner(target: &str, check: bool) -> anyhow::Result<Vec<UpdateRow
         }
         let argv = installed.argv.clone();
         let scope = Some(installed.scope.clone());
-        match install_index(&client, name, InstallOpts { argv, scope }, &mut BTreeSet::new()).await
+        match install_index(
+            &client,
+            name,
+            InstallOpts { argv, scope },
+            &mut BTreeSet::new(),
+        )
+        .await
         {
             Ok(r) => {
                 let v = r.version.clone();
