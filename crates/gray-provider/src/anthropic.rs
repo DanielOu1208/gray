@@ -159,7 +159,7 @@ pub(crate) fn map_request(
                     "type": "document",
                     "source": {"type": "base64", "media_type": media_type, "data": data},
                 })),
-                ContentBlock::ToolUse { id, name, args } => {
+                ContentBlock::ToolUse { id, name, args, .. } => {
                     let input = if args.is_object() { args } else { json!({}) };
                     blocks
                         .push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
@@ -410,6 +410,7 @@ impl Decoder {
                         id: cb.get("id").and_then(Value::as_str).map(str::to_string),
                         name: cb.get("name").and_then(Value::as_str).map(str::to_string),
                         arguments_delta: String::new(),
+                        thought_signature: None,
                     }));
                 }
                 let data = cb
@@ -463,6 +464,7 @@ impl Decoder {
                         id: None,
                         name: None,
                         arguments_delta: text("partial_json"),
+                        thought_signature: None,
                     })),
                     _ => {}
                 }

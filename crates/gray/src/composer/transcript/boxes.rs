@@ -455,7 +455,7 @@ impl Tui {
                                     );
                                 }
                             }
-                            gray_core::ContentBlock::ToolUse { id, name, args } => {
+                            gray_core::ContentBlock::ToolUse { id, name, args, .. } => {
                                 tool_calls.insert(id.clone(), (name.clone(), args.clone()));
                             }
                             _ => {}

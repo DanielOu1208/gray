@@ -45,6 +45,7 @@ pub(crate) struct PendingToolCall {
     pub(crate) id: Option<String>,
     pub(crate) name: Option<String>,
     pub(crate) arguments: String,
+    pub(crate) thought_signature: Option<String>,
 
     pub(crate) started: bool,
 }

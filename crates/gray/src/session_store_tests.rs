@@ -1105,6 +1105,7 @@ fn random_message(rng: &mut Rng, i: usize) -> Message {
                 id: format!("call-{i}-{k}"),
                 name: "bash".to_string(),
                 args: serde_json::json!({"command": "echo \"hi\\n\"", "n": i}),
+                thought_signature: None,
             }),
             3 => content.push(ContentBlock::ToolResult {
                 id: format!("call-{i}-{k}"),

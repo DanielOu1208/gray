@@ -358,6 +358,8 @@ pub enum StreamEvent {
         name: Option<String>,
         #[serde(default, alias = "arguments", alias = "args_delta")]
         arguments_delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
 
     MessageComplete {
@@ -408,6 +410,7 @@ impl StreamEvent {
             id,
             name,
             arguments_delta: arguments_delta.into(),
+            thought_signature: None,
         }
     }
 

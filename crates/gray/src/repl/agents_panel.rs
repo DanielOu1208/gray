@@ -479,7 +479,7 @@ fn replay_entry(v: &mut Viewer, entry: &SessionEntry, cwd: &Path, w: usize) {
                             push_block(v, TranscriptEntry::StyledLines { lines, hyperlinks });
                         }
                     }
-                    ContentBlock::ToolUse { id, name, args } => {
+                    ContentBlock::ToolUse { id, name, args, .. } => {
                         v.tool_calls
                             .insert(id.clone(), (name.clone(), args.clone()));
                     }
