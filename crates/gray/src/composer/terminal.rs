@@ -3,8 +3,7 @@ use std::io::{self, Write};
 use ratatui::backend::{Backend, ClearType};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Rect, Size};
-use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::Widget;
 
 pub struct Frame<'a> {
     pub(crate) cursor_position: Option<Position>,
@@ -107,7 +106,7 @@ where
         self.viewport_area = area;
     }
 
-    pub fn set_viewport_height(&mut self, height: u16, screen_size: Size) -> io::Result<u16> {
+    pub fn set_viewport_height(&mut self, height: u16, screen_size: Size) -> io::Result<()> {
         let screen_shrank = screen_size.height < self.last_known_screen_size.height;
         self.last_known_screen_size = screen_size;
         let old = self.viewport_area;
@@ -144,19 +143,7 @@ where
             self.set_viewport_area(area);
             self.clear_after_position(Position::new(0, from))?;
         }
-        Ok(if slid { area.y - old.y } else { 0 })
-    }
-
-    pub(crate) fn paint_lines_at(&mut self, y: u16, lines: &[Line<'static>]) -> io::Result<()> {
-        if lines.is_empty() {
-            return Ok(());
-        }
-        let width = self.viewport_area.width.max(1);
-        let height = lines.len() as u16;
-        let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
-        Paragraph::new(lines.to_vec()).render(buffer.area, &mut buffer);
-        let rows: Vec<&[Cell]> = buffer.content.chunks(width as usize).collect();
-        self.draw_rows(y, &rows)
+        Ok(())
     }
 
     pub fn clear_after_position(&mut self, position: Position) -> io::Result<()> {

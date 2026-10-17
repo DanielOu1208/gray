@@ -865,10 +865,12 @@ mod tests {
         let saved_path = dir.path().join("config.json");
         let eps_path = dir.path().join("custom_endpoints.json");
         let auth_path = dir.path().join("auth.json");
-        let mut saved = crate::setup::SavedConfig::default();
-        saved.api_key = Some("existing-key".to_string());
-        saved.base_url = Some("https://api.example.com/v1".to_string());
-        saved.model = Some("existing-model".to_string());
+        let saved = crate::setup::SavedConfig {
+            api_key: Some("existing-key".to_string()),
+            base_url: Some("https://api.example.com/v1".to_string()),
+            model: Some("existing-model".to_string()),
+            ..Default::default()
+        };
         crate::setup::save_saved_config_at(&saved_path, &saved).expect("seed");
         assert!(
             !auto_config_portal_at(&saved_path, &eps_path, &auth_path, "gray_tok")
