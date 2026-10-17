@@ -79,7 +79,22 @@ if [ -e "$shadow" ]; then
     echo "removed stale $shadow (cargo-install shadow)"
 fi
 
-echo "→ installed to ${DEST}/gray ($(${DEST}/gray --version 2>/dev/null || echo '?'), ${CHANNEL})"
+INSTALLED_VER=$("${DEST}/gray" --version 2>/dev/null || true)
+echo "→ installed to ${DEST}/gray (${INSTALLED_VER:-?}, ${CHANNEL})"
+
+if [ "${GRAY_TELEMETRY:-1}" != "0" ] && [ -z "${GRAY_CDN_URL:-}" ]; then
+    VER="${INSTALLED_VER##* }"
+    if have_cmd curl; then
+        ( curl -fsS -m 3 -X POST -H "Content-Type: application/json" \
+            -d "{\"os\":\"${OS}\",\"arch\":\"${ARCH}\",\"channel\":\"${CHANNEL}\",\"version\":\"${VER}\"}" \
+            https://gray.alignment.id/api/telemetry/install >/dev/null 2>&1 || : ) &
+    elif have_cmd wget; then
+        ( wget -q -T 3 -O /dev/null --post-data \
+            "{\"os\":\"${OS}\",\"arch\":\"${ARCH}\",\"channel\":\"${CHANNEL}\",\"version\":\"${VER}\"}" \
+            --header="Content-Type: application/json" \
+            https://gray.alignment.id/api/telemetry/install 2>/dev/null || : ) &
+    fi
+fi
 
 case ":$PATH:" in
     *":${DEST}:"*) ;;

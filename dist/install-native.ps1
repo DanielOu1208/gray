@@ -150,6 +150,14 @@ function Install-NativeGray {
         Write-Host "Installed $version (native $Channel): $binary"
         Write-Host 'Shell commands require Git for Windows (Git Bash). Gray does not install it or WSL.'
         Write-Host 'Uninstall: close Gray, remove this install folder and its user PATH entry; keep your .gray data.'
+        if ($env:GRAY_TELEMETRY -ne '0' -and $BaseUri.Host -eq 'gray.alignment.id') {
+            try {
+                $v = ($version -split '\s+')[-1]
+                $a = if ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') { 'x86_64' } else { $env:PROCESSOR_ARCHITECTURE.ToLower() }
+                $body = @{ os = 'windows'; arch = $a; channel = $Channel; version = $v } | ConvertTo-Json -Compress
+                $null = Invoke-RestMethod -Method Post -Uri 'https://gray.alignment.id/api/telemetry/install' -TimeoutSec 4 -ContentType 'application/json' -Body $body
+            } catch {}
+        }
     } finally {
         if ($stage -and [IO.File]::Exists($stage)) { [IO.File]::Delete($stage) }
         if ($lock) { $lock.Dispose() }
