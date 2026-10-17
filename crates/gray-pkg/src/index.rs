@@ -100,6 +100,8 @@ pub fn lookup<'a>(index: &'a Index, name: &str) -> anyhow::Result<&'a Entry> {
 struct IndexCache {
     etag: Option<String>,
     fetched_at: u64,
+    #[serde(default)]
+    url: String,
     index: Index,
 }
 
@@ -134,7 +136,7 @@ async fn fetch_index_url(
     url: &str,
     cache_file: &str,
 ) -> anyhow::Result<Index> {
-    let cached = read_cache(cache_file).ok();
+    let cached = read_cache(cache_file).ok().filter(|c| c.url == url);
     if let Some(c) = &cached
         && crate::now_secs().saturating_sub(c.fetched_at) < INDEX_TTL_SECS
     {
@@ -166,6 +168,7 @@ async fn fetch_index_url(
         &IndexCache {
             etag,
             fetched_at: crate::now_secs(),
+            url: url.to_string(),
             index: index.clone(),
         },
     )?;

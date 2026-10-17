@@ -75,7 +75,13 @@ impl PluginCredentialSource {
                 "profile_mismatch" => {
                     CredentialError::Invalid(format!("{identity} profile binding changed"))
                 }
-                _ => CredentialError::Unavailable(identity),
+                _ => {
+                    if failure.message.is_empty() {
+                        CredentialError::Unavailable(identity)
+                    } else {
+                        CredentialError::Unavailable(format!("{identity}: {}", failure.message))
+                    }
+                }
             },
             ProviderRpcError::Unavailable(message) => {
                 CredentialError::Unavailable(format!("{identity}: {message}"))

@@ -367,19 +367,25 @@ async fn install_index(
 ) -> anyhow::Result<Report> {
     validate_install_key(name)?;
 
-    let index = match crate::index::fetch_hub_index(client).await {
-        Ok(index) => index,
-        Err(_) => crate::index::fetch_index(client).await?,
+    let hub_hit = match crate::index::fetch_hub_index(client).await {
+        Ok(index) => index.plugins.get(name).cloned(),
+        Err(_) => None,
     };
-    let entry = crate::index::lookup(&index, name)?;
+    let entry = match hub_hit {
+        Some(entry) => entry,
+        None => {
+            let index = crate::index::fetch_index(client).await?;
+            crate::index::lookup(&index, name)?.clone()
+        }
+    };
     match entry.kind.as_str() {
         "" | "plugin" => {}
-        "skill" => return crate::skills_ops::install_hub_entry(client, name, entry).await,
+        "skill" => return crate::skills_ops::install_hub_entry(client, name, &entry).await,
         other => {
             anyhow::bail!("hub package '{name}' is kind '{other}' — not installable yet")
         }
     }
-    if !supported_index_entry(entry) {
+    if !supported_index_entry(&entry) {
         anyhow::bail!(
             "unsupported ecosystem '{}' source type '{}' for {name} (installable: gray-native tarballs)",
             entry.ecosystem,
