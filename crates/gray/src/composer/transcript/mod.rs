@@ -14,7 +14,6 @@ use super::Tui;
 
 mod boxes;
 mod cards;
-mod kitty;
 mod margins;
 pub(crate) mod rows;
 

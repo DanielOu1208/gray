@@ -1,10 +1,8 @@
-pub mod account;
 pub mod ask;
 pub mod auth;
 pub mod auto_title;
 pub mod auto_update;
 pub mod cache;
-pub mod cloud;
 pub mod cmd;
 pub mod compact;
 pub mod composer;
@@ -18,7 +16,7 @@ pub(crate) mod exe_watch;
 pub(crate) mod failed_turn;
 pub mod feedback;
 pub(crate) mod fusion;
-pub mod gateway;
+pub(crate) mod gateway_pid;
 pub mod host;
 pub mod keymap;
 pub mod logging;
@@ -404,7 +402,6 @@ pub(crate) fn extra_surface_plugins(
     }
     if !config.bare && spawn_plugins {
         extra.push(Arc::new(crate::fusion::FusionPlugin::default()));
-        extra.push(Arc::new(crate::cron_tool::CronPlugin));
     }
     extra
 }
@@ -681,10 +678,18 @@ pub enum Commands {
         cmd: PluginCmd,
     },
 
-    #[command(about = "The always-on gateway daemon: chat apps, cron, scheduling")]
+    #[command(
+        disable_help_flag = true,
+        about = "The always-on gateway daemon: chat apps, cron, scheduling (gateway plugin)"
+    )]
     Gateway {
-        #[command(subcommand)]
-        cmd: GatewayCmd,
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS",
+            help = "Forwarded to the installed gateway plugin"
+        )]
+        args: Vec<String>,
     },
 
     #[command(about = "Trust a directory's .gray/prompts, SKILL.md and AGENTS.md files")]
@@ -699,27 +704,6 @@ pub enum Commands {
         revoke: bool,
     },
 
-    #[command(about = "Log in to gray.alignment.id with a one-time enrollment code")]
-    Login {
-        /// The code the site minted; prompted for when omitted.
-        #[arg(value_name = "CODE")]
-        code: Option<String>,
-    },
-
-    #[command(about = "Show the gray.alignment.id account the stored token belongs to")]
-    Whoami,
-
-    #[command(about = "Revoke the stored registry token and forget it locally")]
-    Logout,
-
-    #[command(
-        about = "Your hosted Gray machine on Gray Cloud — provision it, check it, chat with it"
-    )]
-    Cloud {
-        #[arg(value_name = "MESSAGE", num_args = 0.., help = "With a message, chat with your hosted machine; empty shows status")]
-        message: Vec<String>,
-    },
-
     #[command(visible_alias = "upgrade", about = "Install a newer gray build")]
     Update {
         #[arg(
@@ -731,12 +715,6 @@ pub enum Commands {
 
         #[arg(long, help = "Also update plugins and provider CLIs")]
         everything: bool,
-    },
-
-    #[command(about = "Manage scheduled jobs (the gateway or `gray cron serve` runs them)")]
-    Cron {
-        #[command(subcommand)]
-        cmd: CronCmd,
     },
 
     #[command(about = "Manage saved sessions")]
@@ -832,194 +810,6 @@ pub enum SessionsCmd {
     Prune {
         #[arg(long, default_value_t = 90, help = "Age threshold in days")]
         older_than_days: u64,
-    },
-}
-
-#[derive(Parser, Debug, Clone)]
-pub enum CronCmd {
-    #[command(about = "List cron jobs")]
-    List,
-
-    #[command(
-        about = "Add a scheduled job",
-        after_help = "Reminder (one command, no model turn):\n  gray cron add \"in 2m\" \"clean my roo\" --reminder\nThe text is stored and delivered verbatim: never reword it, never fix typos, never pass --name.\n\nSchedules: \"in 10m\", \"every 1h\", \"daily 9am\", \"weekdays 9:00\", \"every monday 6pm\", an RFC3339 timestamp, or a 5-field cron expression."
-    )]
-    Add {
-        #[arg(
-            value_name = "SCHEDULE",
-            help = "\"in 10m\", \"every 1h\", \"daily 9am\", RFC3339, or 5-field cron"
-        )]
-        schedule: String,
-
-        #[arg(value_name = "PROMPT", help = "Prompt the agent runs on each fire")]
-        prompt: String,
-
-        #[arg(long, help = "Where the result goes: 'local', 'origin', or a target")]
-        deliver: Option<String>,
-
-        #[arg(
-            long = "origin-session",
-            value_name = "ID",
-            help = "Deliver to this session instead"
-        )]
-        origin_session: Option<String>,
-
-        #[arg(long, help = "Job name (default: first line of the prompt)")]
-        name: Option<String>,
-
-        #[arg(
-            long = "in",
-            value_name = "DIR",
-            help = "Working directory for the job"
-        )]
-        workdir: Option<PathBuf>,
-
-        #[arg(
-            long,
-            value_name = "LIST",
-            help = "Comma-separated skills to load for this job"
-        )]
-        skills: Option<String>,
-
-        #[arg(
-            long,
-            value_name = "PATH",
-            help = "Run this script file as the job instead of a prompt"
-        )]
-        script: Option<PathBuf>,
-
-        #[arg(
-            long,
-            help = "Store-and-deliver reminder — no model turn, text goes out verbatim"
-        )]
-        reminder: bool,
-    },
-
-    #[command(about = "Run every due job once (what the ticker calls each minute)")]
-    Tick {
-        #[arg(long, help = "Emit JSON instead of text")]
-        json: bool,
-    },
-
-    #[command(about = "Run the cron ticker in the foreground")]
-    Serve,
-
-    #[command(about = "Pause a job")]
-    Pause {
-        #[arg(value_name = "ID")]
-        id: String,
-    },
-
-    #[command(about = "Resume a paused job")]
-    Resume {
-        #[arg(value_name = "ID")]
-        id: String,
-    },
-
-    #[command(about = "Fire a job right now")]
-    Run {
-        #[arg(value_name = "ID")]
-        id: String,
-    },
-
-    #[command(about = "Show one job's schedule, delivery and last result")]
-    Show {
-        #[arg(value_name = "ID")]
-        id: String,
-    },
-
-    #[command(about = "Delete a job")]
-    Remove {
-        #[arg(value_name = "ID")]
-        id: String,
-    },
-}
-
-#[derive(Parser, Debug, Clone)]
-pub enum GatewayCmd {
-    #[command(about = "Connect a chat platform (e.g. telegram, discord)")]
-    Setup {
-        #[arg(
-            value_name = "PLATFORM",
-            help = "Platform to set up; omit for the picker"
-        )]
-        platform: Option<String>,
-    },
-
-    #[command(about = "Run the gateway in the foreground")]
-    Run,
-
-    #[command(about = "Show gateway, cron and service status")]
-    Status,
-
-    #[command(about = "Start the installed service")]
-    Start,
-
-    #[command(about = "Stop the running gateway")]
-    Stop,
-
-    #[command(about = "Restart the service")]
-    Restart,
-
-    #[command(about = "Install the user service (runit/systemd) so the gateway survives logout")]
-    Install {
-        #[arg(long, help = "Install but don't start it")]
-        no_start: bool,
-
-        #[arg(long, help = "Print the service definition instead of installing")]
-        print: bool,
-    },
-
-    #[command(about = "Remove the installed service")]
-    Uninstall,
-
-    #[command(about = "Enable the gateway (the master switch)")]
-    On,
-
-    #[command(about = "Disable the gateway — run/start refuse while off")]
-    Off,
-
-    #[command(
-        subcommand,
-        about = "Service-supervisor lifecycle hooks (used internally)"
-    )]
-    Lifecycle(LifecycleCmd),
-
-    #[command(flatten)]
-    Agent(crate::gateway::cli::AgentCmd),
-}
-
-#[derive(Parser, Debug, Clone)]
-pub enum LifecycleCmd {
-    #[command(about = "Record a gateway boot for DIR")]
-    Boot {
-        #[arg(long, value_name = "DIR")]
-        dir: std::path::PathBuf,
-
-        #[arg(
-            long,
-            default_value_t = 0,
-            help = "How many turns were interrupted mid-flight"
-        )]
-        interrupted: usize,
-    },
-
-    #[command(about = "Record a gateway stop for DIR")]
-    Stop {
-        #[arg(long, value_name = "DIR")]
-        dir: std::path::PathBuf,
-    },
-
-    #[command(about = "Mark DIR as wanting a restart")]
-    Restart {
-        #[arg(long, value_name = "DIR")]
-        dir: std::path::PathBuf,
-    },
-
-    #[command(about = "Clear a pending restart for DIR")]
-    ClearRestart {
-        #[arg(long, value_name = "DIR")]
-        dir: std::path::PathBuf,
     },
 }
 

@@ -58,6 +58,18 @@ pub struct Entry {
 
     #[serde(default)]
     pub license: String,
+
+    #[serde(default)]
+    pub requires_plugins: Vec<String>,
+
+    #[serde(default)]
+    pub supersedes: Vec<String>,
+
+    #[serde(default)]
+    pub superseded_by: Vec<String>,
+
+    #[serde(default)]
+    pub conflicts: Vec<String>,
 }
 
 impl Entry {

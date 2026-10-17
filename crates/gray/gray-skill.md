@@ -6,7 +6,7 @@ description: "Run the gray coding agent: one-shot prompts, JSON output, run budg
 # gray
 
 Gray is a coding agent CLI written in Rust: a provider loop, tools, sessions,
-auto-compaction and cron. Callers that are not a human at a terminal should
+and auto-compaction. Callers that are not a human at a terminal should
 always use `-p`. The bare `gray` REPL takes over the terminal and needs a TTY.
 
 ## Learn the current CLI
@@ -70,23 +70,13 @@ with parent-id branching.
 
 ## Scheduled jobs
 
-```bash
-gray cron add "0 9 * * 1-5" "summarize yesterday's commits" --deliver local
-gray cron list
-gray cron show <id>
-gray cron remove <id>
-```
-
-A schedule is `every 1h`, `30m`, `in 10m`, an RFC3339 timestamp, or a cron
-expression. `add` runs validation inline; whatever ticks this home (the
-gateway, a REPL, or a chat host such as Discord) fires the jobs, so never start
-`cron serve` or `cron tick` yourself to make one fire. Delivery is a file by
-default; `--deliver origin` sends it back to the chat it was added from.
+Cron lives in the gateway plugin (`gray plugin install gateway`); `gray cron`
+and `/cron` then work as before. Do not run a scheduler yourself to make a job
+fire — whatever ticks the home fires it.
 
 ## Other subcommands
 
-`gray find`, `gray grep`, `gray plugin list`,
-`gray gateway status`, `gray update`.
+`gray find`, `gray grep`, `gray plugin list`, `gray update`.
 
 ## What gray can do
 
@@ -100,7 +90,7 @@ into a job after 600 s rather than hanging the turn.
 
 - Prefer `-p`. Do not launch the bare REPL from a script or another agent.
 - Do not probe a subcommand by omitting arguments: several accept defaults and
-  will execute. `gray cron add` with no schedule fails, `gray sessions prune`
+  will execute. `gray plugin install` with no name fails, `gray sessions prune`
   with no threshold does not.
 - Output is redacted per line, but redaction does not stop a tool from sending
   an environment variable somewhere else. Never ask gray to print API keys.

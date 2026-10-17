@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -90,6 +90,7 @@ pub struct Report {
     pub name: String,
     pub version: String,
     pub path: PathBuf,
+    pub deps: Vec<String>,
 }
 
 fn lock_path() -> PathBuf {
@@ -303,7 +304,7 @@ pub async fn install(spec: NameOrUrl, opts: InstallOpts) -> anyhow::Result<Repor
 async fn install_inner(spec: NameOrUrl, opts: InstallOpts) -> anyhow::Result<Report> {
     let client = crate::fetch::client()?;
     match spec {
-        NameOrUrl::Name(name) => install_index(&client, &name, opts).await,
+        NameOrUrl::Name(name) => install_index(&client, &name, opts, &mut BTreeSet::new()).await,
         NameOrUrl::Url(url) => install_url(&client, &url, opts).await,
     }
 }
@@ -360,22 +361,33 @@ fn replace_archive(
     Ok(dest)
 }
 
+const MAX_DEP_DEPTH: usize = 8;
+
+fn installed_plugin_names() -> BTreeMap<String, LockEntry> {
+    read_lock()
+        .ok()
+        .flatten()
+        .map(|l| l.plugins)
+        .unwrap_or_default()
+}
+
 async fn install_index(
     client: &reqwest::Client,
     name: &str,
     opts: InstallOpts,
+    visited: &mut BTreeSet<String>,
 ) -> anyhow::Result<Report> {
     validate_install_key(name)?;
 
-    let hub_hit = match crate::index::fetch_hub_index(client).await {
-        Ok(index) => index.plugins.get(name).cloned(),
-        Err(_) => None,
-    };
-    let entry = match hub_hit {
-        Some(entry) => entry,
+    let hub_index = crate::index::fetch_hub_index(client).await.ok();
+    let hub_hit = hub_index
+        .as_ref()
+        .and_then(|index| index.plugins.get(name).cloned());
+    let (entry, community_index) = match hub_hit {
+        Some(entry) => (entry, None),
         None => {
             let index = crate::index::fetch_index(client).await?;
-            crate::index::lookup(&index, name)?.clone()
+            (crate::index::lookup(&index, name)?.clone(), Some(index))
         }
     };
     match entry.kind.as_str() {
@@ -392,6 +404,71 @@ async fn install_index(
             entry.source.type_
         );
     }
+
+    if visited.len() >= MAX_DEP_DEPTH {
+        anyhow::bail!("{name}: plugin dependency chain exceeds {MAX_DEP_DEPTH} levels");
+    }
+    visited.insert(name.to_string());
+
+    let installed = installed_plugin_names();
+    let mut deps = Vec::new();
+    for dep in &entry.requires_plugins {
+        if installed.contains_key(dep) || visited.contains(dep) {
+            continue;
+        }
+        let report = Box::pin(install_index(client, dep, opts.clone(), visited))
+            .await
+            .map_err(|e| anyhow::anyhow!("{name} requires plugin '{dep}': {e:#}"))?;
+        deps.extend(report.deps.iter().cloned());
+        deps.push(dep.clone());
+    }
+
+    let installed = installed_plugin_names();
+    let conflicts: Vec<String> = entry
+        .conflicts
+        .iter()
+        .filter(|c| installed.contains_key(c.as_str()))
+        .cloned()
+        .collect();
+    if !conflicts.is_empty() {
+        if std::env::var_os("GRAY_PLUGIN_FORCE").is_some() {
+            eprintln!(
+                "warning: {name} conflicts with installed plugin(s): {} — continuing (GRAY_PLUGIN_FORCE)",
+                conflicts.join(", ")
+            );
+        } else {
+            anyhow::bail!(
+                "{name} conflicts with installed plugin(s): {} — remove them first (GRAY_PLUGIN_FORCE=1 to override)",
+                conflicts.join(", ")
+            );
+        }
+    }
+
+    let mut superseded: Vec<String> = entry
+        .supersedes
+        .iter()
+        .filter(|s| installed.contains_key(s.as_str()))
+        .cloned()
+        .collect();
+    for pname in installed.keys() {
+        if pname == name || superseded.contains(pname) {
+            continue;
+        }
+        let peer = hub_index
+            .as_ref()
+            .and_then(|i| i.plugins.get(pname))
+            .or_else(|| community_index.as_ref().and_then(|i| i.plugins.get(pname)));
+        if peer.is_some_and(|e| e.superseded_by.iter().any(|s| s == name)) {
+            superseded.push(pname.clone());
+        }
+    }
+    if !superseded.is_empty() {
+        eprintln!(
+            "note: {name} supersedes installed plugin(s) {} — double-hooking possible",
+            superseded.join(", ")
+        );
+    }
+
     let archive = crate::fetch::download(client, &entry.source.url, Some(&entry.hash)).await?;
     let scope = if entry.scope.is_empty() {
         opts.scope.clone().unwrap_or_else(|| "user".to_string())
@@ -413,6 +490,7 @@ async fn install_index(
         name: name.to_string(),
         version: entry.version.clone(),
         path: dest,
+        deps,
     })
 }
 
@@ -449,6 +527,7 @@ async fn install_url(
         name,
         version: "0.0.0".to_string(),
         path: dest,
+        deps: Vec::new(),
     })
 }
 
@@ -644,7 +723,14 @@ async fn update_inner(target: &str, check: bool) -> anyhow::Result<Vec<UpdateRow
         }
         let argv = installed.argv.clone();
         let scope = Some(installed.scope.clone());
-        match install_index(&client, name, InstallOpts { argv, scope }).await {
+        match install_index(
+            &client,
+            name,
+            InstallOpts { argv, scope },
+            &mut BTreeSet::new(),
+        )
+        .await
+        {
             Ok(r) => {
                 let v = r.version.clone();
                 out.push(UpdateRow {

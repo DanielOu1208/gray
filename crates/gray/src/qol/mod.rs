@@ -1,4 +1,5 @@
 pub(crate) mod detect;
+pub(crate) mod kitty;
 pub(crate) mod setup;
 pub mod update;
 
