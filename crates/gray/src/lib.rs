@@ -4,6 +4,7 @@ pub mod auth;
 pub mod auto_title;
 pub mod auto_update;
 pub mod cache;
+pub mod cloud;
 pub mod cmd;
 pub mod compact;
 pub mod composer;
@@ -621,6 +622,15 @@ pub enum Commands {
 
     #[command(about = "Revoke the stored registry token and forget it locally")]
     Logout,
+
+    #[command(
+        about = "Your hosted Gray machine on Gray Cloud — provision it, check it, chat with it"
+    )]
+    Cloud {
+        /// Message to send; omitted = provision + status.
+        #[arg(value_name = "MESSAGE", num_args = 0..)]
+        message: Vec<String>,
+    },
 
     #[command(visible_alias = "upgrade")]
     Update {

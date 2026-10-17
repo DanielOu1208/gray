@@ -231,7 +231,7 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
 
 /// The registry reports failures as `{"error": "..."}`; surface that message
 /// verbatim instead of a bare status code.
-async fn error_message(resp: reqwest::Response) -> String {
+pub(crate) async fn error_message(resp: reqwest::Response) -> String {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body)
