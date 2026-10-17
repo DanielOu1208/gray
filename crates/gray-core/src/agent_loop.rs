@@ -546,10 +546,10 @@ impl Agent {
                 hint.cache_reported = self.warm_cache_reported;
             }
             if self.cache_warm.is_some() {
-                if let Some(prev) = self.warm_run.take() {
-                    if let Ok(spent) = prev.spent.lock() {
-                        billed.accumulate(&spent);
-                    }
+                if let Some(prev) = self.warm_run.take()
+                    && let Ok(spent) = prev.spent.lock()
+                {
+                    billed.accumulate(&spent);
                 }
                 let warm_spent = std::sync::Arc::new(std::sync::Mutex::new(Usage::default()));
                 let phase = crate::cache_warm::warm_phase();
@@ -1118,10 +1118,10 @@ impl Agent {
                     0.0
                 };
 
-                if let Some(warm) = &self.warm_run {
-                    if let Ok(spent) = warm.spent.lock() {
-                        billed.accumulate(&spent);
-                    }
+                if let Some(warm) = &self.warm_run
+                    && let Ok(spent) = warm.spent.lock()
+                {
+                    billed.accumulate(&spent);
                 }
                 log::info!(target: "gray_agent", "agent run end: session={} stop={stop_reason:?}, usage in={} out={} cached={} hit={:.0}%, {} messages", ctx.session_id.as_deref().unwrap_or("-"), total_usage.input_tokens, total_usage.output_tokens, total_usage.cached_tokens, hit, self.messages.len());
                 emit!(AgentEvent::turn_end(stop_reason, billed));
@@ -1488,7 +1488,7 @@ fn parse_text_tool_calls(text: &str) -> Vec<(String, serde_json::Value)> {
         {
             let name_start = at + "<function=".len();
             let name_end = text[name_start..]
-                .find(|c| c == '>' || c == '{')
+                .find(['>', '{'])
                 .map(|i| name_start + i)
                 .unwrap_or(text.len());
             name_override = Some(text[name_start..name_end].trim().to_string());

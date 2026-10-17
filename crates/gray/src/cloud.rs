@@ -1,10 +1,3 @@
-//! `gray cloud` — the Grayling seat's hosted machine.
-//!
-//! Every seat provisions one Maritime micro-VM running gray, billed to the
-//! seat's portal credits. Provision is idempotent server-side — calling it on
-//! every command returns the same agent — so the module never has to cache an
-//! agent id, only the chat thread's conversation_id under $GRAY_HOME.
-
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -55,9 +48,32 @@ fn save_session(session: &CloudSession) -> anyhow::Result<()> {
     )
 }
 
-fn require_token() -> anyhow::Result<String> {
-    crate::account::load_token()
-        .ok_or_else(|| anyhow::anyhow!("not logged in — run `gray login` first"))
+async fn connect_with_code(code: Option<&str>) -> anyhow::Result<String> {
+    let code = match code.and_then(crate::account::normalize_code) {
+        Some(code) => code,
+        None => {
+            println!("Connect this terminal to your Gray Cloud machine.\n");
+            println!("{}\n", crate::account::login_instructions());
+            crate::account::prompt_for_code().ok_or_else(|| {
+                anyhow::anyhow!("no enrollment code given — run `gray cloud connect <code>`")
+            })?
+        }
+    };
+    let (token, account) = crate::account::login_with_code(&code).await?;
+    let previous = crate::account::load_token().filter(|previous| *previous != token);
+    crate::account::save_token(&token)?;
+    if let Some(previous) = previous {
+        crate::account::revoke_token(&previous).await;
+    }
+    println!("connected as {}", account.label());
+    Ok(token)
+}
+
+async fn require_token() -> anyhow::Result<String> {
+    match crate::account::load_token() {
+        Some(token) => Ok(token),
+        None => connect_with_code(None).await,
+    }
 }
 
 async fn post<T: for<'de> Deserialize<'de>>(
@@ -133,15 +149,19 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
         .build()?)
 }
 
-/// `gray cloud` bare: make sure the seat's machine exists and report it.
-/// `gray cloud <words>`: send a message and print the reply, keeping the
-/// thread in cloud-session.json so follow-ups land in the same conversation.
 pub async fn run_cloud(words: &[String]) -> anyhow::Result<()> {
-    let token = require_token()?;
     let client = http_client()?;
     let message = words.join(" ").trim().to_string();
+    let connect = words
+        .first()
+        .is_some_and(|word| word.eq_ignore_ascii_case("connect"));
+    let token = if connect {
+        connect_with_code(words.get(1).map(String::as_str)).await?
+    } else {
+        require_token().await?
+    };
 
-    if message.is_empty() {
+    if message.is_empty() || connect {
         let prov = provision(&client, &token).await?;
         let status = fetch_status(&client, &token).await.unwrap_or(StatusOut {
             status: prov.status.clone(),
@@ -161,8 +181,6 @@ pub async fn run_cloud(words: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Provision runs before every chat: it is idempotent, so a seat that was
-    // refunded-then-repaid recovers without a separate status dance.
     provision(&client, &token).await?;
 
     let session = session_path()

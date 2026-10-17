@@ -517,15 +517,15 @@ fn replay_tool_result(
         is_error,
         Some(cwd),
     );
-    if !is_error {
-        if let Some(rows) = crate::composer::transcript::rows::viewed_image_lines(
+    if !is_error
+        && let Some(rows) = crate::composer::transcript::rows::viewed_image_lines(
             &name,
             args.as_ref(),
             cwd,
             tui.width(),
-        ) {
-            lines.extend(rows);
-        }
+        )
+    {
+        lines.extend(rows);
     }
     tui.push_tool_box_lines(header, lines);
 }

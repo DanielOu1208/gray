@@ -278,7 +278,7 @@ pub async fn whoami() -> anyhow::Result<Account> {
 /// Best-effort server-side revoke of one token. Failures are logged and
 /// swallowed: the caller's next step (saving a new token, clearing the local
 /// file) must not depend on the registry being reachable.
-async fn revoke_token(token: &str) -> bool {
+pub(crate) async fn revoke_token(token: &str) -> bool {
     let client = match http_client() {
         Ok(c) => c,
         Err(e) => {

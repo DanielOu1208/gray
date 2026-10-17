@@ -1045,7 +1045,7 @@ fn map_chat_to_responses(
                             item_id,
                             model: m,
                             ..
-                        } if !text.is_empty() && m.as_deref().map_or(true, |mm| mm == model) => {
+                        } if !text.is_empty() && m.as_deref().is_none_or(|mm| mm == model) => {
                             let mut item = serde_json::json!({"type": "reasoning",
                                 "summary": [{"type": "summary_text", "text": text}]});
                             if let Some(id) = item_id {
@@ -2200,7 +2200,7 @@ fn process_dynamic_event(
                     .and_then(|i| i.get("encrypted_content"))
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                let summary = item.map(|i| reasoning_summary_text(i)).unwrap_or_default();
+                let summary = item.map(reasoning_summary_text).unwrap_or_default();
                 if !summary.is_empty() && !reasoning_deltas.contains(id) {
                     pending.push_back(StreamEvent::thinking_delta(summary));
                 }
@@ -2542,6 +2542,7 @@ impl OpenAiProvider {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum StreamState {
     Init {
         client: reqwest::Client,

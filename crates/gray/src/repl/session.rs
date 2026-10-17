@@ -657,15 +657,15 @@ pub(crate) fn dispatch_agent_event(
                         *is_error,
                         Some(cwd),
                     );
-                    if !*is_error {
-                        if let Some(rows) = crate::composer::transcript::rows::viewed_image_lines(
+                    if !*is_error
+                        && let Some(rows) = crate::composer::transcript::rows::viewed_image_lines(
                             &name,
                             args.as_ref(),
                             cwd,
                             t.width(),
-                        ) {
-                            lines.extend(rows);
-                        }
+                        )
+                    {
+                        lines.extend(rows);
                     }
 
                     t.atomic(|t| {

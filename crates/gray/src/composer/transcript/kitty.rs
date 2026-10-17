@@ -338,10 +338,10 @@ fn cell_pixels() -> (u32, u32) {
         if let Some((w, h)) = std::env::var("GRAY_CELL_PX").ok().and_then(|v| {
             v.split_once(['x', ';', ','])
                 .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
-        }) {
-            if w > 0 && h > 0 {
-                return (w, h);
-            }
+        }) && w > 0
+            && h > 0
+        {
+            return (w, h);
         }
         query_cell_pixels().unwrap_or((10, 20))
     })

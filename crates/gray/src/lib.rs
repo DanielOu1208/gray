@@ -627,7 +627,6 @@ pub enum Commands {
         about = "Your hosted Gray machine on Gray Cloud — provision it, check it, chat with it"
     )]
     Cloud {
-        /// Message to send; omitted = provision + status.
         #[arg(value_name = "MESSAGE", num_args = 0..)]
         message: Vec<String>,
     },
