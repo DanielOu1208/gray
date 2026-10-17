@@ -305,15 +305,9 @@ fn frame(tui: &mut Tui, paint: bool) -> anyhow::Result<()> {
 
     tui.begin_sync();
 
-    let slid = match tui.terminal.set_viewport_height(desired, screen_size) {
-        Ok(slid) => slid,
-        Err(e) => {
-            tui.end_sync();
-            return Err(e.into());
-        }
-    };
-    if slid > 0 {
-        tui.repaint_slid_rows(slid);
+    if let Err(e) = tui.terminal.set_viewport_height(desired, screen_size) {
+        tui.end_sync();
+        return Err(e.into());
     }
     tui.viewport_h = desired;
 
