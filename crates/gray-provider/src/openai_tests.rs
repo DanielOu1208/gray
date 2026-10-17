@@ -1084,14 +1084,21 @@ fn assistant_messages_carry_reasoning_content_only_when_thinking() {
         tools: Vec::new(),
         max_tokens: None,
     };
-    let body = map_chat_request(thinking_req, "test-model", None).expect("maps");
+    let body = map_chat_request(thinking_req.clone(), "deepseek-v4", None).expect("maps");
     let v = serde_json::to_value(&body).expect("serializes");
     assert_eq!(
         last_msg(&v)
             .get("reasoning_content")
             .and_then(|r| r.as_str()),
         Some("hmm"),
-        "chain preserved: {v}"
+        "deepseek chain preserved: {v}"
+    );
+
+    let body = map_chat_request(thinking_req, "test-model", None).expect("maps");
+    let v = serde_json::to_value(&body).expect("serializes");
+    assert!(
+        last_msg(&v).get("reasoning_content").is_none(),
+        "non-deepseek drops thinking: {v}"
     );
 }
 

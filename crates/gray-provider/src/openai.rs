@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -366,6 +366,10 @@ impl ModelCaps {
     }
 }
 
+fn is_deepseek_model(model: &str) -> bool {
+    model.to_lowercase().contains("deepseek")
+}
+
 pub(crate) fn chat_accepts(media_type: &str) -> bool {
     media_type.starts_with("image/")
         || media_type.starts_with("video/")
@@ -515,9 +519,11 @@ fn map_chat_request(
                     Some(tool_calls)
                 };
 
-                let reasoning_content =
-                    (!thinking_parts.is_empty()).then(|| thinking_parts.join("
-"));
+                let reasoning_content = if is_deepseek_model(model) {
+                    Some(thinking_parts.join("\n"))
+                } else {
+                    None
+                };
 
                 messages.push(OpenAiMessageRequest {
                     role: "assistant".to_string(),
@@ -1006,6 +1012,19 @@ fn map_chat_to_responses(
                         } if m == model => {
                             reasoning_items.push(serde_json::json!({"type": "reasoning", "id": id, "summary": [], "encrypted_content": ec}));
                         }
+                        ContentBlock::Thinking {
+                            text,
+                            item_id,
+                            model: m,
+                            ..
+                        } if !text.is_empty() && m.as_deref().map_or(true, |mm| mm == model) => {
+                            let mut item = serde_json::json!({"type": "reasoning",
+                                "summary": [{"type": "summary_text", "text": text}]});
+                            if let Some(id) = item_id {
+                                item["id"] = Value::String(id);
+                            }
+                            reasoning_items.push(item);
+                        }
                         ContentBlock::Thinking { .. } => {}
                         ContentBlock::ToolUse { id, name, args } => {
                             tool_uses.push((id, name, args))
@@ -1145,11 +1164,17 @@ pub(crate) fn strip_chat_reasoning_params(body: &mut OpenAiChatRequest) {
 
 pub(crate) fn responses_has_reasoning(body: &ResponsesRequest) -> bool {
     body.reasoning.is_some()
+        || body
+            .input
+            .iter()
+            .any(|i| i.get("type").and_then(Value::as_str) == Some("reasoning"))
 }
 
 pub(crate) fn strip_responses_reasoning(body: &mut ResponsesRequest) {
     body.reasoning = None;
     body.include = None;
+    body.input
+        .retain(|i| i.get("type").and_then(Value::as_str) != Some("reasoning"));
 }
 
 pub(crate) fn should_retry_without_previous_response(
@@ -1927,6 +1952,7 @@ enum DynamicState {
         last_usage: Option<Usage>,
         completed: bool,
         trail: EventTrail,
+        reasoning_deltas: HashSet<String>,
     },
     Done,
 }
@@ -2046,12 +2072,25 @@ fn map_send_error(error: reqwest::Error) -> ProviderError {
     }
 }
 
+fn reasoning_summary_text(item: &Value) -> String {
+    item.get("summary")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .collect::<String>()
+        })
+        .unwrap_or_default()
+}
+
 fn process_dynamic_event(
     value: Value,
     pending: &mut VecDeque<StreamEvent>,
     tools: &mut BTreeMap<String, DynamicToolCall>,
     next_index: &mut usize,
     last_usage: &mut Option<Usage>,
+    reasoning_deltas: &mut HashSet<String>,
 ) -> Result<bool, ProviderError> {
     let typ = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match typ {
@@ -2063,6 +2102,12 @@ fn process_dynamic_event(
             }
         }
         "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            if typ.ends_with("summary_text.delta")
+                && let Some(id) = value.get("item_id").and_then(|v| v.as_str())
+                && !id.is_empty()
+            {
+                reasoning_deltas.insert(id.to_string());
+            }
             if let Some(delta) = value.get("delta").and_then(|v| v.as_str())
                 && !delta.is_empty()
             {
@@ -2127,6 +2172,10 @@ fn process_dynamic_event(
                     .and_then(|i| i.get("encrypted_content"))
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
+                let summary = item.map(|i| reasoning_summary_text(i)).unwrap_or_default();
+                if !summary.is_empty() && !reasoning_deltas.contains(id) {
+                    pending.push_back(StreamEvent::thinking_delta(summary));
+                }
                 if !id.is_empty() && !encrypted.is_empty() {
                     pending.push_back(StreamEvent::reasoning_item(id, encrypted));
                 }
@@ -2278,6 +2327,7 @@ async fn dynamic_step(
                             last_usage: None,
                             completed: false,
                             trail: EventTrail::default(),
+                            reasoning_deltas: HashSet::new(),
                         };
                     }
                     Err(error) => return Some((Err(error), DynamicState::Done)),
@@ -2291,6 +2341,7 @@ async fn dynamic_step(
                 mut last_usage,
                 mut completed,
                 mut trail,
+                mut reasoning_deltas,
             } => {
                 if completed && pending.is_empty() {
                     return None;
@@ -2326,6 +2377,7 @@ async fn dynamic_step(
                                 last_usage,
                                 completed,
                                 trail,
+                                reasoning_deltas,
                             };
                             continue;
                         }
@@ -2360,6 +2412,7 @@ async fn dynamic_step(
                             &mut tools,
                             &mut next_index,
                             &mut last_usage,
+                            &mut reasoning_deltas,
                         ) {
                             Ok(finished) => completed |= finished,
                             Err(error) => return Some((Err(error), DynamicState::Done)),
@@ -2374,6 +2427,7 @@ async fn dynamic_step(
                                 last_usage,
                                 completed,
                                 trail,
+                                reasoning_deltas,
                             };
                             return Some((Ok(event), state));
                         }
@@ -2388,6 +2442,7 @@ async fn dynamic_step(
                             last_usage,
                             completed,
                             trail,
+                            reasoning_deltas,
                         };
                     }
                 }
@@ -2518,6 +2573,7 @@ enum StreamState {
         stream_attempt: usize,
         last_response_id: Option<String>,
         trail: EventTrail,
+        reasoning_deltas: HashSet<String>,
     },
     Done,
 }
@@ -2805,6 +2861,7 @@ fn stream_unfold_step(
 
                                 last_text_part: None,
                                 trail: EventTrail::default(),
+                                reasoning_deltas: HashSet::new(),
                             };
                         }
                         Err((err, floor, http_status)) => {
@@ -3223,6 +3280,7 @@ fn stream_unfold_step(
                     stream_attempt,
                     mut last_response_id,
                     mut trail,
+                    mut reasoning_deltas,
                 } => {
                     if let Some(event) = pending_events.pop_front() {
                         return Some((
@@ -3243,6 +3301,7 @@ fn stream_unfold_step(
                                 saw_output_text,
                                 last_text_part,
                                 trail,
+                                reasoning_deltas,
                             },
                         ));
                     }
@@ -3270,6 +3329,7 @@ fn stream_unfold_step(
                                     saw_output_text,
                                     last_text_part,
                                     trail,
+                                    reasoning_deltas,
                                 };
                                 continue;
                             }
@@ -3328,6 +3388,13 @@ fn stream_unfold_step(
                                 }
                                 "response.reasoning_text.delta"
                                 | "response.reasoning_summary_text.delta" => {
+                                    if typ.ends_with("summary_text.delta")
+                                        && let Some(id) =
+                                            value.get("item_id").and_then(|v| v.as_str())
+                                        && !id.is_empty()
+                                    {
+                                        reasoning_deltas.insert(id.to_string());
+                                    }
                                     if let Some(delta) = value.get("delta").and_then(|v| v.as_str())
                                         && !delta.is_empty()
                                     {
@@ -3582,6 +3649,11 @@ fn stream_unfold_step(
                                             .get("encrypted_content")
                                             .and_then(|v| v.as_str())
                                             .unwrap_or_default();
+                                        let summary = reasoning_summary_text(item);
+                                        if !summary.is_empty() && !reasoning_deltas.contains(id) {
+                                            pending_events
+                                                .push_back(StreamEvent::thinking_delta(summary));
+                                        }
                                         if !id.is_empty() && !ec.is_empty() {
                                             pending_events
                                                 .push_back(StreamEvent::reasoning_item(id, ec));
@@ -3625,6 +3697,7 @@ fn stream_unfold_step(
                                 saw_output_text,
                                 last_text_part,
                                 trail,
+                                reasoning_deltas,
                             };
                         }
                         Some(Err(err)) => {
@@ -3692,6 +3765,7 @@ fn stream_unfold_step(
                                     stream_attempt,
                                     last_response_id,
                                     trail,
+                                    reasoning_deltas,
                                 };
                                 continue;
                             }
