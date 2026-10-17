@@ -478,11 +478,21 @@ pub(super) fn preview_lines(path: &Path, max_w: usize) -> Option<Vec<Line<'stati
     let (iw, ih) = (img.width().max(1), img.height().max(1));
     // Natural footprint is 1 image px : 1 screen px; cap at `cols` cells wide
     // so big images shrink but small ones don't get upscaled to mush.
-    let c = iw.div_ceil(cw).clamp(1, cols);
+    let c_nat = iw.div_ceil(cw).clamp(1, cols);
     // Rows that keep the source aspect under the real cell geometry.
-    let r = ((ih as u64 * c as u64 * cw as u64 + (iw as u64 * ch as u64) / 2)
+    let r_nat = ((ih as u64 * c_nat as u64 * cw as u64 + (iw as u64 * ch as u64) / 2)
         / (iw as u64 * ch as u64))
         .clamp(1, (DIACRITICS.len() - 1) as u64) as u32;
+    const MAX_PREVIEW_ROWS: u32 = 12;
+    let (c, r) = if r_nat > MAX_PREVIEW_ROWS {
+        let c2 = ((iw as u64 * MAX_PREVIEW_ROWS as u64 * ch as u64
+            + (ih as u64 * cw as u64) / 2)
+            / (ih as u64 * cw as u64))
+            .clamp(1, c_nat as u64) as u32;
+        (c2, MAX_PREVIEW_ROWS)
+    } else {
+        (c_nat, r_nat)
+    };
     // Bake the thumbnail at exactly display resolution; kitty maps it onto
     // the c-by-r placeholder grid, so matching c*cw x r*ch keeps the aspect.
     let thumb =
