@@ -9,10 +9,12 @@ use gray_core::message::ToolDef;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
+#[cfg(unix)]
+use crate::shell::contract::EXIT_STDIO_GRACE_MS;
 use crate::shell::contract::{
-    DEFAULT_TIMEOUT_SECS, DETACHED_DRAIN_TIMEOUT, EXIT_STDIO_GRACE_MS, INLINE_BUDGET_BYTES,
-    MAX_TIMEOUT_SECS, MEM_HEAD_BYTES, MEM_TAIL_BYTES, PUMP_DRAIN_TIMEOUT, PumpSummary,
-    SLEEP_SLACK_SECS, VIEW_BUDGET_LINES, View,
+    DEFAULT_TIMEOUT_SECS, DETACHED_DRAIN_TIMEOUT, INLINE_BUDGET_BYTES, MAX_TIMEOUT_SECS,
+    MEM_HEAD_BYTES, MEM_TAIL_BYTES, PUMP_DRAIN_TIMEOUT, PumpSummary, SLEEP_SLACK_SECS,
+    VIEW_BUDGET_LINES, View,
 };
 use crate::shell::exit::exit_report;
 use crate::shell::fence::fence;
@@ -1106,6 +1108,8 @@ async fn settle_command(
     ps_report: Option<&std::path::Path>,
     #[cfg(unix)] last: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Settled {
+    #[cfg(windows)]
+    let _ = track_group;
     #[cfg(not(windows))]
     let target = spawned.pgid;
     #[cfg(windows)]

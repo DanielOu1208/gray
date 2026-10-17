@@ -142,6 +142,7 @@ impl GrepPlan {
     }
 }
 
+#[cfg(unix)]
 fn bre_literal(p: &str) -> Option<Vec<String>> {
     let branches = split_bre_alternatives(p)?;
     let mut out = Vec::new();
@@ -151,6 +152,7 @@ fn bre_literal(p: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
+#[cfg(unix)]
 fn bre_branch_literal(b: &str) -> Option<String> {
     let cs: Vec<char> = b.chars().collect();
     let mut out = String::new();
