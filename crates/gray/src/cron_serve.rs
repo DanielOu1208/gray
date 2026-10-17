@@ -57,45 +57,6 @@ pub trait AsyncRunner {
     }
 }
 
-pub struct HeadlessRunner {
-    pub config: crate::config::Config,
-
-    pub follow_switches: bool,
-}
-
-#[async_trait::async_trait(?Send)]
-impl AsyncRunner for HeadlessRunner {
-    async fn run(&self, prompt: String, cwd: PathBuf) -> anyhow::Result<String> {
-        Ok(self.run_full(prompt, cwd).await?.transcript)
-    }
-
-    async fn run_full(&self, prompt: String, cwd: PathBuf) -> anyhow::Result<FireOutput> {
-        let mut config = self.config.clone();
-        if self.follow_switches {
-            refresh_model_from_saved(&mut config);
-        }
-
-        {
-            let rows = crate::setup::canonical_model_rows(&config);
-            crate::setup::canonicalize_effort_variant(&mut config, &rows);
-        }
-        let mut agent = crate::build_agent(&config, &cwd, None).await?;
-        let ctx = gray_core::agent::ToolContext {
-            cwd,
-            cancel: tokio_util::sync::CancellationToken::new(),
-            session_id: None,
-        };
-        let events = agent
-            .run(gray_core::message::Message::user(prompt), ctx)
-            .await
-            .map_err(|e| anyhow::anyhow!(crate::repl::format_core_error(&e, &config.base_url)))?;
-        Ok(FireOutput {
-            transcript: crate::cron_fire::transcript_text(&events),
-            final_text: crate::cron_fire::final_assistant_text(&events),
-        })
-    }
-}
-
 pub const FIRE_TIMEOUT_SECS: u64 = 600;
 
 pub struct SaveLocalDeliver {

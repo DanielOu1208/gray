@@ -1,5 +1,4 @@
 use super::TuiOpt;
-use crate::gateway::service;
 
 const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 
@@ -173,34 +172,56 @@ fn is_scratch_home(set: &std::path::Path, default: Option<&std::path::Path>) -> 
     default != Some(set)
 }
 
+fn gateway_cmd(args: &[&str]) -> std::io::Result<std::process::Output> {
+    let exe = crate::exe_watch::on_disk_exe()?;
+    std::process::Command::new(exe)
+        .arg("gateway")
+        .args(args)
+        .output()
+}
+
 async fn restart_gateway() -> GatewayRestart {
     if scratch_gray_home() {
         return GatewayRestart::Skipped;
     }
-    let supervised = matches!(
-        service::detect(),
-        service::Supervisor::Runit { .. } | service::Supervisor::SystemdUser { .. }
-    );
-    if supervised {
-        match service::restart() {
-            Ok(line) => return GatewayRestart::Restarted(line),
 
-            Err(e) if !e.to_string().contains("no service installed") => {
-                return GatewayRestart::Failed(e.to_string());
-            }
-            Err(_) => {}
+    if let Ok(out) = gateway_cmd(&["restart"]) {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if out.status.success() {
+            return GatewayRestart::Restarted(text.trim().to_string());
+        }
+        if !text.contains("no service installed") && !text.contains("not running") {
+            return GatewayRestart::Failed(text.trim().to_string());
         }
     }
 
     let Ok(home) = crate::setup::gray_home() else {
         return GatewayRestart::NotRunning;
     };
-    let Some(rec) = crate::gateway::pid::running(&home) else {
+    let Some(rec) = crate::gateway_pid::running(&home) else {
         return GatewayRestart::NotRunning;
     };
 
-    if let Err(e) = service::stop() {
-        return GatewayRestart::Failed(format!("could not stop the running gateway: {e}"));
+    match gateway_cmd(&["stop"]) {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return GatewayRestart::Failed(format!(
+                "could not stop the running gateway: {}",
+                text.trim()
+            ));
+        }
+        Err(e) => {
+            return GatewayRestart::Failed(format!("could not stop the running gateway: {e}"));
+        }
     }
     match relaunch(&home, rec.pid) {
         Ok(line) => GatewayRestart::Restarted(line),
@@ -237,7 +258,7 @@ fn relaunch(home: &std::path::Path, old_pid: u32) -> anyhow::Result<String> {
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
-        if let Some(now) = crate::gateway::pid::running(home) {
+        if let Some(now) = crate::gateway_pid::running(home) {
             return Ok(format!(
                 "gateway restarted on the new build (pid {} was {old_pid}, log: {})",
                 now.pid,

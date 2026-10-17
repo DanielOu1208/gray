@@ -84,23 +84,6 @@ pub(crate) fn enabled(home: &Path, name: &str, entry: &LockEntry) -> bool {
         .is_none_or(|entry| entry.enabled)
 }
 
-pub(crate) fn setup_apps(home: &Path) -> Vec<String> {
-    load_lock(home)
-        .map(|lock| {
-            lock.plugins
-                .iter()
-                .filter(|(name, e)| {
-                    e.cli_argv.is_some()
-                        && declared_subcommands(home, name)
-                            .iter()
-                            .any(|s| s == "setup")
-                })
-                .map(|(name, _)| name.clone())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 pub(crate) fn declared_subcommands(home: &Path, name: &str) -> Vec<String> {
     metadata(home, name)
         .ok()
@@ -652,8 +635,28 @@ fn removed_builtin(name: &str) -> Option<&'static str> {
             "`gray view` was removed — `cat <path>` as the whole bash command \
              attaches the media to the turn",
         ),
+        "login" | "whoami" | "logout" => {
+            Some("this moved to the account plugin: gray plugin install account")
+        }
+        "cron" => Some("this moved to the gateway plugin: gray plugin install gateway"),
         _ => None,
     }
+}
+
+fn owner_of_command(home: &Path, lock: &LockFile, name: &str) -> Option<(String, LockEntry)> {
+    lock.plugins.iter().find_map(|(owner, entry)| {
+        entry.cli_argv.as_ref()?;
+        enabled(home, owner, entry).then_some(())?;
+        let m = metadata(home, owner).ok()?;
+        m["commands"]
+            .as_array()?
+            .iter()
+            .any(|v| {
+                v.as_str()
+                    .is_some_and(|cmd| cmd.trim_start_matches('/') == name)
+            })
+            .then(|| (owner.clone(), entry.clone()))
+    })
 }
 
 pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
@@ -661,32 +664,43 @@ pub fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result<()> {
     migrate_commands_json(home);
     let lock = load_lock(home)?;
 
-    let (entry, entry_home) = match lock.plugins.get(name).cloned() {
-        Some(e) => (e, home.to_path_buf()),
-        None => {
-            let fallback = gray_core::paths::gray_user_home()
+    let resolved = lock
+        .plugins
+        .get(name)
+        .cloned()
+        .map(|e| (name.to_string(), e, home.to_path_buf(), rest.to_vec()))
+        .or_else(|| {
+            owner_of_command(home, &lock, name).map(|(owner, e)| {
+                let argv = std::iter::once(name.to_string())
+                    .chain(rest.iter().cloned())
+                    .collect();
+                (owner, e, home.to_path_buf(), argv)
+            })
+        })
+        .or_else(|| {
+            gray_core::paths::gray_user_home()
                 .filter(|u| u.as_path() != home)
                 .and_then(|u| load_lock(&u).ok().map(|l| (u, l)))
                 .and_then(|(u, l)| {
                     l.plugins
                         .get(name)
                         .filter(|e| e.global)
-                        .map(|e| (e.clone(), u))
-                });
-            match fallback {
-                Some((e, u)) => (e, u),
-                None => {
-                    return Err(anyhow::anyhow!(
-                        removed_builtin(name).map(str::to_string).unwrap_or_else(|| {
-                            format!("no plugin command '{name}' — install it with: gray plugin install {name}")
-                        })
-                    ));
-                }
-            }
-        }
+                        .map(|e| (name.to_string(), e.clone(), u, rest.to_vec()))
+                })
+        });
+    let Some((name, entry, entry_home, rest)) = resolved else {
+        return Err(anyhow::anyhow!(
+            removed_builtin(name)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    format!(
+                        "no plugin command '{name}' — install it with: gray plugin install {name}"
+                    )
+                })
+        ));
     };
     anyhow::ensure!(
-        enabled(&entry_home, name, &entry),
+        enabled(&entry_home, &name, &entry),
         "plugin command '{name}' is disabled"
     );
     let argv = entry

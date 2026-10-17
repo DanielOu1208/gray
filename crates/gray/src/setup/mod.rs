@@ -123,10 +123,10 @@ pub(crate) use install_manager::{
 };
 pub use install_manager::{ManagerOutcome, run_plugins_modal, run_skills_modal};
 pub(crate) use model_modal::{
-    canonical_model_rows, canonicalize_adopted_model, canonicalize_effort_variant,
-    composite_label_for, composite_label_parts_for, decompose_model_variant, effort_chip,
-    picker_scope, provider_models_for_config, run_model_modal, saved_models_for,
-    selected_model_label, selection_parts, validate_direct_model_id, wire_model_for,
+    canonicalize_adopted_model, composite_label_for, composite_label_parts_for,
+    decompose_model_variant, effort_chip, picker_scope, provider_models_for_config,
+    run_model_modal, saved_models_for, selected_model_label, selection_parts,
+    validate_direct_model_id, wire_model_for,
 };
 pub(crate) use model_panes::{PanesOutcome, run_model_panes};
 pub(crate) use plugins_modal::run_plugins_manager;
