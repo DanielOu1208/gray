@@ -13,7 +13,7 @@ pub struct Snapshot {
 #[derive(Clone)]
 pub struct Meter {
     state: Arc<Mutex<Snapshot>>,
-    limit: u32,
+    limit: Option<u32>,
     rates: Option<(f64, f64)>,
     budget: Option<u64>,
 }
@@ -25,7 +25,7 @@ impl Meter {
         output: Option<f64>,
         budget: Option<u64>,
     ) -> anyhow::Result<Self> {
-        anyhow::ensure!(limit > 0, "model request limit must be positive");
+        let limit = (limit > 0).then_some(limit);
         let rates = match (input, output) {
             (Some(i), Some(o)) if i.is_finite() && o.is_finite() && i >= 0.0 && o >= 0.0 => {
                 Some((i, o))
@@ -70,7 +70,7 @@ impl Provider for Metered {
     }
     fn stream(&self, request: ChatRequest) -> ProviderStream {
         let mut state = self.meter.state.lock().unwrap();
-        if state.requests >= self.meter.limit
+        if self.meter.limit.is_some_and(|l| state.requests >= l)
             || (self.meter.budget.is_some() && !state.usage_complete)
             || self
                 .meter

@@ -432,7 +432,8 @@ pub struct Cli {
     #[arg(long, requires = "one_shot_input")]
     pub json: bool,
 
-    #[arg(long, requires = "json", value_parser = clap::value_parser!(u32).range(1..))]
+    /// Cap on model requests; 0 = unlimited (default 32 when omitted)
+    #[arg(long, requires = "json", value_parser = clap::value_parser!(u32))]
     pub max_requests: Option<u32>,
 
     #[arg(long, requires = "json")]

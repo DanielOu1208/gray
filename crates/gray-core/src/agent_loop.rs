@@ -369,6 +369,13 @@ impl Agent {
 
         let mut overflow_recovery_attempted = false;
 
+        let bench_nudges = self.bench_nudges;
+        let bench_thrash_marks = self.bench_thrash_marks.clone();
+        let mut bench_request_num: u32 = 0;
+        let mut bench_thrash_idx: usize = 0;
+        let mut bench_finish_gate_sent = false;
+        let bench_start = std::time::Instant::now();
+
         let mut hook_context = String::new();
         if let Some(hook) = self.checkpoint.clone() {
             hook(&self.messages, self.history_revision()).await;
@@ -494,6 +501,25 @@ impl Agent {
                     request_messages = msgs;
                 }
             }
+
+            if bench_nudges {
+                bench_request_num += 1;
+                let mut note = format!(
+                    "[harness] request {bench_request_num} · {}m elapsed · {}k tokens used",
+                    bench_start.elapsed().as_secs() / 60,
+                    billed.total_tokens / 1000,
+                );
+                if bench_thrash_idx < bench_thrash_marks.len()
+                    && bench_request_num >= bench_thrash_marks[bench_thrash_idx]
+                {
+                    bench_thrash_idx += 1;
+                    note.push_str(
+                        " — many requests used; if a self-check keeps failing, change approach or keep the best-working state and finish",
+                    );
+                }
+                request_messages.push(Message::user_injected(note));
+            }
+
             let req = ChatRequest {
                 system: (!self.system_text().is_empty()).then(|| self.system_text().to_string()),
                 messages: request_messages,
@@ -1043,6 +1069,23 @@ impl Agent {
                     log::info!(target: "gray_agent", "headless run produced no tool calls; nudging {progress_nudges}/{MAX_PROGRESS_NUDGES}");
                     self.messages.push(Message::user_injected(
                         "no tool calls have run yet — if this task requires action, issue a real tool call now",
+                    ));
+                    emit!(AgentEvent::MessageBoundary);
+                    continue 'turn;
+                }
+
+                if bench_nudges
+                    && !bench_finish_gate_sent
+                    && self
+                        .messages
+                        .iter()
+                        .flat_map(|m| m.content.iter())
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                {
+                    bench_finish_gate_sent = true;
+                    log::info!(target: "gray_agent", "bench finish gate: requesting pre-exit verification");
+                    self.messages.push(Message::user_injected(
+                        "Before finishing, verify the deliverable: re-read the task spec; for every file path it names, confirm the file exists and contains a real implementation, not a stub; if the task ships tests or examples, run them against the deliverable. If anything is missing or failing, keep working. Otherwise finish.",
                     ));
                     emit!(AgentEvent::MessageBoundary);
                     continue 'turn;

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::CoreError;
-use crate::event::{StreamEvent, Usage, append_thinking_chunk};
+use crate::event::{StreamEvent, Usage};
 use crate::message::ChatRequest;
 
 #[derive(Debug, thiserror::Error)]
@@ -493,6 +493,8 @@ pub struct Agent {
 
     pub(crate) lean_prompt: bool,
     pub(crate) must_act: bool,
+    pub(crate) bench_nudges: bool,
+    pub(crate) bench_thrash_marks: Vec<u32>,
 }
 
 struct SharedProvider(Arc<dyn Provider>);
@@ -550,6 +552,8 @@ impl Agent {
             prefix_rewrite_ok: true,
             lean_prompt: false,
             must_act: false,
+            bench_nudges: false,
+            bench_thrash_marks: vec![60, 120],
         }
     }
 
@@ -588,6 +592,16 @@ impl Agent {
 
     pub fn set_must_act(&mut self, must: bool) {
         self.must_act = must;
+    }
+
+    pub fn set_bench_nudges(&mut self, on: bool) {
+        self.bench_nudges = on;
+    }
+
+    pub fn set_bench_thrash_marks(&mut self, marks: Vec<u32>) {
+        if !marks.is_empty() {
+            self.bench_thrash_marks = marks;
+        }
     }
 
     pub fn set_steer(&mut self, hook: SteerHook) {
@@ -877,9 +891,6 @@ async fn drain_reply_text(
         match event? {
             StreamEvent::TextDelta { delta } => {
                 result.push_str(&delta);
-            }
-            StreamEvent::ThinkingDelta { delta } => {
-                append_thinking_chunk(&mut result, &delta);
             }
             StreamEvent::MessageComplete { usage, .. } => {
                 usage.unwrap_or_default().log_request("compaction", session);
