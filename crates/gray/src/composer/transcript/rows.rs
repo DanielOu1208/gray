@@ -490,6 +490,9 @@ pub(crate) fn viewed_image_lines(
 }
 
 fn image_preview_lines(path: &std::path::Path, max_w: usize) -> Option<Vec<Line<'static>>> {
+    if let Some(rows) = kitty::preview_lines(path, max_w) {
+        return Some(rows);
+    }
     let img = image::open(path).ok()?;
     let cols = max_w.clamp(8, 48) as u32;
     let thumb = img.thumbnail(cols, 48).to_rgba8();
