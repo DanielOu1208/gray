@@ -82,6 +82,14 @@ fi
 INSTALLED_VER=$("${DEST}/gray" --version 2>/dev/null || true)
 echo "→ installed to ${DEST}/gray (${INSTALLED_VER:-?}, ${CHANNEL})"
 
+if [ "${GRAY_INSTALL_PLUGINS:-1}" != "0" ]; then
+    if "${DEST}/gray" plugin install --yes account >/dev/null 2>&1; then
+        echo "→ installed gray-account"
+    else
+        echo "  optional gray-account plugin unavailable on this platform"
+    fi
+fi
+
 if [ "${GRAY_TELEMETRY:-1}" != "0" ] && [ -z "${GRAY_CDN_URL:-}" ]; then
     VER="${INSTALLED_VER##* }"
     if have_cmd curl; then
