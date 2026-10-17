@@ -389,6 +389,26 @@ fn warn_on_divergence() {
 }
 
 pub async fn update_now() -> anyhow::Result<()> {
+    match latest_version().await {
+        Ok(latest)
+            if !latest.is_empty()
+                && !update_available(
+                    CHANNEL,
+                    &latest,
+                    env!("CARGO_PKG_VERSION"),
+                    env!("GRAY_BUILD_ID"),
+                ) =>
+        {
+            println!(
+                "gray {} is current ({CHANNEL}, latest {latest})",
+                env!("CARGO_PKG_VERSION")
+            );
+            warn_on_shadow();
+            return Ok(());
+        }
+        Ok(_) => {}
+        Err(e) => log::debug!("version check failed ({e:#}); installing anyway"),
+    }
     println!("→ updating gray ({CHANNEL})...");
     install()?;
     println!("✓ updated. restart gray to use the new version.");
@@ -408,6 +428,10 @@ pub(crate) fn install() -> anyhow::Result<()> {
     anyhow::ensure!(
         !cfg!(windows),
         "self-update is not supported on native Windows: close Gray and rerun install-native.ps1 with the verified preview ZIP and checksum"
+    );
+    anyhow::ensure!(
+        !cfg!(debug_assertions),
+        "this is a debug build — self-update would overwrite the installed gray with the release build; use scripts/install-local.sh instead"
     );
     run_installer_locked()
 }

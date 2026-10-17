@@ -236,7 +236,7 @@ async fn build_agent_with(
 ) -> anyhow::Result<gray_core::agent::Agent> {
     let Some(model) = &config.model else {
         anyhow::bail!(
-            "no model configured yet — run /models to set up your provider & key (or /models provider/id; /help for all commands)"
+            "no model configured yet — set one with the models picker (TUI), --model/--api-key, or GRAY_MODEL/GRAY_API_KEY"
         );
     };
 
@@ -418,38 +418,70 @@ pub(crate) fn extra_surface_plugins(
     group(ArgGroup::new("one_shot_input").args(["print", "input_json"]))
 )]
 pub struct Cli {
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Model id to use (env GRAY_MODEL; overrides the saved config)"
+    )]
     pub model: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, help = "Provider base URL (env GRAY_BASE_URL)")]
     pub base_url: Option<String>,
 
-    #[arg(short = 'p', long = "print")]
+    #[arg(
+        short = 'p',
+        long = "print",
+        value_name = "PROMPT",
+        help = "One-shot print mode: answer PROMPT ('-' reads stdin) and exit"
+    )]
     pub print: Option<String>,
 
-    #[arg(long, value_name = "PATH", conflicts_with = "print", requires = "json")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "print",
+        requires = "json",
+        help = "Read a structured input envelope from PATH ('-' = stdin); implies one-shot"
+    )]
     pub input_json: Option<PathBuf>,
 
-    #[arg(long, requires = "one_shot_input")]
+    #[arg(
+        long,
+        requires = "one_shot_input",
+        help = "Emit machine-readable JSONL instead of rendered text"
+    )]
     pub json: bool,
 
     /// Cap on model requests; 0 = unlimited (default 32 when omitted)
     #[arg(long, requires = "json", value_parser = clap::value_parser!(u32))]
     pub max_requests: Option<u32>,
 
-    #[arg(long, requires = "json")]
+    #[arg(
+        long,
+        requires = "json",
+        value_name = "USD",
+        help = "USD per 1M input tokens, for cost accounting"
+    )]
     pub input_price: Option<f64>,
 
-    #[arg(long, requires = "json")]
+    #[arg(
+        long,
+        requires = "json",
+        value_name = "USD",
+        help = "USD per 1M output tokens, for cost accounting"
+    )]
     pub output_price: Option<f64>,
 
-    #[arg(long)]
+    #[arg(long, help = "Provider API key (env GRAY_API_KEY)")]
     pub api_key: Option<String>,
 
-    #[arg(short = 'c', long = "continue")]
+    #[arg(
+        short = 'c',
+        long = "continue",
+        help = "Continue the most recent session in this directory"
+    )]
     pub continue_last: bool,
 
-    #[arg(long, value_name = "ID")]
+    #[arg(long, value_name = "ID", help = "Attach to a session by id or prefix")]
     pub session: Option<String>,
 
     #[arg(
@@ -458,41 +490,59 @@ pub struct Cli {
         value_name = "ID",
         num_args = 0..=1,
         conflicts_with = "session",
-        conflicts_with = "continue_last"
+        conflicts_with = "continue_last",
+        help = "Resume a session: pick interactively, or pass an id/prefix"
     )]
     pub resume: Option<Option<String>>,
 
-    #[arg(long, value_name = "TOKENS", value_parser = parse_context_window_cli)]
+    #[arg(long, value_name = "TOKENS", value_parser = parse_context_window_cli, help = "Override the model context window, e.g. 128000, 128k, 1m")]
     pub context_window: Option<usize>,
 
-    #[arg(long, value_name = "TOKENS", value_parser = parse_context_window_cli)]
+    #[arg(long, value_name = "TOKENS", value_parser = parse_context_window_cli, help = "Tokens reserved for the reply when compacting context")]
     pub context_reserve: Option<usize>,
 
-    #[arg(long, value_name = "TOKENS", value_parser = parse_context_window_cli)]
+    #[arg(long, value_name = "TOKENS", value_parser = parse_context_window_cli, help = "Tokens kept verbatim at the tail during compaction")]
     pub context_keep: Option<usize>,
 
-    #[arg(long, value_name = "auto|TOKENS", value_parser = parse_compact_at_cli)]
+    #[arg(long, value_name = "auto|TOKENS", value_parser = parse_compact_at_cli, help = "Compact once context passes this many tokens, or 'auto'")]
     pub compact_at: Option<crate::setup::CompactAt>,
 
-    #[arg(long = "dump-manifest")]
+    #[arg(
+        long = "dump-manifest",
+        help = "Print the resolved gray.yml tool manifests as JSON and exit"
+    )]
     pub dump_manifest: bool,
 
-    #[arg(long = "skill")]
+    #[arg(
+        long = "skill",
+        help = "Print the gray agent-skill doc (for embedding in other agents) and exit"
+    )]
     pub skill: bool,
 
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Bare mode: no plugins, memory, background jobs or auto-compact"
+    )]
     pub bare: bool,
 
-    #[arg(long)]
+    #[arg(long, help = "Lean system prompt: skip plugin-provided prompt extras")]
     pub lean: bool,
 
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", help = "Stop the turn after N agent steps")]
     pub max_turns: Option<u32>,
 
-    #[arg(long, value_name = "USD")]
+    #[arg(
+        long,
+        value_name = "USD",
+        help = "Stop the turn when estimated spend exceeds USD"
+    )]
     pub max_cost_usd: Option<f64>,
 
-    #[arg(long, value_name = "SECS")]
+    #[arg(
+        long,
+        value_name = "SECS",
+        help = "Stop the turn after SECS wall-clock seconds"
+    )]
     pub max_wall_secs: Option<u64>,
 
     #[command(subcommand)]
@@ -512,48 +562,68 @@ fn parse_compact_at_cli(s: &str) -> Result<crate::setup::CompactAt, String> {
 
 #[derive(Parser, Debug, Clone)]
 pub enum Commands {
+    #[command(about = "Find files by name pattern under PATH (defaults to .)")]
     Find {
-        #[arg(value_name = "PATTERN")]
+        #[arg(value_name = "PATTERN", help = "File-name pattern, e.g. '*.rs'")]
         pattern: String,
 
-        #[arg(value_name = "PATH")]
+        #[arg(
+            value_name = "PATH",
+            help = "Directory to search (default: current directory)"
+        )]
         path: Option<String>,
 
-        #[arg(long, value_name = "N")]
+        #[arg(long, value_name = "N", help = "Cap the number of results")]
         limit: Option<usize>,
     },
 
+    #[command(about = "Search file contents — regex by default (-i ignore-case, -F literal)")]
     Grep {
-        #[arg(value_name = "PATTERN")]
+        #[arg(
+            value_name = "PATTERN",
+            help = "Regex pattern (or literal text with -F)"
+        )]
         pattern: String,
 
-        #[arg(value_name = "PATH")]
+        #[arg(
+            value_name = "PATH",
+            help = "File or directory to search (default: current directory)"
+        )]
         path: Option<String>,
 
-        #[arg(long, value_name = "N")]
+        #[arg(long, value_name = "N", help = "Cap the number of matches")]
         limit: Option<usize>,
 
-        #[arg(long, value_name = "GLOB")]
+        #[arg(
+            long,
+            value_name = "GLOB",
+            help = "Only search files matching GLOB, e.g. '*.toml'"
+        )]
         glob: Option<String>,
 
-        #[arg(long, short)]
+        #[arg(long, short, help = "Case-insensitive matching")]
         ignore_case: bool,
 
-        #[arg(long, short = 'F')]
+        #[arg(long, short = 'F', help = "Treat PATTERN as literal text, not regex")]
         literal: bool,
 
-        #[arg(long, value_name = "N")]
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Print N lines of context around each match"
+        )]
         context: Option<usize>,
     },
 
+    #[command(about = "Resume a past session — picker by default, or pass an id / --last")]
     Resume {
-        #[arg(value_name = "SESSION_ID")]
+        #[arg(value_name = "SESSION_ID", help = "Session id or unique prefix")]
         session_id: Option<String>,
 
-        #[arg(long)]
+        #[arg(long, help = "Resume the most recent session")]
         last: bool,
 
-        #[arg(long)]
+        #[arg(long, help = "Include sessions from other directories")]
         all: bool,
     },
 
@@ -562,51 +632,70 @@ pub enum Commands {
         after_help = "Examples:\n  gray read --live            live sessions: id, pid, cwd, model, last activity\n  gray read <SESSION_ID>      last 20 messages, tool calls summarized\n  gray read <SESSION_ID> --last 50 --json\nReads the owner's session store ($GRAY_USER_HOME, else $GRAY_HOME). A session is live only while its .open lock is held."
     )]
     Read {
-        #[arg(value_name = "SESSION_ID")]
+        #[arg(value_name = "SESSION_ID", help = "Session id or unique prefix")]
         session: Option<String>,
 
-        #[arg(long)]
+        #[arg(long, help = "List live sessions instead of reading one")]
         live: bool,
 
-        #[arg(long, value_name = "N", default_value_t = 20)]
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 20,
+            help = "Show the last N messages"
+        )]
         last: usize,
 
-        #[arg(long)]
+        #[arg(long, help = "Emit JSON instead of rendered text")]
         json: bool,
     },
 
+    #[command(about = "Send a message (and attachments) into a live session")]
     Send {
-        #[arg(value_name = "SESSION_ID")]
+        #[arg(value_name = "SESSION_ID", help = "Session id or unique prefix")]
         session: String,
 
-        #[arg(value_name = "TEXT", default_value = "")]
+        #[arg(value_name = "TEXT", default_value = "", help = "Message text")]
         text: String,
 
-        #[arg(long = "attach", value_name = "PATH")]
+        #[arg(
+            long = "attach",
+            value_name = "PATH",
+            help = "Attach a file (repeatable)"
+        )]
         attach: Vec<std::path::PathBuf>,
 
-        #[arg(long, value_name = "LABEL")]
+        #[arg(long, value_name = "LABEL", help = "Sender label shown in the session")]
         from: Option<String>,
 
-        #[arg(long, value_name = "SECS")]
+        #[arg(long, value_name = "SECS", help = "Wait up to SECS for the reply")]
         wait: Option<u64>,
     },
 
-    #[command(visible_alias = "plugins")]
+    #[command(
+        visible_alias = "plugins",
+        about = "Manage plugins (install, update, enable)"
+    )]
     Plugin {
         #[command(subcommand)]
         cmd: PluginCmd,
     },
 
+    #[command(about = "The always-on gateway daemon: chat apps, cron, scheduling")]
     Gateway {
         #[command(subcommand)]
         cmd: GatewayCmd,
     },
 
+    #[command(about = "Trust a directory's .gray/prompts, SKILL.md and AGENTS.md files")]
     Trust {
+        #[arg(
+            value_name = "DIR",
+            help = "Directory to trust (default: current directory)"
+        )]
         dir: Option<std::path::PathBuf>,
 
-        #[arg(long)]
+        #[arg(long, help = "Revoke trust for DIR")]
         revoke: bool,
     },
 
@@ -627,34 +716,44 @@ pub enum Commands {
         about = "Your hosted Gray machine on Gray Cloud — provision it, check it, chat with it"
     )]
     Cloud {
-        #[arg(value_name = "MESSAGE", num_args = 0..)]
+        #[arg(value_name = "MESSAGE", num_args = 0.., help = "With a message, chat with your hosted machine; empty shows status")]
         message: Vec<String>,
     },
 
-    #[command(visible_alias = "upgrade")]
+    #[command(visible_alias = "upgrade", about = "Install a newer gray build")]
     Update {
-        #[arg(long, value_name = "on|off|status")]
+        #[arg(
+            long,
+            value_name = "on|off|status",
+            help = "Turn auto-update on/off, or show its state"
+        )]
         auto: Option<String>,
 
-        #[arg(long)]
+        #[arg(long, help = "Also update plugins and provider CLIs")]
         everything: bool,
     },
 
+    #[command(about = "Manage scheduled jobs (the gateway or `gray cron serve` runs them)")]
     Cron {
         #[command(subcommand)]
         cmd: CronCmd,
     },
 
+    #[command(about = "Manage saved sessions")]
     Sessions {
         #[command(subcommand)]
         cmd: SessionsCmd,
     },
 
+    #[command(
+        about = "Machine-readable command registry — list and run commands (used by gateways)"
+    )]
     Cmd {
         #[command(subcommand)]
         cmd: CmdVerb,
     },
 
+    #[command(about = "Read spilled tool output that overflowed the transcript")]
     Spill {
         #[command(subcommand)]
         cmd: SpillCmd,
@@ -679,146 +778,211 @@ pub enum Commands {
 
 #[derive(Parser, Debug, Clone)]
 pub enum SpillCmd {
+    #[command(about = "Show the first N lines of a spill")]
     Head {
-        #[arg(value_name = "HANDLE")]
+        #[arg(value_name = "HANDLE", help = "Spill handle, e.g. spill:abc123")]
         handle: String,
 
-        #[arg(long, short = 'n', default_value_t = 50)]
+        #[arg(long, short = 'n', default_value_t = 50, help = "Number of lines")]
         lines: usize,
     },
 
+    #[command(about = "Show the last N lines of a spill")]
     Tail {
-        #[arg(value_name = "HANDLE")]
+        #[arg(value_name = "HANDLE", help = "Spill handle, e.g. spill:abc123")]
         handle: String,
 
-        #[arg(long, short = 'n', default_value_t = 50)]
+        #[arg(long, short = 'n', default_value_t = 50, help = "Number of lines")]
         lines: usize,
     },
 
+    #[command(about = "Search inside a spill")]
     Grep {
-        #[arg(value_name = "HANDLE")]
+        #[arg(value_name = "HANDLE", help = "Spill handle, e.g. spill:abc123")]
         handle: String,
 
-        #[arg(value_name = "PATTERN")]
+        #[arg(value_name = "PATTERN", help = "Regex pattern (literal with -F)")]
         pattern: String,
 
-        #[arg(long, short = 'n', default_value_t = 0)]
+        #[arg(
+            long,
+            short = 'n',
+            default_value_t = 0,
+            help = "Context lines around each match"
+        )]
         context: usize,
 
-        #[arg(long, short)]
+        #[arg(long, short, help = "Case-insensitive matching")]
         ignore_case: bool,
 
-        #[arg(long, short = 'F')]
+        #[arg(long, short = 'F', help = "Treat PATTERN as literal text, not regex")]
         literal: bool,
 
-        #[arg(long, value_name = "N")]
+        #[arg(long, value_name = "N", help = "Cap the number of matches")]
         limit: Option<usize>,
     },
 
+    #[command(about = "Show spill store stats")]
     Stats,
 }
 
 #[derive(Parser, Debug, Clone)]
 pub enum SessionsCmd {
+    #[command(about = "Delete saved sessions older than N days")]
     Prune {
-        #[arg(long, default_value_t = 90)]
+        #[arg(long, default_value_t = 90, help = "Age threshold in days")]
         older_than_days: u64,
     },
 }
 
 #[derive(Parser, Debug, Clone)]
 pub enum CronCmd {
+    #[command(about = "List cron jobs")]
     List,
 
     #[command(
-        after_help = "Reminder (one command, no model turn):\n  gray cron add \"in 2m\" \"clean my roo\" --reminder\nThe text is stored and delivered verbatim: never reword it, never fix typos, never pass --name."
+        about = "Add a scheduled job",
+        after_help = "Reminder (one command, no model turn):\n  gray cron add \"in 2m\" \"clean my roo\" --reminder\nThe text is stored and delivered verbatim: never reword it, never fix typos, never pass --name.\n\nSchedules: \"in 10m\", \"every 1h\", \"daily 9am\", \"weekdays 9:00\", \"every monday 6pm\", an RFC3339 timestamp, or a 5-field cron expression."
     )]
     Add {
+        #[arg(
+            value_name = "SCHEDULE",
+            help = "\"in 10m\", \"every 1h\", \"daily 9am\", RFC3339, or 5-field cron"
+        )]
         schedule: String,
 
+        #[arg(value_name = "PROMPT", help = "Prompt the agent runs on each fire")]
         prompt: String,
 
-        #[arg(long)]
+        #[arg(long, help = "Where the result goes: 'local', 'origin', or a target")]
         deliver: Option<String>,
 
-        #[arg(long = "origin-session")]
+        #[arg(
+            long = "origin-session",
+            value_name = "ID",
+            help = "Deliver to this session instead"
+        )]
         origin_session: Option<String>,
 
-        #[arg(long)]
+        #[arg(long, help = "Job name (default: first line of the prompt)")]
         name: Option<String>,
 
-        #[arg(long = "in", value_name = "DIR")]
+        #[arg(
+            long = "in",
+            value_name = "DIR",
+            help = "Working directory for the job"
+        )]
         workdir: Option<PathBuf>,
 
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "LIST",
+            help = "Comma-separated skills to load for this job"
+        )]
         skills: Option<String>,
 
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Run this script file as the job instead of a prompt"
+        )]
         script: Option<PathBuf>,
 
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Store-and-deliver reminder — no model turn, text goes out verbatim"
+        )]
         reminder: bool,
     },
 
+    #[command(about = "Run every due job once (what the ticker calls each minute)")]
     Tick {
-        #[arg(long)]
+        #[arg(long, help = "Emit JSON instead of text")]
         json: bool,
     },
 
+    #[command(about = "Run the cron ticker in the foreground")]
     Serve,
 
+    #[command(about = "Pause a job")]
     Pause {
+        #[arg(value_name = "ID")]
         id: String,
     },
 
+    #[command(about = "Resume a paused job")]
     Resume {
+        #[arg(value_name = "ID")]
         id: String,
     },
 
+    #[command(about = "Fire a job right now")]
     Run {
+        #[arg(value_name = "ID")]
         id: String,
     },
 
+    #[command(about = "Show one job's schedule, delivery and last result")]
     Show {
+        #[arg(value_name = "ID")]
         id: String,
     },
 
+    #[command(about = "Delete a job")]
     Remove {
+        #[arg(value_name = "ID")]
         id: String,
     },
 }
 
 #[derive(Parser, Debug, Clone)]
 pub enum GatewayCmd {
+    #[command(about = "Connect a chat platform (e.g. telegram, discord)")]
     Setup {
+        #[arg(
+            value_name = "PLATFORM",
+            help = "Platform to set up; omit for the picker"
+        )]
         platform: Option<String>,
     },
 
+    #[command(about = "Run the gateway in the foreground")]
     Run,
 
+    #[command(about = "Show gateway, cron and service status")]
     Status,
 
+    #[command(about = "Start the installed service")]
     Start,
 
+    #[command(about = "Stop the running gateway")]
     Stop,
 
+    #[command(about = "Restart the service")]
     Restart,
 
+    #[command(about = "Install the user service (runit/systemd) so the gateway survives logout")]
     Install {
-        #[arg(long)]
+        #[arg(long, help = "Install but don't start it")]
         no_start: bool,
 
-        #[arg(long)]
+        #[arg(long, help = "Print the service definition instead of installing")]
         print: bool,
     },
 
+    #[command(about = "Remove the installed service")]
     Uninstall,
 
+    #[command(about = "Enable the gateway (the master switch)")]
     On,
 
+    #[command(about = "Disable the gateway — run/start refuse while off")]
     Off,
 
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        about = "Service-supervisor lifecycle hooks (used internally)"
+    )]
     Lifecycle(LifecycleCmd),
 
     #[command(flatten)]
@@ -827,92 +991,135 @@ pub enum GatewayCmd {
 
 #[derive(Parser, Debug, Clone)]
 pub enum LifecycleCmd {
+    #[command(about = "Record a gateway boot for DIR")]
     Boot {
-        #[arg(long)]
+        #[arg(long, value_name = "DIR")]
         dir: std::path::PathBuf,
 
-        #[arg(long, default_value_t = 0)]
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "How many turns were interrupted mid-flight"
+        )]
         interrupted: usize,
     },
 
+    #[command(about = "Record a gateway stop for DIR")]
     Stop {
-        #[arg(long)]
+        #[arg(long, value_name = "DIR")]
         dir: std::path::PathBuf,
     },
 
+    #[command(about = "Mark DIR as wanting a restart")]
     Restart {
-        #[arg(long)]
+        #[arg(long, value_name = "DIR")]
         dir: std::path::PathBuf,
     },
 
+    #[command(about = "Clear a pending restart for DIR")]
     ClearRestart {
-        #[arg(long)]
+        #[arg(long, value_name = "DIR")]
         dir: std::path::PathBuf,
     },
 }
 
 #[derive(Parser, Debug, Clone)]
 pub enum CmdVerb {
+    #[command(about = "List the command table as JSON")]
     List,
 
+    #[command(about = "Run a command by name")]
     Run {
+        #[arg(value_name = "NAME", help = "Command name, e.g. 'usage', 'compact'")]
         name: String,
 
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS",
+            help = "Arguments passed through to the command"
+        )]
         args: Vec<String>,
     },
 
+    #[command(about = "Answer a pending command interaction (option/select prompts)")]
     Interact {
+        #[arg(
+            value_name = "TOKEN",
+            help = "Interaction token from the pending prompt"
+        )]
         token: String,
 
+        #[arg(
+            value_name = "ACTION",
+            help = "Chosen action; omit to re-show the prompt"
+        )]
         action: Option<String>,
     },
 }
 
 #[derive(Parser, Debug, Clone)]
 pub enum PluginCmd {
+    #[command(about = "List installed plugins")]
     List,
 
+    #[command(about = "Install a plugin by index name, https URL, or local path")]
     Install {
+        #[arg(
+            value_name = "SPEC",
+            help = "Plugin name from the index, https URL, or a local dir/file"
+        )]
         spec: String,
 
-        #[arg(short, long)]
+        #[arg(short, long, help = "Reinstall even if already present")]
         force: bool,
 
-        #[arg(short = 'y', long)]
+        #[arg(short = 'y', long, help = "Skip the capability/trust prompt")]
         yes: bool,
     },
 
+    #[command(about = "Remove an installed plugin")]
     Remove {
+        #[arg(value_name = "NAME")]
         name: String,
     },
 
+    #[command(about = "Update plugins — a name or 'all'")]
     Update {
-        #[arg(default_value = "all")]
+        #[arg(default_value = "all", value_name = "NAME|all")]
         target: String,
-        #[arg(long)]
+
+        #[arg(long, help = "Only report what would update")]
         check: bool,
     },
 
+    #[command(about = "Enable a disabled plugin")]
     Enable {
+        #[arg(value_name = "NAME")]
         name: String,
 
-        #[arg(long)]
+        #[arg(long, help = "Load it in every GRAY_HOME (e.g. memory everywhere)")]
         global: bool,
     },
 
+    #[command(about = "Disable a plugin without removing it")]
     Disable {
+        #[arg(value_name = "NAME")]
         name: String,
     },
 
+    #[command(about = "Run conformance checks on a plugin directory (for authors)")]
     Check {
+        #[arg(value_name = "DIR")]
         dir: String,
     },
 
+    #[command(about = "Show a plugin's declared capabilities; --all grants them")]
     Capabilities {
+        #[arg(value_name = "NAME")]
         name: Option<String>,
 
-        #[arg(long)]
+        #[arg(long, help = "Grant every declared capability (needs NAME)")]
         all: bool,
     },
 }

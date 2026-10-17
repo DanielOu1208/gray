@@ -6,7 +6,10 @@ fn miss_error_is_exact() {
         plugins: BTreeMap::new(),
     };
     let err = lookup(&index, "foo").unwrap_err().to_string();
-    assert_eq!(err, "not in index: foo (try /plugin install <https-url>)");
+    assert_eq!(
+        err,
+        "not in index: foo (install by https URL or local path instead)"
+    );
 }
 
 #[test]

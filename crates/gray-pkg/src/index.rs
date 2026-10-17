@@ -90,10 +90,9 @@ impl HashSpec {
 }
 
 pub fn lookup<'a>(index: &'a Index, name: &str) -> anyhow::Result<&'a Entry> {
-    index
-        .plugins
-        .get(name)
-        .ok_or_else(|| anyhow::anyhow!("not in index: {name} (try /plugin install <https-url>)"))
+    index.plugins.get(name).ok_or_else(|| {
+        anyhow::anyhow!("not in index: {name} (install by https URL or local path instead)")
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]

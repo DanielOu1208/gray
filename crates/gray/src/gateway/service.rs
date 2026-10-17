@@ -180,7 +180,10 @@ pub fn status(sup: &Supervisor) -> ServiceStatus {
 }
 
 pub fn describe(sup: &Supervisor) -> String {
-    let st = status(sup);
+    describe_status(sup, &status(sup))
+}
+
+pub fn describe_status(sup: &Supervisor, st: &ServiceStatus) -> String {
     match (st.installed, st.up) {
         (false, _) if matches!(sup, Supervisor::None) => st.detail.clone(),
         (false, _) => format!("{}; install with `gray gateway install`", st.detail),

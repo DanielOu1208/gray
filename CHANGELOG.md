@@ -2,7 +2,71 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-17
+
+### Added
+- **`gray login` / `whoami` / `logout` — account sign-in against
+  gray.alignment.id.** A one-time enrollment code minted on the site
+  bootstraps a registry token; the installers now ship the official
+  account plugin by default so plugin-credentialed providers work out
+  of the box.
+- **`gray cloud` — your hosted Gray machine.** Provision it, check it,
+  and chat with a Grayling seat from the CLI.
+- **Inline image previews in the transcript.** `cat`-ed image paths
+  render inline (kitty graphics), the grounded band repaints rows it
+  vacated, and prompt cards keep their painted margins.
+- **Prompt-cache + overflow machinery, ported from pi.** Provider
+  `prompt_cache_key` support, compaction quarantine, cache-miss
+  metering, a recoverable length-stop retry, and child/tool output that
+  spills to a file and returns a bounded tail view (`gray spill`).
+- **Installer flavors: `full` (default) and `core`.** Full installs a
+  curated plugin set — account, memory, search, questions, subagents,
+  mcp — on unix, WSL and the Windows path.
+- **`/skills` menu: Enter invokes the highlighted skill.**
+
 ### Fixed
+- **`gray update` no longer reinstalls when already current.** It
+  checks the latest version first and reports `gray X is current`
+  instead of re-downloading; and a debug build refuses to self-update,
+  since that would overwrite the installed binary with a release build
+  (`scripts/install-local.sh` is the dev path).
+- **`gray --help` and every subcommand now document themselves.** All
+  top-level options and every `plugin`/`gateway`/`cron`/`sessions`/
+  `cmd`/`spill` subcommand gained `about`/`help` text and argument
+  value names.
+- **A stray positional after `-p`/`--json` is a usage error, not a
+  plugin lookup.** `gray -p "prompt" file.txt` used to dispatch
+  `file.txt` as an external plugin command and never ran the prompt.
+- **The "no model configured" error works headlessly now.** It used to
+  tell `gray -p` callers to run the TUI's `/models`, which the print
+  scrubber then mangled to `<path>`; it now points at the picker for
+  interactive use and `--model`/`--api-key`/`GRAY_MODEL`/`GRAY_API_KEY`
+  otherwise.
+- **Plugin index misses suggest a URL/path install, not `/plugin
+  install`** — that slash command only exists inside the REPL.
+- **`gray gateway status` explains the "service up, socket silent"
+  state** instead of printing a bare `not running` next to a live pid.
+- **`gray read`/`gray send` accept a unique session-id prefix**
+  instead of demanding the full id; an ambiguous prefix errors and
+  lists the matches rather than guessing.
+- **Mid-stream turn failures retry.** A provider drop mid-reply used to
+  fail the whole turn; the loop retries it, and silent-stall retries
+  are capped with the cap shrinking after a recent stall.
+- **Detached process groups survive a clean exit.** The shutdown sweep
+  no longer kills process groups the user backgrounded and detached.
+- **Gemini thought signatures are preserved across tool calls**, and
+  text-markup tool calls no longer carry a `thought_signature`.
+- **The stall watchdog no longer fires on plugin-relayed streams** —
+  relayed providers stream on their own schedule.
+- **Composer caret uses display width, not char index** — correct
+  column around wide glyphs and attachment chips.
+- **Compaction seeds the agent from pending history on resumed
+  sessions** instead of losing the tail.
+- **Prose tabs expand to 8-stop spaces** in pretty markdown render.
+- **Connect surfaces plugin credential hints** and the status line
+  wraps instead of clipping.
+- **rustls updated to 0.23.46** (patched).
+
 - **Pasted images no longer vanish for text-only models.** Models that
   can't take image input (swe-*, non-vision deepseek) used to get a
   silent `[image]` wire part the relay dropped; image blocks are now

@@ -235,7 +235,17 @@ fn report(home: &Path) -> (bool, Vec<String>) {
         }
         Err(e) => lines.push(format!("  cron: store unavailable: {e:#}")),
     }
-    lines.push(format!("  service: {}", service::describe(&sup)));
+    let svc = service::status(&sup);
+    lines.push(format!(
+        "  service: {}",
+        service::describe_status(&sup, &svc)
+    ));
+    if !running && svc.up {
+        lines.push(
+            "  note: the service reports a live pid but nothing answers this home's socket — different GRAY_HOME, or the gateway is crash-looping (`gray gateway run` shows why)"
+                .to_string(),
+        );
+    }
     (running, lines)
 }
 
