@@ -295,21 +295,6 @@ impl Tui {
         });
     }
 
-    pub(crate) fn repaint_slid_rows(&mut self, slid: u16) {
-        let top = usize::from(self.terminal.viewport_area.y);
-        let Some(old_top) = top.checked_sub(usize::from(slid)) else {
-            return;
-        };
-        let len = self.transcript.len();
-        if len <= old_top {
-            return;
-        }
-        let fill: Vec<Line<'static>> =
-            self.transcript[len.saturating_sub(top)..len - old_top].to_vec();
-        let y = slid.saturating_sub(fill.len() as u16);
-        let _ = self.terminal.paint_lines_at(y, &fill);
-    }
-
     pub fn stream(&mut self, chunk: &str) {
         self.pending.push_str(&strip_ansi(chunk));
         while let Some(idx) = self.pending.find('\n') {
