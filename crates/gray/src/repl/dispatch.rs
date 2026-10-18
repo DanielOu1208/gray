@@ -20,6 +20,10 @@ pub(crate) async fn dispatch_command(
     unconfigured: &mut bool,
     hide_thinking: &mut bool,
 ) -> anyhow::Result<Flow> {
+    let cmd = match cmd {
+        ReplCommand::Plugins if tui.is_some() => ReplCommand::Plugin("/plugins".into()),
+        cmd => cmd,
+    };
     Ok(match cmd {
         ReplCommand::Empty | ReplCommand::Prompt(_) => Flow::Continue,
         ReplCommand::Quit => {
@@ -530,28 +534,7 @@ pub(crate) async fn dispatch_command(
             Flow::Continue
         }
         ReplCommand::Plugins => {
-            let tui_shared = tui.as_ref().map(|(s, _)| s);
-            if tui_shared.is_none() {
-                say(tui_shared, &crate::plugin_status::table().await);
-            } else {
-                let bg = tui_shared.map(|s| s.lock().expect("tui lock").snapshot());
-                let changed = with_modal_sync(tui_shared, || {
-                    crate::setup::run_plugins_manager(bg.as_ref())
-                });
-                match changed {
-                    Ok(true) => say(tui_shared, "plugins updated"),
-                    Ok(false) => {
-                        if let Some(shared) = tui_shared {
-                            let mut t = shared.lock().expect("tui lock");
-                            t.clear_draft();
-                            if !t.retract_slash_echo("/plugins") {
-                                let _ = t.draw();
-                            }
-                        }
-                    }
-                    Err(e) => say(tui_shared, &format!("plugins manager failed: {e}")),
-                }
-            }
+            say(None, &crate::plugin_status::table().await);
             Flow::Continue
         }
         ReplCommand::Unknown(cmd) => {

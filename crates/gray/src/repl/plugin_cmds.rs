@@ -69,6 +69,22 @@ pub(crate) fn is_bare_plugin_cmd(raw: &str) -> bool {
     matches!(cmd.to_ascii_lowercase().as_str(), "plugin" | "plugins")
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_PLUGIN_MODAL: std::cell::RefCell<Option<crate::setup::PluginModalOutcome>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn run_plugin_picker(
+    bg: Option<&crate::setup::BackgroundSnapshot>,
+) -> anyhow::Result<crate::setup::PluginModalOutcome> {
+    #[cfg(test)]
+    if let Some(outcome) = TEST_PLUGIN_MODAL.with_borrow_mut(Option::take) {
+        return Ok(outcome);
+    }
+    crate::setup::run_plugins_modal(bg)
+}
+
 pub(crate) async fn handle_plugin_command(
     raw: &str,
     tui: Option<&crate::composer::SharedTui>,
@@ -76,7 +92,7 @@ pub(crate) async fn handle_plugin_command(
 ) -> PluginCommandOutcome {
     if is_bare_plugin_cmd(raw) && tui.is_some() {
         let bg = tui.map(|s| s.lock().expect("tui lock").snapshot());
-        let result = with_modal_sync(tui, || crate::setup::run_plugins_modal(bg.as_ref()));
+        let result = with_modal_sync(tui, || run_plugin_picker(bg.as_ref()));
         let mut command_outcome = PluginCommandOutcome::default();
         match result {
             Ok(outcome) => {

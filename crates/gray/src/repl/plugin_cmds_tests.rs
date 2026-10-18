@@ -17,6 +17,49 @@ fn activation_requires_new_installs_and_now() {
     assert!(super::should_prompt(&["demo".into()], true));
 }
 
+#[tokio::test]
+async fn bare_aliases_parse_and_dispatch_to_marketplace_picker() {
+    use clap::Parser;
+    for raw in ["/plugin", "/plugins", "/PLUGIN", "/PLUGINS"] {
+        let cli = crate::Cli::try_parse_from(["gray"]).unwrap();
+        let mut config = crate::config::Config::resolve_with(&cli, |_| None).unwrap();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(crate::composer::Tui::test_tui(
+            80, 24,
+        )));
+        let tui = Some((
+            shared,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ));
+        super::TEST_PLUGIN_MODAL.with_borrow_mut(|slot| {
+            *slot = Some(crate::setup::PluginModalOutcome::default());
+        });
+        let mut agent = None;
+        let mut session = None;
+        let flow = dispatch_command(
+            super::parse_command(raw),
+            &mut agent,
+            &mut config,
+            tempfile::tempdir().unwrap().path(),
+            &tui,
+            &mut session,
+            &mut super::SessionTotals::default(),
+            &mut None,
+            &mut std::sync::Arc::new(Vec::new()),
+            &mut false,
+            &mut false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(flow, Flow::Continue);
+        assert!(
+            super::TEST_PLUGIN_MODAL.with_borrow(|slot| slot.is_none()),
+            "{raw} did not open the marketplace picker"
+        );
+        assert!(agent.is_none(), "opening marketplace must stay lazy");
+        assert!(session.is_none());
+    }
+}
+
 #[test]
 fn bare_detection_covers_case_and_trailing_space() {
     assert!(is_bare_plugin_cmd("/plugin"));
