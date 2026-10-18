@@ -67,6 +67,19 @@ fn manager_specs_differ_only_where_expected() {
 }
 
 #[test]
+fn only_plugin_wrapper_adds_marketplace() {
+    assert_eq!(
+        super::manager_tab_names(true, false),
+        vec!["Installed", "Errors"]
+    );
+    assert_eq!(
+        super::manager_tab_names(true, true),
+        vec!["Installed", "Errors", "Marketplace"]
+    );
+    assert_eq!(super::manager_tab_names(false, false), vec!["Installed"]);
+}
+
+#[test]
 fn row_shows_name_and_description() {
     assert_eq!(
         crate::skills::format_discovered_skill_row(&discovered("demo-skill", "Do demo things")),

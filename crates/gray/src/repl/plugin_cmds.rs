@@ -55,15 +55,18 @@ pub(crate) async fn handle_plugin_command(raw: &str, tui: Option<&crate::compose
         let bg = tui.map(|s| s.lock().expect("tui lock").snapshot());
         let result = with_modal_sync(tui, || crate::setup::run_plugins_modal(bg.as_ref()));
         match result {
-            Ok(true) => {
+            Ok(outcome) if outcome.changed => {
                 if let Some(shared) = tui {
                     let mut t = shared.lock().expect("tui lock");
                     t.push_action("Plugins updated", None);
                     t.ensure_gap();
                     let _ = t.draw();
                 }
+                for warning in outcome.warnings {
+                    say(tui, &format!("Plugin install warning: {warning}"));
+                }
             }
-            Ok(false) => {
+            Ok(_) => {
                 if let Some(shared) = tui {
                     let mut t = shared.lock().expect("tui lock");
                     t.clear_draft();

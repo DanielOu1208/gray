@@ -117,7 +117,13 @@ pub fn render(
                 } else {
                     ""
                 };
-                ListItem::new(format!("{} · {}{badge}", safe_text(name), trust(entry)))
+                let suffix = format!(" · {}{badge}", trust(entry));
+                let budget =
+                    usize::from(body.width).saturating_sub(crate::tui::visible_width(&suffix) + 2);
+                ListItem::new(format!(
+                    "{}{suffix}",
+                    elide(&safe_text(name), budget.max(4))
+                ))
             })
             .collect::<Vec<_>>();
         let mut state = ListState::default()
@@ -188,6 +194,28 @@ pub fn render(
         )),
         body,
     );
+}
+
+fn elide(text: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if crate::tui::visible_width(text) <= width {
+        return text.into();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = c.width().unwrap_or_default();
+        if used + w >= width {
+            break;
+        }
+        result.push(c);
+        used += w;
+    }
+    result.push('…');
+    result
 }
 
 fn wrapped_lines(text: &str, width: u16) -> Vec<Line<'static>> {

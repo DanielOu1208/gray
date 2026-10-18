@@ -437,7 +437,7 @@ async fn close_waits_for_preparation_cleanup_and_never_installs() {
         .commands
         .send(TaggedCommand {
             operation: 1,
-            command: MarketCommand::Prepare(approved_demo()),
+            command: MarketCommand::Prepare(Box::new(approved_demo())),
         })
         .unwrap();
     fake.prepare_started.cancelled().await;
@@ -589,7 +589,7 @@ async fn ready(worker: &mut super::worker::WorkerHandle, operation: u64) {
     send(
         worker,
         operation,
-        super::worker::MarketCommand::Prepare(approved_demo()),
+        super::worker::MarketCommand::Prepare(Box::new(approved_demo())),
     );
     loop {
         let event = next(worker).await;
@@ -638,7 +638,11 @@ async fn cancel_and_late_ready_cannot_install_or_replace_a_new_attempt() {
         ..Default::default()
     });
     let mut worker = super::worker::spawn_backend(fake.clone());
-    send(&worker, 1, MarketCommand::Prepare(approved_demo()));
+    send(
+        &worker,
+        1,
+        MarketCommand::Prepare(Box::new(approved_demo())),
+    );
     fake.prepare_started.cancelled().await;
     send(&worker, 1, MarketCommand::Cancel);
     send(&worker, 2, MarketCommand::Load);
@@ -738,7 +742,7 @@ async fn failures_and_backend_panics_are_visible_and_allow_closing() {
                 if behavior == Behavior::LoadFailed {
                     MarketCommand::Load
                 } else {
-                    MarketCommand::Prepare(approved_demo())
+                    MarketCommand::Prepare(Box::new(approved_demo()))
                 },
             );
         }
@@ -797,7 +801,7 @@ async fn losing_command_channel_cancels_and_joins_preparation() {
     send(
         &worker,
         1,
-        super::worker::MarketCommand::Prepare(approved_demo()),
+        super::worker::MarketCommand::Prepare(Box::new(approved_demo())),
     );
     fake.prepare_started.cancelled().await;
     let super::worker::WorkerHandle {
@@ -818,4 +822,265 @@ async fn losing_command_channel_cancels_and_joins_preparation() {
     task.await.unwrap();
     assert!(fake.prepare_cancelled.is_cancelled());
     assert_eq!(fake.commits.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+async fn finish_market(mut market: super::Marketplace) -> crate::setup::PluginModalOutcome {
+    use super::ManagerExtension;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !market.request_close() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    market.into_outcome()
+}
+
+#[tokio::test]
+async fn modal_outcome_contains_only_new_commits_and_preserves_warnings() {
+    use super::worker::{MarketEvent, TaggedEvent};
+    use crate::plugin_install::InstallResult;
+    let mut market = super::Marketplace::with_worker(super::worker::spawn_backend(
+        std::sync::Arc::new(RaceBackend::default()),
+    ));
+    market.model.operation = 7;
+    for (operation, name, installed) in [
+        (6, "stale", true),
+        (7, "existing", false),
+        (7, "new", true),
+        (7, "new", true),
+    ] {
+        market.event(TaggedEvent {
+            operation,
+            event: MarketEvent::Committed(InstallResult {
+                name: name.into(),
+                installed,
+                warnings: if name == "new" {
+                    vec!["adoption warning".into()]
+                } else {
+                    vec![]
+                },
+            }),
+        });
+    }
+    assert!(market.model.installed.contains("existing"));
+    assert!(market.model.installed.contains("new"));
+    assert!(!market.model.installed.contains("stale"));
+    let outcome = finish_market(market).await;
+    assert!(outcome.changed);
+    assert_eq!(outcome.installed, ["new"]);
+    assert!(outcome.warnings.contains(&"adoption warning".to_string()));
+}
+
+#[tokio::test]
+async fn late_ready_and_enter_repeat_never_grant_and_tabs_are_blocked_during_install() {
+    use super::ManagerExtension;
+    use super::model::MarketPhase;
+    use super::worker::{MarketEvent, TaggedEvent};
+    use crossterm::event::{KeyEvent, KeyEventKind, KeyModifiers};
+    let fake = std::sync::Arc::new(RaceBackend::default());
+    let mut market = super::Marketplace::with_worker(super::worker::spawn_backend(fake.clone()));
+    market.model.operation = 2;
+    market.model.phase = MarketPhase::Preparing;
+    market.event(TaggedEvent {
+        operation: 1,
+        event: MarketEvent::Ready(consent_fixture()),
+    });
+    assert!(market.consent.is_none());
+    market.event(TaggedEvent {
+        operation: 2,
+        event: MarketEvent::Ready(consent_fixture()),
+    });
+    assert_eq!(market.model.phase, MarketPhase::Consent);
+    assert!(market.key(KeyEvent::new_with_kind(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat
+    )));
+    assert_eq!(market.model.phase, MarketPhase::Consent);
+    assert!(market.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    assert!(market.model.grant_selected);
+    market.model.phase = MarketPhase::Committing;
+    assert!(market.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    assert!(market.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    assert_eq!(market.model.phase, MarketPhase::Committing);
+    assert_eq!(fake.commits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let outcome = finish_market(market).await;
+    assert!(outcome.installed.is_empty());
+}
+
+#[tokio::test]
+async fn search_keys_are_consumed_before_outer_navigation_and_load_error_goes_back() {
+    use super::ManagerExtension;
+    use super::model::MarketPhase;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    let mut market = super::Marketplace::with_worker(super::worker::spawn_backend(
+        std::sync::Arc::new(RaceBackend::default()),
+    ));
+    market.model.loaded(index(&["jack"]), Default::default());
+    for key in ['/', 'j', 'k'] {
+        assert!(market.key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)));
+    }
+    assert_eq!(market.model.query, "jk");
+    assert!(market.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    market.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!market.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    market.model.phase = MarketPhase::LoadError;
+    assert!(market.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    assert!(market.take_back());
+    assert!(!market.model.close_requested);
+    finish_market(market).await;
+}
+
+#[tokio::test]
+async fn modal_close_during_prepare_waits_and_ignores_a_late_ready() {
+    use super::ManagerExtension;
+    use super::model::MarketPhase;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    let fake = std::sync::Arc::new(RaceBackend {
+        behavior: Behavior::LateReady,
+        ..Default::default()
+    });
+    let mut market = super::Marketplace::with_worker(super::worker::spawn_backend(fake.clone()));
+    market.model.loaded(index(&["demo"]), Default::default());
+    market.model.confirm();
+    assert!(market.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    assert_eq!(market.model.phase, MarketPhase::Preparing);
+    fake.prepare_started.cancelled().await;
+    let outcome = finish_market(market).await;
+    assert!(outcome.installed.is_empty());
+    assert_eq!(fake.drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(fake.commits.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn finished_worker_results_are_drained_before_modal_outcome_is_returned() {
+    use super::ManagerExtension;
+    use super::worker::{MarketEvent, TaggedEvent, WorkerHandle};
+    let (commands, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (events_tx, events) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        events_tx
+            .send(TaggedEvent {
+                operation: 1,
+                event: MarketEvent::Committed(crate::plugin_install::InstallResult {
+                    name: "demo".into(),
+                    installed: true,
+                    warnings: vec![],
+                }),
+            })
+            .unwrap();
+        events_tx
+            .send(TaggedEvent {
+                operation: 1,
+                event: MarketEvent::Closed,
+            })
+            .unwrap();
+    });
+    let mut market = super::Marketplace::with_worker(WorkerHandle {
+        commands,
+        events,
+        task,
+    });
+    market.model.operation = 1;
+    market.model.close_requested = true;
+    while !market.worker.task.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    market.tick();
+    assert!(market.closed && market.joined);
+    assert_eq!(market.model.phase, super::model::MarketPhase::Installed);
+    assert_eq!(market.into_outcome().installed, ["demo"]);
+}
+
+#[tokio::test]
+async fn registry_loading_counts_disabled_and_local_keys_and_fails_closed() {
+    use super::worker::MarketBackend;
+    let home = tempfile::tempdir().unwrap();
+    let backend = super::worker::Backend {
+        home: home.path().into(),
+    };
+    let path = gray_plugin::lock::lock_path(home.path());
+    let mut lock = gray_plugin::lock::LockFile::load(&path).unwrap();
+    lock.plugins.insert(
+        "demo".into(),
+        gray_plugin::lock::LockEntry {
+            enabled: false,
+            version: "0.0.1".into(),
+            ..Default::default()
+        },
+    );
+    lock.plugins.insert(
+        "local".into(),
+        gray_plugin::lock::LockEntry {
+            ecosystem: "gray-cli".into(),
+            argv: vec!["/local/path".into()],
+            ..Default::default()
+        },
+    );
+    lock.save(&path).unwrap();
+    assert_eq!(
+        backend.installed().await.unwrap().unwrap(),
+        ["demo".into(), "local".into()].into()
+    );
+    std::fs::write(&path, b"corrupt registry").unwrap();
+    assert!(backend.installed().await.is_err());
+    std::fs::write(&path, br#"{"schema":999,"plugins":{}}"#).unwrap();
+    assert!(backend.installed().await.is_err());
+}
+
+#[tokio::test]
+async fn modal_close_during_commit_returns_real_install_outcome_before_finishing() {
+    use super::ManagerExtension;
+    use super::model::MarketPhase;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    let (release, barrier) = tokio::sync::oneshot::channel();
+    let fake = std::sync::Arc::new(RaceBackend {
+        behavior: Behavior::Warning,
+        commit_release: std::sync::Mutex::new(Some(barrier)),
+        ..Default::default()
+    });
+    let mut market = super::Marketplace::with_worker(super::worker::spawn_backend(fake.clone()));
+    market.model.loaded(index(&["demo"]), Default::default());
+    market.model.confirm();
+    market.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    while market.model.phase != MarketPhase::Consent {
+        let event = next(&mut market.worker).await;
+        market.event(event);
+    }
+    market.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    fake.commit_started.cancelled().await;
+    assert!(!market.request_close());
+    release.send(()).unwrap();
+    let outcome = finish_market(market).await;
+    assert_eq!(outcome.installed, ["demo"]);
+    assert_eq!(outcome.warnings, ["manifest adoption failed"]);
+    assert!(outcome.changed);
+    assert_eq!(fake.commits.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn unsupported_catalog_packages_cannot_start_installation() {
+    let mut model = super::model::MarketModel::default();
+    let mut catalog = index(&["demo"]);
+    catalog.plugins.get_mut("demo").unwrap().kind = "skill".into();
+    model.loaded(catalog, Default::default());
+    assert!(!model.can_install());
+    model.input(KeyCode::Char('i'));
+    assert_eq!(model.phase, super::model::MarketPhase::Browsing);
+    model.details = true;
+    assert!(snapshot(&model, 100, 20).contains("not supported by the marketplace"));
+}
+
+#[test]
+fn long_catalog_names_do_not_hide_trust_or_installed_badges() {
+    let name = "long-plugin-name-".repeat(15);
+    let mut model = super::model::MarketModel::default();
+    model.loaded(index(&[&name]), [name].into());
+    let screen = snapshot(&model, 80, 12);
+    assert!(
+        screen.contains("unverified community [installed]"),
+        "{screen}"
+    );
+    assert!(screen.contains('…'), "{screen}");
 }

@@ -35,6 +35,7 @@ pub(crate) struct Backend {
 
 fn installed_names(home: &Path) -> anyhow::Result<BTreeSet<String>> {
     let lock = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(home))?;
+    anyhow::ensure!(lock.schema == 1, "unsupported plugin lock schema");
     Ok(lock.plugins.into_keys().collect())
 }
 
@@ -84,7 +85,7 @@ impl MarketBackend for Backend {
 
 pub enum MarketCommand {
     Load,
-    Prepare(ApprovedEntry),
+    Prepare(Box<ApprovedEntry>),
     Grant,
     Cancel,
     Close,
@@ -168,7 +169,9 @@ async fn finish<T: Send + 'static>(
                     MarketCommand::Load | MarketCommand::Prepare(_) if command.operation > operation && cancel.is_some() => {
                         if let Some(token) = &cancel { token.cancel(); }
                         cancelled = true;
-                        next = Some(command);
+                        if next.as_ref().is_none_or(|old: &TaggedCommand| old.operation < command.operation) {
+                            next = Some(command);
+                        }
                     }
                     _ => {}
                 }
@@ -266,7 +269,7 @@ async fn run<B: MarketBackend>(
                 let prepare_backend = backend.clone();
                 let done = finish(
                     tokio::spawn(async move {
-                        prepare_backend.prepare(approved, token, stage_tx).await
+                        prepare_backend.prepare(*approved, token, stage_tx).await
                     }),
                     operation,
                     Some(cancel),
