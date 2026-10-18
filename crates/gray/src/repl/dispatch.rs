@@ -504,7 +504,29 @@ pub(crate) async fn dispatch_command(
         }
         ReplCommand::Skill(_) => Flow::Continue,
         ReplCommand::Plugin(raw) => {
-            handle_plugin_command(&raw, tui.as_ref().map(|(s, _)| s)).await;
+            let shared = tui.as_ref().map(|(s, _)| s);
+            let result = handle_plugin_command(&raw, shared, agent.is_some()).await;
+            let choice = if result.activate_now {
+                super::plugin_cmds::ActivationChoice::Now
+            } else {
+                super::plugin_cmds::ActivationChoice::Later
+            };
+            if super::plugin_cmds::should_reload(&result.installed, choice, agent.is_some()) {
+                let outcome = reload_agent(
+                    agent,
+                    config,
+                    cwd,
+                    session_state.as_ref().map(|s| s.session_id.as_str()),
+                    shared,
+                )
+                .await;
+                if !outcome.rebuilt {
+                    say(shared, "Plugins remain installed; activation failed.");
+                }
+                for warning in crate::take_profile_warnings() {
+                    say(shared, &format!("Plugin activation warning: {warning}"));
+                }
+            }
             Flow::Continue
         }
         ReplCommand::Plugins => {

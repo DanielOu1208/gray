@@ -1,3 +1,4 @@
+pub(crate) mod activation;
 mod draw;
 mod model;
 mod worker;

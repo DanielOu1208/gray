@@ -2,6 +2,22 @@ use super::dispatch::{Flow, dispatch_command};
 use super::{PluginAction, is_bare_plugin_cmd, parse_plugin_args};
 
 #[test]
+fn activation_requires_new_installs_and_now() {
+    use super::ActivationChoice::{Later, Now};
+    assert!(!super::should_reload(&[], Now, true));
+    assert!(!super::should_reload(&["demo".into()], Later, true));
+    assert!(!super::should_reload(&["demo".into()], Now, false));
+    assert!(super::should_reload(
+        &["demo".into(), "other".into()],
+        Now,
+        true
+    ));
+    assert!(!super::should_prompt(&[], true));
+    assert!(!super::should_prompt(&["demo".into()], false));
+    assert!(super::should_prompt(&["demo".into()], true));
+}
+
+#[test]
 fn bare_detection_covers_case_and_trailing_space() {
     assert!(is_bare_plugin_cmd("/plugin"));
     assert!(is_bare_plugin_cmd("/PLUGINS"));
