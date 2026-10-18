@@ -644,6 +644,19 @@ impl Agent {
         }
     }
 
+    // Blocks replaced in place, indices unchanged: unlike `history_rewritten`
+    // the stale mask and scrub set stay valid, and the revision is left alone
+    // so the REPL doesn't append the whole history to the session file again.
+    // The hook still runs: dedup must not answer a re-read of elided content.
+    pub(crate) fn history_edited_in_place(&mut self, reason: &'static str) {
+        self.context_usage = None;
+        self.prefix_guard.expect_change(reason);
+        self.warm_run = None;
+        if let Some(hook) = &self.history_rewrite_hook {
+            hook();
+        }
+    }
+
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
         self.system = system.into();
         self.turn_system = None;

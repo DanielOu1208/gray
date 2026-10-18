@@ -501,3 +501,119 @@ fn soft_elide_fires_at_six_tenths_of_a_known_window_only() {
 
     assert!(crate::compact::soft_elide_threshold(128_000) < 128_000 - 16_000);
 }
+
+fn starred_pic(tag: &str, bytes: usize) -> Message {
+    let mut m = Message::user(tag);
+    m.content
+        .push(ContentBlock::image("image/png", "*".repeat(bytes)));
+    m
+}
+
+fn media_bytes_in(msgs: &[Message]) -> usize {
+    msgs.iter()
+        .flat_map(|m| &m.content)
+        .map(|b| match b {
+            ContentBlock::Image { data, .. } | ContentBlock::Media { data, .. } => data.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+#[tokio::test]
+async fn turn_request_keeps_media_under_the_payload_budget() {
+    let (mut agent, seen) = recording_agent("done");
+    agent.set_messages(
+        (0..16)
+            .map(|i| starred_pic(&format!("shot{i}"), 2_000_000))
+            .collect(),
+    );
+    agent.masked_prefix = 3;
+    let revision = agent.history_revision();
+    agent
+        .run(Message::user("go"), ToolContext::default())
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+    let sent = media_bytes_in(&seen[0]);
+    assert!(
+        sent > 0 && sent <= crate::compact::MEDIA_PAYLOAD_KEEP_BYTES,
+        "request carries only the newest images: {sent} bytes"
+    );
+    assert_eq!(
+        media_bytes_in(agent.messages()),
+        sent,
+        "elision lands in history so later requests keep the same prefix"
+    );
+    assert_eq!(
+        agent.history_revision(),
+        revision,
+        "no full-history rewrite: the session file keeps one copy of each image"
+    );
+    assert_eq!(agent.masked_prefix, 3, "the stale-output mask survives");
+}
+
+struct MediaCapProvider {
+    seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+}
+
+#[async_trait]
+impl Provider for MediaCapProvider {
+    fn stream(&self, req: ChatRequest) -> ProviderStream {
+        let sent = media_bytes_in(&req.messages);
+        self.seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(req.messages);
+        if sent > 0 {
+            // Wrapped the way the HTTP providers report a real 413.
+            return Box::pin(futures::stream::iter(vec![Err(
+                crate::agent::ProviderError::Detailed {
+                    class: Box::new(crate::agent::ProviderError::ContextOverflow(
+                        "Downloaded image content cannot exceed 30MB".to_string(),
+                    )),
+                    detail: Box::new(crate::error::ProviderDetail {
+                        status: Some(413),
+                        ..Default::default()
+                    }),
+                },
+            )]));
+        }
+        Box::pin(futures::stream::iter(vec![
+            Ok(StreamEvent::text_delta("TEXT-ONLY-SUMMARY")),
+            Ok(StreamEvent::message_complete(None, None)),
+        ]))
+    }
+}
+
+#[tokio::test]
+async fn compaction_drops_media_when_the_summary_call_overflows() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut agent = Agent::new(
+        Box::new(MediaCapProvider {
+            seen: std::sync::Arc::clone(&seen),
+        }),
+        Arc::new(NoopExecutor),
+    )
+    .with_context_window(Some(5100));
+    let mut history = trimmable_history();
+    history.push(starred_pic("latest screenshot", 50_000));
+    agent.set_messages(history);
+
+    assert!(agent.try_compact_budgeted().await.unwrap());
+    let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(seen.len(), 2, "one overflow, one text-only retry");
+    assert!(media_bytes_in(&seen[0]) > 0);
+    assert_eq!(media_bytes_in(&seen[1]), 0);
+    assert!(
+        seen[1]
+            .iter()
+            .any(|m| m.text_content().contains("elided from context")),
+        "the retry says where the pixels went"
+    );
+    assert!(
+        agent
+            .messages()
+            .iter()
+            .any(|m| m.text_content().contains("TEXT-ONLY-SUMMARY"))
+    );
+}

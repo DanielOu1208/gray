@@ -800,3 +800,83 @@ fn soft_elision_leaves_small_results_and_a_generous_window_alone() {
     assert_eq!(elide_stale_tool_results(&mut msgs, 1, None), 1);
     assert_eq!(result_body(&msgs[4]), "ok");
 }
+
+fn pic_msg(tag: &str, bytes: usize) -> Message {
+    let mut m = Message::user(tag);
+    m.content
+        .push(ContentBlock::image("image/png", "QUJD".repeat(bytes / 4)));
+    m
+}
+
+fn raw_media(msgs: &[Message]) -> (usize, usize) {
+    msgs.iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::Image { data, .. } | ContentBlock::Media { data, .. } => Some(data.len()),
+            _ => None,
+        })
+        .fold((0, 0), |(count, bytes), n| (count + 1, bytes + n))
+}
+
+#[test]
+fn media_under_payload_budget_is_untouched() {
+    with_home(|| {
+        let mut msgs: Vec<Message> = (0..9)
+            .map(|i| pic_msg(&format!("shot{i}"), 2_000_000))
+            .collect();
+        let before = msgs.clone();
+        assert_eq!(elide_media_over_payload_budget(&mut msgs), 0);
+        assert_eq!(msgs, before);
+    });
+}
+
+#[test]
+fn media_over_payload_budget_keeps_the_newest_and_stubs_the_rest() {
+    with_home(|| {
+        let mut msgs: Vec<Message> = (0..12)
+            .map(|i| pic_msg(&format!("shot{i}"), 2_000_000))
+            .collect();
+        let elided = elide_media_over_payload_budget(&mut msgs);
+        assert_eq!(elided, 7);
+        let (count, bytes) = raw_media(&msgs);
+        assert_eq!(count, 5);
+        assert!(bytes <= MEDIA_PAYLOAD_KEEP_BYTES);
+        assert_eq!(raw_media(&msgs[7..]).0, 5, "the kept images are the newest");
+        for m in &msgs[..7] {
+            assert!(m.text_content().contains("shot"), "words survive: {m:?}");
+            assert!(
+                m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("elided from context"))),
+                "older image becomes a stub: {m:?}"
+            );
+        }
+        let attachments = crate::paths::attachments_dir().unwrap();
+        assert!(
+            !attachments.exists() || std::fs::read_dir(&attachments).unwrap().next().is_none(),
+            "the budget writes no extra copies to disk"
+        );
+
+        let settled = msgs.clone();
+        msgs.push(pic_msg("next", 2_000_000));
+        assert_eq!(
+            elide_media_over_payload_budget(&mut msgs),
+            0,
+            "back under the max: the next image must not move the prefix"
+        );
+        assert_eq!(&msgs[..settled.len()], &settled[..]);
+    });
+}
+
+#[test]
+fn media_count_budget_caps_many_small_images() {
+    with_home(|| {
+        let mut msgs: Vec<Message> = (0..=MEDIA_PAYLOAD_MAX_COUNT)
+            .map(|i| pic_msg(&format!("icon{i}"), 64))
+            .collect();
+        let elided = elide_media_over_payload_budget(&mut msgs);
+        assert_eq!(
+            elided,
+            MEDIA_PAYLOAD_MAX_COUNT + 1 - MEDIA_PAYLOAD_KEEP_COUNT
+        );
+        assert_eq!(raw_media(&msgs).0, MEDIA_PAYLOAD_KEEP_COUNT);
+    });
+}

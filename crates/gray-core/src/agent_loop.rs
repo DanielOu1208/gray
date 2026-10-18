@@ -447,6 +447,14 @@ impl Agent {
                 }
             }
 
+            let media_elided = self.elide_media_over_budget();
+            if media_elided > 0 {
+                log::info!(
+                    target: "gray_agent",
+                    "media payload budget: {media_elided} older images stubbed"
+                );
+            }
+
             if needs_pre_turn_compact(
                 self.estimate_tokens(),
                 self.context_window,

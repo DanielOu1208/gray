@@ -114,6 +114,27 @@ const RECENT_IMAGE_GROUPS: usize = 2;
 
 const IMAGE_STUB_MIN_BYTES: usize = 8 * 1024;
 
+fn media_bytes(b: &ContentBlock) -> Option<usize> {
+    match b {
+        ContentBlock::Image { data, .. } | ContentBlock::Media { data, .. } => Some(data.len()),
+        _ => None,
+    }
+}
+
+fn drop_media_block(b: &mut ContentBlock) {
+    if let ContentBlock::Image { media_type, data }
+    | ContentBlock::Media {
+        media_type, data, ..
+    } = b
+    {
+        let stub = format!(
+            "[{media_type} elided from context ({} bytes) to stay under the provider's per-request media limit. View the source file again if you still need it]",
+            data.len()
+        );
+        *b = ContentBlock::text(stub);
+    }
+}
+
 fn stub_large_media(group: &mut [Message]) {
     for m in group.iter_mut() {
         for b in m.content.iter_mut() {
@@ -136,6 +157,60 @@ fn stub_large_media(group: &mut [Message]) {
             };
         }
     }
+}
+
+pub(crate) fn stub_all_media(messages: &mut [Message]) -> usize {
+    let mut stubbed = 0;
+    for b in messages.iter_mut().flat_map(|m| m.content.iter_mut()) {
+        if media_bytes(b).is_some() {
+            drop_media_block(b);
+            stubbed += 1;
+        }
+    }
+    stubbed
+}
+
+// Providers cap inline media per request well below any token window
+// (OpenRouter rejects >30MB of images with a 413; Anthropic allows 100
+// images). Images are priced at ≤4k tokens each, so token-driven compaction
+// never fires first — a screenshot-heavy session hit the cap at 27% of a 1M
+// window. Over the max, everything older than the newest `KEEP` worth is
+// stubbed; the gap to max means the prefix only changes once per ~10MB.
+// Stubs write nothing to disk: the pixels already live in the source file
+// and the session transcript.
+pub(crate) const MEDIA_PAYLOAD_MAX_BYTES: usize = 20_000_000;
+pub(crate) const MEDIA_PAYLOAD_KEEP_BYTES: usize = 10_000_000;
+pub(crate) const MEDIA_PAYLOAD_MAX_COUNT: usize = 80;
+pub(crate) const MEDIA_PAYLOAD_KEEP_COUNT: usize = 40;
+
+pub(crate) fn elide_media_over_payload_budget(messages: &mut [Message]) -> usize {
+    let (count, bytes) = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(media_bytes)
+        .fold((0, 0), |(count, bytes), n| (count + 1, bytes + n));
+    if count <= MEDIA_PAYLOAD_MAX_COUNT && bytes <= MEDIA_PAYLOAD_MAX_BYTES {
+        return 0;
+    }
+    let (mut kept, mut kept_bytes, mut elided) = (0, 0, 0);
+    let mut full = false;
+    for b in messages
+        .iter_mut()
+        .rev()
+        .flat_map(|m| m.content.iter_mut().rev())
+    {
+        let Some(n) = media_bytes(b) else { continue };
+        full =
+            full || kept == MEDIA_PAYLOAD_KEEP_COUNT || kept_bytes + n > MEDIA_PAYLOAD_KEEP_BYTES;
+        if full {
+            drop_media_block(b);
+            elided += 1;
+        } else {
+            kept += 1;
+            kept_bytes += n;
+        }
+    }
+    elided
 }
 
 #[cfg(test)]

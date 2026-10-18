@@ -4,7 +4,7 @@ use crate::compact::{
     run_compaction_call,
 };
 use crate::error::CoreError;
-use crate::message::Message;
+use crate::message::{ContentBlock, Message};
 
 pub fn summary_message(summary: &str) -> Message {
     let s = summary.trim();
@@ -45,7 +45,8 @@ impl Agent {
             return Ok(None);
         }
 
-        let candidate = self.scrubbed_messages();
+        let mut candidate = self.scrubbed_messages();
+        crate::compact::elide_media_over_payload_budget(&mut candidate);
 
         let budget = retained_budget.unwrap_or(match self.context_window {
             None => RETAINED_MESSAGE_TOKEN_BUDGET,
@@ -61,7 +62,21 @@ impl Agent {
             return Ok(None);
         }
 
-        let summary = run_compaction_call(self, &candidate, instructions).await?;
+        // The summary call carries the whole history, so a payload 413 that
+        // sent us here would fail it too; the summarizer can do without pixels.
+        let summary = match run_compaction_call(self, &candidate, instructions).await {
+            Err(e)
+                if matches!(e.class(), CoreError::ContextOverflow(_))
+                    && candidate.iter().flat_map(|m| &m.content).any(|b| {
+                        matches!(b, ContentBlock::Image { .. } | ContentBlock::Media { .. })
+                    }) =>
+            {
+                let mut text_only = candidate.clone();
+                crate::compact::stub_all_media(&mut text_only);
+                run_compaction_call(self, &text_only, instructions).await?
+            }
+            other => other?,
+        };
         if summary.trim().is_empty() {
             return Ok(None);
         }
@@ -144,6 +159,15 @@ pub(crate) fn needs_soft_elide(estimate: usize, window: Option<usize>) -> bool {
 }
 
 impl Agent {
+    pub(crate) fn elide_media_over_budget(&mut self) -> usize {
+        let elided = crate::compact::elide_media_over_payload_budget(&mut self.messages);
+        // The session file keeps the originals; resume re-elides them the same way.
+        if elided > 0 {
+            self.history_edited_in_place("media payload budget");
+        }
+        elided
+    }
+
     pub(crate) fn soft_elide(&mut self) -> usize {
         let Some(window) = self.context_window else {
             return 0;
