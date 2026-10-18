@@ -105,6 +105,7 @@ pub mod tabs;
 
 mod context_modal;
 mod install_manager;
+pub(crate) mod marketplace;
 mod model_modal;
 mod model_panes;
 mod plugins_modal;
