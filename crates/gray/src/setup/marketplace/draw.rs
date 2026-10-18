@@ -50,6 +50,42 @@ pub fn status_text(model: &MarketModel) -> Option<&str> {
     }
 }
 
+const SIDE_BY_SIDE_MIN_WIDTH: u16 = 90;
+
+pub(super) fn browsing_panes(area: Rect) -> (Rect, Rect) {
+    let content = Rect::new(
+        area.x,
+        area.y.saturating_add(1).min(area.bottom()),
+        area.width,
+        area.height.saturating_sub(3),
+    );
+    if area.width >= SIDE_BY_SIDE_MIN_WIDTH {
+        // Keep both trust and installed badges intact at the split boundary.
+        let list_width = ((u32::from(content.width) * 42 / 100) as u16).max(42);
+        (
+            Rect::new(content.x, content.y, list_width, content.height),
+            Rect::new(
+                content.x + list_width + 2,
+                content.y,
+                content.width.saturating_sub(list_width + 2),
+                content.height,
+            ),
+        )
+    } else {
+        let list_height = (content.height / 3).clamp(1, 6).min(content.height);
+        let gap = content.height.saturating_sub(list_height).min(1);
+        (
+            Rect::new(content.x, content.y, content.width, list_height),
+            Rect::new(
+                content.x,
+                content.y + list_height + gap,
+                content.width,
+                content.height.saturating_sub(list_height + gap),
+            ),
+        )
+    }
+}
+
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -65,15 +101,12 @@ pub fn render(
     let footer = match model.phase {
         MarketPhase::Loading => "",
         MarketPhase::LoadError => "[ Retry: r ]  [ Back: Esc ]",
-        MarketPhase::Browsing if model.search_focused => "Type to search · Enter/Esc done",
-        MarketPhase::Browsing if model.details => {
-            if model.can_install() {
-                "[ Install ] i/Enter · Esc back · ↑↓ scroll"
-            } else {
-                "[ Install disabled ] · Esc back · ↑↓ scroll"
-            }
+        MarketPhase::Browsing if model.search_focused => {
+            "←→ tabs · Type to search · Enter/Esc done"
         }
-        MarketPhase::Browsing => "/ search · ↑↓/jk select · Enter details · i install",
+        MarketPhase::Browsing => {
+            "←→ tabs · / search · ↑↓/jk select · Enter install · PgUp/PgDn details"
+        }
         MarketPhase::Confirm => "[ Approve: Enter ]  [ Back: Esc ]",
         MarketPhase::Preparing => "Esc cancel · cleanup finishes before leaving",
         MarketPhase::Consent if model.grant_selected => "> [ Grant: Enter/g ]  [ Cancel: Esc ]",
@@ -101,7 +134,8 @@ pub fn render(
         );
         return;
     }
-    if model.phase == MarketPhase::Browsing && !model.details {
+    if model.phase == MarketPhase::Browsing {
+        let (list_area, details_area) = browsing_panes(area);
         let marker = if model.search_focused { "> " } else { "" };
         frame.render_widget(
             Paragraph::new(format!("{marker}Search: {}", safe_text(&model.query))).style(style),
@@ -118,8 +152,8 @@ pub fn render(
                     ""
                 };
                 let suffix = format!(" · {}{badge}", trust(entry));
-                let budget =
-                    usize::from(body.width).saturating_sub(crate::tui::visible_width(&suffix) + 2);
+                let budget = usize::from(list_area.width)
+                    .saturating_sub(crate::tui::visible_width(&suffix) + 2);
                 ListItem::new(format!(
                     "{}{suffix}",
                     elide(&safe_text(name), budget.max(4))
@@ -139,19 +173,15 @@ pub fn render(
                         .bg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ),
-            Rect::new(
-                body.x,
-                body.y.saturating_add(1),
-                body.width,
-                body.height.saturating_sub(1),
-            ),
+            list_area,
             &mut state,
         );
+        render_text(frame, details_area, &details(model), model.scroll, style);
         return;
     }
 
     let text = match model.phase {
-        MarketPhase::Browsing => details(model),
+        MarketPhase::Browsing => String::new(),
         MarketPhase::Confirm => model.approved.as_ref().map(|approved| {
             let entry = approved.entry();
             format!(
@@ -178,21 +208,26 @@ pub fn render(
         MarketPhase::InstallFailed => format!("Install failed\n{}", model.message.as_deref().unwrap_or_default()),
         MarketPhase::Loading | MarketPhase::LoadError => String::new(),
     };
-    let text = safe_text(&text);
-    let lines = wrapped_lines(&text, body.width);
-    let max_scroll = lines.len().saturating_sub(body.height as usize);
+    render_text(frame, body, &text, model.scroll, style);
+}
+
+fn render_text(frame: &mut Frame<'_>, area: Rect, text: &str, scroll: u16, style: Style) {
+    if area.is_empty() {
+        return;
+    }
+    let text = safe_text(text);
+    let lines = wrapped_lines(&text, area.width);
+    let max_scroll = lines.len().saturating_sub(area.height as usize);
     let paragraph = Paragraph::new(lines)
         .style(style)
         .wrap(Wrap { trim: false });
     // Clamp the view, not just input, so scrolling cannot hide all content.
     frame.render_widget(
         paragraph.scroll((
-            usize::from(model.scroll)
-                .min(max_scroll)
-                .min(u16::MAX as usize) as u16,
+            usize::from(scroll).min(max_scroll).min(u16::MAX as usize) as u16,
             0,
         )),
-        body,
+        area,
     );
 }
 

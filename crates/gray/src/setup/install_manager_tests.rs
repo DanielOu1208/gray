@@ -74,9 +74,37 @@ fn only_plugin_wrapper_adds_marketplace() {
     );
     assert_eq!(
         super::manager_tab_names(true, true),
-        vec!["Installed", "Errors", "Marketplace"]
+        vec!["Installed", "Marketplace", "Errors"]
     );
     assert_eq!(super::manager_tab_names(false, false), vec!["Installed"]);
+}
+
+#[test]
+fn plugin_arrow_keys_cycle_tabs_without_changing_other_manager_tabs() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let names = super::manager_tab_names(true, true);
+    let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+    let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+    assert_eq!(super::manager_tab_for_key(0, &names, right, true), Some(1));
+    assert_eq!(super::manager_tab_for_key(1, &names, right, true), Some(2));
+    assert_eq!(super::manager_tab_for_key(2, &names, right, true), Some(0));
+    assert_eq!(super::manager_tab_for_key(0, &names, left, true), Some(2));
+    assert_eq!(super::manager_panel_tab(&names, 2), super::Tab::Errors);
+    assert_eq!(super::manager_panel_tab(&names, 1), super::Tab::Installed);
+    let shared = super::manager_tab_names(true, false);
+    assert_eq!(shared, ["Installed", "Errors"]);
+    assert_eq!(super::manager_tab_for_key(0, &shared, right, false), None);
+    for (code, modifiers, expected) in [
+        (KeyCode::Tab, KeyModifiers::NONE, 1),
+        (KeyCode::BackTab, KeyModifiers::SHIFT, 2),
+        (KeyCode::Char('n'), KeyModifiers::CONTROL, 1),
+        (KeyCode::Char('p'), KeyModifiers::CONTROL, 2),
+    ] {
+        assert_eq!(
+            super::manager_tab_for_key(0, &names, KeyEvent::new(code, modifiers), true),
+            Some(expected)
+        );
+    }
 }
 
 #[test]

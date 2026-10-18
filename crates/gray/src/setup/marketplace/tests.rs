@@ -110,7 +110,6 @@ fn installed_identity_ignores_version_runtime_name_and_enabled_state() {
     let mut model = super::model::MarketModel::default();
     // Registry loading passes every key, independent of each row's metadata.
     model.loaded(index(&["demo"]), ["demo".into(), "local".into()].into());
-    model.details = true;
     assert!(!model.can_install());
     model.input(KeyCode::Char('i'));
     assert_eq!(model.phase, super::model::MarketPhase::Browsing);
@@ -121,9 +120,6 @@ fn confirmation_snapshot_is_locked_and_consent_requires_explicit_grant() {
     use super::model::{Action, MarketPhase};
     let mut model = super::model::MarketModel::default();
     model.loaded(index(&["demo"]), Default::default());
-    model.input(KeyCode::Enter);
-    assert!(model.details);
-    assert_eq!(model.phase, MarketPhase::Browsing);
     model.input(KeyCode::Enter);
     assert_eq!(model.phase, MarketPhase::Confirm);
     model.entries.get_mut("demo").unwrap().version = "2.0.0".into();
@@ -138,16 +134,13 @@ fn confirmation_snapshot_is_locked_and_consent_requires_explicit_grant() {
 }
 
 #[test]
-fn escape_leaves_search_then_details_before_closing() {
+fn escape_leaves_search_before_closing_browsing() {
     use super::model::Action;
     let mut model = super::model::MarketModel::default();
     model.loaded(index(&["demo"]), Default::default());
-    model.details = true;
     model.search_focused = true;
     assert_eq!(model.input(KeyCode::Esc), Action::None);
-    assert!(model.details);
-    assert_eq!(model.input(KeyCode::Esc), Action::None);
-    assert!(!model.details);
+    assert!(!model.search_focused);
     assert_eq!(model.input(KeyCode::Esc), Action::Close);
 }
 
@@ -183,7 +176,7 @@ fn stable_status_buffer_snapshots() {
             "",
             "",
             "",
-            "/ search · ↑↓/jk select · Enter details"
+            "←→ tabs · / search · ↑↓/jk select · Ente"
         ]
     );
     model.loaded(index(&["demo"]), Default::default());
@@ -205,8 +198,7 @@ fn browse_and_details_show_trust_installed_badges_and_metadata() {
     entry.repo = Some("https://example.invalid/repo".into());
     model.loaded(catalog, ["demo".into()].into());
     assert!(snapshot(&model, 80, 20).contains("demo · verified community [installed]"));
-    model.details = true;
-    let screen = snapshot(&model, 80, 20);
+    let screen = snapshot(&model, 110, 20);
     for field in [
         "demo [installed]",
         "demo helper",
@@ -218,7 +210,6 @@ fn browse_and_details_show_trust_installed_badges_and_metadata() {
         "License: MIT",
         "Homepage: https://example.invalid/home",
         "Repo: https://example.invalid/repo",
-        "[ Install disabled ]",
     ] {
         assert!(screen.contains(field), "{field} missing:\n{screen}");
     }
@@ -345,7 +336,6 @@ fn final_row_stays_visible_and_long_text_wraps_and_scrolls() {
     );
     model.move_selection(149, 15);
     assert!(snapshot(&model, 80, 20).contains("> plugin-149"));
-    model.details = true;
     model.entries.get_mut("plugin-149").unwrap().description = Some("a".repeat(200));
     let screen = snapshot(&model, 20, 10);
     assert!(screen.contains("aaaaaaaaaaaaaaaaaaaa"));
@@ -356,7 +346,7 @@ fn final_row_stays_visible_and_long_text_wraps_and_scrolls() {
             .join("")
             .contains("https://example.invalid/demo.tgz")
     );
-    assert!(!screen.contains("plugin-149"));
+    assert!(screen.contains("> plu…"), "{screen}");
 }
 
 #[test]
@@ -366,7 +356,6 @@ fn catalog_manifest_and_errors_cannot_inject_controls_or_url_credentials() {
     let entry = model.entries.get_mut("demo").unwrap();
     entry.description = Some("\x1b[31mhello\x1b[0m\x07".into());
     entry.source.url = "https://user:secret@example.invalid/demo?token=private#secret".into();
-    model.details = true;
     let screen = snapshot(&model, 100, 20);
     assert!(screen.contains("hello"));
     for absent in ["\x1b", "\x07", "secret", "private", "user:"] {
@@ -1068,7 +1057,6 @@ fn unsupported_catalog_packages_cannot_start_installation() {
     assert!(!model.can_install());
     model.input(KeyCode::Char('i'));
     assert_eq!(model.phase, super::model::MarketPhase::Browsing);
-    model.details = true;
     assert!(snapshot(&model, 100, 20).contains("not supported by the marketplace"));
 }
 
@@ -1077,10 +1065,146 @@ fn long_catalog_names_do_not_hide_trust_or_installed_badges() {
     let name = "long-plugin-name-".repeat(15);
     let mut model = super::model::MarketModel::default();
     model.loaded(index(&[&name]), [name].into());
-    let screen = snapshot(&model, 80, 12);
+    for width in [80, 90, 110] {
+        let screen = snapshot(&model, width, 12);
+        assert!(
+            screen.contains("unverified community [installed]"),
+            "{screen}"
+        );
+        assert!(screen.contains('…'), "{screen}");
+    }
+}
+
+#[test]
+fn enter_and_i_confirm_directly_but_installed_plugins_do_nothing() {
+    use super::model::{MarketModel, MarketPhase};
+    for key in [KeyCode::Enter, KeyCode::Char('i')] {
+        let mut model = MarketModel::default();
+        model.loaded(index(&["demo"]), Default::default());
+        model.input(key);
+        assert_eq!(model.phase, MarketPhase::Confirm);
+        model.loaded(index(&["demo"]), ["demo".into()].into());
+        model.input(key);
+        assert_eq!(model.phase, MarketPhase::Browsing);
+    }
+}
+
+#[test]
+fn selected_details_are_always_visible_in_a_right_side_pane() {
+    let mut model = super::model::MarketModel::default();
+    let mut catalog = index(&["alpha", "beta"]);
+    catalog.plugins.get_mut("alpha").unwrap().description = Some("Alpha description".into());
+    catalog.plugins.get_mut("beta").unwrap().description = Some("Beta description".into());
+    model.loaded(catalog, Default::default());
+    for width in [90, 110] {
+        let screen = snapshot(&model, width, 20);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("> alpha"))
+            .unwrap();
+        assert_eq!(row.matches("alpha").count(), 2, "{screen}");
+        assert!(screen.contains("Alpha description"), "{screen}");
+    }
+    model.input(KeyCode::PageDown);
+    assert!(model.scroll > 0);
+    model.input(KeyCode::Down);
+    assert_eq!(model.scroll, 0);
+    let screen = snapshot(&model, 110, 20);
+    assert!(screen.contains("> beta"), "{screen}");
+    assert!(screen.contains("Beta description"), "{screen}");
+    assert!(!screen.contains("Alpha description"), "{screen}");
     assert!(
-        screen.contains("unverified community [installed]"),
+        screen.contains("←→ tabs · / search · ↑↓/jk select · Enter install"),
         "{screen}"
     );
-    assert!(screen.contains('…'), "{screen}");
+    assert!(!screen.contains("Enter details"));
+}
+
+#[test]
+fn narrow_browsing_stacks_details_below_the_list() {
+    let mut model = super::model::MarketModel::default();
+    model.loaded(index(&["alpha", "beta"]), Default::default());
+    for width in [40, 89] {
+        let screen = snapshot(&model, width, 20);
+        let list_y = screen
+            .lines()
+            .position(|line| line.contains("> alpha"))
+            .unwrap();
+        let description_y = screen
+            .lines()
+            .position(|line| line.contains("alpha helper"))
+            .unwrap();
+        assert!(description_y > list_y, "{screen}");
+        assert!(
+            screen
+                .lines()
+                .nth(description_y)
+                .unwrap()
+                .starts_with("alpha helper"),
+            "{screen}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn search_focus_does_not_capture_left_right_tab_keys() {
+    use super::ManagerExtension;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    let mut market = super::Marketplace::with_worker(super::worker::spawn_backend(
+        std::sync::Arc::new(RaceBackend::default()),
+    ));
+    market.model.loaded(index(&["demo"]), Default::default());
+    market.model.search_focused = true;
+    for key in [KeyCode::Left, KeyCode::Right] {
+        assert!(!market.key(KeyEvent::new(key, KeyModifiers::NONE)));
+        assert!(market.model.query.is_empty());
+    }
+    for phase in [
+        super::model::MarketPhase::Confirm,
+        super::model::MarketPhase::Preparing,
+        super::model::MarketPhase::Committing,
+    ] {
+        market.model.phase = phase;
+        for key in [KeyCode::Left, KeyCode::Right] {
+            assert!(market.key(KeyEvent::new(key, KeyModifiers::NONE)));
+            assert_eq!(market.model.phase, phase);
+        }
+    }
+    market.model.phase = super::model::MarketPhase::Consent;
+    market.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert!(market.model.grant_selected);
+    finish_market(market).await;
+}
+
+#[tokio::test]
+async fn stacked_list_uses_its_actual_height_to_keep_the_last_selection_visible() {
+    use super::ManagerExtension;
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut market = super::Marketplace::with_worker(super::worker::spawn_backend(
+        std::sync::Arc::new(RaceBackend::default()),
+    ));
+    let names = (0..150)
+        .map(|i| format!("plugin-{i:03}"))
+        .collect::<Vec<_>>();
+    market.model.loaded(
+        index(&names.iter().map(String::as_str).collect::<Vec<_>>()),
+        Default::default(),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    terminal
+        .draw(|frame| market.draw(frame, frame.area()))
+        .unwrap();
+    assert_eq!(market.model.viewport_rows, 5);
+    for _ in 0..149 {
+        market.model.input(KeyCode::Down);
+    }
+    assert_eq!(market.model.offset, 145);
+    terminal
+        .draw(|frame| market.draw(frame, frame.area()))
+        .unwrap();
+    let row = (0..80)
+        .map(|x| terminal.backend().buffer()[(x, 5)].symbol())
+        .collect::<String>();
+    assert!(row.contains("> plugin-149"), "{row}");
+    finish_market(market).await;
 }

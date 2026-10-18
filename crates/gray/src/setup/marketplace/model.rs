@@ -39,7 +39,6 @@ pub struct MarketModel {
     pub search_focused: bool,
     pub selected: usize,
     pub offset: usize,
-    pub details: bool,
     pub operation: u64,
     pub message: Option<String>,
     pub close_requested: bool,
@@ -58,7 +57,6 @@ impl MarketModel {
         self.installed = installed;
         self.phase = MarketPhase::Browsing;
         self.message = None;
-        self.details = false;
         self.reset_selection();
     }
 
@@ -93,10 +91,14 @@ impl MarketModel {
 
     pub fn move_selection(&mut self, delta: isize, rows: usize) {
         let len = self.visible_names().len();
+        let previous = self.selected;
         self.selected = self
             .selected
             .saturating_add_signed(delta)
             .min(len.saturating_sub(1));
+        if self.selected != previous {
+            self.scroll = 0;
+        }
         self.offset = self.offset.min(self.selected);
         if self.selected >= self.offset.saturating_add(rows.max(1)) {
             self.offset = self.selected + 1 - rows.max(1);
@@ -141,7 +143,6 @@ impl MarketModel {
         {
             self.approved = Some(approved);
             self.phase = MarketPhase::Confirm;
-            self.details = true;
             self.scroll = 0;
         }
     }
@@ -166,19 +167,26 @@ impl MarketModel {
             self.reset_selection();
             return Action::None;
         }
-        // Wrapped content in details and consent remains readable on narrow terminals.
-        if self.details || self.phase != MarketPhase::Browsing {
+        match code {
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_add(8);
+                return Action::None;
+            }
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_sub(8);
+                return Action::None;
+            }
+            _ => {}
+        }
+        // Up/Down select catalog rows while browsing and scroll install screens.
+        if self.phase != MarketPhase::Browsing {
             match code {
-                KeyCode::Down | KeyCode::PageDown => {
-                    self.scroll =
-                        self.scroll
-                            .saturating_add(if code == KeyCode::Down { 1 } else { 8 });
+                KeyCode::Down => {
+                    self.scroll = self.scroll.saturating_add(1);
                     return Action::None;
                 }
-                KeyCode::Up | KeyCode::PageUp => {
-                    self.scroll =
-                        self.scroll
-                            .saturating_sub(if code == KeyCode::Up { 1 } else { 8 });
+                KeyCode::Up => {
+                    self.scroll = self.scroll.saturating_sub(1);
                     return Action::None;
                 }
                 _ => {}
@@ -189,16 +197,7 @@ impl MarketModel {
                 KeyCode::Char('/') => self.search_focused = true,
                 KeyCode::Down | KeyCode::Char('j') => self.move_selection(1, self.viewport_rows),
                 KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1, self.viewport_rows),
-                KeyCode::Enter if self.details => self.confirm(),
-                KeyCode::Enter => {
-                    self.details = self.selected_name().is_some();
-                    self.scroll = 0;
-                }
-                KeyCode::Char('i') => self.confirm(),
-                KeyCode::Esc if self.details => {
-                    self.details = false;
-                    self.scroll = 0;
-                }
+                KeyCode::Enter | KeyCode::Char('i') => self.confirm(),
                 KeyCode::Esc => return Action::Close,
                 _ => {}
             },
@@ -209,7 +208,7 @@ impl MarketModel {
             },
             MarketPhase::Confirm => match code {
                 KeyCode::Enter | KeyCode::Char('a') => return Action::Prepare,
-                KeyCode::Esc | KeyCode::Char('b') => self.back_to_details(),
+                KeyCode::Esc | KeyCode::Char('b') => self.back_to_browsing(),
                 _ => {}
             },
             MarketPhase::Preparing => {
@@ -232,7 +231,7 @@ impl MarketModel {
                     self.phase = MarketPhase::Confirm;
                     self.scroll = 0;
                 }
-                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('b') => self.back_to_details(),
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('b') => self.back_to_browsing(),
                 _ => {}
             },
             MarketPhase::Loading => {
@@ -245,9 +244,8 @@ impl MarketModel {
         Action::None
     }
 
-    pub fn back_to_details(&mut self) {
+    pub fn back_to_browsing(&mut self) {
         self.phase = MarketPhase::Browsing;
-        self.details = true;
         self.scroll = 0;
         self.message = None;
         self.stage = None;

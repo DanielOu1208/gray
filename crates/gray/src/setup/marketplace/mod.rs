@@ -127,7 +127,7 @@ impl Marketplace {
             MarketEvent::Failed(message) => self.fail(message),
             MarketEvent::Cancelled => {
                 self.consent = None;
-                self.model.back_to_details();
+                self.model.back_to_browsing();
             }
             _ => {}
         }
@@ -173,7 +173,7 @@ impl ManagerExtension for Marketplace {
     }
 
     fn draw(&mut self, frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect) {
-        self.model.viewport_rows = usize::from(area.height.saturating_sub(3)).max(1);
+        self.model.viewport_rows = usize::from(draw::browsing_panes(area).0.height).max(1);
         self.model.move_selection(0, self.model.viewport_rows);
         draw::render(frame, area, &self.model, self.consent.as_ref());
     }
@@ -181,6 +181,9 @@ impl ManagerExtension for Marketplace {
     fn key(&mut self, key: KeyEvent) -> bool {
         if key.kind != KeyEventKind::Press {
             return true;
+        }
+        if matches!(key.code, KeyCode::Left | KeyCode::Right) && !self.model.blocks_tabs() {
+            return false;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             if key.code == KeyCode::Char('c') {

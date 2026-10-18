@@ -63,13 +63,47 @@ pub(crate) trait ManagerExtension {
 
 pub(crate) fn manager_tab_names(has_errors: bool, has_extension: bool) -> Vec<&'static str> {
     let mut names = vec!["Installed"];
-    if has_errors {
-        names.push("Errors");
-    }
     if has_extension {
         names.push("Marketplace");
     }
+    if has_errors {
+        names.push("Errors");
+    }
     names
+}
+
+fn manager_panel_tab(names: &[&str], active: usize) -> Tab {
+    if names.get(active) == Some(&"Errors") {
+        Tab::Errors
+    } else {
+        Tab::Installed
+    }
+}
+
+fn manager_tab_for_key(
+    active: usize,
+    names: &[&str],
+    key: crossterm::event::KeyEvent,
+    arrows: bool,
+) -> Option<usize> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if names.len() < 2 {
+        return None;
+    }
+    let forward = match key.code {
+        KeyCode::Right if arrows => true,
+        KeyCode::Left if arrows => false,
+        KeyCode::Tab => true,
+        KeyCode::BackTab => false,
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => false,
+        _ => return None,
+    };
+    Some(if forward {
+        super::tabs::next_tab(active, names.len())
+    } else {
+        super::tabs::prev_tab(active, names.len())
+    })
 }
 
 pub(crate) fn enter_action(
@@ -300,7 +334,7 @@ fn run_install_manager_extended(
     let mut error_entries = gray_pkg::errors::list();
     let mut tab = Tab::Installed;
     let tab_names = manager_tab_names(spec.errors_tab, extension.is_some());
-    let extension_index = extension.as_ref().map(|_| tab_names.len() - 1);
+    let extension_index = tab_names.iter().position(|name| *name == "Marketplace");
     let mut active_tab = 0;
     let mut closing = false;
     let mut sel = 0usize;
@@ -633,6 +667,25 @@ fn run_install_manager_extended(
                     continue;
                 }
             }
+            if let Event::Key(key) = event
+                && key.kind == KeyEventKind::Press
+                && let Some(next) =
+                    manager_tab_for_key(active_tab, &tab_names, key, extension.is_some())
+            {
+                active_tab = next;
+                tab = manager_panel_tab(&tab_names, active_tab);
+                if Some(active_tab) == extension_index {
+                    if let Some(extra) = extension.as_deref_mut() {
+                        extra.enter();
+                    }
+                } else if extension.is_some() {
+                    relist(&mut items);
+                }
+                error_entries = gray_pkg::errors::list();
+                sel = 0;
+                pending_remove = None;
+                continue;
+            }
             match event {
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('c'),
@@ -650,36 +703,9 @@ fn run_install_manager_extended(
                 }
                 Event::Key(KeyEvent {
                     code,
-                    modifiers,
                     kind: KeyEventKind::Press,
                     ..
                 }) => match code {
-                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('n' | 'p')
-                        if tab_names.len() > 1
-                            && (matches!(code, KeyCode::Tab | KeyCode::BackTab)
-                                || modifiers.contains(KeyModifiers::CONTROL)) =>
-                    {
-                        active_tab = if matches!(code, KeyCode::Tab | KeyCode::Char('n')) {
-                            super::tabs::next_tab(active_tab, tab_names.len())
-                        } else {
-                            super::tabs::prev_tab(active_tab, tab_names.len())
-                        };
-                        tab = if active_tab == 1 && spec.errors_tab {
-                            Tab::Errors
-                        } else {
-                            Tab::Installed
-                        };
-                        if Some(active_tab) == extension_index {
-                            if let Some(extra) = extension.as_deref_mut() {
-                                extra.enter();
-                            }
-                        } else if extension.is_some() {
-                            relist(&mut items);
-                        }
-                        error_entries = gray_pkg::errors::list();
-                        sel = 0;
-                        pending_remove = None;
-                    }
                     KeyCode::Up | KeyCode::Char('k') => {
                         pending_remove = None;
                         sel = sel.saturating_sub(1);
