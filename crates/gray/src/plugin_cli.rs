@@ -345,13 +345,15 @@ fn scan_or_block(root: &Path, force: bool, gate: TrustGate) -> anyhow::Result<Ve
             if !to_lines {
                 print!("{}", report.render());
             }
-            anyhow::bail!(
-                "plugin scan blocked the install: {} critical of {} findings ({}); \
-                 --force does not override a dangerous verdict",
-                critical.len(),
-                report.findings.len(),
-                critical.join(", ")
-            );
+            crate::plugin_install::policy::require_installable_scan(&report).map_err(|_| {
+                anyhow::anyhow!(
+                    "plugin scan blocked the install: {} critical of {} findings ({}); \
+                     --force does not override a dangerous verdict",
+                    critical.len(),
+                    report.findings.len(),
+                    critical.join(", ")
+                )
+            })?;
         }
     }
     Ok(out)
@@ -405,11 +407,12 @@ fn consent_capabilities(
         "'{name}' declares {} capability(ies):",
         declared.len()
     )];
-    for id in declared {
-        let what = gray_plugin::capabilities::spec(id)
-            .map(|s| s.description)
+    for line in crate::plugin_install::policy::capability_lines(declared) {
+        // Keep the CLI's raw-ID presentation, including its legacy whitespace handling.
+        let description = gray_plugin::capabilities::spec(&line.id)
+            .map(|_| line.description.as_str())
             .unwrap_or("(unknown to this build)");
-        lines.push(format!("  - {id}: {what}"));
+        lines.push(format!("  - {}: {description}", line.id));
     }
     if matches!(gate, TrustGate::Lines) {
         lines.push(format!(
@@ -1542,6 +1545,49 @@ mod tests {
         migrate_commands_json(home);
         assert!(load_lock(home).unwrap().plugins.is_empty());
         assert!(!home.join("plugins/commands.json.migrated").exists());
+    }
+
+    #[test]
+    fn consent_policy_extraction_preserves_cli_empty_and_raw_id_output() {
+        let (granted, hash, lines) = consent_capabilities("demo", &[], TrustGate::Lines);
+        assert!(granted.is_empty());
+        assert!(hash.is_none());
+        assert!(lines.is_empty());
+        let declared = vec!["host.ask".into(), " host.ask ".into(), "invented".into()];
+        let (granted, hash, lines) = consent_capabilities("demo", &declared, TrustGate::Lines);
+        assert!(granted.is_empty());
+        assert_eq!(
+            hash,
+            Some(gray_plugin::capabilities::consent_hash(&declared))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|s| s == "  -  host.ask : (unknown to this build)")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|s| s == "  - invented: (unknown to this build)")
+        );
+        assert!(lines.iter().any(|s| s.contains("not granted (deferred)")));
+    }
+
+    #[test]
+    fn scan_policy_extraction_preserves_cli_caution_and_dangerous_messages() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("README.md"), "rm -rf /\n").unwrap();
+        let error = scan_or_block(root.path(), false, TrustGate::Lines).unwrap_err();
+        assert!(error.to_string().contains("this surface cannot ask"));
+        let lines = scan_or_block(root.path(), true, TrustGate::Lines).unwrap();
+        assert!(lines.iter().any(|s| s.contains("continuing (--force)")));
+        std::fs::write(root.path().join("plugin.sh"), "#!/bin/sh\nrm -rf /\n").unwrap();
+        let error = scan_or_block(root.path(), true, TrustGate::Lines).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--force does not override a dangerous verdict")
+        );
     }
 
     #[cfg(unix)]
