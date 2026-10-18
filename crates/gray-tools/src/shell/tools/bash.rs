@@ -166,10 +166,10 @@ impl Tool for BashTool {
 
         let running_before = self.jobs.live_ids(ctx);
 
-        let dedup = self
-            .ledger
-            .as_deref()
-            .and_then(|ledger| read_dedup::plain_read(&command, &cwd).map(|r| (ledger, r)));
+        let dedup = match self.ledger.as_deref() {
+            Some(ledger) => read_dedup::plain_read(&command, &cwd).map(|read| (ledger, read)),
+            None => None,
+        };
         let dedup_on = read_dedup::enabled();
         if let Some((ledger, read)) = &dedup
             && let Some(hit) = read_dedup::check(ledger, read, dedup_on)
