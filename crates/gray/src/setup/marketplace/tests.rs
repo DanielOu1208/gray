@@ -378,3 +378,444 @@ fn catalog_manifest_and_errors_cannot_inject_controls_or_url_credentials() {
     assert!(!screen.contains("secret"));
     assert!(!screen.contains("private"));
 }
+
+#[derive(Default)]
+struct FakeBackend {
+    commits: std::sync::atomic::AtomicUsize,
+    prepare_started: tokio_util::sync::CancellationToken,
+    prepare_cancelled: tokio_util::sync::CancellationToken,
+}
+
+#[async_trait::async_trait]
+impl super::worker::MarketBackend for FakeBackend {
+    type Prepared = ();
+
+    async fn load(
+        &self,
+        _: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<(gray_pkg::index::Index, std::collections::BTreeSet<String>)> {
+        Ok((index(&["demo"]), Default::default()))
+    }
+
+    async fn prepare(
+        &self,
+        _: gray_pkg::staged::ApprovedEntry,
+        cancel: tokio_util::sync::CancellationToken,
+        _: tokio::sync::mpsc::UnboundedSender<gray_pkg::staged::InstallStage>,
+    ) -> anyhow::Result<((), super::ConsentView)> {
+        self.prepare_started.cancel();
+        cancel.cancelled().await;
+        self.prepare_cancelled.cancel();
+        anyhow::bail!("preparation cancelled")
+    }
+
+    async fn commit(&self, _: ()) -> anyhow::Result<crate::plugin_install::InstallResult> {
+        self.commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(crate::plugin_install::InstallResult {
+            name: "demo".into(),
+            installed: true,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+fn approved_demo() -> gray_pkg::staged::ApprovedEntry {
+    gray_pkg::staged::ApprovedEntry::new(
+        "demo".into(),
+        index(&["demo"]).plugins.remove("demo").unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn close_waits_for_preparation_cleanup_and_never_installs() {
+    use super::worker::{MarketCommand, MarketEvent, TaggedCommand};
+    let fake = std::sync::Arc::new(FakeBackend::default());
+    let mut worker = super::worker::spawn_backend(fake.clone());
+    worker
+        .commands
+        .send(TaggedCommand {
+            operation: 1,
+            command: MarketCommand::Prepare(approved_demo()),
+        })
+        .unwrap();
+    fake.prepare_started.cancelled().await;
+    worker
+        .commands
+        .send(TaggedCommand {
+            operation: 1,
+            command: MarketCommand::Close,
+        })
+        .unwrap();
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), worker.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(event.event, MarketEvent::Closed) {
+            break;
+        }
+        assert!(!matches!(
+            event.event,
+            MarketEvent::Ready(_) | MarketEvent::Committed(_)
+        ));
+    }
+    assert_eq!(fake.commits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(fake.prepare_cancelled.is_cancelled());
+    worker.task.await.unwrap();
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Behavior {
+    #[default]
+    Ready,
+    LateReady,
+    LoadFailed,
+    PrepareFailed,
+    Panic,
+    CommitFailed,
+    Warning,
+    AlreadyInstalled,
+    RefreshFailed,
+}
+
+#[derive(Default)]
+struct RaceBackend {
+    behavior: Behavior,
+    loads: std::sync::atomic::AtomicUsize,
+    commits: std::sync::atomic::AtomicUsize,
+    failures: std::sync::atomic::AtomicUsize,
+    drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    prepare_started: tokio_util::sync::CancellationToken,
+    commit_started: tokio_util::sync::CancellationToken,
+    commit_release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+struct FakePrepared(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for FakePrepared {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl super::worker::MarketBackend for RaceBackend {
+    type Prepared = FakePrepared;
+
+    async fn load(
+        &self,
+        _: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<(gray_pkg::index::Index, std::collections::BTreeSet<String>)> {
+        self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        anyhow::ensure!(self.behavior != Behavior::LoadFailed, "catalog unavailable");
+        Ok((index(&["demo"]), Default::default()))
+    }
+
+    async fn prepare(
+        &self,
+        _: gray_pkg::staged::ApprovedEntry,
+        cancel: tokio_util::sync::CancellationToken,
+        progress: tokio::sync::mpsc::UnboundedSender<gray_pkg::staged::InstallStage>,
+    ) -> anyhow::Result<(FakePrepared, super::ConsentView)> {
+        let package = FakePrepared(self.drops.clone());
+        let _ = progress.send(gray_pkg::staged::InstallStage::ReadingManifest);
+        self.prepare_started.cancel();
+        if self.behavior == Behavior::LateReady {
+            cancel.cancelled().await;
+        }
+        assert!(self.behavior != Behavior::Panic, "private panic output");
+        anyhow::ensure!(
+            self.behavior != Behavior::PrepareFailed,
+            "preparation failed"
+        );
+        Ok((package, consent_fixture()))
+    }
+
+    async fn commit(
+        &self,
+        _: FakePrepared,
+    ) -> anyhow::Result<crate::plugin_install::InstallResult> {
+        self.commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let release = self.commit_release.lock().unwrap().take();
+        self.commit_started.cancel();
+        if let Some(release) = release {
+            release.await.unwrap();
+        }
+        anyhow::ensure!(self.behavior != Behavior::CommitFailed, "commit failed");
+        Ok(crate::plugin_install::InstallResult {
+            name: "demo".into(),
+            installed: self.behavior != Behavior::AlreadyInstalled,
+            warnings: if self.behavior == Behavior::Warning {
+                vec!["manifest adoption failed".into()]
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    async fn installed(&self) -> anyhow::Result<Option<std::collections::BTreeSet<String>>> {
+        anyhow::ensure!(self.behavior != Behavior::RefreshFailed, "registry corrupt");
+        Ok(Some(["demo".into(), "disabled-local".into()].into()))
+    }
+
+    fn record_failure(&self, _: &str, _: &str) {
+        self.failures
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn send(
+    worker: &super::worker::WorkerHandle,
+    operation: u64,
+    command: super::worker::MarketCommand,
+) {
+    worker
+        .commands
+        .send(super::worker::TaggedCommand { operation, command })
+        .unwrap();
+}
+
+async fn next(worker: &mut super::worker::WorkerHandle) -> super::worker::TaggedEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(2), worker.events.recv())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+async fn ready(worker: &mut super::worker::WorkerHandle, operation: u64) {
+    send(
+        worker,
+        operation,
+        super::worker::MarketCommand::Prepare(approved_demo()),
+    );
+    loop {
+        let event = next(worker).await;
+        assert_eq!(event.operation, operation);
+        if let super::worker::MarketEvent::Ready(view) = event.event {
+            assert!(!view.capabilities.is_empty());
+            return;
+        }
+    }
+}
+
+async fn closed(mut worker: super::worker::WorkerHandle) {
+    send(&worker, 0, super::worker::MarketCommand::Close);
+    while !matches!(
+        next(&mut worker).await.event,
+        super::worker::MarketEvent::Closed
+    ) {}
+    worker.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn each_load_fetches_fresh_and_stale_loads_cannot_replace_it() {
+    use super::worker::{MarketCommand, MarketEvent};
+    let fake = std::sync::Arc::new(RaceBackend::default());
+    let mut worker = super::worker::spawn_backend(fake.clone());
+    for operation in [1, 2] {
+        send(&worker, operation, MarketCommand::Load);
+        let event = next(&mut worker).await;
+        assert_eq!(event.operation, operation);
+        let MarketEvent::Loaded(index, installed) = event.event else {
+            panic!("expected catalog");
+        };
+        assert!(index.plugins.contains_key("demo"));
+        assert!(installed.is_empty());
+    }
+    send(&worker, 1, MarketCommand::Load);
+    closed(worker).await;
+    assert_eq!(fake.loads.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn cancel_and_late_ready_cannot_install_or_replace_a_new_attempt() {
+    use super::worker::{MarketCommand, MarketEvent};
+    let fake = std::sync::Arc::new(RaceBackend {
+        behavior: Behavior::LateReady,
+        ..Default::default()
+    });
+    let mut worker = super::worker::spawn_backend(fake.clone());
+    send(&worker, 1, MarketCommand::Prepare(approved_demo()));
+    fake.prepare_started.cancelled().await;
+    send(&worker, 1, MarketCommand::Cancel);
+    send(&worker, 2, MarketCommand::Load);
+    loop {
+        let event = next(&mut worker).await;
+        assert!(!matches!(event.event, MarketEvent::Ready(_)));
+        if matches!(event.event, MarketEvent::Loaded(_, _)) {
+            assert_eq!(event.operation, 2);
+            break;
+        }
+    }
+    send(&worker, 1, MarketCommand::Grant);
+    closed(worker).await;
+    assert_eq!(fake.commits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(fake.drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(fake.failures.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn consent_cancel_drops_prepared_and_grant_cannot_resurrect_it() {
+    use super::worker::{MarketCommand, MarketEvent};
+    let fake = std::sync::Arc::new(RaceBackend::default());
+    let mut worker = super::worker::spawn_backend(fake.clone());
+    ready(&mut worker, 1).await;
+    send(&worker, 1, MarketCommand::Cancel);
+    assert!(matches!(
+        next(&mut worker).await.event,
+        MarketEvent::Cancelled
+    ));
+    send(&worker, 1, MarketCommand::Grant);
+    closed(worker).await;
+    assert_eq!(fake.commits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(fake.drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn close_during_commit_waits_and_duplicate_grant_never_installs_twice() {
+    use super::worker::{MarketCommand, MarketEvent};
+    let (release, barrier) = tokio::sync::oneshot::channel();
+    let fake = std::sync::Arc::new(RaceBackend {
+        commit_release: std::sync::Mutex::new(Some(barrier)),
+        ..Default::default()
+    });
+    let mut worker = super::worker::spawn_backend(fake.clone());
+    ready(&mut worker, 1).await;
+    send(&worker, 0, MarketCommand::Grant); // stale consent cannot commit
+    send(&worker, 1, MarketCommand::Grant);
+    fake.commit_started.cancelled().await;
+    send(&worker, 1, MarketCommand::Grant);
+    send(&worker, 1, MarketCommand::Cancel);
+    send(&worker, 1, MarketCommand::Close);
+    assert!(!worker.task.is_finished());
+    release.send(()).unwrap();
+    let mut committed = false;
+    let mut refreshed = false;
+    loop {
+        match next(&mut worker).await.event {
+            MarketEvent::Registry(installed) => {
+                assert!(installed.contains("disabled-local"));
+                refreshed = true;
+            }
+            MarketEvent::Committed(result) => {
+                assert!(result.installed);
+                committed = true;
+            }
+            MarketEvent::Closed => break,
+            MarketEvent::Cancelled => panic!("commit cannot be cancelled"),
+            _ => {}
+        }
+    }
+    assert!(committed && refreshed);
+    worker.task.await.unwrap();
+    assert_eq!(fake.commits.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failures_and_backend_panics_are_visible_and_allow_closing() {
+    use super::worker::{MarketCommand, MarketEvent};
+    for behavior in [
+        Behavior::LoadFailed,
+        Behavior::PrepareFailed,
+        Behavior::Panic,
+        Behavior::CommitFailed,
+    ] {
+        let fake = std::sync::Arc::new(RaceBackend {
+            behavior,
+            ..Default::default()
+        });
+        let mut worker = super::worker::spawn_backend(fake.clone());
+        if behavior == Behavior::CommitFailed {
+            ready(&mut worker, 1).await;
+            send(&worker, 1, MarketCommand::Grant);
+        } else {
+            send(
+                &worker,
+                1,
+                if behavior == Behavior::LoadFailed {
+                    MarketCommand::Load
+                } else {
+                    MarketCommand::Prepare(approved_demo())
+                },
+            );
+        }
+        loop {
+            if let MarketEvent::Failed(message) = next(&mut worker).await.event {
+                assert!(!message.contains("private panic output"));
+                break;
+            }
+        }
+        closed(worker).await;
+        assert_eq!(
+            fake.failures.load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(behavior != Behavior::LoadFailed)
+        );
+    }
+}
+
+#[tokio::test]
+async fn committed_warnings_and_registry_failure_are_success_not_install_failure() {
+    use super::worker::{MarketCommand, MarketEvent};
+    for behavior in [
+        Behavior::Warning,
+        Behavior::AlreadyInstalled,
+        Behavior::RefreshFailed,
+    ] {
+        let fake = std::sync::Arc::new(RaceBackend {
+            behavior,
+            ..Default::default()
+        });
+        let mut worker = super::worker::spawn_backend(fake.clone());
+        ready(&mut worker, 1).await;
+        send(&worker, 1, MarketCommand::Grant);
+        loop {
+            match next(&mut worker).await.event {
+                MarketEvent::Committed(result) => {
+                    assert_eq!(result.installed, behavior != Behavior::AlreadyInstalled);
+                    assert_eq!(
+                        result.warnings.is_empty(),
+                        behavior == Behavior::AlreadyInstalled
+                    );
+                    break;
+                }
+                MarketEvent::Failed(_) => panic!("committed package cannot fail retroactively"),
+                _ => {}
+            }
+        }
+        closed(worker).await;
+        assert_eq!(fake.failures.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn losing_command_channel_cancels_and_joins_preparation() {
+    let fake = std::sync::Arc::new(FakeBackend::default());
+    let worker = super::worker::spawn_backend(fake.clone());
+    send(
+        &worker,
+        1,
+        super::worker::MarketCommand::Prepare(approved_demo()),
+    );
+    fake.prepare_started.cancelled().await;
+    let super::worker::WorkerHandle {
+        commands,
+        events: mut events_rx,
+        task,
+    } = worker;
+    drop(commands);
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), events_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(event.event, super::worker::MarketEvent::Closed) {
+            break;
+        }
+    }
+    task.await.unwrap();
+    assert!(fake.prepare_cancelled.is_cancelled());
+    assert_eq!(fake.commits.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

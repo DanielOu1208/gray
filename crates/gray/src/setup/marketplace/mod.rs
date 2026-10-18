@@ -1,5 +1,6 @@
 mod draw;
 mod model;
+mod worker;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConsentView {
