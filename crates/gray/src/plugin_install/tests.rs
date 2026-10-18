@@ -285,19 +285,7 @@ done
         assert!(tar.status().unwrap().success());
         let bytes = std::fs::read(archive).unwrap();
         let hash = format!("sha256:{:x}", Sha256::digest(&bytes));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/fixture.tgz", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            socket.read(&mut request).await.unwrap();
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                bytes.len()
-            );
-            socket.write_all(head.as_bytes()).await.unwrap();
-            socket.write_all(&bytes).await.unwrap();
-        });
+        let (url, server) = serve_bytes(bytes).await;
         let approved = ApprovedEntry::new(
             "demo".into(),
             serde_json::from_value(serde_json::json!({
@@ -312,6 +300,23 @@ done
             approved,
             server,
         }
+    }
+
+    async fn serve_bytes(bytes: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/fixture", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&bytes).await.unwrap();
+        });
+        (url, server)
     }
 
     fn assert_clean(home: &Path) {
@@ -350,7 +355,7 @@ done
             "x"
         );
         let mut stages = Vec::new();
-        while let Some(stage) = rx.recv().await {
+        while let Ok(stage) = rx.try_recv() {
             stages.push(stage);
         }
         assert_eq!(
@@ -401,6 +406,27 @@ done
     }
 
     #[tokio::test]
+    async fn preparation_error_keeps_exit_status_without_plugin_stdout() {
+        let fixture = fixture(
+            "#!/bin/sh\nprintf 'private-plugin-output\\n'\nexit 9\n",
+            None,
+        )
+        .await;
+        let error = install::prepare(
+            fixture.home.path(),
+            fixture.approved.clone(),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        let display = format!("{error:#}");
+        assert!(!display.contains("private-plugin-output"), "{display}");
+        assert!(display.contains("exit status: 9"), "{display}");
+        assert_clean(fixture.home.path());
+    }
+
+    #[tokio::test]
     async fn caution_findings_survive_preparation_for_consent() {
         let fixture = fixture(COUNTER, Some("# review .gray/auth.json\n")).await;
         let prepared = install::prepare(
@@ -434,5 +460,349 @@ done
         assert!(task.await.unwrap().is_err());
         assert_reaped(&pid);
         assert_clean(fixture.home.path());
+    }
+
+    #[tokio::test]
+    async fn consented_commit_round_trips_host_lock_without_reprobing() {
+        let fixture = fixture(COUNTER, None).await;
+        let prepared = install::prepare(
+            fixture.home.path(),
+            fixture.approved.clone(),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let consent = install::policy::grant(&prepared.manifest.declared);
+        let result = install::commit(prepared, consent.clone()).await.unwrap();
+        assert!(result.installed);
+        assert_eq!(result.name, "demo");
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let lock =
+            gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(fixture.home.path()))
+                .unwrap();
+        let row = &lock.plugins["demo"];
+        assert_eq!(
+            row.capabilities_hash.as_deref(),
+            Some(consent.hash.as_str())
+        );
+        assert_eq!(row.granted_capabilities, consent.granted);
+        let executable = fixture.home.path().join("plugins/demo/plugin.sh");
+        assert_eq!(Path::new(&row.argv[0]), executable);
+        assert_eq!(row.cli_argv.as_ref().unwrap(), &row.argv);
+        assert_eq!(
+            std::fs::read_to_string(executable.with_extension("sh.count")).unwrap(),
+            "x"
+        );
+        let metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(fixture.home.path().join("plugins/demo-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["name"], "runtime-demo");
+        assert_eq!(row.version, fixture.approved.entry().version);
+        assert_eq!(row.hash, fixture.approved.entry().hash.primary().unwrap());
+        assert_eq!(row.source, fixture.approved.entry().source.url);
+        assert_eq!(lock.plugins.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn adoption_error_is_installed_with_warning_and_consent_intact() {
+        let fixture = fixture(COUNTER, None).await;
+        let prepared = install::prepare(
+            fixture.home.path(),
+            fixture.approved.clone(),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let consent = install::policy::grant(&prepared.manifest.declared);
+        let result = install::commit_with(prepared, consent.clone(), |_, _, _, _, _| {
+            anyhow::bail!("provider refresh failed")
+        })
+        .await
+        .unwrap();
+        assert!(result.installed);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("provider refresh failed"));
+        assert!(fixture.home.path().join("plugins/demo/plugin.sh").is_file());
+        let lock =
+            gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(fixture.home.path()))
+                .unwrap();
+        assert_eq!(lock.plugins["demo"].capabilities_hash, Some(consent.hash));
+        assert_eq!(lock.plugins["demo"].granted_capabilities, consent.granted);
+    }
+
+    #[tokio::test]
+    async fn empty_consent_and_sidecar_args_are_committed_even_without_progress_receiver() {
+        let script = COUNTER.replace(
+            "\"capabilities\":[\"host.ask\"]",
+            "\"capabilities\":[],\"sidecar_args\":[\"serve\",\"--test\"]",
+        );
+        let fixture = fixture(&script, None).await;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        let prepared = install::prepare(
+            fixture.home.path(),
+            fixture.approved.clone(),
+            CancellationToken::new(),
+            Some(tx),
+        )
+        .await
+        .unwrap();
+        let result = install::commit(prepared, install::policy::grant(&[]))
+            .await
+            .unwrap();
+        assert!(result.installed);
+        let lock =
+            gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(fixture.home.path()))
+                .unwrap();
+        let row = &lock.plugins["demo"];
+        assert_eq!(
+            row.capabilities_hash,
+            Some(gray_plugin::capabilities::consent_hash(&[]))
+        );
+        assert!(row.granted_capabilities.is_empty());
+        assert_eq!(&row.argv[1..], ["serve", "--test"]);
+        assert_eq!(row.cli_argv.as_ref().unwrap(), &row.argv[..1]);
+    }
+
+    #[tokio::test]
+    async fn mismatched_consent_drops_staging_without_commit() {
+        for alter_hash in [true, false] {
+            let fixture = fixture(COUNTER, None).await;
+            let prepared = install::prepare(
+                fixture.home.path(),
+                fixture.approved.clone(),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut consent = install::policy::grant(&prepared.manifest.declared);
+            if alter_hash {
+                consent.hash.push('x');
+            } else {
+                consent.granted.push("invented".into());
+            }
+            let error = install::commit(prepared, consent).await.unwrap_err();
+            assert!(error.to_string().contains("consent does not match"));
+            assert_clean(fixture.home.path());
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_existing_target_is_not_adopted_or_reported_as_new_install() {
+        let fixture = fixture(COUNTER, None).await;
+        let prepared = install::prepare(
+            fixture.home.path(),
+            fixture.approved.clone(),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let consent = install::policy::grant(&prepared.manifest.declared);
+        let path = gray_plugin::lock::lock_path(fixture.home.path());
+        let mut lock = gray_plugin::lock::LockFile::load(&path).unwrap();
+        lock.plugins.insert(
+            "demo".into(),
+            gray_plugin::lock::LockEntry {
+                version: "concurrent".into(),
+                ..Default::default()
+            },
+        );
+        lock.save(&path).unwrap();
+        let result = install::commit_with(prepared, consent, |_, _, _, _, _| {
+            panic!("a concurrent install must never adopt our staged manifest")
+        })
+        .await
+        .unwrap();
+        assert!(!result.installed);
+        assert_eq!(result.name, "demo");
+        assert!(result.warnings.is_empty());
+        assert_eq!(gray_plugin::lock::LockFile::load(&path).unwrap(), lock);
+        assert!(!fixture.home.path().join("plugins/demo").exists());
+        assert!(
+            !fixture
+                .home
+                .path()
+                .join("plugins/demo-manifest.json")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn wire_commit_publishes_manifest_and_grants_only_known_ids_without_reprobing() {
+        let script = WIRE.replace("while IFS=", "printf x >> \"$0.count\"\nwhile IFS=");
+        let fixture = fixture(&script, None).await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let prepared = install::prepare(
+            fixture.home.path(),
+            fixture.approved.clone(),
+            CancellationToken::new(),
+            Some(tx),
+        )
+        .await
+        .unwrap();
+        let consent = install::policy::grant(&prepared.manifest.declared);
+        assert_eq!(consent.granted, ["host.ask"]);
+        let result = install::commit(prepared, consent).await.unwrap();
+        assert!(result.installed);
+        let mut stages = Vec::new();
+        while let Some(stage) = rx.recv().await {
+            stages.push(stage);
+        }
+        assert_eq!(stages.last(), Some(&InstallStage::Committing));
+        let lock =
+            gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(fixture.home.path()))
+                .unwrap();
+        assert!(lock.plugins["demo"].cli_argv.is_none());
+        assert_eq!(
+            std::fs::read_to_string(fixture.home.path().join("plugins/demo/plugin.sh.count"))
+                .unwrap(),
+            "x"
+        );
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(fixture.home.path().join("plugins/demo-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest["capabilities"],
+            serde_json::json!(["host.ask", "invented"])
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_role_and_discovery_reuse_prepared_manifest() {
+        let raw = serde_json::json!({
+            "name": "runtime-provider", "version": "runtime-1", "protocol": gray_plugin::PROVIDER_PROTOCOL,
+            "capabilities": [gray_plugin::PROVIDER_CREDENTIALS],
+            "providers": [{
+                "id": "prov", "name": "Prov",
+                "transport": {"kind": "openai-responses", "base_url": "https://127.0.0.1:1/",
+                    "authorization": {"kind": "bearer", "secret_name": "k"}},
+                "auth_methods": [{"id": "a", "kind": "api_key", "name": "A", "operations": ["models"]}]
+            }]
+        });
+        let script = format!("#!/bin/sh\nprintf x >> \"$0.count\"\nprintf '%s\\n' '{raw}'\n");
+        let fixture = fixture(&script, None).await;
+        let prepared = install::prepare(
+            fixture.home.path(),
+            fixture.approved.clone(),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let consent = install::policy::grant(&prepared.manifest.declared);
+        let result = install::commit(prepared, consent).await.unwrap();
+        assert!(result.installed);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let lock =
+            gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(fixture.home.path()))
+                .unwrap();
+        assert_eq!(
+            lock.plugins["demo"].runtime_role.as_deref(),
+            Some("provider_only")
+        );
+        let registry = crate::providers::ProviderRegistry::load_cached(fixture.home.path());
+        assert_eq!(registry.cache().plugins["demo"].providers[0].id, "prov");
+        assert_eq!(
+            std::fs::read_to_string(fixture.home.path().join("plugins/demo/plugin.sh.count"))
+                .unwrap(),
+            "x"
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_entry_ignores_shadow_paths_in_isolated_process() {
+        const ENV: &str = "GRAY_MARKETPLACE_SHADOW_FIXTURE";
+        if let Some(shadow) = std::env::var_os(ENV) {
+            let fixture = fixture(COUNTER, None).await;
+            let prepared = install::prepare(
+                fixture.home.path(),
+                fixture.approved.clone(),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+            // A later catalog snapshot cannot change the already-prepared package.
+            let mut changed = fixture.approved.entry().clone();
+            changed.version = "catalog-2".into();
+            changed.source.url = "https://example.invalid/replaced.tgz".into();
+            changed.hash = serde_json::from_value(serde_json::json!("sha256:changed")).unwrap();
+            let (url, server) = serve_bytes(
+                serde_json::to_vec(&serde_json::json!({
+                    "plugins": {"demo": changed}
+                }))
+                .unwrap(),
+            )
+            .await;
+            let refreshed: gray_pkg::index::Index = gray_pkg::fetch::client()
+                .unwrap()
+                .get(url)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            server.await.unwrap();
+            let changed =
+                ApprovedEntry::new("demo".into(), refreshed.plugins["demo"].clone()).unwrap();
+            let consent = install::policy::grant(&prepared.manifest.declared);
+            assert!(install::commit(prepared, consent).await.unwrap().installed);
+            let lock = gray_plugin::lock::LockFile::load(&gray_plugin::lock::lock_path(
+                fixture.home.path(),
+            ))
+            .unwrap();
+            assert_eq!(
+                lock.plugins["demo"].version,
+                fixture.approved.entry().version
+            );
+            assert_ne!(lock.plugins["demo"].version, changed.entry().version);
+            assert_eq!(
+                lock.plugins["demo"].source,
+                fixture.approved.entry().source.url
+            );
+            assert_eq!(
+                lock.plugins["demo"].hash,
+                fixture.approved.entry().hash.primary().unwrap()
+            );
+            for entry in std::fs::read_dir(shadow).unwrap() {
+                assert!(
+                    !entry
+                        .unwrap()
+                        .path()
+                        .to_string_lossy()
+                        .ends_with(".invoked")
+                );
+            }
+            return;
+        }
+        // Scope environment changes to a subprocess, not the parallel test runner.
+        let shadow = tempfile::tempdir().unwrap();
+        let exe = executable(
+            shadow.path(),
+            "#!/bin/sh\nprintf x >> \"$0.invoked\"\nexit 1\n",
+        );
+        std::fs::copy(&exe, shadow.path().join("demo")).unwrap();
+        std::fs::copy(&exe, shadow.path().join("gray-demo")).unwrap();
+        let mut paths = vec![shadow.path().to_owned()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "plugin_install::tests::staged::approved_entry_ignores_shadow_paths_in_isolated_process"])
+            .env(ENV, shadow.path()).env("GRAY_PLUGIN_PATH", shadow.path())
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .output().await.unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 }

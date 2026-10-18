@@ -359,7 +359,7 @@ fn scan_or_block(root: &Path, force: bool, gate: TrustGate) -> anyhow::Result<Ve
     Ok(out)
 }
 
-fn provider_only_role_json(manifest: &serde_json::Value) -> Option<String> {
+pub(crate) fn provider_only_role_json(manifest: &serde_json::Value) -> Option<String> {
     let empty = |key: &str| {
         manifest
             .get(key)
@@ -1061,10 +1061,7 @@ pub(crate) async fn adopt_cli(home: &Path, name: &str, dir: &Path) -> anyhow::Re
                 .collect();
             entry.cli_argv = Some(vec![exe]);
 
-            let mut metadata = tempfile::NamedTempFile::new_in(&plugins)?;
-            use std::io::Write;
-            writeln!(metadata, "{manifest}")?;
-            metadata.persist(plugins.join(format!("{name}-manifest.json")))?;
+            publish_manifest(home, name, &manifest)?;
             lock.save(&lock_path)?;
 
             crate::providers::ProviderRegistry::refresh(home)?;
@@ -1087,6 +1084,43 @@ pub(crate) async fn adopt_cli(home: &Path, name: &str, dir: &Path) -> anyhow::Re
             Ok(false)
         }
     }
+}
+
+fn publish_manifest(home: &Path, name: &str, manifest: &Value) -> anyhow::Result<()> {
+    let plugins = home.join("plugins");
+    let mut metadata = tempfile::NamedTempFile::new_in(&plugins)?;
+    use std::io::Write;
+    writeln!(metadata, "{manifest}")?;
+    metadata.persist(plugins.join(format!("{name}-manifest.json")))?;
+    Ok(())
+}
+
+pub(crate) fn adopt_prepared(
+    home: &Path,
+    name: &str,
+    executable: &Path,
+    manifest: &Value,
+    cli: bool,
+) -> anyhow::Result<()> {
+    validate_name(name)?;
+    let _guard = gray_pkg::ops::hold_registry_lock_in(&home.join("plugins"))?;
+    let lock = load_lock(home)?;
+    let entry = lock
+        .plugins
+        .get(name)
+        .context("installed plugin no longer registered")?;
+    anyhow::ensure!(
+        entry
+            .argv
+            .first()
+            .is_some_and(|program| Path::new(program) == executable)
+            && entry.cli_argv.is_some() == cli,
+        "installed plugin changed before manifest adoption"
+    );
+    // The guarded package transaction already recorded argv, runtime role, and consent.
+    publish_manifest(home, name, manifest)?;
+    crate::providers::ProviderRegistry::refresh(home)?;
+    Ok(())
 }
 
 pub async fn capture_slash(name: &str, args: &[String]) -> anyhow::Result<Option<String>> {

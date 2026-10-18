@@ -18,6 +18,28 @@ pub struct PreparedManifest {
     pub cli: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum CaptureFailure {
+    #[error("plugin output exceeds 64 KiB")]
+    OutputLimit,
+    #[error("plugin request timed out")]
+    TimedOut,
+    #[error("plugin exited {status}{output}")]
+    Exited {
+        status: std::process::ExitStatus,
+        output: String,
+    },
+}
+
+fn failure_summary(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<CaptureFailure>() {
+        Some(CaptureFailure::Exited { status, .. }) => format!("plugin exited {status}"),
+        Some(other) => other.to_string(),
+        None if error.is::<serde_json::Error>() => "invalid plugin manifest JSON".into(),
+        None => "manifest command failed".into(),
+    }
+}
+
 pub async fn manifest(executable: &Path, cancel: CancellationToken) -> anyhow::Result<Value> {
     let mut command = Command::new(executable);
     command.arg("manifest");
@@ -49,8 +71,9 @@ pub(super) async fn prepared(
         Ok(raw) => (raw, true),
         Err(error) => {
             anyhow::ensure!(!cancel.is_cancelled(), "preparation cancelled");
+            let summary = failure_summary(&error);
             let raw = wire_manifest(executable, cancel).await.with_context(|| {
-                format!("CLI manifest probe failed ({error}); wire manifest probe failed")
+                format!("CLI manifest probe failed ({summary}); wire manifest probe failed")
             })?;
             (raw, false)
         }
@@ -98,19 +121,23 @@ pub(crate) async fn capture(
             let mut stdout = child.stdout.take().context("missing stdout")?.take(65537);
             let mut bytes = Vec::new();
             stdout.read_to_end(&mut bytes).await?;
-            anyhow::ensure!(bytes.len() <= 65536, "plugin output exceeds 64 KiB");
+            if bytes.len() > 65536 {
+                return Err(CaptureFailure::OutputLimit.into());
+            }
             let status = child.wait().await?;
             if !status.success() {
                 let tail = String::from_utf8_lossy(&bytes);
                 let tail = tail.trim_end();
                 let tail = tail.get(tail.len().saturating_sub(500)..).unwrap_or(tail);
-                if tail.is_empty() {
-                    anyhow::bail!("plugin exited {status}");
-                }
-                anyhow::bail!("plugin exited {status} — last output: {tail}");
+                let output = if tail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — last output: {tail}")
+                };
+                return Err(CaptureFailure::Exited { status, output }.into());
             }
             Ok(bytes)
-        }) => result.unwrap_or_else(|_| Err(anyhow::anyhow!("plugin request timed out"))),
+        }) => result.unwrap_or_else(|_| Err(CaptureFailure::TimedOut.into())),
     };
     if result.is_err() {
         let _ = child.kill().await;
