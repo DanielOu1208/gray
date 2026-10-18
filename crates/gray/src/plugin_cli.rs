@@ -876,13 +876,9 @@ pub async fn forward(home: &Path, name: &str, rest: &[String]) -> anyhow::Result
 }
 
 async fn cli_manifest(binary: &Path) -> Option<Value> {
-    let mut command = tokio::process::Command::new(binary);
-    command.arg("manifest");
-    capture(command, std::time::Duration::from_secs(10))
+    crate::plugin_install::probe::manifest(binary, tokio_util::sync::CancellationToken::new())
         .await
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .filter(|m| m["name"].is_string())
 }
 
 pub async fn register_native(
@@ -1355,46 +1351,11 @@ pub(crate) fn completions(query: &str) -> Vec<(String, String)> {
 }
 
 pub(crate) async fn capture(
-    mut command: tokio::process::Command,
+    command: tokio::process::Command,
     ttl: std::time::Duration,
 ) -> anyhow::Result<Vec<u8>> {
-    use tokio::io::AsyncReadExt;
-    let mut child = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
-    let mut stdout = child.stdout.take().context("missing stdout")?.take(65537);
-    let result = tokio::time::timeout(ttl, async {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).await?;
-        anyhow::ensure!(bytes.len() <= 65536, "plugin output exceeds 64 KiB");
-        let status = child.wait().await?;
-        if !status.success() {
-            let tail = String::from_utf8_lossy(&bytes);
-            let tail = tail.trim_end();
-            let tail = tail.get(tail.len().saturating_sub(500)..).unwrap_or(tail);
-            if tail.is_empty() {
-                anyhow::bail!("plugin exited {status}");
-            }
-            anyhow::bail!("plugin exited {status} — last output: {tail}");
-        }
-        Ok::<_, anyhow::Error>(bytes)
-    })
-    .await;
-    match result {
-        Ok(Ok(bytes)) => Ok(bytes),
-        other => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            match other {
-                Ok(Err(e)) => Err(e),
-                Err(_) => anyhow::bail!("plugin request timed out"),
-                _ => unreachable!(),
-            }
-        }
-    }
+    crate::plugin_install::probe::capture(command, ttl, tokio_util::sync::CancellationToken::new())
+        .await
 }
 
 #[cfg(test)]
