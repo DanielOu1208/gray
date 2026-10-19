@@ -154,7 +154,7 @@ fn stable_status_buffer_snapshots() {
     let mut model = MarketModel::default();
     assert_eq!(
         compact(&snapshot(&model, 40, 5)),
-        ["Loading marketplace…", "", "", "", ""]
+        ["⠋ Loading marketplace…", "", "", "", ""]
     );
     model.phase = MarketPhase::LoadError;
     model.message = Some("HTTP 503".into());
@@ -165,7 +165,7 @@ fn stable_status_buffer_snapshots() {
             "HTTP 503",
             "",
             "",
-            "[ Retry: r ]  [ Back: Esc ]"
+            "r retry · Esc back"
         ]
     );
     model.loaded(index(&[]), Default::default());
@@ -181,7 +181,11 @@ fn stable_status_buffer_snapshots() {
     );
     model.loaded(index(&["demo"]), Default::default());
     model.query = "absent".into();
-    assert_eq!(compact(&snapshot(&model, 40, 5))[0], "No matching plugins");
+    let screen = snapshot(&model, 40, 5);
+    let rows = compact(&screen);
+    assert!(rows[0].starts_with("/ absent"), "{screen}");
+    assert!(rows[0].ends_with("0 of 1"), "{screen}");
+    assert_eq!(rows[1], "No matching plugins", "{screen}");
 }
 
 #[test]
@@ -197,19 +201,20 @@ fn browse_and_details_show_trust_installed_badges_and_metadata() {
     entry.homepage = Some("https://example.invalid/home".into());
     entry.repo = Some("https://example.invalid/repo".into());
     model.loaded(catalog, ["demo".into()].into());
-    assert!(snapshot(&model, 80, 20).contains("demo · verified community [installed]"));
+    let screen = snapshot(&model, 80, 20);
+    let row = screen.lines().find(|l| l.contains("> ◐ demo")).unwrap();
+    assert!(row.trim_end().ends_with("1.0.0 ✓"), "{screen}");
     let screen = snapshot(&model, 110, 20);
     for field in [
-        "demo [installed]",
+        "demo  1.0.0  ✓ installed",
         "demo helper",
-        "Author: Builder",
-        "Version: 1.0.0",
-        "Trust: verified community",
-        "Kind: plugin",
-        "Commands: /demo",
-        "License: MIT",
-        "Homepage: https://example.invalid/home",
-        "Repo: https://example.invalid/repo",
+        "Author    Builder",
+        "Trust     ◐ verified community",
+        "Kind      plugin",
+        "Commands  /demo",
+        "License   MIT",
+        "Homepage  https://example.invalid/home",
+        "Repo      https://example.invalid/repo",
     ] {
         assert!(screen.contains(field), "{field} missing:\n{screen}");
     }
@@ -235,14 +240,13 @@ fn confirmation_and_consent_render_the_approved_information() {
     let screen = snapshot(&model, 100, 20);
     for expected in [
         "Confirm preparation: demo",
-        "Version: 1.0.0",
-        "Source: https://example.invalid/demo.tgz",
-        "Hash: sha256:",
-        "Trust: unverified community",
-        "A matching hash proves integrity, not safety.",
-        "Preparing will run this plugin's manifest command as you.",
-        "[ Approve: Enter ]",
-        "[ Back: Esc ]",
+        "Version   1.0.0",
+        "Source    https://example.invalid/demo.tgz",
+        "Hash      sha256:",
+        "Trust     ○ unverified community",
+        "! A matching hash proves integrity, not safety.",
+        "! Preparing will run this plugin's manifest command as you.",
+        "Enter approve · Esc back",
     ] {
         assert!(screen.contains(expected), "{expected} missing:\n{screen}");
     }
@@ -251,13 +255,13 @@ fn confirmation_and_consent_render_the_approved_information() {
     let screen = snapshot_with_consent(&model, 100, 20, Some(&consent));
     for expected in [
         "Capability consent",
-        "host.ask:",
-        "unknown.capability [not grantable]",
-        "Commands: /demo",
-        "Caution: shell invocation",
-        "review plugin.sh:7",
-        "[ Grant: g ]",
-        "[ Cancel: Enter/Esc ]",
+        "• host.ask",
+        "• unknown.capability  not grantable",
+        "Commands  /demo",
+        "  Caution: shell invocation",
+        "  review plugin.sh:7",
+        " Grant · g ",
+        " Cancel · Enter/Esc ",
     ] {
         assert!(screen.contains(expected), "{expected} missing:\n{screen}");
     }
@@ -273,9 +277,16 @@ fn progress_success_and_failure_buffers() {
         ..Default::default()
     };
     assert_eq!(
-        compact(&snapshot(&model, 60, 5)),
+        compact(&snapshot(&model, 60, 12)),
         [
+            "",
+            "Installing plugin",
+            "",
+            "✓ Downloading",
+            "✓ Unpacking",
             "⠋ Scanning",
+            "· Reading manifest",
+            "· Committing",
             "",
             "",
             "",
@@ -295,7 +306,7 @@ fn progress_success_and_failure_buffers() {
     model.message = Some("missing required plugins: questions, ledger".into());
     let screen = snapshot(&model, 80, 8);
     assert!(screen.contains("missing required plugins: questions, ledger"));
-    assert!(screen.contains("[ Retry: r ]"));
+    assert!(screen.contains("r retry · Esc back"));
 }
 
 #[test]
@@ -335,18 +346,14 @@ fn final_row_stays_visible_and_long_text_wraps_and_scrolls() {
         Default::default(),
     );
     model.move_selection(149, 15);
-    assert!(snapshot(&model, 80, 20).contains("> plugin-149"));
+    assert!(snapshot(&model, 80, 20).contains("> ○ plugin-149"));
     model.entries.get_mut("plugin-149").unwrap().description = Some("a".repeat(200));
     let screen = snapshot(&model, 20, 10);
     assert!(screen.contains("aaaaaaaaaaaaaaaaaaaa"));
     model.scroll = u16::MAX;
     let screen = snapshot(&model, 20, 10);
-    assert!(
-        compact(&screen)
-            .join("")
-            .contains("https://example.invalid/demo.tgz")
-    );
-    assert!(screen.contains("> plu…"), "{screen}");
+    assert!(screen.contains("unverified community"), "{screen}");
+    assert!(screen.contains("> ○ plugin-149"), "{screen}");
 }
 
 #[test]
@@ -1057,7 +1064,8 @@ fn unsupported_catalog_packages_cannot_start_installation() {
     assert!(!model.can_install());
     model.input(KeyCode::Char('i'));
     assert_eq!(model.phase, super::model::MarketPhase::Browsing);
-    assert!(snapshot(&model, 100, 20).contains("not supported by the marketplace"));
+    let screen = compact(&snapshot(&model, 100, 20)).join(" ");
+    assert!(screen.contains("not supported by the"), "{screen}");
 }
 
 #[test]
@@ -1067,12 +1075,37 @@ fn long_catalog_names_do_not_hide_trust_or_installed_badges() {
     model.loaded(index(&[&name]), [name].into());
     for width in [80, 90, 110] {
         let screen = snapshot(&model, width, 12);
-        assert!(
-            screen.contains("unverified community [installed]"),
-            "{screen}"
-        );
-        assert!(screen.contains('…'), "{screen}");
+        let row = screen.lines().find(|l| l.contains('…')).unwrap();
+        assert!(row.starts_with("> ○ long-plugin-name"), "{screen}");
+        assert!(row.contains("… 1.0.0 ✓"), "{screen}");
     }
+}
+
+#[test]
+fn details_wrap_at_word_boundaries_and_installed_mark_is_green() {
+    let mut model = super::model::MarketModel::default();
+    let mut catalog = index(&["demo"]);
+    catalog.plugins.get_mut("demo").unwrap().description = Some(format!(
+        "{}enrollment-code exchange, whoami, logout.",
+        "Log in from the CLI: ".repeat(3)
+    ));
+    model.loaded(catalog, ["demo".into()].into());
+    for width in [90, 100, 110] {
+        let screen = snapshot(&model, width, 20);
+        assert!(screen.contains("enrollment-code"), "{screen}");
+    }
+    model.loaded(index(&["alpha", "demo"]), ["demo".into()].into());
+    let backend = ratatui::backend::TestBackend::new(110, 20);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| super::draw::render(frame, frame.area(), &model, None))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let mark = (0..20)
+        .flat_map(|y| (0..110).map(move |x| (x, y)))
+        .find(|&(x, y)| buffer[(x, y)].symbol() == "✓")
+        .unwrap();
+    assert_eq!(buffer[mark].fg, crate::theme::theme().success);
 }
 
 #[test]
@@ -1100,7 +1133,7 @@ fn selected_details_are_always_visible_in_a_right_side_pane() {
         let screen = snapshot(&model, width, 20);
         let row = screen
             .lines()
-            .find(|line| line.contains("> alpha"))
+            .find(|line| line.contains("> ○ alpha"))
             .unwrap();
         assert_eq!(row.matches("alpha").count(), 2, "{screen}");
         assert!(screen.contains("Alpha description"), "{screen}");
@@ -1110,7 +1143,7 @@ fn selected_details_are_always_visible_in_a_right_side_pane() {
     model.input(KeyCode::Down);
     assert_eq!(model.scroll, 0);
     let screen = snapshot(&model, 110, 20);
-    assert!(screen.contains("> beta"), "{screen}");
+    assert!(screen.contains("> ○ beta"), "{screen}");
     assert!(screen.contains("Beta description"), "{screen}");
     assert!(!screen.contains("Alpha description"), "{screen}");
     assert!(
@@ -1128,7 +1161,7 @@ fn narrow_browsing_stacks_details_below_the_list() {
         let screen = snapshot(&model, width, 20);
         let list_y = screen
             .lines()
-            .position(|line| line.contains("> alpha"))
+            .position(|line| line.contains("> ○ alpha"))
             .unwrap();
         let description_y = screen
             .lines()
@@ -1203,8 +1236,8 @@ async fn stacked_list_uses_its_actual_height_to_keep_the_last_selection_visible(
         .draw(|frame| market.draw(frame, frame.area()))
         .unwrap();
     let row = (0..80)
-        .map(|x| terminal.backend().buffer()[(x, 5)].symbol())
+        .map(|x| terminal.backend().buffer()[(x, 7)].symbol())
         .collect::<String>();
-    assert!(row.contains("> plugin-149"), "{row}");
+    assert!(row.contains("> ○ plugin-149"), "{row}");
     finish_market(market).await;
 }
