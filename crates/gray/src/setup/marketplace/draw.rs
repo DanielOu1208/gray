@@ -188,6 +188,9 @@ pub fn render(
         render_browsing(frame, area, model, &theme, style);
         return;
     }
+    if model.phase == MarketPhase::Loading && render_loading(frame, body, model, style) {
+        return;
+    }
     let mut doc = Doc::default();
     match model.phase {
         MarketPhase::Loading => doc.line(vec![
@@ -246,6 +249,51 @@ pub fn render(
         }
     }
     doc.render(frame, body, model.scroll, style);
+}
+
+/// Replays the startup logo intro while the catalog loads: the mark draws in,
+/// holds briefly, then draws again, above a shimmering label.
+fn render_loading(frame: &mut Frame<'_>, body: Rect, model: &MarketModel, style: Style) -> bool {
+    use crate::composer::{INTRO_TOTAL_MS, MARK_CELLS, intro_frame_index, intro_mark_rows};
+    const HOLD_MS: u64 = 700;
+    const LABEL: &str = "Loading marketplace…";
+    let (mark_w, mark_h) = MARK_CELLS;
+    let width = usize::from(body.width);
+    if width < mark_w.max(visible_width(LABEL)) || usize::from(body.height) < mark_h + 2 {
+        return false;
+    }
+    let elapsed = model.loading_since.map(|since| since.elapsed());
+    let frame_idx = match elapsed {
+        Some(elapsed) => {
+            let cycle = elapsed.as_millis() as u64 % (INTRO_TOTAL_MS + HOLD_MS);
+            intro_frame_index(Some(std::time::Duration::from_millis(cycle)), 1.0)
+        }
+        None => intro_frame_index(None, 1.0),
+    };
+    let (mark, _) = intro_mark_rows(frame_idx);
+    if mark.is_empty() {
+        return false;
+    }
+    let top = usize::from(body.height).saturating_sub(mark_h + 2) / 2;
+    let mut lines = vec![Line::default(); top];
+    // Center on the fixed mark size so partially drawn frames do not jitter.
+    let mark_pad = " ".repeat(width.saturating_sub(mark_w) / 2);
+    lines.extend(mark.into_iter().map(|spans| {
+        let mut row = vec![Span::raw(mark_pad.clone())];
+        row.extend(spans);
+        Line::from(row)
+    }));
+    lines.push(Line::default());
+    let mut label = vec![Span::raw(
+        " ".repeat(width.saturating_sub(visible_width(LABEL)) / 2),
+    )];
+    label.extend(crate::composer::draw::shimmer_spans(
+        LABEL,
+        elapsed.unwrap_or_default(),
+    ));
+    lines.push(Line::from(label));
+    frame.render_widget(Paragraph::new(lines).style(style), body);
+    true
 }
 
 fn render_browsing(

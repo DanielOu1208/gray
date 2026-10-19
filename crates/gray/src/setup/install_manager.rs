@@ -59,6 +59,9 @@ pub(crate) trait ManagerExtension {
     fn take_back(&mut self) -> bool {
         false
     }
+    fn animating(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) fn manager_tab_names(has_errors: bool, has_extension: bool) -> Vec<&'static str> {
@@ -642,7 +645,9 @@ fn run_install_manager_extended(
                     Rect::new(inner.x, footer_y, inner.width, 1),
                 );
             })?;
-            if !poll(Duration::from_millis(100))? {
+            let animating = Some(active_tab) == extension_index
+                && extension.as_deref().is_some_and(|extra| extra.animating());
+            if !poll(Duration::from_millis(if animating { 33 } else { 100 }))? {
                 continue;
             }
             let event = read()?;

@@ -62,6 +62,7 @@ impl Marketplace {
 
     fn load(&mut self) {
         self.model.begin(MarketPhase::Loading);
+        self.model.loading_since = Some(std::time::Instant::now());
         self.model.search_focused = false;
         self.consent = None;
         self.send(MarketCommand::Load);
@@ -238,6 +239,10 @@ impl ManagerExtension for Marketplace {
 
     fn take_back(&mut self) -> bool {
         std::mem::take(&mut self.back)
+    }
+
+    fn animating(&self) -> bool {
+        self.model.phase == MarketPhase::Loading
     }
 }
 

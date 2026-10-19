@@ -33,6 +33,41 @@ fn loading_snapshot_has_no_install_action() {
     assert!(!screen.contains("[ Install ]"));
 }
 
+#[test]
+fn loading_replays_the_logo_intro_and_falls_back_to_a_spinner_when_small() {
+    let mut model = super::model::MarketModel {
+        loading_since: Some(std::time::Instant::now() - std::time::Duration::from_millis(1200)),
+        ..Default::default()
+    };
+    let screen = snapshot(&model, 80, 20);
+    let mark_rows = screen
+        .lines()
+        .filter(|line| line.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)))
+        .count();
+    assert_eq!(mark_rows, 6, "{screen}");
+    let label = screen
+        .lines()
+        .find(|line| line.contains("Loading marketplace…"))
+        .unwrap();
+    assert!(!label.contains('⠋'), "{screen}");
+    model.loading_since = None;
+    assert!(snapshot(&model, 80, 20).contains("Loading marketplace…"));
+    assert!(snapshot(&model, 40, 5).starts_with("⠋ Loading marketplace…"));
+}
+
+#[tokio::test]
+async fn only_loading_requests_fast_redraws() {
+    use super::ManagerExtension;
+    let mut market = super::Marketplace::with_worker(super::worker::spawn_backend(
+        std::sync::Arc::new(RaceBackend::default()),
+    ));
+    market.model.phase = super::model::MarketPhase::Loading;
+    assert!(market.animating());
+    market.model.loaded(index(&["demo"]), Default::default());
+    assert!(!market.animating());
+    finish_market(market).await;
+}
+
 fn index(names: &[&str]) -> gray_pkg::index::Index {
     let plugins = names
         .iter()

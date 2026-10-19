@@ -47,6 +47,7 @@ pub struct MarketModel {
     pub scroll: u16,
     pub viewport_rows: usize,
     pub spinner: usize,
+    pub loading_since: Option<std::time::Instant>,
     pub grant_selected: bool,
     pub cancelling: bool,
 }
